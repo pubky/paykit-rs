@@ -332,34 +332,51 @@ const SEEN_RECORDS_BYTES: usize = (pubky_switch_client::store::MAX_VALUE_BYTES /
 /// spec 4.2, Switch wire 3.2 "Equal times"), oldest first (`p/ar/<payee>/<app>`). Replayed
 /// in order, they rebuild the core's [`RecordView`]; kept, they survive a restart, so a
 /// copy older than one seen, or one conflicting with it, is never used after a reload.
+///
 /// A served record whose timestamp group is too large to keep leaves `unkept_at`, its
 /// `updated_at`: no record at or before it is used, across restarts too, until a strictly
 /// later record is kept (Switch spec 4.2).
+///
+/// Every record that leaves the set, and the time of a served group too large to keep, raise
+/// `dropped_at` ([`SeenRecords::raise_floor`]), which nothing lowers or clears. A record at or
+/// before it, a whole group at exactly that time included, is never kept, used, nor the
+/// fallback under a conflict, whatever the clock: what left may have withdrawn it or
+/// conflicted with it, and the set no longer knows ([`SeenRecords::admits`], the one test of
+/// the floor, for a read, the view, a merge and a drop alike). Nothing is held for good: a
+/// record newer than it is compared and used as usual. A floor is the time of a record the
+/// reader kept or was served, never more than the clock tolerance ahead of the clock at that
+/// read, so after the clock steps back it holds that app's public endpoints until the clock
+/// reaches it again, minutes after a routine correction, as long as the clock ran fast
+/// otherwise. Every value a reader writes holds the floor before its newest kept record or
+/// at or before `unkept_at`, so a restored value that doesn't is refused
+/// ([`SeenRecords::verifies`]). Only public records are compared here; a Private Payment
+/// List or a request's own destination never is.
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SeenRecords {
     records: Vec<SignedDoc>,
     #[serde(deserialize_with = "Option::deserialize")]
     unkept_at: Option<u64>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    dropped_at: Option<u64>,
 }
 
 impl SeenRecords {
-    /// Insert into timestamp order and keep the newest complete groups within both bounds.
-    /// Return their view, or `None` if the served record itself would have to be dropped.
-    fn keep(
-        &mut self,
-        record: &AppRecord,
-        mut held: Vec<AppRecord>,
-        now: u64,
-    ) -> Option<RecordView> {
-        let at = held.partition_point(|r| r.updated_at() <= record.updated_at());
-        held.insert(at, record.clone());
+    /// Where the kept part of `held`, in timestamp order, starts: past every record at or
+    /// before the floor ([`SeenRecords::admits`]), the newest complete
+    /// timestamp groups that fit both bounds. Keeping just one side of a conflict could make
+    /// it the fallback for a later conflict (Switch spec 4.2).
+    fn kept_from(&self, held: &[AppRecord]) -> usize {
+        let floor = held.partition_point(|r| !self.admits(r));
         let mut count = 0;
         let mut bytes = 0usize;
         let mut start = held.len();
-        // Keep the newest complete timestamp groups that fit. Keeping just one side of a
-        // conflict could make it the fallback for a later conflict (Switch spec 4.2).
-        for group in held.chunk_by(|a, b| a.updated_at() == b.updated_at()).rev() {
+        for group in held
+            .get(floor..)
+            .unwrap_or_default()
+            .chunk_by(|a, b| a.updated_at() == b.updated_at())
+            .rev()
+        {
             count += group.len();
             for item in group {
                 let size = serde_json::to_vec(item.signed()).map_or(usize::MAX, |b| b.len() + 1);
@@ -370,12 +387,65 @@ impl SeenRecords {
             }
             start -= group.len();
         }
+        start
+    }
+
+    /// Drop the records of `held`, in timestamp order, before `start`, as
+    /// [`SeenRecords::kept_from`] places it, and return the rest: the one place a record
+    /// leaves the set, so the newest time dropped always raises `dropped_at`.
+    fn drop_before(&mut self, mut held: Vec<AppRecord>, start: usize) -> Vec<AppRecord> {
+        let start = start.min(held.len());
+        if let Some(newest) = start.checked_sub(1).and_then(|i| held.get(i)) {
+            self.raise_floor(newest.updated_at());
+        }
+        held.split_off(start)
+    }
+
+    /// Whether `record` may take part: later than the floor, whatever the clock. This is the
+    /// one test of the floor, for a read, the view, a merge and a drop alike.
+    fn admits(&self, record: &AppRecord) -> bool {
+        self.admits_at(record.updated_at())
+    }
+
+    /// [`SeenRecords::admits`] of a record made at `updated_at`.
+    fn admits_at(&self, updated_at: u64) -> bool {
+        self.dropped_at.is_none_or(|at| updated_at > at)
+    }
+
+    /// Raise the floor to `at`: the one place it rises, never lowered or cleared. Only the
+    /// time of a record that verified and was no more than the clock tolerance ahead of the
+    /// clock at the read that saw it raises it: a read keeps, or is refused, only a record that
+    /// takes part ([`takes_part`]), which one ahead of the clock never does, and a merge drops
+    /// only records a reader kept. So a floor is never more than the tolerance ahead of the
+    /// clock at that read, and holds an app at most for the tolerance plus how far the clock
+    /// has stepped back since (Paykit spec 4).
+    fn raise_floor(&mut self, at: u64) {
+        self.dropped_at = self.dropped_at.max(Some(at));
+    }
+
+    /// Insert into timestamp order and keep the newest complete groups within both bounds.
+    /// Return their view, or `None` if the served record itself would have to be dropped,
+    /// which then drops nothing and raises the floor to its time: so a record at or before
+    /// the floor is never kept.
+    fn keep(
+        &mut self,
+        record: &AppRecord,
+        mut held: Vec<AppRecord>,
+        now: u64,
+    ) -> Option<RecordView> {
+        let at = held.partition_point(|r| r.updated_at() <= record.updated_at());
+        held.insert(at, record.clone());
+        let start = self.kept_from(&held);
         if at < start {
+            // Its group's other bodies are unknown, so no member of it is kept, used or the
+            // fallback of a later conflict (Switch spec 4.2).
             self.unkept_at = self.unkept_at.max(Some(record.updated_at()));
+            self.raise_floor(record.updated_at());
             return None;
         }
-        let view = Self::replay(&held[start..], now);
-        self.records = held.into_iter().skip(start).map(SignedDoc::from).collect();
+        let kept = self.drop_before(held, start);
+        let view = Self::replay(&kept, now);
+        self.records = kept.into_iter().map(SignedDoc::from).collect();
         if self.unkept_at.is_some_and(|at| record.updated_at() > at) {
             self.unkept_at = None;
         }
@@ -395,20 +465,89 @@ impl SeenRecords {
     }
 
     /// Whether the kept records each are `payee`'s, verified as its signer signed it, and of
-    /// app `app_id`, and there is one at least or a group the reader couldn't keep: checked
+    /// app `app_id`, and there is one at least or a group the reader couldn't keep, with
+    /// `dropped_at` before the newest kept record or at or before `unkept_at`, as every value
+    /// a reader writes holds it, a merge's included: checked
     /// before a restore installs a copy (`p/ar/<payee>/<app>`), so none can fail every later
     /// read of the payee. A group's time isn't signed, so one ahead of the clock holds
     /// nothing ([`SeenRecords::before_unkept`]).
     pub(crate) fn verifies(&self, payee: &[u8; 32], app_id: &[u8; 16]) -> bool {
-        (!self.records.is_empty() || self.unkept_at.is_some())
-            && self.records.iter().all(|signed| {
-                AppRecord::verify(signed, payee)
-                    .is_ok_and(|record| record.cert().app_id() == *app_id)
+        let mut newest = None;
+        for signed in &self.records {
+            match AppRecord::verify(signed, payee) {
+                Ok(record) if record.cert().app_id() == *app_id => {
+                    newest = newest.max(Some(record.updated_at()));
+                }
+                _ => return false,
+            }
+        }
+        // A group too large to keep raises the floor to its time with it, so the floor is
+        // never below `unkept_at`.
+        (newest.is_some() || self.unkept_at.is_some())
+            && self
+                .unkept_at
+                .is_none_or(|unkept| self.dropped_at.is_some_and(|at| at >= unkept))
+            && self.dropped_at.is_none_or(|at| {
+                newest.is_some_and(|newest| newest > at)
+                    || self.unkept_at.is_some_and(|unkept| at <= unkept)
             })
     }
 
-    /// The view the records give, at the reader's clock `now`. A kept record that no longer
-    /// verifies is a corrupt store.
+    /// These seen records kept as a read keeps them ([`SeenRecords::merged`] with none): a
+    /// restored value over the bounds is cut to them, and what is cut raises the floor.
+    /// `None` when a record doesn't verify as `payee`'s.
+    pub(crate) fn canonical(&self, payee: &[u8; 32]) -> Option<Self> {
+        self.merged(&Self::default(), payee)
+    }
+
+    /// The union of these seen records and `other`'s, both of one app of `payee` (Switch spec
+    /// 4.2). The later of the two `dropped_at` comes first: every record of either at or
+    /// before it is dropped, so a record one side dropped never comes back through the
+    /// other. Every other record of either, once, is then kept as a read keeps them
+    /// ([`SeenRecords::kept_from`]), so a conflict either saw stays one, and what doesn't
+    /// fit is dropped as at a read ([`SeenRecords::drop_before`]). The unkept bound is the
+    /// later of the two, or the newest group's if none fits; a merge never lifts it, as a
+    /// copy may hold a later record beside it once the clock went back, and the next record
+    /// a read keeps past it lifts it as usual. `None` when a record doesn't verify as
+    /// `payee`'s.
+    pub(crate) fn merged(&self, other: &Self, payee: &[u8; 32]) -> Option<Self> {
+        let mut merged = Self {
+            records: Vec::new(),
+            unkept_at: self.unkept_at.max(other.unkept_at),
+            dropped_at: self
+                .dropped_at
+                .max(other.dropped_at)
+                .max(self.unkept_at)
+                .max(other.unkept_at),
+        };
+        // The same body twice is one record, whatever its signature (Switch wire 3.2).
+        let mut all: Vec<AppRecord> = Vec::new();
+        for signed in self.records.iter().chain(&other.records) {
+            let record = AppRecord::verify(signed, payee).ok()?;
+            if !all
+                .iter()
+                .any(|held| record.order(held) == RecordOrder::Same)
+            {
+                all.push(record);
+            }
+        }
+        all.sort_by_key(AppRecord::updated_at);
+        let start = merged.kept_from(&all);
+        if let Some(newest) = all
+            .last()
+            .filter(|n| start == all.len() && merged.admits(n))
+        {
+            merged.unkept_at = merged.unkept_at.max(Some(newest.updated_at()));
+        }
+        let kept = merged.drop_before(all, start);
+        merged.records = kept.into_iter().map(SignedDoc::from).collect();
+        Some(merged)
+    }
+
+    /// The view the records give, at the reader's clock `now`, and the records held. A
+    /// record at or before the floor, held from before a group too large to keep raised it,
+    /// is held until the next record kept drops it, and plays no part in the view. A kept
+    /// record that no longer verifies is a corrupt store.
     fn view(&self, payee: &[u8; 32], now: u64) -> Result<(RecordView, Vec<AppRecord>)> {
         let mut records = Vec::with_capacity(self.records.len());
         for signed in &self.records {
@@ -416,7 +555,9 @@ impl SeenRecords {
             records.push(record);
         }
         records.sort_by_key(AppRecord::updated_at);
-        Ok((Self::replay(&records, now), records))
+        let from = records.partition_point(|r| !self.admits(r));
+        let view = Self::replay(records.get(from..).unwrap_or_default(), now);
+        Ok((view, records))
     }
 
     fn replay(records: &[AppRecord], now: u64) -> RecordView {
@@ -446,6 +587,29 @@ fn takes_part(record: &AppRecord, held: &[AppRecord], view: &RecordView, now: u6
 }
 
 impl Paykit {
+    /// Whether the payee app records this app keeps, judged now, still use `record`, the one
+    /// a public payment selected, also as the earlier record kept under a conflict, and it
+    /// isn't at or before the floor (Switch spec 4.2; Paykit spec 4). A payment that
+    /// reuses a read checks this before it pays, so it never pays a record the comparison it
+    /// would make now has left behind. A local read only.
+    pub(crate) async fn seen_still_uses(
+        &self,
+        payee: &[u8; 32],
+        record: &AppRecord,
+    ) -> Result<bool> {
+        let seen_key = key::seen_records(payee, &record.cert().app_id());
+        let Some(seen) = self.local_get::<SeenRecords>(&seen_key).await? else {
+            return Ok(false);
+        };
+        let (view, _) = seen.view(payee, self.now())?;
+        let hash = |r: &AppRecord| r.signed().doc_hash().ok();
+        // Under a conflict the record used is the earlier one the Switch rule keeps using.
+        Ok(seen.admits(record)
+            && view
+                .used()
+                .is_some_and(|used| hash(used).is_some() && hash(used) == hash(record)))
+    }
+
     /// The payee's app records that may be used now (module docs), of `app` only when given,
     /// and the apps whose records couldn't be used: in the order of the payee's
     /// `identity.json`, within the read's bound. `Err` inside holds the refusal of the payee's
@@ -627,7 +791,15 @@ impl Paykit {
             let served_at = read.as_ref().map(AppRecord::updated_at);
             let served_refused = read.is_none();
             if let Some(record) = read {
-                if takes_part(&record, &held, &view, now) {
+                // A record at or before one dropped from the set takes part in nothing, as a
+                // record earlier than one held: what was dropped may have withdrawn it or
+                // conflicted with it (Switch spec 4.2). The records held answer for it.
+                // A record at or before the floor takes part in nothing, as one earlier than
+                // a record held. One of the group too large to keep is refused again as it
+                // was, by `keep`, which keeps nothing at or before the floor.
+                let unkept_again = seen.unkept_at == Some(record.updated_at());
+                if (seen.admits(&record) || unkept_again) && takes_part(&record, &held, &view, now)
+                {
                     // A record the reader can't keep for the comparison is never used, nor
                     // is an earlier one in its place, which it may withdraw: the app's
                     // failure, and the other apps' reads go on (Paykit spec 4, below).
@@ -642,8 +814,17 @@ impl Paykit {
                             && check_record_lifetime_and_certificate(&app_id, &record, doc, clocks)
                                 .is_ok()
                             && !view.see(&record, now);
+                        let floor = seen.dropped_at.filter(|_| !seen.admits(&record));
                         let reason = if over_bound {
                             PublicAppFailureReason::OverBound
+                        } else if let Some(floor) = floor {
+                            // At or before the floor: the time a later record must pass.
+                            PublicAppFailureReason::Refused(format!(
+                                "Paykit spec 4: the app's records up to {floor} ms left the \
+                                 history a reader keeps ({SEEN_RECORDS} records, \
+                                 {SEEN_RECORDS_BYTES} bytes); its public endpoints are unusable \
+                                 until a record of it after that time can be used"
+                            ))
                         } else {
                             PublicAppFailureReason::Refused(format!(
                                 "Paykit spec 4: the served record exceeds the history a reader keeps \
@@ -659,11 +840,34 @@ impl Paykit {
             }
             // A record at or before a group the reader couldn't keep is never used, nor an
             // earlier one in its place, until a strictly later record is kept.
-            if seen.before_unkept(served_at, now) {
+            // A later record held and usable answers for it, as for any older copy.
+            let later_used = view
+                .used()
+                .is_some_and(|used| seen.unkept_at.is_some_and(|at| used.updated_at() > at));
+            if seen.before_unkept(served_at, now) && !later_used {
+                // The history floor: never below the group's time, and after a merge it may be
+                // later.
+                let at = seen.dropped_at.max(seen.unkept_at).unwrap_or_default();
                 failures.push(fail(PublicAppFailureReason::Refused(format!(
-                    "Paykit spec 4: the app's records up to a group that exceeded the history \
-                     a reader keeps ({SEEN_RECORDS} records, {SEEN_RECORDS_BYTES} bytes) are \
-                     not used"
+                    "Paykit spec 4: a group of the app's records exceeded the history a reader \
+                     keeps ({SEEN_RECORDS} records, {SEEN_RECORDS_BYTES} bytes): its records up \
+                     to the history floor at {at} ms are not used, until a record of it after \
+                     that time can be used"
+                ))));
+                continue;
+            }
+            // A record at or before the floor, with nothing later held to answer for it: the
+            // app's public endpoints are unusable until it publishes a record after the floor
+            // and that record isn't ahead of the payer's clock (Paykit spec 4).
+            if let Some(floor) = seen.dropped_at.filter(|_| {
+                served_at.is_some_and(|at| !seen.admits_at(at))
+                    && view.used().is_none()
+                    && !view.in_conflict()
+            }) {
+                failures.push(fail(PublicAppFailureReason::Refused(format!(
+                    "Paykit spec 4: the record served is no later than one dropped from the \
+                     history a reader keeps; the app's public endpoints are unusable until a \
+                     record of it after {floor} ms can be used"
                 ))));
                 continue;
             }
@@ -991,6 +1195,7 @@ mod tests {
             .unwrap()
         };
         let mut records = SeenRecords {
+            dropped_at: None,
             records: vec![
                 signed(0, tip_jar()),
                 signed(2, tip_jar()),
@@ -1029,6 +1234,172 @@ mod tests {
         let (_, kept) = seen.view(&bob.id(), NOW + DAY_MS).unwrap();
         assert_eq!(kept.len(), SEEN_RECORDS - 1);
         assert_eq!(kept.first().unwrap().updated_at(), NOW + 1);
+        // The dropped group raises the floor to its time.
+        assert_eq!(seen.dropped_at, Some(NOW));
+    }
+
+    #[test]
+    fn test_app_records_merged_keeps_both_sides_and_the_unkept_bound() {
+        let (bob, _) = discovery_records();
+        let signed = |ms, member| {
+            serde_json::from_slice::<SignedDoc>(&record_bytes(
+                &bob,
+                member,
+                NOW + ms,
+                Some(NOW + DAY_MS),
+            ))
+            .unwrap()
+        };
+        let times = |seen: &SeenRecords| -> Vec<u64> {
+            let mut at: Vec<_> = seen
+                .records
+                .iter()
+                .map(|doc| AppRecord::verify(doc, &bob.id()).unwrap().updated_at() - NOW)
+                .collect();
+            at.sort_unstable();
+            at
+        };
+        let seen = |records, unkept_at| SeenRecords {
+            records,
+            unkept_at,
+            dropped_at: None,
+        };
+        // Each side of a conflict, and a record both hold, kept once.
+        let first = seen(vec![signed(0, tip_jar()), signed(1, tip_jar())], None);
+        let second = seen(vec![signed(0, tip_jar()), signed(1, json!({}))], None);
+        let merged = first.merged(&second, &bob.id()).unwrap();
+        assert_eq!(times(&merged), [0, 1, 1]);
+        assert!(merged.view(&bob.id(), NOW + 1).unwrap().0.in_conflict());
+        assert!(!first.view(&bob.id(), NOW + 1).unwrap().0.in_conflict());
+
+        // A group one side couldn't keep drops the older records the other side has: none
+        // of them is used again.
+        let held = seen(Vec::new(), Some(NOW + 5));
+        let merged = held.merged(&first, &bob.id()).unwrap();
+        assert_eq!(merged.unkept_at, Some(NOW + 5));
+        assert_eq!(merged.dropped_at, Some(NOW + 5));
+        assert!(times(&merged).is_empty());
+        // A merge never lifts it, also beside a later record, which stays kept.
+        let later = seen(vec![signed(6, tip_jar())], None);
+        let merged = held.merged(&later, &bob.id()).unwrap();
+        assert_eq!(merged.unkept_at, Some(NOW + 5));
+        assert_eq!(times(&merged), [6]);
+        // A group too large to keep leaves its time alone.
+        let crowd = seen(
+            (0..=SEEN_RECORDS)
+                .map(|i| signed(9, json!({ "n": i })))
+                .collect(),
+            None,
+        );
+        let merged = crowd.merged(&first, &bob.id()).unwrap();
+        assert_eq!(merged.unkept_at, Some(NOW + 9));
+        assert_eq!(merged.dropped_at, Some(NOW + 9));
+        assert!(times(&merged).is_empty());
+
+        // A record of another identity refuses the merge.
+        assert!(first.merged(&second, &[9; 32]).is_none());
+    }
+
+    #[test]
+    fn test_app_records_floor_keeps_a_dropped_record_out_of_a_merge_and_a_read() {
+        let (bob, _) = discovery_records();
+        let signed = |ms, member| {
+            serde_json::from_slice::<SignedDoc>(&record_bytes(
+                &bob,
+                member,
+                NOW + ms,
+                Some(NOW + DAY_MS),
+            ))
+            .unwrap()
+        };
+        let record = |doc: &SignedDoc| AppRecord::verify(doc, &bob.id()).unwrap();
+        let seen = |records, dropped_at| SeenRecords {
+            records,
+            unkept_at: None,
+            dropped_at,
+        };
+        // One side holds E0's record; the other dropped the withdrawal after it and holds a
+        // conflict. Either way round, the merge never brings E0's record back as the
+        // fallback under the conflict.
+        let withdrawn = seen(vec![signed(0, tip_jar())], None);
+        let conflicted = seen(
+            vec![signed(2, json!({})), signed(2, json!({ "x": 1 }))],
+            Some(NOW + 1),
+        );
+        for merged in [
+            withdrawn.merged(&conflicted, &bob.id()).unwrap(),
+            conflicted.merged(&withdrawn, &bob.id()).unwrap(),
+        ] {
+            let (view, kept) = merged.view(&bob.id(), NOW + 2).unwrap();
+            assert!(view.in_conflict());
+            assert!(view.used().is_none());
+            assert_eq!(kept.len(), 2);
+            assert_eq!(merged.dropped_at, Some(NOW + 1));
+        }
+        // A record at exactly the floor is at or before it: dropped by a merge, and never
+        // kept at a read; one past it is kept.
+        let at_floor = seen(vec![signed(1, tip_jar())], None);
+        let mut merged = at_floor.merged(&conflicted, &bob.id()).unwrap();
+        assert_eq!(merged.records.len(), 2);
+        let (_, held) = merged.view(&bob.id(), NOW + 2).unwrap();
+        let again = record(&signed(1, json!({ "y": 1 })));
+        assert!(merged.keep(&again, held, NOW + 2).is_none());
+        assert_eq!(merged.records.len(), 2);
+        assert!(!merged.admits(&record(&signed(1, tip_jar()))));
+        assert!(merged.admits(&record(&signed(2, tip_jar()))));
+        // A merge that drops nothing uses the record it used before.
+        let older = seen(vec![signed(0, tip_jar())], None);
+        let newer = seen(vec![signed(0, tip_jar()), signed(1, json!({}))], None);
+        let merged = older.merged(&newer, &bob.id()).unwrap();
+        assert_eq!(merged.dropped_at, None);
+        let (view, _) = merged.view(&bob.id(), NOW + 1).unwrap();
+        assert_eq!(view.used().unwrap().updated_at(), NOW + 1);
+        // A restored value holding a floor past all it keeps is refused; one at the newest
+        // record kept too; one before it verifies.
+        assert!(!seen(Vec::new(), Some(u64::MAX)).verifies(&bob.id(), &bob.app_id()));
+        assert!(!seen(vec![signed(1, tip_jar())], Some(NOW + 1)).verifies(&bob.id(), &bob.app_id()));
+        assert!(seen(vec![signed(1, tip_jar())], Some(NOW)).verifies(&bob.id(), &bob.app_id()));
+        // The floor holds whatever the clock: ahead of it, at it and past it, a record at or
+        // before it is never kept, and one after it is once it is no longer ahead.
+        let current = record(&signed(1, tip_jar()));
+        for now in [NOW, NOW + 1, NOW + DAY_MS] {
+            let mut far = seen(Vec::new(), Some(NOW + 1 + CLOCK_TOLERANCE_MS));
+            assert!(!far.admits(&current));
+            assert!(far.keep(&current, Vec::new(), now).is_none());
+            assert!(far.records.is_empty());
+        }
+        let after = record(&signed(2 + CLOCK_TOLERANCE_MS, tip_jar()));
+        let mut far = seen(Vec::new(), Some(NOW + 1 + CLOCK_TOLERANCE_MS));
+        assert!(far.keep(&after, Vec::new(), NOW + 2).is_some());
+        // A record at or before the floor held from before plays no part in the view, until
+        // the next record kept drops it.
+        let mut kept = seen(Vec::new(), Some(NOW + 1));
+        kept.records = vec![
+            SignedDoc::from(current.clone()),
+            SignedDoc::from(after.clone()),
+        ];
+        assert!(kept.verifies(&bob.id(), &bob.app_id()));
+        let (view, held) = kept.view(&bob.id(), NOW + CLOCK_TOLERANCE_MS).unwrap();
+        assert_eq!(
+            view.used().unwrap().updated_at(),
+            NOW + 2 + CLOCK_TOLERANCE_MS
+        );
+        assert_eq!(held.len(), 2);
+        let next = record(&signed(3 + CLOCK_TOLERANCE_MS, tip_jar()));
+        kept.keep(&next, held, NOW + 3).unwrap();
+        assert_eq!(kept.records.len(), 2);
+        assert_eq!(kept.dropped_at, Some(NOW + 1));
+        // A served group too large to keep raises the floor to its time.
+        let mut crowded = seen(vec![signed(5, tip_jar())], None);
+        let (_, held) = crowded.view(&bob.id(), NOW + 5).unwrap();
+        let wide = (0..=SEEN_RECORDS)
+            .map(|i| record(&signed(6, json!({ "n": i }))))
+            .collect::<Vec<_>>();
+        let mut held = held;
+        held.extend(wide[..SEEN_RECORDS].iter().cloned());
+        assert!(crowded.keep(&wide[SEEN_RECORDS], held, NOW + 6).is_none());
+        assert_eq!(crowded.unkept_at, Some(NOW + 6));
+        assert_eq!(crowded.dropped_at, Some(NOW + 6));
     }
 
     #[test]
@@ -1043,19 +1414,40 @@ mod tests {
     fn test_discovery_state_records_empty_is_not_persisted() {
         let (bob, _) = discovery_records();
         let records: SeenRecords =
-            serde_json::from_value(json!({"records": [], "unkept_at": null})).unwrap();
+            serde_json::from_value(json!({"records": [], "unkept_at": null, "dropped_at": null}))
+                .unwrap();
         assert!(!records.verifies(&bob.id(), &bob.app_id()));
-        // A group too large to keep is kept as its time alone.
+        // A group too large to keep is kept as its time alone, with the floor at it.
         let held: SeenRecords =
-            serde_json::from_value(json!({"records": [], "unkept_at": 5})).unwrap();
+            serde_json::from_value(json!({"records": [], "unkept_at": 5, "dropped_at": 5}))
+                .unwrap();
         assert!(held.verifies(&bob.id(), &bob.app_id()));
-        assert!(serde_json::from_value::<SeenRecords>(json!({"records": []})).is_err());
+        // A floor past everything kept, or at the newest record kept, or below a group too
+        // large to keep, is no value a reader writes.
+        for value in [
+            json!({"records": [], "unkept_at": 5, "dropped_at": null}),
+            json!({"records": [], "unkept_at": 5, "dropped_at": 4}),
+            json!({"records": [], "unkept_at": null, "dropped_at": 5}),
+            json!({"records": [], "unkept_at": 5, "dropped_at": 6}),
+            json!({"records": [], "unkept_at": null, "dropped_at": u64::MAX}),
+        ] {
+            let held: SeenRecords = serde_json::from_value(value).unwrap();
+            assert!(!held.verifies(&bob.id(), &bob.app_id()));
+        }
+        for value in [
+            json!({"records": []}),
+            json!({"records": [], "unkept_at": 5}),
+            json!({"records": [], "dropped_at": 5}),
+        ] {
+            assert!(serde_json::from_value::<SeenRecords>(value).is_err());
+        }
     }
 
     #[test]
     fn test_discovery_state_group_ahead_of_the_clock_holds_nothing() {
         let now = 1_000_000_000;
         let held = |at: u64| SeenRecords {
+            dropped_at: None,
             records: Vec::new(),
             unkept_at: Some(at),
         };

@@ -51,7 +51,9 @@ pub enum WalletNoticeKind {
     BlockFloorHeld,
     /// A block floor raise the wallet owes isn't written yet, with no divergence hold: until it
     /// is, an unblocked sender's one-time requests wait and it is asked nothing, and while a
-    /// widening's raise waits no one is asked to re-send.
+    /// widening's raise waits no one is asked to re-send. The wallet tries again at the next
+    /// receive, then after a wait of one minute doubling to ten, ended early when the floor
+    /// changes or becomes readable or a new raise is owed.
     /// Shown once per load while it stands; it goes when the raise is written, or when the
     /// divergence hold stands, which its own notice tells.
     FloorRaiseWaiting,
