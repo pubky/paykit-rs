@@ -278,6 +278,11 @@ impl crate::Paykit {
         let Some(record) = bind_at(value, &self.identity(), &q.to, id) else {
             return Ok(Unreadable);
         };
+        // A record seen divergent and not confirmed since decides nothing, though writing
+        // the end cleared its view (Paykit spec 7.2, 8.1).
+        if self.pause_seen(&key).await?.paused {
+            return Ok(Unreadable);
+        }
         let accepted = super::acceptance(&record);
         if let Some(end) = &record.end {
             if !exact_stop(end, q, self) {

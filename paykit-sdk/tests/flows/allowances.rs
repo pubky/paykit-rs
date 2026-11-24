@@ -10805,7 +10805,7 @@ async fn queued_allowance_after_renewal(
         .release_message(
             "paykit",
             &msg_id,
-            pubky_switch_client::app::ReplyGrantOnRelease::AsTheMessageSays,
+            pubky_switch_client::app::ReplyGrantOnRelease::IfOwed,
         )
         .await
         .unwrap();

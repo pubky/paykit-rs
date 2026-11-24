@@ -1554,7 +1554,7 @@ async fn test_blocked_queued_resend_checks_current_contacts_and_the_deny_copy() 
         .release_message(
             "paykit",
             &id,
-            pubky_switch_client::app::ReplyGrantOnRelease::AsTheMessageSays,
+            pubky_switch_client::app::ReplyGrantOnRelease::IfOwed,
         )
         .await
         .unwrap();

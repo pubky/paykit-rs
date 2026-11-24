@@ -2730,9 +2730,24 @@ async fn test_replies_dropped_restore_in_place_uses_the_identified_first_deliver
                 .collect::<Vec<_>>()
         };
         if accepted {
-            assert!(open(asked(&shop, &payer).await).is_empty());
+            // The ask accepted after the backup was delivered, and its sent copy stands after
+            // the restore in place: it is the last ask the outbox delivered, so none goes
+            // again within 24 hours of it (Paykit spec 9, Messages dropped for a bound).
+            assert_eq!(open(asked(&shop, &payer).await), vec![(Some(from), None)]);
+            assert!(!shop
+                .app()
+                .queued_messages("paykit")
+                .await
+                .unwrap()
+                .iter()
+                .any(|m| m.kind == "paykit.resend_request"));
             w.clock.advance_ms(DAY_MS);
             shop.receive(None).await.unwrap();
+            assert_eq!(
+                open(asked(&shop, &payer).await),
+                vec![(Some(from), None), (Some(from), None)]
+            );
+            continue;
         }
         assert_eq!(open(asked(&shop, &payer).await), vec![(Some(from), None)]);
     }

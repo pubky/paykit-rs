@@ -428,7 +428,17 @@ impl GivenUpOrigin {
             Some(Self::UnrecordedStop) => NoticeKind::StopNotRecorded,
             Some(Self::AllowanceConflict) => NoticeKind::AllowancePlacementExpired,
             Some(Self::AllowanceBeforeLoss) => NoticeKind::AllowanceAcceptanceBeforeLoss,
-            _ => NoticeKind::MessageGivenUp,
+            // A message given up with no origin of its own is told as given up.
+            None
+            | Some(
+                Self::KeyWait
+                | Self::KeptReply
+                | Self::Divergent
+                | Self::ReceiveStep
+                | Self::HeldAnswer
+                | Self::HeldSend
+                | Self::HeldUnread,
+            ) => NoticeKind::MessageGivenUp,
         }
     }
 }

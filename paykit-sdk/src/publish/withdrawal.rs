@@ -192,6 +192,31 @@ impl Paykit {
         Ok(false)
     }
 
+    /// Keep the unknown-delivery notice of a carried list before it is withdrawn at a
+    /// restore, while its outcome still matters: the device the backup came from may have
+    /// delivered it, and the recipient state a restore makes no longer names its choice
+    /// (Paykit spec 7.2, 9). Kept once; [`Paykit::take_list_delivery`] then finds it.
+    pub(crate) async fn note_carried_list(
+        &mut self,
+        queued: &pubky_switch_client::app::QueuedMessage,
+    ) -> Result<()> {
+        let issue = self
+            .local_get::<ListReservation>(&key::list_reservation(&queued.to))
+            .await?
+            .filter(|issue| issue.id == queued.msg_id && issue.hash == queued.hash);
+        let Some(issue) = issue else {
+            return Ok(());
+        };
+        let now = self.service_time().unwrap_or(0);
+        let at = key::restored_delivery(&issue.recipient, &issue.id, &issue.hash);
+        if issue.unknown_matters(now) && self.kept_notice(&at).await?.is_none() {
+            let notice =
+                KeptNotice::list_delivery_unknown(&issue.recipient, &issue.id, &issue.hash, now);
+            self.local_put(&at, &notice).await?;
+        }
+        Ok(())
+    }
+
     /// Drop each list notice whose list's outcome is settled: that recipient's list was
     /// superseded by a newer version, or the recipient is known to hold it, or nothing it
     /// offered or withdrew can be paid any more (Paykit spec 9, "Deliveries of unknown

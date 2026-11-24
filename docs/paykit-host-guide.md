@@ -539,28 +539,27 @@ the new cursor to the service. Acknowledging the deletion notice leaves the cred
 
 ## Messages held at restore
 
-The receive summary counts original messages released, withdrawn and still waiting in
-`held_at_restore`. Show a waiting stop as pending a fresh record read. Receive checks it
-again until the Switch gives it up at its replay deadline. A released stop still passes
-the normal delivery checks. For `DeliveryUnknown`, show the original as possibly delivered
-and reconcile it with the counterparty or the current records (Paykit spec 7.2, 9).
+A restore holds the Paykit messages the backup's outbox carried that the client can't tell are still wanted. The receive summary's `held_messages` counts those released and withdrawn in that receive, and those still held after it. Paykit decides them only once its own first read is complete: its records listed, their scope keys held, nothing stopping the wallet. Until then they stay held. One past its replay deadline is given up at any receive and told as `DeliveryUnknown`. A withdrawal is told as `DeliveryUnknown` too, in the next receive's report. For `DeliveryUnknown`, show the original as possibly delivered and reconcile it with the counterparty or the current records (Paykit spec 7.2, 9).
 
-| Withdrawn message | What the host shows and what can happen next |
+A stop or a proof is released with its original bytes while the record, read afresh and not paused as divergent, still holds it: a stop with no stop of the counterparty's, a proof with no receipt for its attempt. It still passes the normal delivery checks, and it adds no reply grant. While the record can't be read, or is paused until the user confirms it, the message stays held and counts as still held.
+
+| Held message | What happens and what the host shows |
 | --- | --- |
-| One-time or recurring Payment Request | Show the original first. If the payer never answered, the user may authorize a new request. |
-| Payee or payer cancellation, or request rejection | Show the request's current status. With `StopNotRecorded`, the user may cancel or reject the open request again. When the counterparty has stopped the request itself, nothing more is needed. |
-| Period details | The payee may issue new details for an open period, within its limit of eight. The payer may ask for the originals by re-send request. |
-| Receipt | The payer may ask for the receipt retained in the payee record by re-send request. |
-| Acceptance reporting a payment, or payment proof | Show the existing payment. Ordinary payment recovery sends what the journal, claim and activity record still require. No user action is needed. |
-| Subscription acceptance | The user may accept again if the payer record still has no response. |
-| Private Payment List request or re-send request | The payer asks for a list at its next need. Restore and ordinary re-send rules handle further re-send requests. |
-| Allowance proposal | Show the possibly delivered original before the user authorizes a new proposal. |
-| Allowance acceptance or rejection | The user may answer a still-pending proposal again. A rejected proposal can remain pending at the proposer until withdrawn or the retained rejection arrives. |
-| Proposer's withdrawal | The late-withdrawal duty still applies. The user may withdraw again (Paykit spec 8.3.1). |
-| End of an accepted Allowance | Show the current Allowance. With `StopNotRecorded`, the user may end it again. |
-| Executor notice | Executors read the Allowance record themselves. |
-| Empty or nonempty Private Payment List | A fresh empty withdrawal is owed. Show the previous list, reapply the user's withdrawals, then let the user set the list and choose recipients again. |
-| Extension message | The extension owner may send again through its own call. |
+| Payee or payer cancellation, or request rejection | Released while the record holds it. When the record shows the counterparty's own stop, it is withdrawn and nothing more is needed. When the record no longer shows it and the request is still open, it is withdrawn with `StopNotRecorded`, and the user may stop the request again. |
+| End of an accepted Allowance | Released while the Allowance record holds it, judged as an end the app made unless the user's origin is known. When the record no longer shows it and the Allowance is still open, it is withdrawn with `StopNotRecorded`, and the user may end it again. |
+| Payment proof | Released while the payer's record holds it and no receipt for its attempt. With a receipt recorded it is withdrawn and nothing is owed. When the record holds neither, it is withdrawn and told as `DeliveryUnknown`, and resuming the payment records and sends a proof for a paid attempt. |
+| One-time or recurring Payment Request | Withdrawn. Show the original first. If the payer never answered, the user may authorize a new request. |
+| Period details | Withdrawn. The payee may issue new details for an open period, within its limit of eight. The payer may ask for the originals by re-send request. |
+| Receipt | Withdrawn. The payer may ask for the receipt retained in the payee record by re-send request. |
+| Acceptance reporting a payment | Withdrawn. While the payer record holds no response and the restored store doesn't know the original's delivery, resuming the payment signs the acceptance again from the journal and the claim. |
+| Subscription acceptance | Withdrawn. The user may accept again if the payer record still has no response. |
+| Private Payment List request or re-send request | Withdrawn. The payer asks for a list at its next need. Restore and ordinary re-send rules handle further re-send requests. |
+| Allowance proposal | Withdrawn. Show the possibly delivered original before the user authorizes a new proposal. |
+| Allowance acceptance or rejection | Withdrawn. The user may answer a still-pending proposal again. A rejected proposal can remain pending at the proposer until withdrawn or the retained rejection arrives. |
+| Proposer's withdrawal | Withdrawn. The late-withdrawal duty still applies, and the user may withdraw again (Paykit spec 8.3.1). |
+| Executor notice | Withdrawn. Executors read the Allowance record themselves. |
+| Empty or nonempty Private Payment List | Withdrawn, its unknown delivery kept as a notice while it matters. A fresh empty withdrawal is owed and goes once the app holds plain `paykit_request`. Show the previous list, reapply the user's withdrawals, then let the user set the list and choose recipients again. |
+| Extension message | Withdrawn. The extension's owner may send again through its own call. |
 
 ## The payment method's settlement ID
 

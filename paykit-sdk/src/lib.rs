@@ -114,7 +114,7 @@ pub use pay::{
     UnrequestedPayment, UNREQUESTED_DEADLINE_MS,
 };
 pub use paykit::{
-    orphan_floor_s, HeldAtRestore, Paykit, PaykitBackup, PaykitConfig, ReceiveSummary,
+    orphan_floor_s, HeldMessages, Paykit, PaykitBackup, PaykitConfig, ReceiveSummary,
     DEFAULT_RESEND_BUDGET, PRE_DISPATCH_BUDGET_MS,
 };
 pub use paykit_lib::bodies::RequestDestination;

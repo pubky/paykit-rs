@@ -119,7 +119,7 @@ async fn test_restore_first_read_withdraws_the_original_request_after_confirmati
         .unwrap()
         .confirmed_at()
         .is_some());
-    let checked = restored.receive(None).await.unwrap().held_at_restore;
+    let checked = restored.receive(None).await.unwrap().held_messages;
     assert_eq!(checked.withdrawn, 1);
     assert!(restored.app().restore_held_cursor().is_some());
     restored.flush().await.unwrap();

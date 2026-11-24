@@ -215,15 +215,16 @@ impl PaykitBackup {
     }
 }
 
-/// Outgoing messages checked after a restore (Paykit spec 7.2, Switch spec 12.4).
+/// The Paykit messages a restore held for Paykit to decide (Paykit spec 7.2, Switch spec
+/// 12.4).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct HeldAtRestore {
-    /// Paykit messages released for delivery with their original signed bytes.
+pub struct HeldMessages {
+    /// Messages released in this receive, with their original signed bytes.
     pub released: u32,
-    /// Carried messages withdrawn, including extensions.
+    /// Messages withdrawn in this receive, each told to the host as of unknown outcome.
     pub withdrawn: u32,
-    /// Messages still held, to check at a later receive.
-    pub waiting: u32,
+    /// Messages still held after this receive, to decide at a later one.
+    pub still_held: u32,
 }
 
 /// What a [`Paykit::receive`] did.
@@ -249,7 +250,7 @@ pub struct ReceiveSummary {
     /// cursor move (Switch spec 8.2).
     pub applied: Vec<String>,
     /// Disposition of messages held at restore (Paykit spec 7.2).
-    pub held_at_restore: HeldAtRestore,
+    pub held_messages: HeldMessages,
     /// The `resend_request`s answered and asked.
     pub resends: u64,
     /// A recovery ask waits because its sender certificate lacks `paykit_contacts`.
@@ -323,14 +324,15 @@ impl ReceiveSummary {
             (earlier, later) => later.or(earlier),
         };
         self.applied.splice(0..0, earlier.applied);
-        self.held_at_restore.released = self
-            .held_at_restore
+        // Counts of this receive add up; `still_held` is the later one's.
+        self.held_messages.released = self
+            .held_messages
             .released
-            .saturating_add(earlier.held_at_restore.released);
-        self.held_at_restore.withdrawn = self
-            .held_at_restore
+            .saturating_add(earlier.held_messages.released);
+        self.held_messages.withdrawn = self
+            .held_messages
             .withdrawn
-            .saturating_add(earlier.held_at_restore.withdrawn);
+            .saturating_add(earlier.held_messages.withdrawn);
         self.resends = self.resends.saturating_add(earlier.resends);
         self.divergent.splice(0..0, earlier.divergent);
         self.key_epochs_awaited.extend(earlier.key_epochs_awaited);
@@ -1210,22 +1212,16 @@ impl Paykit {
         // is lost: only the SDK's own marks and notes are kept here, and nothing is written at
         // the switch (`stored.rs`, `divergent.rs`).
         Box::pin(self.take_stored_events(&duties)).await?;
-        let held_at_restore = Box::pin(self.check_held_messages(
-            &report,
-            !account_gone
-                && self.certificate_refused().is_none()
-                && self.app.recovery_required().is_none()
-                && self.app.alarm().is_none()
-                && self.confirmed_first_read(),
-        ))
-        .await?;
+        // A held message's deadline doesn't wait for Paykit's first read: one too old is
+        // given up and told now, whatever the read found (Paykit spec 7.2, Switch spec 12.4).
+        Box::pin(self.give_up_expired_held()).await?;
         if account_gone {
             // Nothing more is read or written there: the summary tells the host.
             let divergent = Box::pin(self.newly_paused(&paused_before)).await?;
             return Ok(ReceiveSummary {
                 report,
                 account_gone,
-                held_at_restore,
+                held_messages: self.held_messages_now().await?,
                 divergent,
                 ..ReceiveSummary::default()
             });
@@ -1238,7 +1234,7 @@ impl Paykit {
             return Ok(ReceiveSummary {
                 report,
                 certificate_refused: Some(refused),
-                held_at_restore,
+                held_messages: self.held_messages_now().await?,
                 divergent,
                 ..ReceiveSummary::default()
             });
@@ -1262,7 +1258,7 @@ impl Paykit {
             return Ok(ReceiveSummary {
                 report,
                 applied,
-                held_at_restore,
+                held_messages: self.held_messages_now().await?,
                 records_unlisted: self
                     .unlisted()
                     .await?
@@ -1370,6 +1366,15 @@ impl Paykit {
             .collect();
         Box::pin(self.repair_settlement_buckets()).await?;
         let answered = Box::pin(self.answer_kept_resends()).await?;
+        // Held messages are decided once Paykit's own first read is complete, after this
+        // read's stops are placed, so a counterparty's stop it brought counts (Paykit spec
+        // 7.2). The gate is the one predicate every decision goes through.
+        let mut held_messages = HeldMessages::default();
+        if Box::pin(self.held_decisions_open(&report)).await? {
+            let (released, withdrawn) = Box::pin(self.decide_held_messages(&report)).await?;
+            held_messages.released = released;
+            held_messages.withdrawn = withdrawn;
+        }
         // Open records resolve re-send requests and locally held answers. After a restore,
         // signed records also identify outgoing messages whose outcome the host must check.
         if Box::pin(self.unlisted()).await?.is_none()
@@ -1393,7 +1398,10 @@ impl Paykit {
         Ok(ReceiveSummary {
             report,
             applied,
-            held_at_restore,
+            held_messages: HeldMessages {
+                still_held: self.still_held().await?,
+                ..held_messages
+            },
             resends: answered.saturating_add(asked).saturating_add(marked),
             resend_refused,
             certificate_refused: None,
@@ -1402,6 +1410,14 @@ impl Paykit {
             key_epochs_awaited,
             account_gone: false,
             divergent,
+        })
+    }
+
+    /// The held messages as a receive that decided none leaves them.
+    async fn held_messages_now(&self) -> Result<HeldMessages> {
+        Ok(HeldMessages {
+            still_held: self.still_held().await?,
+            ..HeldMessages::default()
         })
     }
 
@@ -1418,6 +1434,30 @@ impl Paykit {
         self.refresh_own()?;
         Box::pin(self.refresh_lists_when_due()).await?;
         Box::pin(self.note_service_time()).await?;
+        // The first read a flush makes can complete Paykit's own: the held messages are
+        // decided before the outbox is sent, as a receive decides them, and counted in the
+        // summary the next receive returns (Paykit spec 7.2).
+        if let Some(report) = self.first_read_summary.as_ref().map(|s| s.report.clone()) {
+            // A flush lists the records first, as a write does, so the held messages it can
+            // decide are decided before the client delivers. A listing that can't finish
+            // now leaves them held for the next receive.
+            if !report.stopped && self.unlisted().await?.is_some() {
+                if let Err(error) = Box::pin(self.records_known()).await {
+                    crate::pay::unless_stop(error)?;
+                }
+            }
+            if Box::pin(self.held_decisions_open(&report)).await? {
+                let (released, withdrawn) = Box::pin(self.decide_held_messages(&report)).await?;
+                let still_held = self.still_held().await?;
+                if let Some(summary) = self.first_read_summary.as_mut() {
+                    summary.held_messages.released =
+                        summary.held_messages.released.saturating_add(released);
+                    summary.held_messages.withdrawn =
+                        summary.held_messages.withdrawn.saturating_add(withdrawn);
+                    summary.held_messages.still_held = still_held;
+                }
+            }
+        }
         self.send_outbox().await?;
         // Flushing can settle a kept deletion. Its signed reply can leave only
         // once Paykit has verified the applied operation and its service result.

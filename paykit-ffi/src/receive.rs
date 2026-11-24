@@ -56,15 +56,15 @@ impl From<HeldCursor> for CursorStatus {
         }
     }
 }
-/// Disposition of messages held at restore (Paykit spec 7.2).
+/// The Paykit messages a restore held for Paykit to decide (Paykit spec 7.2).
 #[derive(uniffi::Record)]
-pub struct WalletHeldAtRestore {
-    /// Paykit messages released for delivery.
+pub struct WalletHeldMessages {
+    /// Messages released in this receive.
     pub released: u32,
-    /// Carried messages withdrawn, including extensions.
+    /// Messages withdrawn in this receive, each told as of unknown outcome.
     pub withdrawn: u32,
-    /// Messages still waiting for a later receive.
-    pub waiting: u32,
+    /// Messages still held after this receive.
+    pub still_held: u32,
 }
 
 /// What a `Paykit::receive` did.
@@ -85,8 +85,8 @@ pub struct WalletReceiveReport {
     /// The `msg_id`s of the messages received, each with its effect committed with the cursor
     /// move (Switch spec 8.2).
     pub applied: Vec<String>,
-    /// Outgoing messages checked after restore (Paykit spec 7.2).
-    pub held_at_restore: WalletHeldAtRestore,
+    /// The messages a restore held, as this receive left them (Paykit spec 7.2).
+    pub held_messages: WalletHeldMessages,
     /// The `resend_request`s answered and asked.
     pub resends: u64,
     /// A recovery ask waits because its sender certificate lacks `paykit_contacts`.
@@ -188,10 +188,10 @@ impl NativeWallet {
                     held_cursor: r.held_cursor.map(Into::into),
                     events: r.events.into_iter().map(|e| event(app, e)).collect(),
                     applied: s.applied,
-                    held_at_restore: WalletHeldAtRestore {
-                        released: s.held_at_restore.released,
-                        withdrawn: s.held_at_restore.withdrawn,
-                        waiting: s.held_at_restore.waiting,
+                    held_messages: WalletHeldMessages {
+                        released: s.held_messages.released,
+                        withdrawn: s.held_messages.withdrawn,
+                        still_held: s.held_messages.still_held,
                     },
                     resends: s.resends,
                     resend_refused: s.resend_refused.map(|r| Arc::new(PaymentRefusal(r))),
