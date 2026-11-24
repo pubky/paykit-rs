@@ -3045,8 +3045,8 @@ pub(crate) fn lists_read_is_fresh(read: u64, now: u64) -> bool {
 /// placed once the record reads again with those marks. One held over an absent key stays
 /// held. After a delete this app has seen, or a value naming one, the list stays held for
 /// good: no value at the key is taken or written over, whoever writes it and whatever marks
-/// it keeps ([`crate::records::list_key_open`]; Paykit spec 6; wire 5). No payment uses that
-/// payee app's list meanwhile; a newer list, a request's own destination and its public
+/// it keeps, a newer list of that payee app included (Paykit spec 6; wire 5). No payment uses
+/// that payee app's list meanwhile; a request's own destination and the payee's public
 /// endpoints remain separate choices of the user, as does a list the payee shares from
 /// another app.
 #[derive(Clone, Debug, PartialEq, Eq)]

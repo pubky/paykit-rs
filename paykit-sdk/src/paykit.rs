@@ -874,8 +874,9 @@ impl Paykit {
     /// codes. Calls made through it bypass Paykit's gates, such as the refusal of every
     /// Paykit action under a certificate Paykit refuses ([`Paykit::certificate_refused`]):
     /// a host that flushes the client's outbox itself sends what is queued in it, and a
-    /// `payment_lists` value naming a delete that the host reads itself is kept as a hold
-    /// only from the next [`Paykit::receive`] or [`Paykit::backup`] (Paykit spec 6). After a
+    /// `payment_lists` value naming a delete that the host reads itself is sure to be kept
+    /// as a hold only once the next [`Paykit::receive`] or [`Paykit::backup`] has run
+    /// (Paykit spec 6). After a
     /// restore, the host must run [`Paykit::receive`] before such calls; Paykit's outgoing
     /// methods make that first read themselves (Switch spec 12.4).
     pub fn app_mut(&mut self) -> &mut App {

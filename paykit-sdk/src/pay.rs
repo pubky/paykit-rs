@@ -5044,6 +5044,14 @@ impl Paykit {
         if Box::pin(self.divergent_withholds(entry)).await? {
             return Ok(true);
         }
+        // Nor ever to a list destination over a record seen deleted (Paykit spec 6; wire 5):
+        // the attempt stays "may be paid" until the method's history or a receipt tells.
+        if self
+            .list_destination_held(&entry.payee, &entry.destination)
+            .await?
+        {
+            return Ok(true);
+        }
         // A Billing Period's request record is the one its payee cancels, beside the period
         // record the outcome writes (Paykit spec 8.2).
         let Some(natural) = entry.request_record()? else {

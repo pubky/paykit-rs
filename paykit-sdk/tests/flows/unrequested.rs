@@ -3527,10 +3527,10 @@ async fn test_unrequested_open_attempt_to_a_list_not_dispatched_again_after_its_
     put_list_record(&mut phone, &target, None).await;
     wallet.receive(None).await.unwrap();
     // A resume doesn't dispatch the saved list destination again (Paykit spec 6; wire 5):
-    // the attempt stays open.
+    // the attempt stays open, "may be paid", for the user to reconcile.
     let resumed = wallet.resume_payments().await.unwrap();
     assert!(
-        matches!(resumed.as_slice(), [PayOutcome::Pending { .. }]),
+        matches!(resumed.as_slice(), [PayOutcome::Uncertain { .. }]),
         "{resumed:?}"
     );
     assert_eq!(w.rail.pay_calls(&attempt_id), 1);
@@ -3689,5 +3689,45 @@ async fn test_unrequested_loss_marker_kept_through_an_in_place_restore_of_a_back
         !matches!(again, Ok(PayOutcome::Paid { .. })),
         "the paid single-use endpoint was paid again: {again:?}"
     );
+    assert_eq!(w.rail.all_executions().len(), 1);
+}
+
+#[tokio::test]
+async fn test_unrequested_loss_marker_that_does_not_read_kept_and_its_drop_flagged() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut phone = w.wallet("phone").await;
+    let mut shop = w.shop().await;
+    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 1))
+        .await;
+    wallet.receive(None).await.unwrap();
+    let paid = wallet
+        .pay_without_request(to_bob(&w, "0.0015", "btc-bitcoin-p2wpkh"))
+        .await
+        .outcome
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    // Another own app writes the record with every mark and a `lost_to_delete` that doesn't
+    // read: the wallet takes it at the least permissive state and keeps the hold (Paykit
+    // wire 5, "Deletion data that doesn't read").
+    let target = shop_list_target(&w, &shop);
+    phone.app_mut().read_record(&target).await.unwrap();
+    let (_, marked) = list_record(&phone, &w).await;
+    let mut null_marked = marked.clone();
+    null_marked["lost_to_delete"] = serde_json::Value::Null;
+    put_list_record(&mut phone, &target, Some(&null_marked)).await;
+    wallet.receive(None).await.unwrap();
+    assert_eq!(lost_entries(&wallet.backup().await.unwrap()).len(), 1);
+    // A later write that drops it is ignored and shown with its writer, and nothing is paid
+    // from the list.
+    phone.app_mut().read_record(&target).await.unwrap();
+    put_list_record(&mut phone, &target, Some(&marked)).await;
+    wallet.receive(None).await.unwrap();
+    assert_eq!(wallet.app().flagged_writes().await.unwrap().len(), 1);
+    let again = wallet
+        .pay_without_request(to_bob(&w, "0.0015", "btc-bitcoin-p2wpkh"))
+        .await
+        .outcome;
+    assert!(!matches!(again, Ok(PayOutcome::Paid { .. })), "{again:?}");
     assert_eq!(w.rail.all_executions().len(), 1);
 }
