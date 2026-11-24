@@ -227,6 +227,22 @@ impl Paykit {
     }
 }
 
-pub(super) fn unavailable() -> PaykitError {
-    Refusal::NotNow("the previous Allowance ledger write is unresolved".into()).into()
+/// No executor checkpoint of this app for the Allowance, or one whose grant and ledger don't
+/// verify: no read takes execution up, so it is shown (Paykit spec 8.3, "Executor").
+pub(super) fn no_executor_base() -> PaykitError {
+    Refusal::HeldForUser(crate::HeldForUserReason::AllowanceExecutionHeld(
+        "this app can't establish its executor grant and ledger for the Allowance",
+    ))
+    .into()
+}
+
+/// The ledger write was applied, but the switch's proof doesn't show the ledger at the
+/// revision written: an answer that breaks a rule, never a refusal, which would say nothing
+/// was written. The write stands; a later read shows the ledger.
+pub(super) fn written_unverified() -> PaykitError {
+    PaykitError::Lib(paykit_lib::Error::Invalid(
+        "Paykit spec 8.3: the Allowance ledger write was applied, but its proof doesn't show \
+         the ledger written"
+            .into(),
+    ))
 }

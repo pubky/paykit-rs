@@ -937,7 +937,7 @@ async fn test_final_check_first_dispatch_payee_copy_aged_during_the_own_read_not
         matches!(
             refused.refusal(),
             Some(paykit_sdk::Refusal::AttemptFailed(inner))
-                if matches!(&**inner, paykit_sdk::Refusal::NotNow(why) if why.contains("budget"))
+                if matches!(&**inner, paykit_sdk::Refusal::HeldForUser(paykit_sdk::HeldForUserReason::AttemptCheck(why)) if why.contains("budget"))
         ),
         "{refused:?}"
     );
@@ -1886,7 +1886,7 @@ async fn test_fence_attempt_past_its_pre_dispatch_budget_not_paid() {
         matches!(
             refused.refusal(),
             Some(paykit_sdk::Refusal::AttemptFailed(inner))
-                if matches!(&**inner, paykit_sdk::Refusal::NotNow(why) if why.contains("budget"))
+                if matches!(&**inner, paykit_sdk::Refusal::HeldForUser(paykit_sdk::HeldForUserReason::AttemptCheck(why)) if why.contains("budget"))
         ),
         "{refused:?}"
     );
@@ -2017,7 +2017,9 @@ async fn test_fence_answer_committed_past_the_budget_not_paid() {
         matches!(
             refused.refusal(),
             Some(paykit_sdk::Refusal::AttemptFailed(inner))
-                if matches!(**inner, paykit_sdk::Refusal::NotNow(_))
+                if matches!(**inner, paykit_sdk::Refusal::HeldForUser(
+                    paykit_sdk::HeldForUserReason::AttemptCheck(_)
+                ))
         ),
         "{refused:?}"
     );
@@ -2971,7 +2973,7 @@ async fn test_resume_ends_when_its_first_claim_read_installs_a_recovery_notice()
         w.alice
             .switch()
             .fail_next(pubky_switch_client::testing::Fault::Error {
-                path: "claims".into(),
+                path: "/claims".into(),
                 code: pubky_switch_core::http::ErrorCode::RecoveryRequired,
                 current: serde_json::json!({
                     "generation": generation,
@@ -3205,7 +3207,7 @@ async fn test_resume_ends_at_a_service_answer_that_is_no_stop() {
         w.alice
             .switch()
             .fail_next(pubky_switch_client::testing::Fault::Error {
-                path: "claims".into(),
+                path: "/claims".into(),
                 code,
                 current: serde_json::Value::Null,
             });

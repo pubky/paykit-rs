@@ -178,9 +178,10 @@ pub struct AllowanceView {
     /// Whether the counterparty is on the identity's deny list, as the app last read it
     /// (Paykit spec 8.1, "Blocked counterparties"): nothing new from it is taken, its
     /// requests are paused and nothing is sent to it, so the host shows the Allowance as
-    /// blocked. `None` while the copy of the deny list isn't known, at an app holding
-    /// `paykit_contacts` after a failed read of the lists or a restore: sends are held then too,
-    /// and the host can't show it as not blocked.
+    /// blocked. `None` while the copy of the deny list can't tell, at an app holding
+    /// `paykit_contacts`: not known after a failed read of the lists or a restore, an own block
+    /// or unblock settled since the last read, or a block in a copy due for a read. Sends are
+    /// held then too, and the host can't show it as not blocked.
     pub blocked: Option<bool>,
 }
 
@@ -284,7 +285,7 @@ pub(crate) enum ConsentEnd {
 }
 
 /// Where this app's consent to execute an Allowance stands ([`Paykit::consent_state`]).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ConsentState {
     /// On the consent list and confirmed since any restore or `missed` item: the executor
     /// may pay under it.
@@ -309,7 +310,7 @@ pub(crate) enum ConsentState {
     },
     /// Not held for now, and why: a `missed` item's mark the next receive turns into
     /// [`ConsentState::ConfirmAgain`], or a record not held as it must be yet.
-    Waiting(&'static str),
+    Waiting(Refusal),
 }
 
 /// Why consent waits while a `missed` item's mark is kept.
@@ -1863,10 +1864,10 @@ impl Paykit {
     /// A seller proposes with this method. The payer uses [`Self::propose_executable_allowance`]
     /// to confirm its terms and automatic payment before signing P. Proposing requires both
     /// `paykit_allowance` and `paykit_contacts`.
-    /// [`Refusal::ScopeMissing`] identifies a missing scope. [`Refusal::NotNow`] is returned
-    /// while sends to `to` are held because the deny list holds it, or the copy of
-    /// the lists isn't known after a read tried now (Paykit spec 8.1, "Blocked counterparties"),
-    /// with nothing signed, written or queued; [`PaykitError::Lib`] with `Validation` for terms
+    /// [`Refusal::ScopeMissing`] identifies a missing scope. While sends to `to` are held,
+    /// with nothing signed, written or queued (Paykit spec 8.1, "Blocked counterparties"):
+    /// [`Refusal::HeldForUser`] while the deny list holds it, and [`Refusal::NotNow`] while
+    /// the copy of the lists isn't known after a read tried now; [`PaykitError::Lib`] with `Validation` for terms
     /// that break Paykit wire 4.15, with nothing sent; the client's errors. A failure that leaves
     /// the batch kept (the network, `429`, `503`) is no error: the proposal is reported sent,
     /// [`MessageDelivery::Kept`], and goes with the app's next write or read.
@@ -1933,14 +1934,13 @@ impl Paykit {
             self.require_payer_choice(execution.as_ref())?;
         }
         Box::pin(self.require_sends_allowed(&to)).await?;
-        let count = count.ok_or_else(|| {
-            Refusal::NotNow("the current pending proposals have not been read".into())
-        })?;
+        // Unknown as `pending_count` says why: records not listed or not verified yet, a
+        // wait, or a proposal that doesn't read, shown.
+        let count = count?;
         if count >= pending::LIMIT {
-            return Err(Refusal::NotNow(
-                "eight own proposals to this counterparty are already pending".into(),
-            )
-            .into());
+            return Err(
+                Refusal::HeldForUser(crate::HeldForUserReason::PendingProposalsFull).into(),
+            );
         }
         let allowance_id = AllowanceId::generate()?;
         let target = allowance_record_target(Collection::AllowanceProposals, &to, &allowance_id);
@@ -1975,9 +1975,9 @@ impl Paykit {
             )
             .await?;
         if !pending::is_create(&write.1) {
-            return Err(Refusal::NotNow(
-                "the new Allowance ID already has a pending record".into(),
-            )
+            return Err(Refusal::NotNow(crate::NotNowReason::CallAgain(
+                "the new Allowance ID already has a pending record",
+            ))
             .into());
         }
         let mut tx = Tx::default();
@@ -2287,7 +2287,12 @@ impl Paykit {
                 .ok_or(Refusal::NotFound)?;
             // Nothing is sent for a conflicted Allowance (Paykit spec 8.3, "Conflicted").
             if self.unresolved_for_allowance(record, &held).await? {
-                return Err(Refusal::NotNow("Allowance conflict check pending".into()).into());
+                // The check may never settle, as when the earlier lifetime can't be
+                // established: shown, not waited on.
+                return Err(Refusal::HeldForUser(crate::HeldForUserReason::Unresolved(
+                    "Allowance conflict check pending",
+                ))
+                .into());
             }
             if held.conflicted.is_some() || Box::pin(self.conflict_kept(record)).await? {
                 return Err(Refusal::AllowanceConflicted.into());
@@ -2302,7 +2307,9 @@ impl Paykit {
                 if rejected(&held) {
                     Refusal::Rejected
                 } else {
-                    Refusal::NotNow("the permanent Allowance has no verified acceptance".into())
+                    Refusal::NotNow(crate::NotNowReason::ReadAgain(
+                        "the permanent Allowance has no verified acceptance",
+                    ))
                 }
             })?;
             let refs = vec![held.proposal.hash(), accepted.hash()];
@@ -2750,10 +2757,8 @@ impl Paykit {
     /// Whether the copy of the deny list holds `pubky`, for the views: `None` while the copy
     /// isn't known ([`Paykit::deny_copy_known`]).
     async fn blocked_as_known(&self, pubky: &[u8; 32]) -> Result<Option<bool>> {
-        if !Box::pin(self.deny_copy_known()).await? {
-            return Ok(None);
-        }
-        Ok(Some(Box::pin(self.denied_as_last_read(pubky)).await?))
+        // Never a definite block from stale state: `None` while the copy can't tell.
+        Box::pin(self.deny_decides(pubky)).await
     }
 
     /// [`Refusal::NotNow`] while the record at `record` waits for its scope key: the app
@@ -2834,13 +2839,22 @@ impl Paykit {
             return Ok(ConsentState::Removed(reason));
         }
         if Box::pin(self.consents_unconfirmed()).await? {
-            return Ok(ConsentState::Waiting(WAITS_FOR_MISSED));
+            // Only the next receive marks it: a wait.
+            return Ok(ConsentState::Waiting(Refusal::NotNow(
+                crate::NotNowReason::ReadAgain(WAITS_FOR_MISSED),
+            )));
         }
+        // Not read yet: a read brings it.
         let Some(shared) = Box::pin(self.app.shared_record(record)).await? else {
-            return Ok(ConsentState::Waiting(WAITS_FOR_RECORD));
+            return Ok(ConsentState::Waiting(Refusal::NotNow(
+                crate::NotNowReason::ReadAgain(WAITS_FOR_RECORD),
+            )));
         };
+        // Flagged: it lasts until a write the app takes replaces it, so it is shown.
         if shared.flagged {
-            return Ok(ConsentState::Waiting(WAITS_FOR_RECORD));
+            return Ok(ConsentState::Waiting(Refusal::HeldForUser(
+                crate::HeldForUserReason::AllowanceExecutionHeld(WAITS_FOR_RECORD),
+            )));
         }
         let shown = match Box::pin(self.held_allowance(record)).await? {
             Some(held) if held.end.is_some() => {
@@ -2853,12 +2867,20 @@ impl Paykit {
                 return Ok(ConsentState::Removed(ConsentEnd::Rejected))
             }
             Some(held) => {
+                // A conflict check that may never settle: shown.
                 if self.unresolved_for_allowance(record, &held).await? {
-                    return Ok(ConsentState::Waiting(WAITS_FOR_RECORD));
+                    return Ok(ConsentState::Waiting(Refusal::HeldForUser(
+                        crate::HeldForUserReason::AllowanceExecutionHeld(WAITS_FOR_RECORD),
+                    )));
                 }
                 held
             }
-            None => return Ok(ConsentState::Waiting(WAITS_FOR_RECORD)),
+            // Not read as the Allowance yet: a read brings it.
+            None => {
+                return Ok(ConsentState::Waiting(Refusal::NotNow(
+                    crate::NotNowReason::ReadAgain(WAITS_FOR_RECORD),
+                )))
+            }
         };
         let own_granted = shown
             .current_grant(&self.identity())

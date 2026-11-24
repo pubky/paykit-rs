@@ -21,12 +21,21 @@ private suspend fun allowanceNotFound(call: suspend () -> Unit) {
     }
 }
 
-private suspend fun allowanceNotNow(call: suspend () -> Unit) {
+private suspend fun allowancesNotListed(call: suspend () -> Unit) {
     try {
         call()
-        error("expected an Allowance to be unavailable")
+        error("expected the Allowances to be unlisted")
+    } catch (error: WalletException.RetryLater) {
+        error.failure.use { check(it.code() == "records_not_listed") }
+    }
+}
+
+private suspend fun pendingProposalsFull(call: suspend () -> Unit) {
+    try {
+        call()
+        error("expected the pending proposals to be full")
     } catch (error: WalletException.NeedsUser) {
-        error.failure.use { check(it.code() == "not_now") }
+        error.failure.use { check(it.code() == "pending_proposals_full") }
     }
 }
 
@@ -46,7 +55,7 @@ internal suspend fun checkAllowances(fixture: CheckoutFixture, wallet: NativeWal
     fixture.hostForStore(EnrollmentStore()).use { host ->
         host.restore(wallet.appId(), wallet.backup(), BackupDevice.IN_POSSESSION).use { restored ->
             try {
-                allowanceNotNow { restored.allowances() }
+                allowancesNotListed { restored.allowances() }
             } finally {
                 restored.shutdown()
             }
@@ -84,8 +93,8 @@ internal suspend fun checkAllowances(fixture: CheckoutFixture, wallet: NativeWal
         }
         val listed = wallet.allowanceIds().toSet()
         check(listed == (before + proposals.map { it.allowanceId }).toSet())
-        allowanceNotNow { wallet.proposeAllowance(peer, AllowanceRole.ALLOWEE, terms) }
-        allowanceNotNow { wallet.proposeExecutableAllowance(peer, terms, true) }
+        pendingProposalsFull { wallet.proposeAllowance(peer, AllowanceRole.ALLOWEE, terms) }
+        pendingProposalsFull { wallet.proposeExecutableAllowance(peer, terms, true) }
 
         val record = proposals.first().record
         allowanceUsageRefusal { wallet.acceptAllowance(record) }

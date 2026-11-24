@@ -523,7 +523,12 @@ async fn stops_across_loss(another_loss: bool) {
             payer.requests().await.unwrap_err(),
         ] {
             assert!(
-                matches!(error.refusal(),Some(Refusal::NotNow(reason)) if reason.contains("order of the request's cancellations")),
+                matches!(
+                    error.refusal(),
+                    Some(Refusal::HeldForUser(
+                        paykit_sdk::HeldForUserReason::CancellationOrderUnknown
+                    ))
+                ),
                 "{error}"
             );
         }

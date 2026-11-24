@@ -12,4 +12,5 @@ mkdir -p "$out/kotlin" "$out/swift"
 "$bindgen" generate --no-format --metadata-no-deps --library "$library" --config "$dir/uniffi.toml" --language kotlin --out-dir "$out/kotlin"
 "$bindgen" generate --no-format --metadata-no-deps --library "$library" --config "$dir/uniffi.toml" --language swift --out-dir "$out/swift"
 
-python3 "$dir/prepare-bindings.py" "$out/kotlin/com/synonym/paykit/paykit.kt" "$out/swift/WalletRedaction.swift"
+python3 "$dir/prepare-bindings.py" "$out/kotlin/com/synonym/paykit/paykit.kt" \
+    "$out/swift/Paykit.swift" "$out/swift/WalletRedaction.swift"

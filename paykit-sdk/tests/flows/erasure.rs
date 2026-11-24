@@ -17,9 +17,9 @@ use crate::common::{draft, request_from, store, World, ALICE_ORIGIN, HOUR_MS};
 /// A transport whose requests to alice's switch are answered, once armed, as an erased
 /// account answers: `404`, signed with no key the app pins. Every other request goes through
 /// the world's router.
-struct ErasedSwitch {
-    inner: Arc<Router>,
-    erased: AtomicBool,
+pub(crate) struct ErasedSwitch {
+    pub(crate) inner: Arc<Router>,
+    pub(crate) erased: AtomicBool,
 }
 
 impl Transport for ErasedSwitch {

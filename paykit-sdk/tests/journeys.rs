@@ -9,6 +9,8 @@
 //! fails the test.
 #![recursion_limit = "256"]
 
+#[path = "journeys/allowances.rs"]
+mod allowances;
 #[path = "journeys/connect.rs"]
 mod connect;
 #[path = "journeys/one_time.rs"]

@@ -331,7 +331,7 @@ async fn check_incomplete_backup(
             .await
             .unwrap_err()
             .refusal(),
-        Some(Refusal::NotNow(_))
+        Some(Refusal::HeldForUser(_))
     ));
     assert_eq!(restored.app().protocol_scan("paykit", b"ap/").await?, kept);
     assert!(restored

@@ -379,8 +379,7 @@ pub(crate) fn activity_base_changed(held: Option<&SharedRecord>) -> bool {
 }
 
 pub(crate) fn activity_base_refusal() -> PaykitError {
-    Refusal::NotNow("the switch shows another write at the held activity record's version".into())
-        .into()
+    Refusal::HeldForUser(crate::HeldForUserReason::ActivityBaseChanged).into()
 }
 
 /// The contents an activity effect may use, taken from the same read as the chosen base.
