@@ -395,6 +395,9 @@ fn every_refusal_kind() -> Vec<RefusalKind> {
         RefusalKind::Cancelled,
         RefusalKind::AllowanceEnded,
         RefusalKind::AllowanceConflicted,
+        RefusalKind::AllowanceConfirmationNeeded {
+            record: vec![0; 32],
+        },
         RefusalKind::CreditHistoryLost,
         RefusalKind::AlreadyPaid,
         RefusalKind::BeingHandledByOtherWallet,
@@ -449,6 +452,7 @@ fn every_refusal_kind() -> Vec<RefusalKind> {
             | K::Cancelled
             | K::AllowanceEnded
             | K::AllowanceConflicted
+            | K::AllowanceConfirmationNeeded { .. }
             | K::CreditHistoryLost
             | K::AlreadyPaid
             | K::BeingHandledByOtherWallet

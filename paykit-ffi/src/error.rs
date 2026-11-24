@@ -313,6 +313,8 @@ pub(crate) fn refusal_category(kind: &crate::RefusalKind) -> (Category, &'static
         K::NotSubscribed => (NeedsUser, "not_subscribed"),
         // No wait lifts it, only the shared post-loss hold standing too; the user pays by hand.
         K::FloorHeld => (NeedsUser, "floor_held"),
+        // Confirmed with `confirm_allowance_executor` once the user has seen the Allowance.
+        K::AllowanceConfirmationNeeded { .. } => (NeedsUser, "allowance_confirmation_needed"),
         // The SDK gives its reason as text only, and the reasons span every case, from a wait
         // to an alarm: shown to the user, it is never retried by itself.
         K::NotNow => (NeedsUser, "not_now"),
