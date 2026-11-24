@@ -37,9 +37,8 @@ async fn confirm_after_quota(world: &World, fail_notice: bool) -> TestResult {
     let merchant = wallets.seller_wallet.identity();
     Box::pin(finish_seller_lookups(&mut wallets)).await?;
 
-    let [(transaction, tag)] =
-        transactions_in_one_bucket(wallets.seller_wallet.app().naming_key())?;
-    wallets.rail.next(Behaviour::InTransaction(transaction));
+    let [(settlement, tag)] = transactions_in_one_bucket(wallets.seller_wallet.app().naming_key())?;
+    wallets.rail.next(Behaviour::InSettlement(settlement));
     let (mut buyer, winner, winning_key) = Box::pin(paid_request(
         &mut wallets.seller_wallet,
         wallets.buyer,
@@ -47,7 +46,7 @@ async fn confirm_after_quota(world: &World, fail_notice: bool) -> TestResult {
         "bcrt1qqyqszqgpqyqszqgpqyqszqgpqyqszqgpvxat9t",
     ))
     .await?;
-    wallets.rail.next(Behaviour::InTransaction(transaction));
+    wallets.rail.next(Behaviour::InSettlement(settlement));
     let (mut other, loser, losing_key) = Box::pin(paid_request(
         &mut wallets.labelled,
         wallets.other,
