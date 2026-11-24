@@ -1,15 +1,31 @@
 name: Wallet packages
 
 # Builds the Swift package and the Android AAR as a release would, and compiles a consumer of
-# each. It publishes nothing. It runs when the bindings, their packaging or the locked
-# dependencies change, since a full package build takes long.
+# each. It publishes nothing. It runs when something the packages are built from changes, since
+# a full package build takes long.
 on:
   push:
     branches: [v0.2]
-    paths: ["paykit-ffi/**", "Cargo.lock", ".github/workflows/packages.yml"]
+    paths:
+      - "paykit-ffi/**"
+      - "paykit-lib/**"
+      - "paykit-sdk/**"
+      - "vendor/**"
+      - ".cargo/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/packages.yml"
   pull_request:
     branches: [v0.2, "feat/**"]
-    paths: ["paykit-ffi/**", "Cargo.lock", ".github/workflows/packages.yml"]
+    paths:
+      - "paykit-ffi/**"
+      - "paykit-lib/**"
+      - "paykit-sdk/**"
+      - "vendor/**"
+      - ".cargo/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/packages.yml"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -42,9 +58,9 @@ jobs:
           set -eu
           consumer="$RUNNER_TEMP/swift-consumer"
           package="$consumer/paykit"
-          sources=paykit-ffi/bindings/ios
-          mkdir -p "$package/$sources" "$consumer/Sources/WalletConsumer"
-          cp "$sources/Paykit.swift" "$sources/WalletRedaction.swift" "$package/$sources/"
+          sources=paykit-ffi/dist/ios/Sources/Paykit
+          mkdir -p "$package/paykit-ffi/bindings/ios" "$consumer/Sources/WalletConsumer"
+          cp "$sources/Paykit.swift" "$sources/WalletRedaction.swift" "$package/paykit-ffi/bindings/ios/"
           unzip -q paykit-ffi/dist/ios/Paykit.xcframework.zip -d "$package"
           # The release manifest, resolved against the local copy of the archive.
           sed -e 's/@TAG@/v0.0.0/' -e 's/@CHECKSUM@/local/' \
