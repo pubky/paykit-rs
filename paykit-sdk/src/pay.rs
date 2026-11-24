@@ -953,6 +953,15 @@ pub(crate) fn entry_waits(error: &PaykitError) -> bool {
     }
 }
 
+/// Whether a failure met after work a step can't take back (a payment made, an outcome
+/// written) is judged by the resume's table rather than taken as best effort: the Switch
+/// client's, which [`client_waits`] classifies exactly. This SDK's own refusals stay best
+/// effort there, as before: `Refusal::NotNow` carries its reason as text, which tells a wait
+/// (a scope key awaited) from a step only the user takes only once it is typed.
+fn judged_at_resume(error: &PaykitError) -> bool {
+    matches!(error, PaykitError::Client(_))
+}
+
 /// Whether a failure of the pinned Switch client is temporary by its own documentation: the
 /// same call may pass later with no one acting. Kept and ahead batches are judged by the
 /// failure inside them. The waits:
@@ -961,7 +970,7 @@ pub(crate) fn entry_waits(error: &PaykitError) -> bool {
 /// - the account-erasure check still waiting (`NotAnsweringAsAccount`, Switch spec 12.7);
 /// - an answer whose signature doesn't verify with a `5xx` status, as from a proxy in front
 ///   of the service, nothing of it used (Switch wire 7.1);
-/// - an answer given before the body was read, final for nothing (Switch wire 7.1), and a
+/// - a `429` given before the body was read, final for nothing (Switch wire 7.1), and a
 ///   signed public read whose time is outside the reader's window, which a fresh read
 ///   replaces;
 /// - a switch answer whose Retry column (Switch spec 6.4) lets the same request pass as it
@@ -999,7 +1008,10 @@ pub(crate) fn client_waits(error: &AppError) -> bool {
                 Retry::Yes | Retry::AfterRetryAfter | Retry::WithNewTimestamp | Retry::AfterReread
             ),
             C::BadServiceSignature { status } => *status >= 500,
-            C::BodyUnread { .. } | C::StaleAnswer { .. } => true,
+            // Before the body was read only a `429` passes by itself: a `413` or a `404` comes
+            // again for the same bytes.
+            C::BodyUnread { code, .. } => code.retry() == Retry::AfterRetryAfter,
+            C::StaleAnswer { .. } => true,
             C::DisplayReadPending
             | C::OwnRecoveryRequired { .. }
             | C::Chain(_)
@@ -1022,21 +1034,26 @@ pub(crate) fn client_waits(error: &AppError) -> bool {
 }
 
 /// Whether a transport failure is the network's, which the client sends again with the same
-/// bytes: its first-handoff deadline passed before release, no connection, a timeout, or
-/// another failure of the transport; and a signed header that can't be read,
+/// bytes: no connection, a timeout, or another failure of the transport; and a signed header that can't be read,
 /// which the client takes as an answer whose signature doesn't verify, under a `5xx` status.
 /// No first handoff at all, which a host transport without that facility gives every time,
+/// a guarded first send past its deadline, which is never released,
 /// an origin the client may not connect to, an answer larger than the transport takes and a
 /// request that can't be built are no waits.
 fn transport_waits(error: &pubky_switch_client::error::TransportError) -> bool {
     use pubky_switch_client::error::TransportError as T;
     match error {
-        T::FirstSendExpired | T::Connect(_) | T::Timeout | T::Other(_) => true,
+        T::Connect(_) | T::Timeout | T::Other(_) => true,
         // Taken as an answer whose signature doesn't verify: a wait under a `5xx` status, as
         // [`client_waits`] judges one.
         T::UnreadableSignedHeader { status } => *status >= 500,
         // A host transport without a first-handoff facility gives it every time.
-        T::FirstSendUnavailable | T::Refused(_) | T::TooLarge(_) | T::InvalidRequest(_) => false,
+        // A guarded first send past its deadline is never released.
+        T::FirstSendUnavailable
+        | T::FirstSendExpired
+        | T::Refused(_)
+        | T::TooLarge(_)
+        | T::InvalidRequest(_) => false,
         // A failure a later pin adds is no wait until it is classified here.
         _ => false,
     }
@@ -4111,9 +4128,10 @@ impl Paykit {
         Box::pin(self.report_as(entry, false)).await
     }
 
-    /// [`Paykit::report`] for a resume: a failure to write a payment made is returned, so the
-    /// resume reports the entry [`PayOutcome::PaidOutcomeUnwritten`] and decides whether the
-    /// failure is a wait or one the host must act on ([`entry_waits`]).
+    /// [`Paykit::report`] for a resume: a failure of the Switch client to write a payment made
+    /// is returned ([`judged_at_resume`]), so the resume reports the entry
+    /// [`PayOutcome::PaidOutcomeUnwritten`] and decides whether the failure is a wait or one
+    /// the host must act on ([`entry_waits`]).
     async fn resume_report(&mut self, entry: &mut JournalEntry) -> Result<PayOutcome> {
         Box::pin(self.report_as(entry, true)).await
     }
@@ -4132,7 +4150,7 @@ impl Paykit {
             match self.record_offline_attempt(entry).await {
                 Ok(true) => {}
                 Ok(false) => return Ok(PayOutcome::PaidOutcomeUnwritten { attempt_id }),
-                Err(error) if strict => return Err(error),
+                Err(error) if strict && judged_at_resume(&error) => return Err(error),
                 Err(error) => {
                     unless_stop(error)?;
                     return Ok(PayOutcome::PaidOutcomeUnwritten { attempt_id });
@@ -4160,7 +4178,7 @@ impl Paykit {
             }
             // Money moved: a failure to write it is never the payment's error (Paykit spec
             // 7.2), unless it stops the wallet; the journal keeps the proof for a resume.
-            Err(error) if strict => return Err(error),
+            Err(error) if strict && judged_at_resume(&error) => return Err(error),
             Err(error) if paid => {
                 unless_stop(error)?;
                 return Ok(PayOutcome::PaidOutcomeUnwritten { attempt_id });
@@ -4784,7 +4802,7 @@ impl Paykit {
                         if stops_resume(&error) {
                             return Err(error);
                         }
-                        if !entry_waits(&error) {
+                        if judged_at_resume(&error) && !entry_waits(&error) {
                             not_a_wait.get_or_insert(error);
                         }
                     }
@@ -6496,6 +6514,12 @@ mod tests {
                 })),
             }),
             transport(TransportError::FirstSendUnavailable),
+            transport(TransportError::FirstSendExpired),
+            PaykitError::Client(AppError::Switch(ClientError::BodyUnread {
+                status: 413,
+                code: E::TooLarge,
+                retry_after: None,
+            })),
             transport(TransportError::Refused("origin".into())),
             transport(TransportError::TooLarge(1)),
             transport(TransportError::UnreadableSignedHeader { status: 400 }),
