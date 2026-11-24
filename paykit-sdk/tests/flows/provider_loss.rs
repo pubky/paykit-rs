@@ -4257,3 +4257,45 @@ async fn test_provider_loss_unblock_at_the_upload_step_waits_for_the_list_step()
     assert!(copy.contains(&w.bob_id()));
     assert_eq!(block_floor(&wallet).await, None);
 }
+
+#[tokio::test]
+async fn test_provider_loss_list_read_at_the_list_step_is_fresh_and_holds_the_owed_entry() {
+    // At the list step a read of the lists holds the loss's owed deny entries, and is right
+    // once they land: the copy is fresh, so a deny list that stays full holds nothing else
+    // back (Switch wire 7.4.14, "Lists").
+    let w = World::new();
+    let (mut wallet, _phone, _request) = loss_with_an_owed_deny_entry(&w).await;
+    w.clock.advance_ms(paykit_sdk::LISTS_REFRESH_MS);
+    let _ = wallet.receive(None).await;
+    assert_lists_step_owes_bob(&w, &wallet).await;
+    let (copy, fresh) = deny_copy(&wallet).await;
+    assert!(copy.contains(&w.bob_id()), "{copy:?}");
+    assert!(fresh);
+}
+
+#[tokio::test]
+async fn test_provider_loss_followed_through_the_client_reads_the_lists_again() {
+    // The host follows the loss through the client alone, every step done before Paykit's
+    // next read: the read time from before the loss is gone with it, so no copy read before
+    // the loss is taken as fresh.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    wallet.receive(None).await.unwrap();
+    assert!(wallet
+        .app()
+        .protocol_get("paykit", b"lr")
+        .await
+        .unwrap()
+        .is_some());
+    let _next = declare_loss(&w);
+    wallet.app_mut().refresh_identity().await.unwrap();
+    for _ in 0..4 {
+        let _ = wallet.app_mut().follow_provider().await;
+    }
+    assert!(wallet
+        .app()
+        .protocol_get("paykit", b"lr")
+        .await
+        .unwrap()
+        .is_none());
+}

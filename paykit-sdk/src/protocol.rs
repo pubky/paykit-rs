@@ -2073,6 +2073,11 @@ impl Protocol for PaykitProtocol {
             )?],
         };
         actions.local.extend(crate::loss::loss_writes(loss, view)?);
+        // No copy of the lists read before the loss is taken as fresh: the first use after it
+        // reads the lists again ([`crate::Paykit::loss_lists`]).
+        actions.local.push(LocalWrite::Delete {
+            key: key::LISTS_READ.as_bytes().to_vec(),
+        });
         Ok(actions)
     }
 

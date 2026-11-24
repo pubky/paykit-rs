@@ -2799,10 +2799,12 @@ pub(crate) enum LossLists {
     During,
 }
 
-/// Put in `tx` that the lists were read at `read_at`, unless a provider loss's list upload is
-/// still owed: the read time goes then, so no copy is taken as fresh ([`Paykit::loss_lists`]).
+/// Put in `tx` that the lists were read at `read_at`, unless the read came before a provider
+/// loss's list step: the read time goes then, so no copy is taken as fresh. A read at the list
+/// step holds the loss's owed deny entries, and stays right once they land
+/// ([`Paykit::loss_lists`]).
 fn put_lists_read(tx: &mut Tx, loss: LossLists, read_at: u64) -> crate::error::Result<()> {
-    if loss == LossLists::Settled {
+    if loss != LossLists::Before {
         tx.put(key::LISTS_READ, &read_at)?;
     } else {
         tx.delete(key::LISTS_READ);
@@ -3246,14 +3248,10 @@ impl Paykit {
             return Ok(());
         }
         let now = self.now();
-        // While a provider loss's list upload is owed, no copy is fresh; before its list step
-        // nothing a read answers is taken ([`Paykit::loss_lists`]).
-        let loss = self.loss_lists().await?;
-        if loss != LossLists::Settled {
+        // Before a provider loss's list step no copy is fresh, and a read only adds to it
+        // ([`Paykit::loss_lists`]).
+        if self.loss_lists().await? == LossLists::Before {
             self.local_delete(key::LISTS_READ).await?;
-            if loss == LossLists::Before {
-                return Ok(());
-            }
         }
         let last = self.local_get::<u64>(key::LISTS_READ).await?;
         // A raise owed that can be written goes at the next receive, whatever the copy's age,
@@ -3378,19 +3376,25 @@ impl Paykit {
         let loss = self.loss_lists().await?;
         if loss == LossLists::Before {
             // Before a provider loss's list step the new service holds none of the loss's
-            // deny entries, and the client names none of them yet: the stored copy stays the
-            // truth, the read decides nothing, and no copy is taken as fresh until the upload
-            // lands (Switch wire 7.4.14, "Lists").
-            self.local_delete(key::LISTS_READ).await?;
-            return self
-                .local_get::<Vec<[u8; 32]>>(key::DENIED)
-                .await?
-                .ok_or_else(|| {
-                    crate::error::Refusal::SwitchUnavailable(
-                        "the deny list isn't known before a provider loss's upload".into(),
-                    )
-                    .into()
-                });
+            // deny entries, and the client names none of them yet: the copy only takes what
+            // the answer adds, such as another own app's block there, and drops nothing, so
+            // no unblock is read and no floor raised; and no copy is taken as fresh until the
+            // list step (Switch wire 7.4.14, "Lists").
+            let Some(mut deny) = self.local_get::<Vec<[u8; 32]>>(key::DENIED).await? else {
+                self.local_delete(key::LISTS_READ).await?;
+                return Err(crate::error::Refusal::SwitchUnavailable(
+                    "the deny list isn't known before a provider loss's upload".into(),
+                )
+                .into());
+            };
+            let (added, _) = self.judged_deny(lists.deny).await?;
+            deny.extend(added);
+            deny.sort_unstable();
+            deny.dedup();
+            let mut tx = Tx::default();
+            tx.delete(key::LISTS_READ).put(key::DENIED, &deny)?;
+            self.local_commit(tx).await?;
+            return Ok(deny);
         }
         let (mut deny, mut tx) = self.judged_deny(lists.deny).await?;
         deny.sort_unstable();
@@ -3554,7 +3558,7 @@ impl Paykit {
         let read = self.local_get::<u64>(key::LISTS_READ).await?;
         let copy = self.local_get::<Vec<[u8; 32]>>(key::DENIED).await?;
         let now = self.now();
-        let settled = self.loss_lists().await? == LossLists::Settled;
+        let settled = self.loss_lists().await? != LossLists::Before;
         match (read, copy) {
             (Some(read), Some(denied)) if lists_read_is_fresh(read, now) && settled => {
                 Ok(denied.contains(pubky))
@@ -3641,9 +3645,9 @@ impl Paykit {
     /// Where a provider loss's list upload stands (Switch spec 12.6, Switch wire 7.4.14,
     /// "Lists"). While it is owed, the client counts the loss's deny entries as denying, but
     /// the new service holds them only once their page is accepted, and the client names them
-    /// only at the list step ([`App::recovery_deny_entries`]): no copy of the lists is taken
-    /// as fresh meanwhile, so every reader reads them again, and once the upload lands the
-    /// first use reads the lists the new service holds.
+    /// only at the list step ([`App::recovery_deny_entries`]). So no copy read before the loss
+    /// or before the list step is taken as fresh, a read before the list step only adds to
+    /// the copy, and a read at the list step, which holds the owed entries, is complete.
     ///
     /// [`App::recovery_deny_entries`]: pubky_switch_client::app::App::recovery_deny_entries
     pub(crate) async fn loss_lists(&self) -> crate::error::Result<LossLists> {
