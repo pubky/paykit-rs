@@ -576,13 +576,28 @@ async fn payment_guards(world: &World) -> TestResult {
                 PeriodPriceChoice::RequestedAmount,
             )
             .await,
-        wallet.pay_period_under_allowance(id.clone(), period).await,
+        wallet
+            .pay_period_under_allowance(id.clone(), period.clone())
+            .await,
     ] {
         assert!(matches!(
             result,
             Err(WalletError::PaymentMethodWithoutLookup)
         ));
     }
+    // A bad price choice is the host's input error before the method's lookup is checked.
+    let choice = wallet
+        .pay_period_automatically(
+            id.clone(),
+            period,
+            PeriodPriceChoice::QuoteFor {
+                endpoint: "bad/endpoint".into(),
+            },
+        )
+        .await;
+    assert!(
+        matches!(choice, Err(WalletError::InvalidInput { field }) if field == "endpoint identifier")
+    );
     for period in [
         BillingPeriod {
             starts_at: 1,

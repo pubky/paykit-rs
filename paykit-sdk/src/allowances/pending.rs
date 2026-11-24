@@ -134,11 +134,20 @@ impl Paykit {
         let Some(current) = self.app.current_collection(&family, report).await? else {
             return Ok(Err(unlisted()));
         };
-        // Members not verified yet, which a decision on every value waits for.
+        // Members not verified yet, which a decision on every value waits for. Where each of
+        // them is held and only sealed under a scope key the app doesn't hold yet, the key is
+        // what is awaited (Switch spec 3.5); any other is read again.
         if !current.uncertain_keys.is_empty() {
-            return Ok(Err(Refusal::NotNow(crate::NotNowReason::ReadAgain(
-                "the current pending proposals have not been read",
-            ))));
+            let mut await_keys = true;
+            for key in &current.uncertain_keys {
+                let held = self.app.shared_record(key).await?;
+                await_keys &= held.is_some_and(|held| crate::hold::awaits_key(&held.content));
+            }
+            return Ok(Err(Refusal::NotNow(if await_keys {
+                crate::NotNowReason::ValueAwaitsKey
+            } else {
+                crate::NotNowReason::ReadAgain("the current pending proposals have not been read")
+            })));
         }
         let mut count = 0;
         for held in current.live {
