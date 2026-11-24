@@ -468,6 +468,7 @@ object CheckoutConsumer {
         if (restore == null) outsideTextStaysInside()
         if (restore == null) throwingCallbacks()
         if (restore == null) CheckoutReview.entries.forEach { driveCheckout(it) }
+        if (restore == null) driveConsumers()
         else driveCheckout(CheckoutReview.ORDINARY, restore)
     }
 }

@@ -653,7 +653,7 @@ fn test_wallet_errors_match_the_host_guide_table() {
     for (category, code) in crate::error::UNBUILT {
         add(code.into(), category.case());
     }
-    // `NotSent` promises nothing took effect, so a host may redo the call: each of these is
+    // `NotSent` promises no payment or message went out, so a host may redo the call: each of these is
     // refused before anything was written, sent or applied.
     let not_sent: Vec<_> = produced
         .iter()
@@ -925,7 +925,7 @@ fn meaning_of(case: &str) -> &'static str {
         "needs_user" => "the user must see this and decide",
         "retry_later" => "a later call can succeed",
         "outcome_unknown" => "the call may have taken effect",
-        "not_sent" => "nothing took effect",
+        "not_sent" => "no payment or message went out",
         "permanent" => "the answer is final",
         "recovery" => "the wallet stopped for a recovery",
         _ => panic!("no case {case}"),

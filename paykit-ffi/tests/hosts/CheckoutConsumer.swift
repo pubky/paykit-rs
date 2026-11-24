@@ -392,6 +392,7 @@ func driveCheckout() async throws {
         outsideTextStaysInside()
         try throwingCallbacks()
         for review in CheckoutReview.allCases { try await driveCheckout(review) }
+        try await driveConsumers()
     }
 }
 

@@ -1,0 +1,1 @@
+//! The one-time payer's remaining calls for Kotlin and Swift: one request, rejection, held confirmations, payment without a request, a payee's public endpoints, receipts, record repair, block and unblock (Paykit spec 7, 8.1).

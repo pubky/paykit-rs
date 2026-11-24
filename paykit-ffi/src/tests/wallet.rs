@@ -42,7 +42,8 @@ impl WalletHomeserver for Home {
 const PAY_LIMIT: std::time::Duration = std::time::Duration::from_millis(300);
 const LOOKUP_LIMIT: std::time::Duration = std::time::Duration::from_secs(2);
 
-fn host(world: &World, root: &Path, account: Arc<Account>) -> Arc<WalletHost> {
+/// A wallet host on `root`, paying through `account`, on `world`'s service.
+pub(super) fn host(world: &World, root: &Path, account: Arc<Account>) -> Arc<WalletHost> {
     let host = WalletHost::new(
         Arc::new(DeviceStore::open(root)),
         Arc::new(Home(world.files().clone())),
@@ -66,7 +67,8 @@ fn host(world: &World, root: &Path, account: Arc<Account>) -> Arc<WalletHost> {
     Arc::new(host)
 }
 
-async fn enrolled_payer(
+/// A payer wallet enrolled through the test signer, its host, App ID and signer.
+pub(super) async fn enrolled_payer(
     world: &World,
     root: &Path,
     account: Arc<Account>,
@@ -842,7 +844,8 @@ async fn journey(world: &World) -> TestResult {
     assert_eq!(account.count(), 0);
     Box::pin(payment(world, root.path(), &env, reopened, &account, id)).await
 }
-fn run(backend: Backend, journey: impl AsyncFn(&World) -> TestResult + Send + 'static) {
+/// Run `journey` on a fresh `backend` world, on a thread with the wallet's stack size.
+pub(super) fn run(backend: Backend, journey: impl AsyncFn(&World) -> TestResult + Send + 'static) {
     let thread = std::thread::Builder::new()
         .stack_size(1_835_008)
         .spawn(move || {

@@ -33,7 +33,7 @@ A failed operation says what to do next by its error case, and each of the six c
 - `NeedsUser`: show it to the user. A held, blocked, may-be-paid, transfer or rate refusal goes ahead once the user confirms it and the same `failure.refusal` is passed back in `confirmedRefusals`; every other code names its own call.
 - `RetryLater`: try again later, after `retryAfterMs` when it is set. The network, the service or a rule that can't be met now.
 - `OutcomeUnknown`: the call may have taken effect. Reconcile before trying again; `keptBatch` names a Switch batch kept for this call, which the wallet sends again by itself.
-- `NotSent`: no payment, message or other outside effect happened, so the call is safe to make again once its cause is fixed. An `attempt_failed` may have stored its attempt, closed as failed.
+- `NotSent`: no payment was made and no message went out, so the call is safe to make again once its cause is fixed. An attempt's own writes may have happened: an `attempt_failed` stores its attempt, closed as failed, and may mark a single-use endpoint used, which a retry then leaves out.
 - `Permanent`: the answer is final, such as a rejected, cancelled or already paid request. Trying again gives the same answer.
 - `Recovery`: the wallet as a whole stopped, for an alarm, a recovery notice, a refused certificate or its authority. Show it and follow the recovery steps. A hold on one record comes as `NeedsUser`, never as `Recovery`.
 
@@ -76,7 +76,7 @@ paykit-ffi/generate-bindings.sh target/release/paykit-bindgen \
     target/release/libpaykit.dylib "$OUT"
 ```
 
-On Linux use `libpaykit.so` for generation. Use the generated Swift support files and Kotlin source together with their matching native library. Default descriptions redact approval requests, protected store values, payment journal entries and their related payment data. Read typed fields explicitly when displaying a payment to the user.
+Generate into a fresh `OUT` folder whenever the generated names change: the Swift commands below compile `"$OUT"/swift/*.swift`, and an older generated file left beside the new one would be compiled with it. Otherwise pass `Paykit.swift` and `WalletRedaction.swift` explicitly. On Linux use `libpaykit.so` for generation. Use the generated Swift support files and Kotlin source together with their matching native library. Default descriptions redact approval requests, protected store values, payment journal entries and their related payment data. Read typed fields explicitly when displaying a payment to the user.
 
 ### Android
 
@@ -125,6 +125,6 @@ swiftc -swift-version 6 -parse-as-library -I "$OUT" -I "$OUT/swift" \
 DYLD_LIBRARY_PATH="$OUT:$LIB" "$OUT/wallet-consumer"
 ```
 
-To exercise a full checkout from the host, build the host library with `--features bindgen,test-wallet` and regenerate the bindings. Supply `-PcheckoutTest=true` to the Kotlin command. For the Swift 6 command, add `-D PAYKIT_CHECKOUT_TEST` and `paykit-ffi/tests/hosts/CheckoutConsumer.swift`. Both consumers enroll with a local shop, acknowledge a recovery notice across reopen, and stop waiting for the payment call after the host method has durably charged it. The payment is recorded when the method answers, and the reopened wallet uses the original attempt to obtain the signed seller receipt. The same programs also exercise a divergent request with a held receipt and a payment whose only doubt is a provider loss.
+To exercise a full checkout from the host, build the host library with `--features bindgen,test-wallet` and regenerate the bindings. Supply `-PcheckoutTest=true` to the Kotlin command. For the Swift 6 command, add `-D PAYKIT_CHECKOUT_TEST`, `paykit-ffi/tests/hosts/CheckoutConsumer.swift`, `paykit-ffi/tests/hosts/ConsumerWallet.swift` and the eight group callers `paykit-ffi/tests/hosts/{Inbox,Payer,Payee,Lists,Public,Periods,Allowance,Executor}Consumer.swift`. After the checkouts, the same run hands one enrolled wallet to each group's caller. Both consumers enroll with a local shop, acknowledge a recovery notice across reopen, and stop waiting for the payment call after the host method has durably charged it. The payment is recorded when the method answers, and the reopened wallet uses the original attempt to obtain the signed seller receipt. The same programs also exercise a divergent request with a held receipt and a payment whose only doubt is a provider loss.
 
 Run either checkout consumer with `PAYKIT_TEST_RESTORE=confirm` to restore a backup into a fresh store, review a registration made since the backup, and pay the original held request after confirmation. Use `refuse` to decline the registration and observe the compromise alarm, or `doubt` to close the wallet while the method's charge is still running and reconcile that possibly sent attempt. The test checkout waits 2 seconds for `pay` instead of 30.

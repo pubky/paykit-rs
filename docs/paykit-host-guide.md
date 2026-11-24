@@ -535,7 +535,7 @@ The Kotlin and Swift wallets report a failed call as one of six cases, each carr
 | `NeedsUser` | The user must see it and decide. Only `held_after_restore`, `blocked`, `may_be_paid`, `transfer` and `priced_by_rate` are confirmed by passing the same `failure.refusal` back in `confirmedRefusals`, and an `attempt_failed` with one of them as its cause by passing `attemptedFailure()`; every other code names its own call, or says that no call of these bindings answers it yet. |
 | `RetryLater` | Waiting, or a later call such as `receive`, changes it with no user action. Wait `retryAfterMs` when it is set. |
 | `OutcomeUnknown` | The call may have taken effect. Reconcile before trying again. |
-| `NotSent` | Nothing applied. Fix the cause, then make the call again. |
+| `NotSent` | No payment was made and no message went out. Fix the cause, then make the call again. An attempt's own writes may have happened: a failed attempt is stored closed, and a single-use endpoint it used is left out of a retry. |
 | `Permanent` | Final: trying again gives the same answer. Never confirmed. |
 | `Recovery` | The wallet as a whole is stopped: an alarm, a recovery notice, its certificate or its authority. Stop Paykit actions and follow the recovery steps. A hold on one record is never `Recovery`. |
 
