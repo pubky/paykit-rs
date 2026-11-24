@@ -13077,7 +13077,7 @@ async fn carried_loss_withdrawal(keep_key: bool) {
         "{read:?}"
     );
     recovered.fail_next(Fault::Unreachable {
-        path: "ops".into(),
+        path: "/ops".into(),
         after: 0,
     });
     Box::pin(payer.receive(None)).await.unwrap();
@@ -13242,7 +13242,7 @@ async fn kept_rejection_across_generations(lost: bool) {
     w.alice
         .switch()
         .fail_next(pubky_switch_client::testing::Fault::Unreachable {
-            path: "ops".into(),
+            path: "/ops".into(),
             after: 0,
         });
     let id = payer.reject_allowance(&canonical).await.unwrap();

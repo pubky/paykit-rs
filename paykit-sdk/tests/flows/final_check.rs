@@ -2986,7 +2986,7 @@ async fn test_resume_ends_when_its_first_claim_read_installs_a_recovery_notice()
         w.alice
             .switch()
             .fail_next(pubky_switch_client::testing::Fault::Error {
-                path: "claims".into(),
+                path: "/claims".into(),
                 code: pubky_switch_core::http::ErrorCode::RecoveryRequired,
                 current: serde_json::json!({
                     "generation": generation,
@@ -3234,7 +3234,7 @@ async fn test_resume_returns_a_service_answer_no_retry_passes_after_the_later_pa
         w.alice
             .switch()
             .fail_next(pubky_switch_client::testing::Fault::Error {
-                path: "claims".into(),
+                path: "/claims".into(),
                 code,
                 current: serde_json::Value::Null,
             });

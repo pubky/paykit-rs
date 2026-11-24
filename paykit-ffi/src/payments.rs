@@ -1,5 +1,6 @@
 use crate::{fixed, Amount, NativeWallet, WalletError};
 use paykit_sdk::{PayOutcome, RequestRef};
+use std::sync::Arc;
 
 /// A request, by its payee and its request hash (Paykit wire 1.5).
 #[derive(Clone, uniffi::Record)]
@@ -224,6 +225,10 @@ impl From<paykit_sdk::Stage> for PaymentStage {
 pub struct PaymentEntry {
     /// The attempt ID, the payment method's idempotency key.
     pub attempt_id: String,
+    /// The attempt as a handle with its obligation, for `resolve_confirmed_attempt` once the
+    /// user has answered it, even when the claim no longer lists it, as after a restore or a
+    /// provider loss (Paykit spec 7.2, 7.3).
+    pub attempt: Arc<crate::DoubtfulAttempt>,
     /// The claim key of the obligation paid.
     pub obligation: Vec<u8>,
     /// The payee.
@@ -271,6 +276,7 @@ impl NativeWallet {
                     .map(|p| {
                         Ok(PaymentEntry {
                             attempt_id: p.attempt_id.to_text(),
+                            attempt: crate::DoubtfulAttempt::new(p.obligation, p.attempt_id),
                             obligation: p.obligation.into(),
                             payee: p.payee.into(),
                             request_hash: p.request_hash.map(Vec::from),

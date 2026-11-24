@@ -3415,7 +3415,7 @@ async fn restored_queued_reply_before_wider_keys(listing: RestoreListing) {
         w.bob
             .switch()
             .fail_next(pubky_switch_client::testing::Fault::Error {
-                path: "inbox".into(),
+                path: "/inbox".into(),
                 code: pubky_switch_core::http::ErrorCode::Unavailable,
                 current: serde_json::Value::Null,
             });
