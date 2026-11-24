@@ -1154,6 +1154,13 @@ WalletEventData from app::AppEvent {
         /// The size of the mark that wasn't kept.
         mark_bytes: u64,
     },
+    /// A restore's seen marks were incomplete (Switch spec 12.4 "Seen marks"): from then on
+    /// a record without a mark is checked as new. Raised once, at that restore, for each
+    /// registered protocol; not kept, and nothing to acknowledge. A notice: show it, or log it.
+    SeenMarksIncomplete {
+        /// The protocol told.
+        protocol: String,
+    },
     /// The app observed divergent shared record histories.
     RecordDivergent {
         /// The record key.
