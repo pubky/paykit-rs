@@ -34,7 +34,7 @@
 //! | `j/<attempt_id>` | the payment journal: one payment, from before its `attempt` | yes |
 //! | `side/<msg_id>` | the side a cancellation is sent from, kept with the batch that queues it | |
 //! | `ex/<msg_id>` | why an acceptance this app sent may go while sends to its payee are held: a payment dispatched, or the user's confirmation of that blocked subscription, bound to its payee and request; kept before or with the batch that queues it (`send_holds.rs`) | |
-//! | `qs/<msg_id>` | a rejection or payer's cancellation this app queued: its payee, request, signed hash and `created_at`, written in the commit that queues it, so the receive step ends its outbox copy past 30 days, telling the host as its request record decides, with that decision; gone once neither the outbox nor a report of its end the host hasn't acknowledged names it (`send_holds.rs`); restored whole, since a restored outbox can hold the copy and a restored client an unacknowledged report of its end | |
+//! | `qs/<msg_id>` | a held message this app queued (a rejection or payer's cancellation, a payment request, period details, a list request or a subscription acceptance): its kind, counterparty, request, signed hash, `created_at` and the activity record that holds it, written in the commit that queues it, so the receive step ends its outbox copy past 30 days, telling the host as its request record decides, with that decision; gone once neither the outbox nor a report of its end the host hasn't acknowledged names it (`send_holds.rs`); restored whole, since a restored outbox can hold the copy and a restored client an unacknowledged report of its end | |
 //! | `ar/<payee>/<app_id>` | a payee app's records that took part in its comparison, for its public endpoints | |
 //! | `ct` | the acceptance time of the last Paykit entry the receive step passed | |
 //! | `rh` | the cursor verdict, earlier holds and block windows for restored requests (`hold.rs`) | |
@@ -663,6 +663,7 @@ impl Stored for u64 {
             | StateKey::Resent { .. }
             | StateKey::ResentDay { .. }
             | StateKey::ListsRead
+            | StateKey::ListsTold
             | StateKey::ListsReadUnder
             | StateKey::ServiceTime => Ok(()),
             // A generation recovered at follows another.
@@ -2029,6 +2030,8 @@ pub(crate) mod key {
     /// for none ([`crate::receive::lists_read_counts`]).
     pub(crate) const LISTS_READ_UNDER: &str = "lu";
     pub(crate) const SERVICE_TIME: &str = "sv";
+    /// `lt`: a deny change or gap the client told, not followed by a read of the lists.
+    pub(crate) const LISTS_TOLD: &str = "lt";
     pub(crate) const HELD_LISTS: &str = "lh/";
     pub(crate) const LISTS_LOST: &str = "lgone/";
     pub(crate) const LISTS_UNREAD: &str = "lur/";
@@ -2436,7 +2439,7 @@ pub(crate) mod key {
     }
 
     /// This app's block or unblock of `pubky` not yet shown by a read of the lists
-    /// ([`OwnBlockMark`]). A block is marked before the switch is asked, so a crash before
+    /// ([`OwnBlockMark`](super::OwnBlockMark)). A block is marked before the switch is asked, so a crash before
     /// the call leaves it counted; its mark goes once the switch took it, or once a read of
     /// the lists shows it, and until then a block whose batch the client neither keeps nor
     /// applied is written again at each receive. An unblock counts for payments and held
@@ -2647,6 +2650,8 @@ pub(crate) enum StateKey {
     ListsReadUnder,
     /// `sv`: the highest service time verified, for the delivery hook.
     ServiceTime,
+    /// `lt`: a deny change or gap told and not followed by a read of the lists.
+    ListsTold,
     /// `lh/<record key>`: a list held over a record that didn't read.
     HeldList([u8; 32]),
     /// `lgone/<record key>`: a `payment_lists` record seen deleted ([`LostListRecord`]).
@@ -2885,6 +2890,7 @@ impl StateKey {
             "lr" => Self::ListsRead,
             "lu" => Self::ListsReadUnder,
             "sv" => Self::ServiceTime,
+            "lt" => Self::ListsTold,
             "dl" => Self::Denied,
             "fg" => Self::Flagged,
             "fk" => Self::FloorKept,
@@ -4216,6 +4222,7 @@ mod tests {
             (key::LISTS_READ.into(), StateKey::ListsRead),
             (key::LISTS_READ_UNDER.into(), StateKey::ListsReadUnder),
             (key::SERVICE_TIME.into(), StateKey::ServiceTime),
+            (key::LISTS_TOLD.into(), StateKey::ListsTold),
             (key::DENIED.into(), StateKey::Denied),
             (key::own_block(&pubky), StateKey::OwnBlock(pubky)),
             (

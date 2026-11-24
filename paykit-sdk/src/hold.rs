@@ -1359,6 +1359,13 @@ impl Paykit {
                 }
                 continue;
             }
+            // One a pass queued before it stopped short of its last commit is the outbox's
+            // now, which its entry (`qs/`) ends: never told given up while its copy may go
+            // (Paykit spec 8.1, "Undelivered messages").
+            if self.app.delivery(&answer.msg_id).await?.is_some() {
+                gone.push(answer.clone());
+                continue;
+            }
             match Box::pin(self.answer_record(&answer.payee, &answer.request_hash, &answer.msg_id))
                 .await?
             {
@@ -1456,7 +1463,17 @@ impl Paykit {
         let target = crate::activity::ActivityTarget::payer(
             paykit_lib::derive::natural_key::request_record(payee, request_hash),
         );
-        let key = self.activity_key(&target)?;
+        Box::pin(self.record_outcome(&target, msg_id)).await
+    }
+
+    /// What the activity record at `target` says of the own message `msg_id`
+    /// ([`AnswerRecord`]), on either side.
+    pub(crate) async fn record_outcome(
+        &mut self,
+        target: &crate::activity::ActivityTarget,
+        msg_id: &str,
+    ) -> Result<AnswerRecord> {
+        let key = self.activity_key(target)?;
         let Some(held) = self.app.shared_record(&key).await? else {
             return Ok(AnswerRecord::Gone);
         };
@@ -1474,7 +1491,7 @@ impl Paykit {
         if let RecordContent::Deleted = held.content {
             return Ok(AnswerRecord::Gone);
         }
-        let Some(record) = self.held_activity(&target).await? else {
+        let Some(record) = self.held_activity(target).await? else {
             return Ok(AnswerRecord::Undecided);
         };
         Ok(if record.reflects(msg_id) {
