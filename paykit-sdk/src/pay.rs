@@ -1059,6 +1059,47 @@ fn transport_waits(error: &pubky_switch_client::error::TransportError) -> bool {
     }
 }
 
+/// The reason of a failed outcome written after the payment method reported a failure.
+const METHOD_FAILED: &str = "the payment method reported a failure";
+/// The reason of a failed outcome written for an attempt no payment started for.
+const NO_PAYMENT_STARTED: &str = "Paykit spec 7.2: no payment started";
+
+/// The outcome the journal holds as written for an entry a resume's step left open in stage
+/// `left_in` (Paykit spec 7.2 steps 3 and 4), `None` while it isn't written:
+/// - with the method's proof, once the entry is finished or owes only its acceptance: paid;
+/// - without it, once the entry is finished: the failure its step was writing, the method's
+///   for an entry left at the method's failure, "no payment started" for one left before
+///   the method's call.
+///
+/// An entry left in another stage is reported as the step left it: the journal can't say
+/// which outcome a write from that stage carried.
+fn written_outcome(
+    attempt_id: AttemptId,
+    entry: &JournalEntry,
+    left_in: Stage,
+) -> Option<PayOutcome> {
+    if entry.rail_proof.is_some() {
+        return matches!(entry.stage, Stage::Finished | Stage::AcceptanceOwed).then(|| {
+            PayOutcome::Paid {
+                attempt_id,
+                proof_msg_id: entry.proof_msg_id.clone(),
+            }
+        });
+    }
+    if entry.stage != Stage::Finished {
+        return None;
+    }
+    let reason = match left_in {
+        Stage::RailFailed => METHOD_FAILED,
+        Stage::Recorded | Stage::Attempted => NO_PAYMENT_STARTED,
+        _ => return None,
+    };
+    Some(PayOutcome::Failed {
+        attempt_id,
+        reason: reason.into(),
+    })
+}
+
 /// The wallet-wide stop a read of this app's own record carries in the reason it kept the
 /// earlier copy: the switch refusing the read with an answer [`stops_resume`] counts, which
 /// the read keeps as its code. `None` for any other reason.
@@ -4144,7 +4185,7 @@ impl Paykit {
                 self.set_stage(entry, Stage::Finished).await?;
                 return Ok(PayOutcome::Failed {
                     attempt_id,
-                    reason: "the payment method reported a failure".into(),
+                    reason: METHOD_FAILED.into(),
                 });
             }
             match self.record_offline_attempt(entry).await {
@@ -4188,7 +4229,7 @@ impl Paykit {
         if !paid {
             return Ok(PayOutcome::Failed {
                 attempt_id,
-                reason: "the payment method reported a failure".into(),
+                reason: METHOD_FAILED.into(),
             });
         }
         if let Some(msg_id) = entry.proof_msg_id.clone() {
@@ -4738,9 +4779,10 @@ impl Paykit {
     /// every entry is visited and the outbox flushed, the first failure of an entry's step
     /// that is no wait, which a later resume would meet again until the user or the host
     /// acts, as it is; nothing is pruned then. A failure whose write went through by the
-    /// end of the call isn't one of these: a paid outcome the journal then holds as written
-    /// is reported [`PayOutcome::Paid`], and an owed acceptance the journal then holds as
-    /// placed is over (Paykit spec 7.2 steps 3 and 4). The client's
+    /// end of the call isn't one of these, and an entry is reported as the journal holds it
+    /// then: an outcome written by then is reported [`PayOutcome::Paid`] or
+    /// [`PayOutcome::Failed`], whether its failure was a wait or not, and an owed acceptance
+    /// placed by then is over (Paykit spec 7.2 steps 3 and 4). The client's
     /// and the rail's errors from the work before and after the entries (the first read, the
     /// first flush, the recheck of failed attempts, the ledger and pruning), as they are. A
     /// call that returns an error carries no outcome: [`Paykit::payments`] lists every
@@ -4789,18 +4831,20 @@ impl Paykit {
         // Each entry's work stands alone. A wallet-wide stop ([`stops_resume`]) ends the
         // resume and is returned. Any other failure of one entry's step leaves that entry for
         // the next resume, reported for it, and the next entry goes on, so a payment the
-        // method reports made behind it is still resolved. The failures that aren't waits
-        // ([`entry_waits`]) are kept in entry order, each with its claim and what the step
-        // left, and judged once the outbox is flushed.
+        // method reports made behind it is still resolved. Each failure is kept in entry
+        // order with its claim and what the step left, and judged once the outbox is flushed:
+        // the failure itself only when it isn't a wait ([`entry_waits`]), the outcome
+        // reported for the entry either way.
         enum Left {
             /// An acceptance owed for a written outcome, not placed.
             Acceptance,
-            /// The outcome reported for the entry, by its place in `out`.
-            Outcome(usize),
+            /// The outcome reported for the entry, by its place in `out`, and the stage its
+            /// step left it in.
+            Outcome(usize, Stage),
             /// Nothing reported.
             Nothing,
         }
-        let mut not_waits = Vec::new();
+        let mut left_behind = Vec::new();
         for mut entry in self.journal().await? {
             // An outcome written whose acceptance is still owed: queued and placed now.
             // One that can't be placed now stays owed for the next resume: its outcome is
@@ -4816,7 +4860,7 @@ impl Paykit {
                             return Err(error);
                         }
                         if judged_at_resume(&error) && !entry_waits(&error) {
-                            not_waits.push((error, claim, Left::Acceptance));
+                            left_behind.push((Some(error), claim, Left::Acceptance));
                         }
                     }
                 }
@@ -4830,16 +4874,17 @@ impl Paykit {
                     }
                     let mut left = Left::Nothing;
                     if let Some(attempt_id) = attempt_id {
-                        if let Some(outcome) =
+                        if let Some((outcome, stage)) =
                             self.left_for_next_resume(attempt_id, &obligation).await?
                         {
-                            left = Left::Outcome(out.len());
+                            left = Left::Outcome(out.len(), stage);
                             out.push(outcome);
                         }
                     }
-                    if !entry_waits(&error) {
-                        let claim = attempt_id.map(|id| (id, obligation));
-                        not_waits.push((error, claim, left));
+                    let claim = attempt_id.map(|id| (id, obligation));
+                    let error = (!entry_waits(&error)).then_some(error);
+                    if error.is_some() || matches!(left, Left::Outcome(..)) {
+                        left_behind.push((error, claim, left));
                     }
                 }
             }
@@ -4864,14 +4909,15 @@ impl Paykit {
             }
         }
         // The client sends a batch it kept before any later one, so a write that failed at
-        // an entry's step may have gone through since, and its local writes moved the entry
-        // on in the journal. The journal alone says so (Paykit spec 7.2 steps 3 and 4):
+        // an entry's step, for a wait or not, may have gone through since, and its local
+        // writes moved the entry on in the journal. The journal alone says so (Paykit spec
+        // 7.2 steps 3 and 4):
         // - an acceptance owed for a written outcome is placed once its entry is finished;
-        // - a paid outcome reported unwritten is written once its entry holds the proof and
-        //   is finished or owes only its acceptance, and is reported paid.
+        // - an outcome reported for an entry left open is written once the journal holds it
+        //   ([`written_outcome`]), and the entry is reported with it.
         // Every other failure stands, an entry no longer in the journal included.
         let mut unresolved = None;
-        for (error, claim, left) in not_waits {
+        for (error, claim, left) in left_behind {
             let entry = match claim {
                 Some((attempt_id, obligation)) => {
                     self.journal_entry_on(&attempt_id, &obligation).await?
@@ -4880,28 +4926,22 @@ impl Paykit {
             };
             let over = match (entry, left) {
                 (Some(entry), Left::Acceptance) => entry.stage == Stage::Finished,
-                (Some(entry), Left::Outcome(index)) => {
-                    let written = entry.rail_proof.is_some()
-                        && matches!(entry.stage, Stage::Finished | Stage::AcceptanceOwed);
-                    match out.get_mut(index) {
-                        Some(outcome)
-                            if written
-                                && matches!(outcome, PayOutcome::PaidOutcomeUnwritten { .. }) =>
-                        {
-                            let attempt_id = outcome.attempt_id();
-                            *outcome = PayOutcome::Paid {
-                                attempt_id,
-                                proof_msg_id: entry.proof_msg_id,
-                            };
+                (Some(entry), Left::Outcome(index, left_in)) => match out.get_mut(index) {
+                    Some(outcome) => match written_outcome(outcome.attempt_id(), &entry, left_in) {
+                        Some(written) => {
+                            *outcome = written;
                             true
                         }
-                        _ => false,
-                    }
-                }
+                        None => false,
+                    },
+                    None => false,
+                },
                 (Some(_), Left::Nothing) | (None, _) => false,
             };
             if !over {
-                unresolved.get_or_insert(error);
+                if let Some(error) = error {
+                    unresolved.get_or_insert(error);
+                }
             }
         }
         // A call that returns an error carries no outcome, so nothing is pruned then:
@@ -4975,16 +5015,16 @@ impl Paykit {
         &self,
         attempt_id: AttemptId,
         obligation: &[u8; 32],
-    ) -> Result<Option<PayOutcome>> {
+    ) -> Result<Option<(PayOutcome, Stage)>> {
         let Some(entry) = self.journal_entry_on(&attempt_id, obligation).await? else {
             return Ok(None);
         };
         Ok(if !entry.open() {
             None
         } else if entry.rail_proof.is_some() {
-            Some(PayOutcome::PaidOutcomeUnwritten { attempt_id })
+            Some((PayOutcome::PaidOutcomeUnwritten { attempt_id }, entry.stage))
         } else {
-            Some(PayOutcome::Pending { attempt_id })
+            Some((PayOutcome::Pending { attempt_id }, entry.stage))
         })
     }
 
@@ -5055,7 +5095,7 @@ impl Paykit {
                     self.write_outcome(&mut entry, false, false).await?;
                     out.push(PayOutcome::Failed {
                         attempt_id,
-                        reason: "Paykit spec 7.2: no payment started".into(),
+                        reason: NO_PAYMENT_STARTED.into(),
                     });
                 }
                 // Known unsubmitted: this app never called the method.
