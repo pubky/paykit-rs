@@ -446,39 +446,91 @@ private fun throwingCallbacks() {
     }
 }
 
-/// A host whose callbacks die with an Error, not an Exception: the store, the Homeserver and
-/// the payment method.
+/// A host whose callbacks die with an Error, not an Exception, each naming itself: the store,
+/// the Homeserver and the payment method.
 private class DyingCallbacks : ReceiptReader(), WalletStore {
-    private fun die(): Nothing = throw AssertionError("callback died")
-    override fun get(namespace: String, key: ByteArray): ByteArray? = die()
-    override fun scan(namespace: String, prefix: ByteArray, after: ByteArray?, limit: UInt): List<StoreEntry> = die()
-    override fun acquire(namespace: String, owner: ByteArray): Boolean = die()
-    override fun release(namespace: String, owner: ByteArray) = die()
-    override fun commitIf(namespace: String, owner: ByteArray, writes: List<StoreWrite>): Boolean = die()
-    override suspend fun get(identity: ByteArray, path: String): ByteArray? = die()
-    override suspend fun put(identity: ByteArray, path: String, bytes: ByteArray) = die()
-    override fun selectEndpoints(candidates: List<EndpointCandidate>, amount: Amount?): SelectedEndpoints = die()
-    override fun transfer(endpoint: String, payload: String, amount: Amount): MethodTransfer = die()
-    override fun settlementId(endpoint: String, proofJson: ByteArray): ByteArray? = die()
-    override suspend fun pay(payment: MethodPayment): MethodOutcome = die()
-    override suspend fun payment(attemptId: String): MethodOutcome? = die()
+    private fun die(callback: String): Nothing = throw AssertionError(callback)
+    override fun get(namespace: String, key: ByteArray): ByteArray? = die("store.get")
+    override fun scan(namespace: String, prefix: ByteArray, after: ByteArray?, limit: UInt): List<StoreEntry> =
+        die("store.scan")
+    override fun acquire(namespace: String, owner: ByteArray): Boolean = die("store.acquire")
+    override fun release(namespace: String, owner: ByteArray) = die("store.release")
+    override fun commitIf(namespace: String, owner: ByteArray, writes: List<StoreWrite>): Boolean = die("store.commit_if")
+    override suspend fun get(identity: ByteArray, path: String): ByteArray? = die("home.get")
+    override suspend fun put(identity: ByteArray, path: String, bytes: ByteArray) = die("home.put")
+    override suspend fun delete(identity: ByteArray, path: String) = die("home.delete")
+    override fun selectEndpoints(candidates: List<EndpointCandidate>, amount: Amount?): SelectedEndpoints =
+        die("method.select_endpoints")
+    override fun transfer(endpoint: String, payload: String, amount: Amount): MethodTransfer = die("method.transfer")
+    override fun settlementId(endpoint: String, proofJson: ByteArray): ByteArray? = die("method.settlement_id")
+    override suspend fun pay(payment: MethodPayment): MethodOutcome = die("method.pay")
+    override suspend fun payment(attemptId: String): MethodOutcome? = die("method.payment")
+    override suspend fun allowanceHistory(payer: ByteArray): List<MethodDispatch>? = die("method.allowance_history")
+    override suspend fun verify(proof: MethodProof): ULong? = die("method.verify")
 }
 
-/// A callback that dies with an Error answers as unknown at once, never as success: a store
-/// write isn't read as committed or released, and a `pay` stays possibly sent. The platform
-/// still reports each Error: JNA's callback handler for a sync callback, the default uncaught
-/// handler for an async one.
+/// A method whose `pay` dies with an Error after the attempt is journaled, and whose lookup
+/// can't tell yet.
+private class DyingPay : ReceiptReader() {
+    override suspend fun pay(payment: MethodPayment): MethodOutcome = throw AssertionError("method.pay")
+    override suspend fun payment(attemptId: String): MethodOutcome? = MethodOutcome.Pending
+}
+
+/// Pay a checkout through `DyingPay`: the attempt stays open in the journal, possibly sent.
+private suspend fun payThroughADyingMethod() {
+    val store = EnrollmentStore()
+    enrolledTestCheckout(store, DyingPay(), testDeclaration, testEndpoints).use { checkout ->
+        val reference = ByteArray(16) { 41 }
+        val secret = ByteArray(32) { 9 }
+        WalletEnrollment(store).use { owner ->
+            val info = owner.beginEnrollment(reference)
+            val original = owner.prepareEnrollment(reference, "wallet.example", ByteArray(32) { 8 },
+                info.appRecordPath + ":rw", secret, WalletScopes(pay = true))
+            owner.acceptApproval(reference, checkout.identity(), checkout.approve(original.signedRequest, secret))
+        }
+        checkout.host().use { host ->
+            host.completeEnrollment(reference).use { wallet ->
+                wallet.finishReceive()
+                wallet.allowConnect(checkout.payee())
+                val request = checkout.sendCheckout()
+                wallet.finishReceive()
+                val result = wallet.payRequest(request, PaymentOptions(null, null, false, false, emptyList()))
+                check((result.decision as? PaymentDecision.Outcome)?.outcome !is PaymentOutcome.Paid)
+                val entry = wallet.payments().single()
+                check(entry.stage == PaymentStage.PAYING && !entry.paidByMethod)
+                wallet.shutdown()
+            }
+        }
+        checkout.finish()
+    }
+}
+
+/// Whether `dyingCallbacks` ran to its end, which the program checks before it exits.
+private var dyingCallbacksChecked = false
+
+/// A callback that dies with an Error answers Paykit as unknown, never as success, even when
+/// the host's own JNA callback handler throws in turn: a store write isn't read as committed
+/// or released, and a `pay` stays possibly sent. The platform still reports each Error once:
+/// JNA's callback handler for a sync callback, the default uncaught handler for an async one.
 private fun dyingCallbacks() = runBlocking {
-    val died = { e: Throwable -> e is AssertionError && e.message == "callback died" }
-    val synced = AtomicInteger()
-    val awaited = AtomicInteger()
+    val reported = java.util.concurrent.ConcurrentHashMap<String, Int>()
+    val count = { e: Throwable -> (e as? AssertionError)?.message?.let { reported.merge(it, 1, Int::plus) } != null }
     val previousCallbackHandler = com.sun.jna.Native.getCallbackExceptionHandler()
     val previousThreadHandler = Thread.getDefaultUncaughtExceptionHandler()
+    val handlerFailed = "host callback handler failed"
+    val handlerFailures = AtomicInteger()
     com.sun.jna.Native.setCallbackExceptionHandler { callback, e ->
-        if (died(e)) synced.incrementAndGet() else previousCallbackHandler.uncaughtException(callback, e)
+        if (!count(e)) previousCallbackHandler.uncaughtException(callback, e)
+        // A host handler that throws in turn can't undo the answer Paykit already has: the
+        // store's `release` is still read as failed, never as released.
+        if ((e as? AssertionError)?.message == "store.release") throw IllegalStateException(handlerFailed)
     }
     Thread.setDefaultUncaughtExceptionHandler { thread, e ->
-        if (died(e)) awaited.incrementAndGet() else previousThreadHandler?.uncaughtException(thread, e)
+        if (e is IllegalStateException && e.message == handlerFailed) {
+            handlerFailures.incrementAndGet()
+        } else if (!count(e)) {
+            previousThreadHandler?.uncaughtException(thread, e)
+        }
     }
     try {
         val host = DyingCallbacks()
@@ -487,19 +539,29 @@ private fun dyingCallbacks() = runBlocking {
         check(answered.selected == null && answered.selectionFailure == "method_unknown")
         check(answered.transferAmount == null && answered.settlementId == null)
         check(testCallbackAnswers(host, host, host) == listOf(
-            "store.get=unknown", "store.acquire=unknown", "store.commit_if=unknown", "store.release=unknown",
-            "home.get=unknown", "home.put=unknown", "method.pay=possibly_sent", "method.payment=unknown",
+            "store.get=unknown", "store.scan=unknown", "store.acquire=unknown", "store.commit_if=unknown",
+            "store.release=unknown", "home.get=unknown", "home.put=unknown", "home.delete=unknown",
+            "method.pay=possibly_sent", "method.payment=unknown", "method.allowance_history=unknown",
+            "method.verify=unknown",
         ))
-        // Every callback ran and reported its Error: three of the method's and four of the
-        // store's sync calls, two of the Homeserver's and two of the method's async calls.
+        payThroughADyingMethod()
+        // Each callback's Error was reported, once per call: `pay` died twice, here and in the
+        // payment above.
+        val expected = listOf(
+            "store.get", "store.scan", "store.acquire", "store.commit_if", "store.release",
+            "method.select_endpoints", "method.transfer", "method.settlement_id",
+            "home.get", "home.put", "home.delete", "method.payment", "method.allowance_history",
+            "method.verify",
+        ).associateWith { 1 } + ("method.pay" to 2)
         withTimeout(10_000) {
-            while (synced.get() < 7 || awaited.get() < 4) delay(10)
+            while (reported != expected) delay(10)
         }
-        check(synced.get() == 7 && awaited.get() == 4)
+        check(handlerFailures.get() <= 1)
     } finally {
         com.sun.jna.Native.setCallbackExceptionHandler(previousCallbackHandler)
         Thread.setDefaultUncaughtExceptionHandler(previousThreadHandler)
     }
+    dyingCallbacksChecked = true
 }
 
 /// Text the switch gave never leaves the bindings: not in a message, a description or a reason.
@@ -528,5 +590,7 @@ object CheckoutConsumer {
         if (restore == null) CheckoutReview.entries.forEach { driveCheckout(it) }
         if (restore == null) driveConsumers()
         else driveCheckout(CheckoutReview.ORDINARY, restore)
+        // The program fails if the check of dying callbacks was left out.
+        check(restore != null || dyingCallbacksChecked)
     }
 }

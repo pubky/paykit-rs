@@ -654,6 +654,10 @@ pub async fn test_callback_answers(
         let mut answers = vec![
             format!("store.get={}", stored(store.get(space.clone(), vec![1]))),
             format!(
+                "store.scan={}",
+                stored(store.scan(space.clone(), vec![1], None, 8))
+            ),
+            format!(
                 "store.acquire={}",
                 stored(store.acquire(space.clone(), owner.clone()))
             ),
@@ -671,7 +675,14 @@ pub async fn test_callback_answers(
         ));
         answers.push(format!(
             "home.put={}",
-            served(tokio::time::timeout(limit, home.put(identity, path, vec![1])).await)
+            served(
+                tokio::time::timeout(limit, home.put(identity.clone(), path.clone(), vec![1]))
+                    .await
+            )
+        ));
+        answers.push(format!(
+            "home.delete={}",
+            served(tokio::time::timeout(limit, home.delete(identity, path)).await)
         ));
         let payment = crate::MethodPayment {
             endpoint: "btc-lightning-bolt11".into(),
@@ -704,6 +715,35 @@ pub async fn test_callback_answers(
                 Ok(Ok(_)) => "answered",
                 Ok(Err(MethodError::Unknown { .. })) => "unknown",
                 Ok(Err(_)) => "refused",
+            }
+        ));
+        let unknown = |answer: Result<_, MethodError>| match answer {
+            Ok(_) => "answered",
+            Err(MethodError::Unknown { .. }) => "unknown",
+            Err(_) => "refused",
+        };
+        answers.push(format!(
+            "method.allowance_history={}",
+            match tokio::time::timeout(limit, method.allowance_history(vec![5; 32])).await {
+                Err(_) => "no_answer",
+                Ok(answer) => unknown(answer.map(|_| ())),
+            }
+        ));
+        let proof = crate::MethodProof {
+            endpoint: "btc-lightning-bolt11".into(),
+            payload: None,
+            amount: Amount {
+                asset: "btc".into(),
+                value: "7".into(),
+            },
+            attempt_id: "AAAAAAAAAAAAAAAAAAAAAA".into(),
+            proof_json: b"{}".to_vec(),
+        };
+        answers.push(format!(
+            "method.verify={}",
+            match tokio::time::timeout(limit, method.verify(proof)).await {
+                Err(_) => "no_answer",
+                Ok(answer) => unknown(answer.map(|_| ())),
             }
         ));
         Ok(answers)
