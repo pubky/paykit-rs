@@ -9,6 +9,7 @@ use pubky_switch_client::app::AppEvent;
 use pubky_switch_client::clock::Clock;
 use pubky_switch_client::testing::Fault;
 use pubky_switch_core::claims::Outcome;
+use pubky_switch_core::http::ErrorCode;
 
 use crate::common::{
     asked, btc, draft, endpoint, list_version, mark_senders, refuse_writes, request_from,
@@ -1357,6 +1358,101 @@ async fn test_stored_refused_note_given_up_past_its_window() {
     wallet.acknowledge_notice(&notices[0].id).await.unwrap();
     assert!(kept(&wallet, "nt/").await.is_empty());
     assert!(wallet.app_mut().parked_entries().await.unwrap().is_empty());
+}
+
+/// The wallet's verified receipt for bob's request, stored with its note (`se/`) after its
+/// intake and first later write were refused, then `past` after its acceptance with the
+/// client's own read made: the next later write of it is the next batch at alice's switch.
+async fn stored_receipt_aged(w: &World, past: u64) -> (Paykit, paykit_sdk::RequestRef) {
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    let attempt_id = pending(w, &mut wallet, &request).await;
+    crate::receipts::deliver_proved_receipt(w, &mut wallet, &shop, &request, attempt_id).await;
+    refuse_writes(&w.alice, 2);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(kept(&wallet, "se/").await.len(), 1);
+    w.clock.advance_ms(past);
+    wallet.app_mut().receive(None).await.unwrap();
+    (wallet, request)
+}
+
+/// The next batch at `signer`'s switch is answered `code`, applying nothing.
+fn answer_next_write(signer: &pubky_switch_client::testing::TestSigner, code: ErrorCode) {
+    signer.switch().fail_next(Fault::Error {
+        path: "/ops".into(),
+        code,
+        current: serde_json::Value::Null,
+    });
+}
+
+/// Past its window, the later write of a stored message is answered `code`, which says
+/// nothing of its content (Switch spec 6.4): it is neither counted nor given up, and the
+/// next receive writes it.
+async fn kept_past_its_window_on(code: ErrorCode) {
+    let w = World::new();
+    let (mut wallet, _) = stored_receipt_aged(&w, paykit_sdk::KEPT_MESSAGE_MS).await;
+    answer_next_write(&w.alice, code);
+    let _ = wallet.receive(None).await;
+    assert_eq!(kept(&wallet, "se/").await.len(), 1, "{code:?}");
+    assert!(wallet.notices().await.unwrap().is_empty(), "{code:?}");
+    // Once the switch's limit has passed, the next receive writes it.
+    w.clock.advance_ms(11 * 60_000);
+    wallet.receive(None).await.unwrap();
+    assert!(kept(&wallet, "se/").await.is_empty(), "{code:?}");
+    assert!(wallet.app_mut().parked_entries().await.unwrap().is_empty());
+    assert!(wallet.notices().await.unwrap().is_empty(), "{code:?}");
+}
+
+#[tokio::test]
+async fn test_stored_rate_limited_note_kept_past_its_window_then_written() {
+    kept_past_its_window_on(ErrorCode::RateLimited).await;
+}
+
+#[tokio::test]
+async fn test_stored_stale_timestamp_note_kept_past_its_window_then_written() {
+    kept_past_its_window_on(ErrorCode::StaleTimestamp).await;
+}
+
+#[tokio::test]
+async fn test_stored_quota_exceeded_note_given_up_past_its_window() {
+    // The account's room, the case the window is for: counted, and given up past it.
+    let w = World::new();
+    let (mut wallet, _) = stored_receipt_aged(&w, paykit_sdk::KEPT_MESSAGE_MS).await;
+    answer_next_write(&w.alice, ErrorCode::QuotaExceeded);
+    wallet.receive(None).await.unwrap();
+    assert!(kept(&wallet, "se/").await.is_empty());
+    let notices = wallet.notices().await.unwrap();
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert_eq!(notices[0].kind, paykit_sdk::NoticeKind::MessageGivenUp);
+}
+
+#[tokio::test]
+async fn test_stored_note_kept_when_its_write_meets_a_wallet_wide_stop() {
+    // The certificate expired: a stop of the whole wallet, not of the message. The receive
+    // ends with it and nothing is given up.
+    let w = World::new();
+    let (mut wallet, _) = stored_receipt_aged(&w, paykit_sdk::KEPT_MESSAGE_MS).await;
+    answer_next_write(&w.alice, ErrorCode::CertExpired);
+    let error = wallet.receive(None).await.unwrap_err();
+    assert_eq!(error.code(), Some(ErrorCode::CertExpired), "{error:?}");
+    assert_eq!(kept(&wallet, "se/").await.len(), 1);
+    assert!(wallet.notices().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_stored_note_given_up_past_two_windows_whatever_the_answer() {
+    // Kept on answers that say nothing of its content, but not for ever: one more window
+    // past its own, it is given up as any other (Paykit spec 8.1).
+    let w = World::new();
+    let (mut wallet, _) =
+        stored_receipt_aged(&w, paykit_sdk::KEPT_MESSAGE_MS.saturating_mul(2)).await;
+    answer_next_write(&w.alice, ErrorCode::RateLimited);
+    let _ = wallet.receive(None).await;
+    assert!(kept(&wallet, "se/").await.is_empty());
+    let notices = wallet.notices().await.unwrap();
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert_eq!(notices[0].kind, paykit_sdk::NoticeKind::MessageGivenUp);
 }
 
 #[tokio::test]

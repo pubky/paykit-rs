@@ -97,25 +97,57 @@ pub(crate) enum Placed {
     /// Not written while the record's absence decides nothing yet: tried again at the next
     /// receive, and never given up meanwhile.
     Waits,
+    /// Not written now on an answer of the switch that says nothing of the write's content,
+    /// one the same batch may pass later by the Switch's own table ([`refuses_the_content`]):
+    /// tried again at the next receive, uncounted, so past its window too, and given up only
+    /// past [`hard_bound`] (Paykit spec 8.1).
+    Retry,
 }
 
-/// What a later write's batch came to: written, or refused by the switch, and so not
-/// written now and counted toward the message's window, or not sent now for want of a key,
-/// and so waiting. Any other error, such as a store failure or a switch that doesn't
-/// answer, is returned: the write wasn't evaluated, and nothing may be given up on it.
+/// What a later write's batch came to: written; refused by the switch for its content, and
+/// so not written now and counted toward the message's window; answered with a code that
+/// says nothing of the content, and so tried again uncounted; or not sent now for want of a
+/// key, and so waiting. Any other error is returned, and nothing may be given up on it: a
+/// wallet-wide stop, which ends the receive ([`crate::pay::stops_resume`]), a switch that
+/// doesn't answer ([`crate::pay::switch_unavailable`]), a store failure, an answer that
+/// doesn't verify.
 pub(crate) fn submitted<T>(result: std::result::Result<T, AppError>) -> Result<Placed> {
-    match result {
-        Ok(_) => Ok(Placed::Done),
-        Err(AppError::Refused(ClientRefusal::NotNow(_))) => Ok(Placed::Waits),
-        Err(error) if refused(&error) => Ok(Placed::Not),
-        Err(error) => Err(error.into()),
+    let error = match result {
+        Ok(_) => return Ok(Placed::Done),
+        Err(AppError::Refused(ClientRefusal::NotNow(_))) => return Ok(Placed::Waits),
+        Err(error) => PaykitError::from(error),
+    };
+    let code = match &error {
+        PaykitError::Client(client) if !crate::pay::switch_unavailable(client) => client.code(),
+        _ => None,
+    };
+    match code {
+        Some(_) if crate::pay::stops_resume(&error) => Err(error),
+        Some(code) if refuses_the_content(code) => Ok(Placed::Not),
+        Some(_) => Ok(Placed::Retry),
+        None => Err(error),
     }
 }
 
-/// Whether `error` is the switch's refusal of a request, an answer with its error code,
-/// rather than a switch that doesn't answer or a failure of the app's own.
+/// Whether `error` is the switch's refusal of a read, an answer with its error code, rather
+/// than a switch that doesn't answer or a failure of the app's own.
 fn refused(error: &AppError) -> bool {
     !crate::pay::switch_unavailable(error) && error.unkept().code().is_some()
+}
+
+/// Whether the switch's answer `code` refuses a later write for its content, by the Retry
+/// column of Switch spec 6.4: never unchanged (`No`), or once the account's limit frees
+/// (`429 quota_exceeded`), the "room frees" case the message's window is for (Paykit spec
+/// 8.1, Stored entries). Every other code says the same batch may pass later, with a new
+/// timestamp, after a wait, a re-read or new keys, so it counts nothing toward the window.
+///
+/// The receive goes on past a failed upkeep of the app record only where the switch doesn't
+/// answer ([`crate::pay::switch_unavailable`]), a strict subset of the answers this never
+/// counts, so no step after the upkeep gives a stored message up on an answer the upkeep was
+/// allowed past.
+pub(crate) fn refuses_the_content(code: pubky_switch_core::http::ErrorCode) -> bool {
+    use pubky_switch_core::http::Retry;
+    matches!(code.retry(), Retry::No | Retry::WhenLimitFrees)
 }
 
 /// What becomes of a message kept to write later, by its write's outcome ([`later_write`]).
@@ -142,7 +174,8 @@ pub(crate) fn later_write(placed: Placed, accepted_at: u64, service: Option<u64>
         Placed::Done => LaterWrite::Done,
         Placed::Waits => LaterWrite::Keep,
         Placed::Not if past_window(accepted_at, service) => LaterWrite::GiveUp,
-        Placed::Not => LaterWrite::Keep,
+        Placed::Retry if past_hard_bound(accepted_at, service) => LaterWrite::GiveUp,
+        Placed::Not | Placed::Retry => LaterWrite::Keep,
     }
 }
 
@@ -150,6 +183,20 @@ pub(crate) fn later_write(placed: Placed, accepted_at: u64, service: Option<u64>
 /// kept at most, on `service`, the highest service time verified.
 pub(crate) fn past_window(accepted_at: u64, service: Option<u64>) -> bool {
     service.is_some_and(|t| accepted_at.saturating_add(crate::receive::KEPT_MESSAGE_MS) <= t)
+}
+
+/// How long after its acceptance a message whose write the switch keeps answering with a
+/// code that says nothing of its content ([`Placed::Retry`]) is still tried: one more window
+/// past its own. The app tries for the window and may then give the message up (Paykit spec
+/// 8.1); it doesn't on such an answer, which the switch may lift at the next try, but it
+/// keeps no message for ever.
+pub(crate) fn hard_bound() -> u64 {
+    crate::receive::KEPT_MESSAGE_MS.saturating_mul(2)
+}
+
+/// Whether a message accepted at `accepted_at` is past [`hard_bound`], on `service`.
+fn past_hard_bound(accepted_at: u64, service: Option<u64>) -> bool {
+    service.is_some_and(|t| accepted_at.saturating_add(hard_bound()) <= t)
 }
 
 /// The side of the shared records `target` is of.
@@ -1434,6 +1481,94 @@ impl Paykit {
 mod tests {
     use super::*;
     use crate::testkit::{object, Party};
+
+    /// Every answer of the switch, by the Switch's own table (Switch spec 6.4): counted toward
+    /// a stored message's window only where it refuses the content. An answer of a switch
+    /// that doesn't answer, the one a failed upkeep of the app record goes past, is never
+    /// counted (`refuses_the_content`).
+    #[test]
+    fn test_stored_counts_only_answers_that_refuse_the_content() {
+        use pubky_switch_client::error::ClientError;
+        use pubky_switch_core::http::ErrorCode;
+        for code in ErrorCode::ALL {
+            // No wildcard: a code the switch adds fails to build here until it is classified.
+            let counted = match code {
+                ErrorCode::BadRequest
+                | ErrorCode::BadSignature
+                | ErrorCode::NotAdmitted
+                | ErrorCode::PermissionMissing
+                | ErrorCode::NotCurrent
+                | ErrorCode::CertExpired
+                | ErrorCode::NotFound
+                | ErrorCode::StaleIdentity
+                | ErrorCode::TooLarge
+                | ErrorCode::QuotaExceeded => true,
+                ErrorCode::StaleTimestamp
+                | ErrorCode::Conflict
+                | ErrorCode::StaleEpoch
+                | ErrorCode::StaleGeneration
+                | ErrorCode::StaleKey
+                | ErrorCode::IdentityNeeded
+                | ErrorCode::Moved
+                | ErrorCode::RateLimited
+                | ErrorCode::Staged
+                | ErrorCode::Unavailable
+                | ErrorCode::RecoveryRequired => false,
+            };
+            assert_eq!(refuses_the_content(code), counted, "{code:?}");
+            let answer = AppError::Switch(ClientError::Switch {
+                status: code.status(),
+                code,
+                message: String::new(),
+                current: serde_json::Value::Null,
+                known_version: None,
+                retry_after: None,
+            });
+            let placed = submitted::<()>(Err(answer.clone()));
+            // A switch that doesn't answer is never counted: a failed upkeep goes past it.
+            if crate::pay::switch_unavailable(&answer) {
+                assert!(placed.is_err(), "{code:?}");
+                continue;
+            }
+            // A wallet-wide stop ends the receive, never counted either.
+            if crate::pay::stops_resume(&PaykitError::Client(answer)) {
+                assert!(placed.is_err(), "{code:?}");
+                continue;
+            }
+            let expected = if counted { Placed::Not } else { Placed::Retry };
+            assert_eq!(placed.unwrap(), expected, "{code:?}");
+        }
+    }
+
+    #[test]
+    fn test_stored_later_write_keeps_a_retry_to_the_hard_bound() {
+        let window = crate::receive::KEPT_MESSAGE_MS;
+        let at = 1_000;
+        // Within its window, a refusal and a retry are kept alike.
+        assert_eq!(later_write(Placed::Not, at, Some(at + 1)), LaterWrite::Keep);
+        assert_eq!(
+            later_write(Placed::Retry, at, Some(at + 1)),
+            LaterWrite::Keep
+        );
+        // Past it, a refusal is given up and a retry kept.
+        assert_eq!(
+            later_write(Placed::Not, at, Some(at + window)),
+            LaterWrite::GiveUp
+        );
+        assert_eq!(
+            later_write(Placed::Retry, at, Some(at + window)),
+            LaterWrite::Keep
+        );
+        // Past the hard bound, a retry is given up too.
+        assert_eq!(
+            later_write(Placed::Retry, at, Some(at + hard_bound())),
+            LaterWrite::GiveUp
+        );
+        assert_eq!(
+            later_write(Placed::Retry, at, Some(at + hard_bound() - 1)),
+            LaterWrite::Keep
+        );
+    }
 
     fn note(placed: bool) -> StoredNote {
         let alice = Party::new("alice", "wallet", &["paykit_pay", "paykit_contacts"]);
