@@ -83,6 +83,9 @@ async fn work_done_past_failed_upkeep(failure: UpkeepFailure) {
     let w = World::new();
     let (mut wallet, request) = upkeep_due_over_pending_work(&w, failure).await;
     let signed = wallet.app().record().clone();
+    let app_id = wallet.app_id();
+    let at_switch = || w.alice.switch().app(&app_id).record.unwrap();
+    let delivered = at_switch();
     let summary = wallet.receive(None).await.unwrap();
     assert!(summary.app_record_owed.is_some(), "{summary:?}");
     assert_eq!(
@@ -92,6 +95,8 @@ async fn work_done_past_failed_upkeep(failure: UpkeepFailure) {
     assert!(wallet.app_mut().parked_entries().await.unwrap().is_empty());
     // Placed in the request record, not only kept: the kept copy is gone.
     assert!(kept(&wallet, "kc/").await.is_empty());
+    // Nothing new reached the switch.
+    assert_eq!(at_switch(), delivered);
     if let UpkeepFailure::Uncarriable = failure {
         // Refused before anything is signed: the record is the one signed before.
         assert_eq!(wallet.app().record(), &signed);
@@ -100,7 +105,9 @@ async fn work_done_past_failed_upkeep(failure: UpkeepFailure) {
     }
     let summary = wallet.receive(None).await.unwrap();
     assert_eq!(summary.app_record_owed, None, "{summary:?}");
-    assert_ne!(wallet.app().record(), &signed);
+    // The record brought up to date is the one the switch holds now.
+    assert_ne!(at_switch(), delivered);
+    assert_eq!(&at_switch(), wallet.app().record());
 }
 
 #[tokio::test]

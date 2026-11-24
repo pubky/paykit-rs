@@ -304,7 +304,8 @@ impl ReceiveSummary {
     /// The summary of two receives, `earlier` and then `self`, as one: the events, messages,
     /// re-sends and records paused of both, in order; the worse held cursor (ahead over
     /// unknown over clean); the data epochs either awaited, ascending and unique. Current
-    /// state, including the cursor and certificate status, comes from the later read.
+    /// state, including the cursor, certificate status and an app record owed, comes from the
+    /// later read.
     fn after(mut self, earlier: Self) -> Self {
         let report = &mut self.report;
         report.events.splice(0..0, earlier.report.events);
@@ -323,7 +324,6 @@ impl ReceiveSummary {
         self.key_epochs_awaited.sort_unstable();
         self.key_epochs_awaited.dedup();
         self.scope_keys_awaited |= !self.key_epochs_awaited.is_empty();
-        self.app_record_owed = self.app_record_owed.or(earlier.app_record_owed);
         self
     }
 }

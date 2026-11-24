@@ -1773,6 +1773,8 @@ async fn test_own_record_renewal_without_request_scope_signs_no_endpoint() {
     let summary = wallet.receive(None).await.unwrap();
     assert!(summary.app_record_owed.is_some(), "{summary:?}");
     assert_eq!(summary.records_unlisted, None, "{summary:?}");
+    // A read refused while the records are unlisted goes through.
+    wallet.requests().await.unwrap();
     // The record signed with the renewed certificate, the one the Homeserver got, carries
     // no public endpoint and no expiry: the earlier member was never signed under it.
     assert_eq!(wallet.app().cert().hash(), narrower.hash());

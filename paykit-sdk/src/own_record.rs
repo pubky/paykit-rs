@@ -301,9 +301,7 @@ impl Paykit {
                         .await
                 }
                 _ => {
-                    return Err(
-                        Refusal::NotNow("unknown Switch app-record expiry policy".into()).into(),
-                    );
+                    return Err(Refusal::NotNow(UNKNOWN_EXPIRY_POLICY.into()).into());
                 }
             };
             self.note_own_record_write(&renewed);
@@ -324,20 +322,34 @@ impl Paykit {
     /// record is the app's public description (Paykit spec 4), which no incoming message, record
     /// write or payment of this receive depends on, so a failure that is only the publisher's
     /// own leaves the record owed for the next receive or [`Paykit::update_own_record`], and the
-    /// receive goes on. Returns that failure's reason for [`crate::ReceiveSummary`]. A
-    /// wallet-wide stop or a local failure is returned as the error: the receive ends there,
-    /// as before. A stop the client comes to hold during the attempt refuses every write
-    /// after it, so the next step that writes meets it as its own.
+    /// receive goes on. Returns that failure's reason for [`crate::ReceiveSummary`].
+    ///
+    /// The steps after the upkeep act under the app's standing as the read left it: its
+    /// certificate, the newest own `identity.json` and a recovery notice. The client can change
+    /// that standing within the upkeep and still fail it: a delivery whose answer names a later
+    /// generation reads the newer `identity.json` (Switch wire 7.1), and a conflict with a later
+    /// record of this app takes its renewal before fetching the scope keys (Switch spec 3.5).
+    /// A failure after such a change ends the receive, as any failure did before, whatever it
+    /// is ([`upkeep_outcome`]).
     ///
     /// # Errors
     ///
-    /// Every failure [`own_record_left_owed`] doesn't name.
+    /// Every failure [`own_record_left_owed`] doesn't name, and any failure after the upkeep
+    /// changed the app's standing.
     pub(crate) async fn tend_own_record_at_receive(&mut self) -> Result<Option<String>> {
+        let before = self.own_standing();
         match Box::pin(self.tend_own_record()).await {
             Ok(_) => Ok(None),
-            Err(error) => own_record_left_owed(&error)
-                .map(|reason| Some(reason.to_string()))
-                .ok_or(error),
+            Err(error) => upkeep_outcome(error, &before, &self.own_standing()),
+        }
+    }
+
+    /// The app's standing the steps after the upkeep act under ([`OwnStanding`]).
+    fn own_standing(&self) -> OwnStanding {
+        OwnStanding {
+            cert: self.app.cert().hash(),
+            identity: self.app.own_identity().hash(),
+            recovery: self.app.recovery_required().map(|notice| notice.generation),
         }
     }
 
@@ -569,6 +581,37 @@ impl Signs for Measure {
     }
 }
 
+/// The reason [`Paykit::tend_own_record`] gives a record expiry policy this version doesn't
+/// know.
+const UNKNOWN_EXPIRY_POLICY: &str = "unknown Switch app-record expiry policy";
+
+/// What the steps of a receive after the app record's upkeep act under: the app's
+/// certificate, the newest own `identity.json` (its generation, version and listed apps among
+/// it) and the recovery notice held, if any (Switch spec 3.6, 12.4).
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct OwnStanding {
+    cert: [u8; 32],
+    identity: [u8; 32],
+    recovery: Option<u64>,
+}
+
+/// The outcome of a receive's upkeep that failed with `error`, the app's standing `before` and
+/// `after` it: the reason the record is owed when the failure is the publisher's own
+/// ([`own_record_left_owed`]) and the standing is unchanged, else `error`, which ends the
+/// receive.
+pub(crate) fn upkeep_outcome(
+    error: PaykitError,
+    before: &OwnStanding,
+    after: &OwnStanding,
+) -> Result<Option<String>> {
+    if before != after {
+        return Err(error);
+    }
+    own_record_left_owed(&error)
+        .map(|reason| Some(reason.to_string()))
+        .ok_or(error)
+}
+
 /// Why a failure of the app record's upkeep is the publisher's own, and so leaves the record
 /// owed without ending a receive ([`Paykit::tend_own_record_at_receive`]); `None` for any
 /// other failure, which ends it.
@@ -578,23 +621,28 @@ impl Signs for Measure {
 /// carry among them (Switch wire 6.1); an edit the client keeps pending for that refusal; the
 /// delivery to the own switch failing on the way or answered with an error that isn't a
 /// wallet-wide stop (Switch spec 4.2); and an expiry policy this version doesn't know.
-/// Everything else ends the receive: a wallet-wide stop ([`crate::pay::stops_resume`]), the
-/// store, an alarm, a held record or member that doesn't read, and any failure this list
-/// doesn't name.
+/// Everything else ends the receive: a wallet-wide stop ([`crate::pay::stops_resume`]); the
+/// answers that the app's account or generation is no longer where the app reads it, a
+/// `not_found` for an account the switch doesn't host, `moved` and `stale_generation`
+/// (Switch wire 7.1, 7.6); the store, an alarm, a held record or member that doesn't read,
+/// and any failure this list doesn't name.
 ///
 /// Security: the reason is fixed text. It never carries the error's own text, which can hold
-/// a service's answer; [`Paykit::update_own_record`] returns the error itself.
+/// a service's answer; an update of the record made on its own returns the error itself.
 pub(crate) fn own_record_left_owed(error: &PaykitError) -> Option<&'static str> {
+    use pubky_switch_core::http::ErrorCode as E;
     let client = match error {
         PaykitError::Client(client) | PaykitError::PublicEndpointChangePending(client) => client,
-        PaykitError::Refused(Refusal::NotNow(_)) => {
+        PaykitError::Refused(Refusal::NotNow(reason)) if reason == UNKNOWN_EXPIRY_POLICY => {
             return Some(
                 "the app record's expiry policy is one this version doesn't know (Paykit spec 4)",
             );
         }
         _ => return None,
     };
-    if crate::pay::stops_resume(&PaykitError::Client(client.clone())) {
+    if crate::pay::stops_resume(&PaykitError::Client(client.clone()))
+        || matches!(client.code(), Some(E::Moved | E::StaleGeneration))
+    {
         return None;
     }
     match client.unkept() {
@@ -603,9 +651,10 @@ pub(crate) fn own_record_left_owed(error: &PaykitError) -> Option<&'static str> 
         // a later generation's identity.json while it read the service time for the record,
         // says the wallet's view moved, and ends the receive.
         AppError::Refused(ClientRefusal::Usage(_)) => Some(
-            "the Switch client refused the app record's update; Paykit::update_own_record \
-             returns why (Paykit spec 4)",
+            "the Switch client refused the app record's update as one it can't sign; updating \
+             the record on its own returns why (Paykit spec 4)",
         ),
+        AppError::Switch(switch) if switch.is_not_hosted() => None,
         AppError::Transport(_) | AppError::Switch(_) => Some(
             "the app record's delivery to the own switch failed; the client sends it again at \
              a later read (Switch spec 4.2)",
@@ -675,10 +724,33 @@ mod renewal_tests {
 
 #[cfg(test)]
 mod upkeep_tests {
+    use pubky_switch_client::error::{ClientError, TransportError};
+    use pubky_switch_core::http::ErrorCode;
+
     use super::*;
 
     fn refused(refusal: ClientRefusal) -> AppError {
         AppError::Refused(refusal)
+    }
+
+    /// The switch's answer `code`, with `current`.
+    fn answered(code: ErrorCode, current: serde_json::Value) -> AppError {
+        AppError::Switch(ClientError::Switch {
+            status: code.status(),
+            code,
+            message: String::new(),
+            current,
+            known_version: None,
+            retry_after: None,
+        })
+    }
+
+    fn standing(cert: u8, identity: u8, recovery: Option<u64>) -> OwnStanding {
+        OwnStanding {
+            cert: [cert; 32],
+            identity: [identity; 32],
+            recovery,
+        }
     }
 
     #[test]
@@ -688,8 +760,19 @@ mod upkeep_tests {
         // An edit the client keeps pending for a refusal is owed as the refusal is.
         assert!(own_record_left_owed(&PaykitError::PublicEndpointChangePending(usage())).is_some());
         assert!(
-            own_record_left_owed(&Refusal::NotNow("unknown expiry policy".into()).into()).is_some()
+            own_record_left_owed(&Refusal::NotNow(UNKNOWN_EXPIRY_POLICY.into()).into()).is_some()
         );
+        // The delivery failing on the way, or answered with an error that isn't a stop.
+        for delivery in [
+            AppError::Transport(TransportError::Timeout),
+            answered(ErrorCode::PermissionMissing, serde_json::Value::Null),
+            answered(ErrorCode::NotFound, serde_json::Value::Null),
+        ] {
+            assert!(
+                own_record_left_owed(&PaykitError::Client(delivery.clone())).is_some(),
+                "{delivery:?}"
+            );
+        }
     }
 
     #[test]
@@ -702,6 +785,17 @@ mod upkeep_tests {
             refused(ClientRefusal::RecoveryRequired { generation: 1 }),
             AppError::Store(StoreError::Unknown),
             AppError::InvalidData("kept batch".into()),
+            // The switch's wallet-wide stops (Switch wire 7.6).
+            answered(ErrorCode::CertExpired, serde_json::Value::Null),
+            answered(ErrorCode::NotCurrent, serde_json::Value::Null),
+            answered(ErrorCode::RecoveryRequired, serde_json::Value::Null),
+            // The account or generation isn't where the app reads it.
+            answered(ErrorCode::Moved, serde_json::Value::Null),
+            answered(ErrorCode::StaleGeneration, serde_json::Value::Null),
+            answered(
+                ErrorCode::NotFound,
+                pubky_switch_core::http::not_hosted_current(),
+            ),
         ] {
             assert_eq!(
                 own_record_left_owed(&PaykitError::Client(stop.clone())),
@@ -720,5 +814,31 @@ mod upkeep_tests {
             own_record_left_owed(&Refusal::IdentityUnavailable("first read".into()).into()),
             None
         );
+        // Another `NotNow` of the SDK's than the unknown expiry policy.
+        assert_eq!(
+            own_record_left_owed(&Refusal::NotNow("load the app again".into()).into()),
+            None
+        );
+    }
+
+    #[test]
+    fn test_own_record_upkeep_outcome_ends_the_receive_once_the_standing_moved() {
+        let owed = || PaykitError::Client(AppError::Transport(TransportError::Timeout));
+        let before = standing(1, 1, None);
+        assert!(upkeep_outcome(owed(), &before, &standing(1, 1, None))
+            .unwrap()
+            .is_some());
+        // A renewal taken, a newer identity.json, a recovery notice: the failure ends the
+        // receive, whatever it is.
+        for after in [
+            standing(2, 1, None),
+            standing(1, 2, None),
+            standing(1, 1, Some(2)),
+        ] {
+            assert!(
+                upkeep_outcome(owed(), &before, &after).is_err(),
+                "{after:?}"
+            );
+        }
     }
 }
