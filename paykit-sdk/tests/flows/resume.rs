@@ -490,15 +490,10 @@ async fn test_resume_reports_a_payment_found_made_after_its_failure_once() {
     assert_eq!(w.rail.pay_calls(&first), 1);
 }
 
-#[tokio::test]
-async fn test_resume_keeps_the_methods_proof_over_a_replayed_resolution() {
-    // The user's resolution of the second payment as failed timed out and is kept, and the
-    // resume's first flush can't send it either. The method's history then shows both
-    // payments made, and the next write sends the kept resolution ahead of it, whose journal
-    // write replaces the second entry. The proof the method gave outlasts it: the payment
-    // is reported paid with its proof queued, never paid without one.
-    let w = World::new();
-    let (mut wallet, [first, second], transport) = in_flight_behind(&w).await;
+/// Two payments in flight, the user's resolution of the second as failed kept after a
+/// timeout, and the transport set to time out the next write too.
+async fn second_resolved_failed_and_kept(w: &World) -> (Paykit, [AttemptId; 2], Arc<RefusingOps>) {
+    let (mut wallet, [first, second], transport) = in_flight_behind(w).await;
     let obligation = wallet
         .payments()
         .await
@@ -519,6 +514,18 @@ async fn test_resume_keeps_the_methods_proof_over_a_replayed_resolution() {
         .unwrap_err();
     assert!(kept.kept_batch().is_some(), "{kept:?}");
     assert_eq!(stage(&wallet, &second).await, Stage::Paying);
+    (wallet, [first, second], transport)
+}
+
+#[tokio::test]
+async fn test_resume_keeps_the_methods_proof_over_a_replayed_resolution() {
+    // The user's resolution of the second payment as failed timed out and is kept, and the
+    // resume's first flush can't send it either. The method's history then shows both
+    // payments made, and the next write sends the kept resolution ahead of it, whose journal
+    // write replaces the second entry. The proof the method gave outlasts it: the payment
+    // is reported paid with its proof queued, never paid without one.
+    let w = World::new();
+    let (mut wallet, [first, second], transport) = second_resolved_failed_and_kept(&w).await;
     for attempt in [first, second] {
         w.rail.settle(&attempt, true);
     }
@@ -538,4 +545,39 @@ async fn test_resume_keeps_the_methods_proof_over_a_replayed_resolution() {
     }
     let paid = wallet.payments().await.unwrap();
     assert!(paid.iter().all(|p| p.paid_by_method), "{paid:?}");
+}
+
+#[tokio::test]
+async fn test_resume_keeps_the_methods_failure_over_a_replayed_resolution() {
+    // As above, but the method's history shows the second payment failed. The kept
+    // resolution's journal write replaces the entry without the method's word; that word
+    // goes back, so the failure is reported as the method's and its history is asked again
+    // later, where it shows the payment made after all.
+    let w = World::new();
+    let (mut wallet, [first, second], transport) = second_resolved_failed_and_kept(&w).await;
+    w.rail.settle(&first, true);
+    w.rail.settle(&second, false);
+    *transport.next.lock().unwrap() = Some(TransportError::Timeout);
+    let outcomes = wallet.resume_payments().await.unwrap();
+    assert!(
+        matches!(
+            outcomes.as_slice(),
+            [
+                PayOutcome::Paid { attempt_id: paid, proof_msg_id: Some(_), .. },
+                PayOutcome::Failed { attempt_id: failed, reason, .. },
+            ] if *paid == first && *failed == second && reason == "the payment method reported a failure"
+        ),
+        "{outcomes:?}"
+    );
+    assert_eq!(stage(&wallet, &second).await, Stage::Finished);
+    w.rail.complete_after_failure(&second);
+    let outcomes = wallet.resume_payments().await.unwrap();
+    assert!(
+        matches!(
+            outcomes.as_slice(),
+            [PayOutcome::Paid { attempt_id: paid, .. }] if *paid == second
+        ),
+        "{outcomes:?}"
+    );
+    assert_eq!(w.rail.pay_calls(&second), 1);
 }

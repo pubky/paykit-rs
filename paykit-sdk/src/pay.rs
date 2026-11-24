@@ -1142,7 +1142,8 @@ impl JournalFacts {
 /// step that failed left the entry before the method's call.
 ///
 /// - An entry still open: unwritten with the method's proof, pending without, and as the
-///   step told it where that says more of the same (uncertain, held, divergent).
+///   step told it where that says more of the same (held or divergent with the proof,
+///   uncertain without).
 /// - An entry over with the method's proof: paid.
 /// - An entry finished without it: the method's failure when the journal holds that the
 ///   method reported one; the failure a step told as written; "no payment started" for an
@@ -1167,7 +1168,7 @@ fn settled(held: JournalFacts, told: Told, before_call: bool) -> Settled {
         | Stage::Paying
         | Stage::RailPaid
         | Stage::RailFailed => match (held.proof, told) {
-            (true, Told::PaidOpen) | (false, Told::Open | Told::PaidOpen) => Settled::AsTold,
+            (true, Told::PaidOpen) | (false, Told::Open) => Settled::AsTold,
             (true, _) => Settled::Unwritten,
             (false, _) => Settled::Pending,
         },
@@ -1199,6 +1200,21 @@ fn settled_outcome(
         Settled::AsTold => Some(told),
         Settled::Nothing => None,
     }
+}
+
+/// Whether the journal's entry `held` lost what the method's history told for `answered`, the
+/// same entry as this call left it: a write kept from before the answer replaced it. A
+/// proof gone is always lost. A failure the method reported is lost unless the entry holds a
+/// proof or the user resolved it as paid, which a method's failure doesn't undo (Paykit spec
+/// 7.2, 8.4).
+fn replaced_by_an_older_write(answered: &JournalEntry, held: &JournalEntry) -> bool {
+    if answered.rail_proof.is_some() {
+        return held.rail_proof.is_none();
+    }
+    answered.failed_by_method
+        && !held.failed_by_method
+        && !held.user_paid
+        && held.rail_proof.is_none()
 }
 
 /// What a resume's step told about an attempt ([`settled`]).
@@ -4416,16 +4432,16 @@ impl Paykit {
                 .await?
             {
                 if matches!(kept.stage, Stage::Finished | Stage::AcceptanceOwed) {
-                    if !paid || kept.rail_proof.is_some() {
+                    if !replaced_by_an_older_write(entry, &kept) {
                         *entry = kept;
                         return Ok(Written::Done);
                     }
-                    // Finished without the proof this outcome carries: another write kept
-                    // from before did it, such as the user's resolution. The payment made
-                    // is still written, on what the claim and the record show now.
-                    let mut reopened = kept;
-                    self.keep_method_proof(&mut reopened, entry).await?;
-                    *entry = reopened;
+                    // Finished without what the method told for this outcome: another write
+                    // kept from before did it, such as the user's resolution. The entry as
+                    // this step holds it goes back, and the outcome is still written, on
+                    // what the claim and the record show now.
+                    entry.step = None;
+                    self.save(entry).await?;
                 }
             }
             // The record's update is settled first: without it nothing is written, `done`
@@ -4923,12 +4939,14 @@ impl Paykit {
     pub async fn resume_payments(&mut self) -> Result<Vec<PayOutcome>> {
         let _delivery = self.delivery_operation();
         #[cfg(feature = "test-support")]
-        let before = self.journal().await?;
+        let before = self.journal().await;
         // The call's future goes on the heap, as `receive`'s does: it nests deep.
         let result = Box::pin(self.resume_payments_inner()).await;
         #[cfg(feature = "test-support")]
-        self.assert_resume_agrees_with_the_journal(&before, &result)
-            .await?;
+        if let Ok(before) = &before {
+            self.assert_resume_agrees_with_the_journal(before, &result)
+                .await;
+        }
         result
     }
 
@@ -4946,8 +4964,11 @@ impl Paykit {
         &self,
         before: &[JournalEntry],
         result: &Result<Vec<PayOutcome>>,
-    ) -> Result<()> {
-        let after = self.journal().await?;
+    ) {
+        // A journal that can't be read back checks nothing: the result stands as it is.
+        let Ok(after) = self.journal().await else {
+            return;
+        };
         let held = |attempt_id: AttemptId| {
             after
                 .iter()
@@ -4964,7 +4985,7 @@ impl Paykit {
                         );
                     }
                 }
-                return Ok(());
+                return;
             }
         };
         let mut seen = std::collections::HashSet::new();
@@ -4985,11 +5006,11 @@ impl Paykit {
                 PayOutcome::Failed { .. } => {
                     entry.stage == Stage::Finished && !proof && !entry.user_paid
                 }
-                PayOutcome::PaidOutcomeUnwritten { .. } => entry.open() && proof,
-                PayOutcome::Pending { .. } | PayOutcome::Uncertain { .. } => entry.open() && !proof,
-                PayOutcome::PaidUnreported { .. }
+                PayOutcome::PaidOutcomeUnwritten { .. }
+                | PayOutcome::PaidUnreported { .. }
                 | PayOutcome::RecordHeld { .. }
-                | PayOutcome::RecordDivergent { .. } => entry.open(),
+                | PayOutcome::RecordDivergent { .. } => entry.open() && proof,
+                PayOutcome::Pending { .. } | PayOutcome::Uncertain { .. } => entry.open() && !proof,
             };
             assert!(
                 agrees,
@@ -4998,7 +5019,6 @@ impl Paykit {
                 entry.stage, entry.user_paid
             );
         }
-        Ok(())
     }
 
     async fn resume_payments_inner(&mut self) -> Result<Vec<PayOutcome>> {
@@ -5034,7 +5054,7 @@ impl Paykit {
         // The method's history before any entry, which needs no switch: a payment it reports
         // made is journaled with its proof before anything an entry's step meets can end the
         // resume. It comes after the flush, so a kept batch's journal writes are in place.
-        let proofs = self.journal_method_answers(payer_waits).await?;
+        let answers = self.journal_method_answers(payer_waits).await?;
         // Each entry's work stands alone. A wallet-wide stop ([`stops_resume`]) ends the
         // resume and is returned. Any other failure of one entry's step leaves that entry for
         // the next resume, told for it, and the next entry goes on, so a payment the method
@@ -5052,7 +5072,7 @@ impl Paykit {
         let mut told: Vec<Report> = Vec::new();
         let mut failures = Vec::new();
         for listed in listed {
-            let Some(mut entry) = self.at_its_turn(listed, &proofs).await? else {
+            let Some(mut entry) = self.at_its_turn(listed, &answers).await? else {
                 continue;
             };
             let claim = entry.attempt().ok().map(|id| (id, entry.obligation));
@@ -5066,7 +5086,7 @@ impl Paykit {
                             return Err(error);
                         }
                         if judged_at_resume(&error) && !entry_waits(&error) {
-                            failures.push((error, claim));
+                            failures.push((error, claim, true));
                         }
                     }
                 }
@@ -5092,7 +5112,7 @@ impl Paykit {
                         }
                     }
                     if !entry_waits(&error) {
-                        failures.push((error, claim));
+                        failures.push((error, claim, false));
                     }
                 }
             }
@@ -5159,19 +5179,25 @@ impl Paykit {
                 None => out.push(report.outcome),
             }
         }
-        // A failure stands only while its entry is still open, or still owes the acceptance
-        // it couldn't place: a later resume meets it again. One whose entry is over is past,
-        // and one whose entry can't be read back stands.
-        for (error, claim) in failures {
+        // A failure stands only while what it failed at is still to do: a step's while its
+        // entry is open, and an owed acceptance's while the entry still owes it. A later
+        // resume meets it again. One whose work is done by now is past, and one whose entry
+        // can't be read back stands.
+        for (error, claim, acceptance) in failures {
             let entry = match claim {
                 Some((attempt_id, obligation)) => {
                     self.journal_entry_on(&attempt_id, &obligation).await?
                 }
                 None => None,
             };
-            if entry.is_none_or(|entry| {
-                entry.stage != Stage::Finished && entry.stage != Stage::Abandoned
-            }) {
+            let past = entry.is_some_and(|entry| {
+                if acceptance {
+                    matches!(entry.stage, Stage::Finished | Stage::Abandoned)
+                } else {
+                    !entry.open()
+                }
+            });
+            if !past {
                 // A call that returns an error carries no outcome, so nothing is pruned
                 // then: `payments` still lists every entry this call finished.
                 return Err(error);
@@ -5182,48 +5208,41 @@ impl Paykit {
     }
 
     /// The journal entry `listed` names as the journal holds it now, `None` once it is gone:
-    /// no step of a resume acts on an entry read before the call's last write. A proof the
-    /// method's history gave earlier in this call (`proofs`) that the entry holds no more was
-    /// replaced by the journal write of a batch kept from before, such as the user's
-    /// resolution, sent with another entry's write: the proof is put back
-    /// ([`Paykit::keep_method_proof`]), so the payment made is reported and its proof sent.
+    /// no step of a resume acts on an entry read before the call's last write.
+    ///
+    /// `answers` holds the entries the method's history changed earlier in this call, as
+    /// that pass left them. A batch kept from before, such as the user's resolution, sent
+    /// with another entry's write, replaces the entry in the journal with the copy taken
+    /// when the batch was built, which is older than the method's answer. Where the entry
+    /// no longer holds that answer, the entry as the pass left it goes back
+    /// ([`replaced_by_an_older_write`]): the payment made is reported and its proof sent,
+    /// with the acceptance released for it, and a failure the method reported stays one its
+    /// history is asked about again (Paykit spec 7.2).
     async fn at_its_turn(
         &mut self,
         listed: JournalEntry,
-        proofs: &HashMap<AttemptId, JournalEntry>,
+        answers: &HashMap<AttemptId, JournalEntry>,
     ) -> Result<Option<JournalEntry>> {
         // An entry that names no attempt can't be read back by one: it goes as listed.
         let Ok(attempt_id) = listed.attempt() else {
             return Ok(Some(listed));
         };
-        let Some(mut entry) = self
+        let Some(entry) = self
             .journal_entry_on(&attempt_id, &listed.obligation)
             .await?
         else {
             return Ok(None);
         };
-        if let Some(paid) = proofs.get(&attempt_id) {
-            if entry.rail_proof.is_none() {
-                self.keep_method_proof(&mut entry, paid).await?;
+        match answers.get(&attempt_id) {
+            Some(answered) if replaced_by_an_older_write(answered, &entry) => {
+                // Built on what the claim shows now, which that batch may have moved.
+                let mut answered = answered.clone();
+                answered.step = None;
+                self.save(&answered).await?;
+                Ok(Some(answered))
             }
+            _ => Ok(Some(entry)),
         }
-        Ok(Some(entry))
-    }
-
-    /// Put the method's proof `paid` holds into `entry`, which lost it or never held it, and
-    /// open it again as paid and unwritten (`RailPaid`): its outcome is built on what the
-    /// claim and the record show now, as for a payment found made after its failure was
-    /// written ([`Paykit::recheck_failed`]). The method's word that the payment was made
-    /// outlasts any earlier resolution of the attempt (Paykit spec 7.2).
-    async fn keep_method_proof(
-        &mut self,
-        entry: &mut JournalEntry,
-        paid: &JournalEntry,
-    ) -> Result<()> {
-        entry.rail_proof.clone_from(&paid.rail_proof);
-        entry.paid_at_ms = paid.paid_at_ms;
-        entry.step = None;
-        self.set_stage(entry, Stage::RailPaid).await
     }
 
     /// Ask the payment method's history about every entry this app left `Paying`, and journal
@@ -5237,18 +5256,18 @@ impl Paykit {
     /// can't answer leaves that entry as it is, for its own step to ask again; a wallet-wide
     /// stop, such as a store failure, is returned.
     ///
-    /// Returns the entries it journaled a proof in, by attempt: a batch kept from before
-    /// that another entry's write sends later may replace such an entry in the journal, and
-    /// its proof is put back at the entry's turn ([`Paykit::at_its_turn`]).
+    /// Returns the entries the method's answer changed, by attempt, as this pass left them:
+    /// a batch kept from before that a later write sends may replace such an entry in the
+    /// journal, and it is put back at the entry's turn ([`Paykit::at_its_turn`]).
     async fn journal_method_answers(
         &mut self,
         payer_waits: bool,
     ) -> Result<HashMap<AttemptId, JournalEntry>> {
-        let mut proofs = HashMap::new();
+        let mut answers = HashMap::new();
         for listed in self.journal().await? {
             // As the journal holds it now: an acceptance released for an earlier entry may
             // have sent a batch kept for this one.
-            let Some(mut entry) = self.at_its_turn(listed, &proofs).await? else {
+            let Some(mut entry) = self.at_its_turn(listed, &answers).await? else {
                 continue;
             };
             if entry.stage != Stage::Paying || entry.restored || entry.offline.is_some() {
@@ -5269,18 +5288,18 @@ impl Paykit {
             // (Paykit spec 7.2 step 2); one that can't be queued now is left to the report.
             // Not while the payer's side waits for its keys: the resume writes nothing to the
             // switch then, and a new acceptance goes once that wait ends ([`KeysAwaited`]).
-            if entry.stage == Stage::RailPaid {
-                if let Ok(attempt_id) = entry.attempt() {
-                    proofs.insert(attempt_id, entry.clone());
+            if entry.stage == Stage::RailPaid && !payer_waits {
+                if let Err(error) = self.release_acceptance(&mut entry, None).await {
+                    unless_stop(error)?;
                 }
-                if !payer_waits {
-                    if let Err(error) = self.release_acceptance(&mut entry, None).await {
-                        unless_stop(error)?;
-                    }
+            }
+            if matches!(entry.stage, Stage::RailPaid | Stage::RailFailed) {
+                if let Ok(attempt_id) = entry.attempt() {
+                    answers.insert(attempt_id, entry);
                 }
             }
         }
-        Ok(proofs)
+        Ok(answers)
     }
 
     /// The wallet-wide stop the Switch client holds now, if any: a recovery notice, an alarm,
