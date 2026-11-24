@@ -184,7 +184,10 @@ async fn test_payee_receipt_offline_custom_receipt_waits_for_its_method() {
     unavailable.receive(None).await.unwrap();
     let backup = unavailable.backup().await.unwrap();
     drop(unavailable);
-    let mut restored = Box::pin(restore(&w, &device, &backup, rail)).await.unwrap();
+    // On an empty store, the receipt comes from the backup alone.
+    let mut restored = Box::pin(restore(&w, &store(), &backup, rail))
+        .await
+        .unwrap();
     let kept = restored.retained_payee_receipts().await.unwrap();
     assert_eq!(kept.len(), 1);
     assert_eq!(kept[0].receipt.message().msg_id, receipt);
