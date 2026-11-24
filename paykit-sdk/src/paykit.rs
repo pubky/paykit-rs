@@ -327,9 +327,21 @@ impl ReceiveSummary {
         self.key_epochs_awaited.sort_unstable();
         self.key_epochs_awaited.dedup();
         self.scope_keys_awaited |= !self.key_epochs_awaited.is_empty();
+        // Only the later read's flag is ever read: a summary of two reads is the earlier one
+        // of any later summary, never the later.
         if !self.upkeep_tried {
             self.app_record_owed = earlier.app_record_owed;
-            self.upkeep_tried = earlier.upkeep_tried;
+        }
+        self
+    }
+
+    /// The summary as the host is to see it while the store can't tell whether the last
+    /// write of the app record was applied (`latched`): the record is owed until the app is
+    /// loaded again, also after a read that skipped the upkeep.
+    fn with_record_latch(mut self, latched: bool) -> Self {
+        if latched && !self.upkeep_tried {
+            self.app_record_owed = Some(crate::own_record::OWED_UNTIL_LOADED.to_string());
+            self.upkeep_tried = true;
         }
         self
     }
@@ -1179,6 +1191,12 @@ impl Paykit {
 
     /// Run the SDK's recovery work after the client's read and any explicit block.
     async fn after_read(&mut self, read: ReadResult) -> Result<ReceiveSummary> {
+        let summary = Box::pin(self.after_read_steps(read)).await?;
+        Ok(summary.with_record_latch(self.own_record_unknown))
+    }
+
+    /// The steps of [`Paykit::after_read`].
+    async fn after_read_steps(&mut self, read: ReadResult) -> Result<ReceiveSummary> {
         let ReadResult {
             report,
             paused_before,
@@ -1444,6 +1462,32 @@ mod tests {
         // And a later read that skipped it too keeps it again.
         let all = upkeep_read(None, false).after(both);
         assert_eq!(all.app_record_owed.as_deref(), Some("earlier"));
+    }
+
+    #[test]
+    fn test_receive_summary_reports_the_record_owed_while_its_last_write_is_unknown() {
+        // A read that skipped the upkeep while the latch is set still tells the host.
+        let skipped = upkeep_read(None, false).with_record_latch(true);
+        assert_eq!(
+            skipped.app_record_owed.as_deref(),
+            Some(crate::own_record::OWED_UNTIL_LOADED)
+        );
+        // And it is the latest word: an earlier, older reason gives way to it.
+        let both = skipped.after(upkeep_read(Some("earlier"), true));
+        assert_eq!(
+            both.app_record_owed.as_deref(),
+            Some(crate::own_record::OWED_UNTIL_LOADED)
+        );
+        // A read that tried the upkeep keeps its own outcome, and without the latch nothing
+        // changes.
+        let tried = upkeep_read(Some("tried"), true).with_record_latch(true);
+        assert_eq!(tried.app_record_owed.as_deref(), Some("tried"));
+        assert_eq!(
+            upkeep_read(None, false)
+                .with_record_latch(false)
+                .app_record_owed,
+            None
+        );
     }
 
     #[test]
