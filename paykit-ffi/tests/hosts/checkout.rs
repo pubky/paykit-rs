@@ -80,8 +80,9 @@ impl CheckoutFixture {
             rail: rail.clone(),
             timer: Arc::new(RuntimeTimer),
         });
-        // The shop sells, and pays the requests a payee wallet sends it (Paykit spec 3.1).
-        let scopes = AppScopes::new().request().pay().build()?;
+        // The shop sells, pays the requests a payee wallet sends it, and proposes Allowances
+        // in either role (Paykit spec 3.1).
+        let scopes = AppScopes::new().request().allowance_execute().build()?;
         let names: Vec<_> = scopes.scopes.iter().map(String::as_str).collect();
         let asking = Asking::for_scopes(world.app_keys(&owner, "wallet")?, &names)?;
         let review = issuer.review(asking.request.signed(), &asking.auth)?;
@@ -96,6 +97,8 @@ impl CheckoutFixture {
         .await?;
         issuer.claim_delivered(&approval.request).await?;
         Box::pin(seller.allow_connect(&buyer)).await?;
+        // The shop lists its records and its deny list before it sends (Paykit spec 3.1, 6).
+        Box::pin(shop_listed(&mut seller)).await?;
         Ok(Arc::new(Self {
             world: Mutex::new(Some(world)),
             host,
@@ -364,21 +367,13 @@ impl CheckoutFixture {
         crate::runtime::run(async move {
             let request: RequestRef = request.try_into()?;
             let mut seller = self.seller.lock().await;
-            for _ in 0..8 {
-                if !Box::pin(seller.receive(None)).await?.report.more {
-                    break;
-                }
-            }
-            let entry = seller
-                .payee_activity()
-                .await?
-                .into_iter()
-                .find(|entry| {
-                    entry.payer == self.buyer
-                        && entry.request_hash == Some(request.request_hash)
-                        && request.payee == self.payee
-                })
-                .ok_or(WalletError::invalid("original payer proof"))?;
+            Box::pin(shop_listed(&mut seller)).await?;
+            let found = seller.payee_activity().await?.into_iter().find(|entry| {
+                entry.payer == self.buyer
+                    && entry.request_hash == Some(request.request_hash)
+                    && request.payee == self.payee
+            });
+            let entry = found.ok_or(WalletError::invalid("original payer proof"))?;
             Box::pin(seller.confirm_payment(&entry.record))
                 .await?
                 .ok_or(WalletError::invalid("original seller receipt"))
@@ -419,6 +414,52 @@ impl CheckoutFixture {
                 .await
                 .outcome?;
             shop_paid(outcome)
+        })
+        .await
+    }
+    /// Have the shop propose an Allowance in which the buyer takes `role`: the shop pays the
+    /// buyer when the buyer is allowee, and is paid when it is allower. Return the Allowance
+    /// ID (Paykit spec 8.3.1).
+    pub async fn propose_allowance(
+        self: Arc<Self>,
+        role: crate::AllowanceRole,
+    ) -> Result<String, WalletError> {
+        crate::runtime::run(async move {
+            let terms = paykit_lib::allowances::AllowanceTerms::from_json(&serde_json::json!({
+                "asset": "btc",
+                "per_payment_amount": {"minimum": "0.01", "maximum": "2.00"},
+                "period_limits": [{
+                    "amount_limit": null,
+                    "payment_count_limit": 3,
+                    "period": {"kind": "rolling", "every": 1, "unit": "week"},
+                }],
+                "lifetime_amount_limit": "10.0",
+                "active_from": null,
+                "expires_at": null,
+                "allowed_payment_endpoint_identifiers": ["btc-lightning-bolt11"],
+            }))
+            .map_err(paykit_sdk::PaykitError::from)?;
+            let mut seller = self.seller.lock().await;
+            let sent = match role {
+                crate::AllowanceRole::Allower => {
+                    Box::pin(seller.propose_allowance(
+                        self.buyer,
+                        paykit_sdk::AllowanceRole::Allowee,
+                        terms,
+                    ))
+                    .await?
+                }
+                crate::AllowanceRole::Allowee => {
+                    Box::pin(seller.propose_executable_allowance(
+                        self.buyer,
+                        terms,
+                        paykit_sdk::UserConfirmed::new(),
+                    ))
+                    .await?
+                }
+                crate::AllowanceRole::Other => return Err(WalletError::invalid("role")),
+            };
+            Ok(sent.allowance_id.as_str().into())
         })
         .await
     }
@@ -529,11 +570,22 @@ impl CheckoutFixture {
     }
 }
 
-/// Read the shop's feed until it lists `request`. Its first read lists its own records; a
-/// later one brings the request.
+/// Read the shop's feed until it is done and every record its scopes read is listed
+/// (Paykit spec 6).
+async fn shop_listed(seller: &mut Paykit) -> Result<(), WalletError> {
+    for _ in 0..8 {
+        let summary = Box::pin(seller.receive(None)).await?;
+        if !summary.report.more && summary.records_unlisted.is_none() {
+            return Ok(());
+        }
+    }
+    Err(WalletError::invalid("test shop listing"))
+}
+
+/// Read the shop's feed until it holds `request`.
 async fn shop_holds(seller: &mut Paykit, request: &RequestRef) -> Result<(), WalletError> {
     for _ in 0..8 {
-        Box::pin(seller.receive(None)).await?;
+        Box::pin(shop_listed(seller)).await?;
         if seller
             .requests()
             .await?
@@ -565,6 +617,138 @@ pub struct MethodAnswers {
     pub transfer_amount: Option<Amount>,
     /// The settlement ID read; `None` when `settlement_id` threw or found none.
     pub settlement_id: Option<Vec<u8>>,
+}
+
+/// What the wallet makes of each host callback that fails, as `<callback>=<answer>` lines, for
+/// the host tests to check that a callback which dies, by any throw, answers as unknown and
+/// never as success. Each async call is bounded, so one that never answers shows as
+/// `no_answer`.
+#[uniffi::export]
+pub async fn test_callback_answers(
+    store: Arc<dyn WalletStore>,
+    home: Arc<dyn crate::WalletHomeserver>,
+    method: Arc<dyn PaymentMethod>,
+) -> Result<Vec<String>, WalletError> {
+    use crate::{HomeserverError, MethodError, StorageError};
+    fn stored<T>(answer: Result<T, StorageError>) -> &'static str {
+        match answer {
+            Ok(_) => "answered",
+            Err(StorageError::Unknown) => "unknown",
+            Err(_) => "refused",
+        }
+    }
+    fn served<T>(
+        answer: Result<Result<T, HomeserverError>, tokio::time::error::Elapsed>,
+    ) -> &'static str {
+        match answer {
+            Err(_) => "no_answer",
+            Ok(Ok(_)) => "answered",
+            Ok(Err(HomeserverError::Unavailable)) => "unknown",
+            Ok(Err(_)) => "refused",
+        }
+    }
+    let limit = Duration::from_secs(2);
+    crate::runtime::run(async move {
+        let space = String::from("callback-check");
+        let owner = vec![7; 32];
+        let mut answers = vec![
+            format!("store.get={}", stored(store.get(space.clone(), vec![1]))),
+            format!(
+                "store.scan={}",
+                stored(store.scan(space.clone(), vec![1], None, 8))
+            ),
+            format!(
+                "store.acquire={}",
+                stored(store.acquire(space.clone(), owner.clone()))
+            ),
+            format!(
+                "store.commit_if={}",
+                stored(store.commit_if(space.clone(), owner.clone(), Vec::new()))
+            ),
+            format!("store.release={}", stored(store.release(space, owner))),
+        ];
+        let identity = vec![5; 32];
+        let path = String::from("/pub/example");
+        answers.push(format!(
+            "home.get={}",
+            served(tokio::time::timeout(limit, home.get(identity.clone(), path.clone())).await)
+        ));
+        answers.push(format!(
+            "home.put={}",
+            served(
+                tokio::time::timeout(limit, home.put(identity.clone(), path.clone(), vec![1]))
+                    .await
+            )
+        ));
+        answers.push(format!(
+            "home.delete={}",
+            served(tokio::time::timeout(limit, home.delete(identity, path)).await)
+        ));
+        let payment = crate::MethodPayment {
+            endpoint: "btc-lightning-bolt11".into(),
+            payload: "lnbc1checkout".into(),
+            amount: Amount {
+                asset: "btc".into(),
+                value: "7".into(),
+            },
+            attempt_id: "AAAAAAAAAAAAAAAAAAAAAA".into(),
+            payment_reference: None,
+        };
+        // A `pay` that fails is possibly sent: the wallet keeps the attempt open and asks
+        // the lookup later (Paykit spec 7.2).
+        answers.push(format!(
+            "method.pay={}",
+            match tokio::time::timeout(limit, method.pay(payment)).await {
+                Err(_) => "no_answer",
+                Ok(Ok(_)) => "answered",
+                Ok(Err(error)) => match paykit_sdk::RailError::from(error) {
+                    paykit_sdk::RailError::Unavailable(_) => "possibly_sent",
+                    _ => "refused",
+                },
+            }
+        ));
+        answers.push(format!(
+            "method.payment={}",
+            match tokio::time::timeout(limit, method.payment("AAAAAAAAAAAAAAAAAAAAAA".into())).await
+            {
+                Err(_) => "no_answer",
+                Ok(Ok(_)) => "answered",
+                Ok(Err(MethodError::Unknown { .. })) => "unknown",
+                Ok(Err(_)) => "refused",
+            }
+        ));
+        let unknown = |answer: Result<_, MethodError>| match answer {
+            Ok(_) => "answered",
+            Err(MethodError::Unknown { .. }) => "unknown",
+            Err(_) => "refused",
+        };
+        answers.push(format!(
+            "method.allowance_history={}",
+            match tokio::time::timeout(limit, method.allowance_history(vec![5; 32])).await {
+                Err(_) => "no_answer",
+                Ok(answer) => unknown(answer.map(|_| ())),
+            }
+        ));
+        let proof = crate::MethodProof {
+            endpoint: "btc-lightning-bolt11".into(),
+            payload: None,
+            amount: Amount {
+                asset: "btc".into(),
+                value: "7".into(),
+            },
+            attempt_id: "AAAAAAAAAAAAAAAAAAAAAA".into(),
+            proof_json: b"{}".to_vec(),
+        };
+        answers.push(format!(
+            "method.verify={}",
+            match tokio::time::timeout(limit, method.verify(proof)).await {
+                Err(_) => "no_answer",
+                Ok(answer) => unknown(answer.map(|_| ())),
+            }
+        ));
+        Ok(answers)
+    })
+    .await
 }
 
 /// Call `method`'s synchronous callbacks as Paykit does for the test checkout's endpoint,

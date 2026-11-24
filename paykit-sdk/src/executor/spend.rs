@@ -77,13 +77,136 @@ pub(crate) struct AllowanceReservation {
     checked: ReconciledLedger,
 }
 
-fn held(why: &str) -> crate::PaykitError {
-    Refusal::NotNow(why.into()).into()
-}
-
-/// A refusal no later read changes for this request: it may still be paid by hand.
+/// A payment the Allowance's terms don't cover: final for automatic payment, though the
+/// user may still pay it by hand (Paykit spec 8.3).
 fn not_automatic(why: &str) -> crate::PaykitError {
     Refusal::NotAutomatic(why.into()).into()
+}
+
+/// Whether a payment of `value` never fits a period limit, whatever later outcomes do: a
+/// period that admits no payment, or the payment alone above a period's amount limit
+/// (Paykit spec 8.3).
+fn period_never_fits(
+    terms: &paykit_lib::allowances::AllowanceTerms,
+    value: &paykit_lib::Decimal,
+) -> bool {
+    terms.period_limits.iter().any(|period| {
+        period.payment_count_limit == Some(0)
+            || period
+                .amount_limit
+                .as_ref()
+                .is_some_and(|cap| value.scaled() > cap.scaled())
+    })
+}
+
+/// Where the lifetime limit leaves a payment (Paykit spec 8.3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LifetimeRoom {
+    /// It fits now.
+    Now,
+    /// It fits once the entries still reserved give their room back, by their outcomes,
+    /// with no one acting.
+    Automatic,
+    /// It fits only once the user also releases another app's failed attempts.
+    Manual,
+    /// It never fits.
+    Never,
+}
+
+/// [`LifetimeRoom`] for a payment of `value`, from the same counting as `usage`:
+/// `self_freeing` is the amount of the reservations an outcome may still give back with no
+/// one acting ([`self_freeing`]), and `releasable` the room only the user frees, the failed
+/// attempts of other apps the user may release, which count as spent until then. An entry
+/// spent or released already frees nothing more.
+fn lifetime_room(
+    terms: &paykit_lib::allowances::AllowanceTerms,
+    usage: &paykit_lib::allowances::Usage,
+    self_freeing: u128,
+    releasable: u128,
+    value: &paykit_lib::Decimal,
+) -> LifetimeRoom {
+    let Some(cap) = &terms.lifetime_amount_limit else {
+        return LifetimeRoom::Now;
+    };
+    let used = usage.lifetime().scaled();
+    let fits = |freed: u128| {
+        used.saturating_sub(freed)
+            .checked_add(value.scaled())
+            .is_some_and(|sum| sum <= cap.scaled())
+    };
+    if fits(0) {
+        LifetimeRoom::Now
+    } else if fits(self_freeing) {
+        LifetimeRoom::Automatic
+    } else if fits(self_freeing.saturating_add(releasable)) {
+        LifetimeRoom::Manual
+    } else {
+        LifetimeRoom::Never
+    }
+}
+
+/// The amount of the reservations whose room an outcome may still give back with no one
+/// acting (Paykit spec 8.3), judged entry by entry: of the entries the usage holds reserved
+/// that the method's history doesn't show (`before_call`), those this app's journal doesn't
+/// hold at or past the method's call (`past_call`). A payment at the call or past it counts
+/// whether it pays or fails, so its reservation never frees. One of another app, which this
+/// app's journal doesn't hold, may still free itself.
+fn self_freeing(
+    before_call: &[(paykit_lib::AttemptId, u128)],
+    past_call: impl Fn(&paykit_lib::AttemptId) -> bool,
+) -> u128 {
+    before_call
+        .iter()
+        .filter(|(attempt_id, _)| !past_call(attempt_id))
+        .fold(0u128, |sum, (_, value)| sum.saturating_add(*value))
+}
+
+/// Whether this app's journal holds `attempt` at or past the payment method's call: any
+/// entry of it but one of this installation still before the call. An entry back from a
+/// backup may have been at the call, which the backup can't tell (Paykit spec 7.2).
+fn past_the_call(journal: &[JournalEntry], attempt: &paykit_lib::AttemptId) -> bool {
+    journal.iter().any(|own| {
+        own.attempt().is_ok_and(|id| id == *attempt)
+            && (own.restored
+                || !matches!(
+                    own.stage,
+                    crate::journal::Stage::Recorded | crate::journal::Stage::Attempted
+                ))
+    })
+}
+
+/// Terms whose start is still ahead: the same call once it has passed clears this (Paykit
+/// spec 8.3).
+fn terms_not_active() -> crate::PaykitError {
+    waits(crate::NotNowReason::CallAgain(
+        "the Allowance's terms aren't active yet",
+    ))
+}
+
+/// A payment that waits: a later read, an earlier attempt's answer or room in a limit
+/// clears it (Paykit spec 8.3).
+fn waits(reason: crate::NotNowReason) -> crate::PaykitError {
+    Refusal::NotNow(reason).into()
+}
+
+/// The refusal of a payment the first failing `limit` has no room for (Paykit spec 8.3),
+/// given whether a period never fits it and where the lifetime limit leaves it.
+fn limit_refusal(limit: LimitKind, period_never: bool, room: LifetimeRoom) -> crate::PaykitError {
+    let why = format!("the {} limit has no room", limit.as_str());
+    match limit {
+        LimitKind::PerPayment => not_automatic(&why),
+        // Usage of other terms: no window or release mends it (Paykit spec 8.3).
+        LimitKind::InconsistentUsage => execution_held(INCONSISTENT_USAGE).into(),
+        _ if period_never || room == LifetimeRoom::Never => not_automatic(&why),
+        // Room only the user gives back, releasing another app's failed attempt
+        // ([`crate::Paykit::reserved_by_other_apps`] lists it): the user's to answer, also
+        // when a period limit fails first, since no period roll makes lifetime room.
+        _ if room == LifetimeRoom::Manual => execution_held(RELEASE_HELD).into(),
+        // A window rolling, or a reserved entry's outcome, gives the room back.
+        _ => waits(crate::NotNowReason::AllowanceLimit {
+            limit: limit.as_str().into(),
+        }),
+    }
 }
 
 /// Where an Allowance stands for a payment by this app as its executor (Paykit spec 8.3,
@@ -98,8 +221,9 @@ pub(crate) enum Standing {
     NotTakenUp,
     /// The user must confirm it again, which [`Paykit::confirm_allowance_executor`] lifts.
     Confirm,
-    /// A later read, answer or the user's own action may change it.
-    Temporary(&'static str),
+    /// A later read, answer or the user's own action may change it: the typed refusal says
+    /// which.
+    Temporary(Refusal),
     /// Nothing later changes it.
     Final(Refusal),
 }
@@ -109,11 +233,9 @@ impl Standing {
     pub(crate) fn refusal(self, hold: &crate::AllowanceHold) -> Option<Refusal> {
         match self {
             Self::Payable => None,
-            Self::NotTakenUp => Some(Refusal::NotNow(
-                "this app hasn't taken up the Allowance's execution".into(),
-            )),
+            Self::NotTakenUp => Some(execution_held(NOT_TAKEN_UP)),
             Self::Confirm => Some(Refusal::AllowanceConfirmationNeeded { hold: hold.clone() }),
-            Self::Temporary(why) => Some(Refusal::NotNow(why.into())),
+            Self::Temporary(refusal) => Some(refusal),
             Self::Final(refusal) => Some(refusal),
         }
     }
@@ -125,7 +247,7 @@ impl Standing {
 /// counterparty's block and the knowledge of the deny list, and only then the user's
 /// confirmation, so the user is asked only when confirming lifts the refusal.
 pub(crate) fn standing(app: &Paykit, view: &AllowanceView, consent: ConsentState) -> Standing {
-    if let Some(standing) = status_standing(view.status) {
+    if let Some(standing) = status_standing(view.status, view.proposed_here) {
         return standing;
     }
     if view.role != Some(AllowanceRole::Allower) {
@@ -165,14 +287,20 @@ pub(crate) fn standing(app: &Paykit, view: &AllowanceView, consent: ConsentState
     // 8.1): unblocking ends the pause.
     match view.blocked {
         Some(false) => {}
-        Some(true) => return Standing::Temporary("the counterparty is blocked"),
-        None => return Standing::Temporary("the deny list isn't known"),
+        Some(true) => {
+            return Standing::Temporary(Refusal::HeldForUser(
+                crate::HeldForUserReason::CounterpartyBlocked("the counterparty is blocked"),
+            ))
+        }
+        None => return Standing::Temporary(read_again("the deny list isn't known")),
     }
     // One this app executes, last confirmed before the loss, waits for the user's
     // confirmation again, which writes its grant at the current generation; that grant
     // establishes no complete usage authority, so its usage waits for a repair (Paykit spec
     // 8.3, "After provider loss"). Neither lifts the shared hold on one-time payments.
     // A known wait comes first: confirming wouldn't lift it.
+    // A missed item or a record not held as executing needs: a flagged record can stay so,
+    // so it is shown, not waited on.
     if let ConsentState::Waiting(why) = consent {
         return Standing::Temporary(why);
     }
@@ -180,7 +308,7 @@ pub(crate) fn standing(app: &Paykit, view: &AllowanceView, consent: ConsentState
     // of the record, or for the messages kept over it, so does the Allowance's (Paykit spec 6).
     if view.granted_before_loss {
         return match view.record_write_waits {
-            true => Standing::Temporary(WAITS_FOR_RECORD_WRITE),
+            true => Standing::Temporary(execution_held(WAITS_FOR_RECORD_WRITE)),
             false => Standing::Confirm,
         };
     }
@@ -188,7 +316,9 @@ pub(crate) fn standing(app: &Paykit, view: &AllowanceView, consent: ConsentState
     if view.regranted_after_loss {
         return match consent {
             ConsentState::ConfirmAgain => Standing::Confirm,
-            _ => Standing::Temporary(NEEDS_REPAIR_AFTER_LOSS),
+            _ => Standing::Temporary(Refusal::HeldForUser(
+                crate::HeldForUserReason::AllowanceNotResumed,
+            )),
         };
     }
     match (consent, own) {
@@ -198,9 +328,11 @@ pub(crate) fn standing(app: &Paykit, view: &AllowanceView, consent: ConsentState
         (ConsentState::ConfirmAgain, true) => Standing::Confirm,
         (ConsentState::ConfirmAgain, false) => Standing::NotTakenUp,
         // The grant path lands the kept batch: the host calls again.
-        (ConsentState::GrantKept, _) => {
-            Standing::Temporary("the executor grant's write waits to be sent again")
-        }
+        (ConsentState::GrantKept, _) => Standing::Temporary(Refusal::NotNow(
+            crate::NotNowReason::EarlierWriteUnresolved(
+                "the executor grant's write waits to be sent again",
+            ),
+        )),
         // Applied here: resuming writes the consent the user approved under this hold, and
         // without that approval the user confirms it.
         (ConsentState::Unconsented { approved: false }, _) => Standing::Confirm,
@@ -211,7 +343,7 @@ pub(crate) fn standing(app: &Paykit, view: &AllowanceView, consent: ConsentState
         | (ConsentState::Unconsented { approved: true }, true) => Standing::NotTakenUp,
         // The grant came from a backup taken before this device's consent was written.
         (ConsentState::Unrecorded, true) => {
-            Standing::Temporary("this app's grant is held, but its consent isn't on this device")
+            Standing::Temporary(execution_held(CONSENT_NOT_ON_DEVICE))
         }
         (ConsentState::Waiting(why), _) => Standing::Temporary(why),
         (ConsentState::Removed(reason), _) => Standing::Final(removed_refusal(reason)),
@@ -220,16 +352,24 @@ pub(crate) fn standing(app: &Paykit, view: &AllowanceView, consent: ConsentState
 
 /// Where an Allowance stands by its status alone: `None` for an accepted one, which the
 /// rest of [`standing`] decides.
-fn status_standing(status: AllowanceStatus) -> Option<Standing> {
+fn status_standing(status: AllowanceStatus, proposed_here: bool) -> Option<Standing> {
     Some(match status {
         AllowanceStatus::Accepted => return None,
         AllowanceStatus::Ended => Standing::Final(Refusal::AllowanceEnded),
         AllowanceStatus::Conflicted => Standing::Final(Refusal::AllowanceConflicted),
         AllowanceStatus::Rejected => Standing::Final(Refusal::Rejected),
         AllowanceStatus::AwaitingConflictCheck => {
-            Standing::Temporary("the Allowance waits for its conflict check")
+            Standing::Temporary(execution_held(CONFLICT_CHECK))
         }
-        _ => Standing::Temporary("the Allowance isn't accepted yet"),
+        // A proposal of this identity waits for the counterparty's answer; one the
+        // counterparty proposed waits for this user's.
+        // An answer may never come, or the proposal may have lapsed: shown, not waited on.
+        _ if proposed_here => {
+            Standing::Temporary(execution_held("the Allowance isn't accepted yet"))
+        }
+        _ => Standing::Temporary(execution_held(
+            "the Allowance waits for this wallet's acceptance",
+        )),
     })
 }
 
@@ -240,8 +380,33 @@ pub(crate) const SET_UP_BEFORE_LOSS: &str = "the Allowance was set up before a p
 /// Why an Allowance last confirmed before a provider loss waits before asking the user.
 pub(crate) const WAITS_FOR_RECORD_WRITE: &str = "the Allowance record is divergent or has messages to write first: the user confirms the record as shown, a newer write ends it, or the next receive writes the messages";
 
-/// Why an Allowance whose grant was written again after a provider loss doesn't pay yet.
-pub(crate) const NEEDS_REPAIR_AFTER_LOSS: &str = "after a provider loss this version doesn't resume automatic payments under the Allowance, whose usage needs a repair it doesn't make: the user ends it and sets up a new one";
+/// Why a payment waits for the user to release another app's failed attempt.
+const RELEASE_HELD: &str = "the lifetime limit has no room while another app's failed attempt holds it: the user can release that attempt (reserved_by_other_apps)";
+
+/// Why a payment waits on usage that doesn't follow the Allowance's terms.
+const INCONSISTENT_USAGE: &str =
+    "the Allowance's usage doesn't follow its terms: the user ends it and sets up a new one";
+
+/// Why an accepted Allowance waits for its conflict check.
+const CONFLICT_CHECK: &str = "the Allowance waits for its conflict check";
+
+/// Why this app doesn't pay under an Allowance it hasn't taken up the execution of.
+const NOT_TAKEN_UP: &str = "this app hasn't taken up the Allowance's execution";
+
+/// Why this app doesn't pay under a grant it holds from a backup taken before its consent.
+const CONSENT_NOT_ON_DEVICE: &str =
+    "this app's grant is held, but its consent isn't on this device";
+
+/// A wait that a later read clears; `why` names it.
+fn read_again(why: &'static str) -> Refusal {
+    Refusal::NotNow(crate::NotNowReason::ReadAgain(why))
+}
+
+/// A hold on this app's execution of the Allowance that the user or the host acts on;
+/// `why` names it.
+fn execution_held(why: &'static str) -> Refusal {
+    Refusal::HeldForUser(crate::HeldForUserReason::AllowanceExecutionHeld(why))
+}
 
 /// The refusal for an Allowance taken off this app's consent list for `reason`: final, as no
 /// later read puts it back (Paykit spec 8.3, "Executor", "Ends reach the executor").
@@ -300,9 +465,12 @@ impl AllowanceReservation {
                     accounts_for_attempt(ledger, claim.claim_key, attempt.attempt_id)
                 })
             {
-                return Err(held(
+                // A claim gone, or an attempt another app or the user made outside the ledger:
+                // no read adds it, so it is shown, and the user may pay by hand.
+                return Err(execution_held(
                     "an earlier attempt is not accounted for under this Allowance",
-                ));
+                )
+                .into());
             }
         }
         Ok(())
@@ -325,7 +493,7 @@ impl AllowanceReservation {
             .as_ref()
             .is_some_and(|t| self.checked.at < t.ms())
         {
-            return Err(held("the Allowance's terms aren't active yet"));
+            return Err(terms_not_active());
         }
         if terms
             .per_payment_amount
@@ -398,48 +566,33 @@ impl AllowanceReservation {
         let mut checked = self.checked;
         let amount = entry
             .paid_amount()?
-            .ok_or_else(|| held("the transfer amount is unknown"))?;
+            .ok_or_else(|| not_automatic("the transfer amount is unknown"))?;
         let endpoint = entry.destination.endpoint_id()?;
         checked
             .terms
             .check_payment(&amount, &endpoint, checked.at)
             .map_err(|refused| match refused {
                 TermsRefusal::NotActive if expired => Refusal::AllowanceEnded.into(),
-                TermsRefusal::NotActive => held("the Allowance's terms aren't active yet"),
+                TermsRefusal::NotActive => terms_not_active(),
                 _ => not_automatic("the transfer does not satisfy the Allowance terms"),
             })?;
-        check_limits(&checked.terms, &checked.usage, &amount.value).map_err(|limit| {
-            let why = format!("the {} limit has no room", limit.as_str());
-            // The per-payment range never makes room for this payment, nor the lifetime limit
-            // once nothing is reserved; a reservation's release, a later period and a repair
-            // of usage of other terms do.
-            // Releasing every releasable attempt would make room for this payment.
-            let release_fits = || {
-                let Some(cap) = &checked.terms.lifetime_amount_limit else {
-                    return false;
-                };
-                checked.facts.releasable().is_some_and(|freed| {
-                    checked
-                        .usage
-                        .lifetime()
-                        .scaled()
-                        .saturating_sub(freed)
-                        .checked_add(amount.value.scaled())
-                        .is_some_and(|sum| sum <= cap.scaled())
-                })
-            };
-            match limit {
-                LimitKind::PerPayment => not_automatic(&why),
-                // Room another app's failed attempt holds comes back once the user releases
-                // it, when that makes room for this payment, and room a reserved entry holds
-                // once it is released.
-                LimitKind::Lifetime if release_fits() => held(
-                    "the lifetime limit has no room while another app's failed attempt holds it: the user can release that attempt (reserved_by_other_apps)",
-                ),
-                LimitKind::Lifetime if checked.usage.reserved() == 0 => not_automatic(&why),
-                _ => held(&why),
-            }
-        })?;
+        if let Err(limit) = check_limits(&checked.terms, &checked.usage, &amount.value) {
+            let journal = Box::pin(app.journal()).await?;
+            let room = lifetime_room(
+                &checked.terms,
+                &checked.usage,
+                self_freeing(&checked.reserved_before_call, |attempt| {
+                    past_the_call(&journal, attempt)
+                }),
+                checked.facts.releasable().unwrap_or(0),
+                &amount.value,
+            );
+            return Err(limit_refusal(
+                limit,
+                period_never_fits(&checked.terms, &amount.value),
+                room,
+            ));
+        }
         checked.ledger = reserved_ledger(
             &checked.terms,
             checked.ledger,
@@ -607,8 +760,11 @@ impl Paykit {
         record: &[u8; 32],
         payee: &[u8; 32],
     ) -> Result<AllowanceReservation> {
-        let stopped =
-            || held("the accepted executor grant, ledger or wallet history is unavailable");
+        let stopped = || {
+            crate::PaykitError::from(execution_held(
+                "the accepted executor grant, ledger or wallet history is unavailable",
+            ))
+        };
         let view = self.allowance(record).await?;
         let consent = Box::pin(self.consent_state(record)).await?;
         if let Some(refusal) = standing(self, &view, consent).refusal(&view.hold) {
@@ -624,7 +780,8 @@ impl Paykit {
             .executor_replies_pending(record, payee, &view.allowance_id, false)
             .await?
         {
-            return Err(held("a reply to the Allowance waits to be written"));
+            // A reply's mark can outlive its delivery: shown, not waited on.
+            return Err(execution_held("a reply to the Allowance waits to be written").into());
         }
         let target = ledger_target(payee, &view.allowance_id);
         if self.pause_at(record).await?.blocks_automatic()
@@ -633,7 +790,7 @@ impl Paykit {
                 .await?
                 .blocks_automatic()
         {
-            return Err(held("the Allowance's records are paused or divergent"));
+            return Err(Refusal::HeldForUser(crate::HeldForUserReason::HeldFromAutomatic).into());
         }
         let checked = self
             .executor_base(record, LedgerRead::Inventory)
@@ -790,18 +947,209 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_spend_limit_refusal_holds_for_the_user_whatever_limit_fails_first() {
+        let refusal =
+            |limit, period_never, room| limit_refusal(limit, period_never, room).refusal().cloned();
+        let held = Some(execution_held(RELEASE_HELD));
+        // Period cap 50, lifetime cap 100, 60 spent in earlier periods and 30 held by another
+        // app's failed attempt: a payment of 30 fails the period amount first, but only the
+        // user's release makes lifetime room, which no period roll gives.
+        for limit in [
+            LimitKind::PeriodAmount,
+            LimitKind::PeriodCount,
+            LimitKind::Lifetime,
+        ] {
+            assert_eq!(
+                refusal(limit, false, LifetimeRoom::Manual),
+                held,
+                "{limit:?}"
+            );
+        }
+        // A period that rolls or a reservation that ends gives the room back.
+        assert_eq!(
+            refusal(LimitKind::PeriodAmount, false, LifetimeRoom::Automatic),
+            Some(Refusal::NotNow(crate::NotNowReason::AllowanceLimit {
+                limit: "period_amount".into()
+            }))
+        );
+        assert_eq!(
+            refusal(LimitKind::PeriodAmount, false, LifetimeRoom::Never),
+            Some(Refusal::NotAutomatic(
+                "the period_amount limit has no room".into()
+            ))
+        );
+    }
+
+    #[test]
+    fn test_spend_lifetime_room_frees_only_what_is_still_reserved() {
+        use paykit_lib::allowances::{
+            usage, AllowanceTerms, AttemptEvidence, ClaimState, EntryOutcome, Ledger, LedgerEntry,
+        };
+        use paykit_lib::{AttemptId, Decimal};
+        let terms = AllowanceTerms::from_json(&serde_json::json!({
+            "asset": "btc", "lifetime_amount_limit": "100", "period_limits": [],
+            "per_payment_amount": null, "active_from": null, "expires_at": null,
+            "allowed_payment_endpoint_identifiers": null
+        }))
+        .unwrap();
+        let entry = |id: u8, value: &str, outcome| LedgerEntry {
+            obligation: [id; 32],
+            attempt_id: AttemptId::from_bytes([id; 16]),
+            value: Decimal::parse(value).unwrap(),
+            asset: paykit_lib::Asset::parse("btc").unwrap(),
+            at: 1_000,
+            outcome,
+        };
+        let evidence = |claim, paid, never_dispatched| AttemptEvidence {
+            claim: Some(claim),
+            paid,
+            never_dispatched,
+        };
+        // `at_method`: the attempts the method's history shows or the journal holds at or
+        // past the call.
+        let room_with = |entries: &[LedgerEntry],
+                         facts: &[(u8, AttemptEvidence)],
+                         at_method: &[u8],
+                         releasable: &str,
+                         value: &str| {
+            let ledger = Ledger {
+                entries: entries.to_vec(),
+                ..Ledger::empty(
+                    [5; 32],
+                    AllowanceId::parse("d0efffb7-191b-4709-b6c7-e343af5500b4").unwrap(),
+                    [9; 32],
+                )
+            };
+            let facts: std::collections::HashMap<_, _> = facts
+                .iter()
+                .map(|(id, fact)| (AttemptId::from_bytes([*id; 16]), *fact))
+                .collect();
+            let used = usage(&terms, &ledger, &facts, 2_000).unwrap();
+            let at_method: Vec<_> = at_method
+                .iter()
+                .map(|id| AttemptId::from_bytes([*id; 16]))
+                .collect();
+            // As the reconciliation lists them: counted reserved, not in the history.
+            let before_call: Vec<_> = ledger
+                .entries
+                .iter()
+                .filter(|entry| {
+                    paykit_lib::allowances::counts(
+                        entry,
+                        facts.get(&entry.attempt_id).copied().unwrap_or_default(),
+                    ) == paykit_lib::allowances::Counting::Reserved
+                })
+                .map(|entry| (entry.attempt_id, entry.value.scaled()))
+                .collect();
+            lifetime_room(
+                &terms,
+                &used,
+                self_freeing(&before_call, |attempt| at_method.contains(attempt)),
+                Decimal::parse(releasable).unwrap().scaled(),
+                &Decimal::parse(value).unwrap(),
+            )
+        };
+        let room =
+            |entries: &[LedgerEntry],
+             facts: &[(u8, AttemptEvidence)],
+             releasable: &str,
+             value: &str| room_with(entries, facts, &[], releasable, value);
+        use LifetimeRoom::{Automatic, Manual, Never};
+        // 70 dispatched and failed by another app, spent for good, and 10 reserved: 40
+        // never fits; 25 fits once the 10 come back.
+        let entries = [entry(1, "70", None), entry(2, "10", None)];
+        let facts = [
+            (
+                1,
+                evidence(ClaimState::Failed { by_owner: false }, false, false),
+            ),
+            (2, evidence(ClaimState::Open, false, false)),
+        ];
+        assert_eq!(room(&entries, &facts, "0", "40"), Never);
+        assert_eq!(room(&entries, &facts, "0", "25"), Automatic);
+        // The 10 reserved, once at the method's call, are spent whatever they answer: 25
+        // never fits.
+        assert_eq!(room_with(&entries, &facts, &[2], "0", "25"), Never);
+        // 70 the method's history shows paid while its claim is still open, and 10 reserved
+        // before the call: the 70 are spent and at the method, and that takes nothing from
+        // the 10, which may still come back. 25 waits for them; 40 never fits.
+        let paid_by_history = [
+            (1, evidence(ClaimState::Open, true, false)),
+            (2, evidence(ClaimState::Open, false, false)),
+        ];
+        assert_eq!(
+            room_with(&entries, &paid_by_history, &[1], "0", "25"),
+            Automatic
+        );
+        assert_eq!(
+            room_with(&entries, &paid_by_history, &[1], "0", "40"),
+            Never
+        );
+        // 70 the method reported failed, its claim's outcome not written yet: still counted
+        // reserved, but at the method, so nothing gives it back and 50 never fits.
+        let failed_unwritten = [(1, evidence(ClaimState::Open, false, false))];
+        assert_eq!(
+            room_with(&entries[..1], &failed_unwritten, &[1], "0", "50"),
+            Never
+        );
+        assert_eq!(
+            room_with(&entries[..1], &failed_unwritten, &[], "0", "50"),
+            Automatic
+        );
+        // 70 paid on the method with its ledger outcome unwritten, and 10 in flight: the 70
+        // are spent, so 40 never fits.
+        let facts = [
+            (1, evidence(ClaimState::Open, true, false)),
+            (2, evidence(ClaimState::Open, false, false)),
+        ];
+        assert_eq!(room(&entries, &facts, "0", "40"), Never);
+        // 80 paid, 50 released and 10 reserved: the released 50 frees nothing more, so 25
+        // never fits, and 15 fits once the 10 come back.
+        let entries = [
+            entry(1, "80", Some(EntryOutcome::Done)),
+            entry(2, "50", None),
+            entry(3, "10", None),
+        ];
+        let facts = [
+            (
+                2,
+                evidence(ClaimState::Failed { by_owner: false }, false, true),
+            ),
+            (3, evidence(ClaimState::Open, false, false)),
+        ];
+        assert_eq!(room(&entries, &facts, "0", "25"), Never);
+        assert_eq!(room(&entries, &facts, "0", "15"), Automatic);
+        // 60 paid, 25 in flight and 10 held by another app's failed attempt the user can
+        // release: 40 needs both, so the user is asked; 30 fits once the 25 come back; 50
+        // never fits.
+        let entries = [
+            entry(1, "60", Some(EntryOutcome::Done)),
+            entry(2, "25", None),
+            entry(3, "10", None),
+        ];
+        let facts = [
+            (2, evidence(ClaimState::Open, false, false)),
+            (
+                3,
+                evidence(ClaimState::Failed { by_owner: false }, false, false),
+            ),
+        ];
+        assert_eq!(room(&entries, &facts, "10", "40"), Manual);
+        assert_eq!(room(&entries, &facts, "10", "30"), Automatic);
+        assert_eq!(room(&entries, &facts, "10", "50"), Never);
+    }
+
+    #[test]
     fn test_spend_pending_conflict_check_waits_and_stops_stay_final() {
         use crate::allowances::shown_status;
         // An accepted Allowance whose record could still establish a conflict waits for
         // the check, with its own reason, not as one not accepted yet.
         assert_eq!(
-            status_standing(shown_status(AllowanceStatus::Accepted, true)),
-            Some(Standing::Temporary(
-                "the Allowance waits for its conflict check"
-            ))
+            status_standing(shown_status(AllowanceStatus::Accepted, true), true),
+            Some(Standing::Temporary(execution_held(CONFLICT_CHECK)))
         );
         assert_eq!(
-            status_standing(shown_status(AllowanceStatus::Accepted, false)),
+            status_standing(shown_status(AllowanceStatus::Accepted, false), true),
             None
         );
         // An ended, rejected or conflicted record stays final with conflict evidence still
@@ -812,7 +1160,7 @@ mod tests {
             (AllowanceStatus::Conflicted, Refusal::AllowanceConflicted),
         ] {
             assert_eq!(
-                status_standing(shown_status(status, true)),
+                status_standing(shown_status(status, true), true),
                 Some(Standing::Final(refusal))
             );
         }

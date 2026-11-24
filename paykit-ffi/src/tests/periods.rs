@@ -107,7 +107,11 @@ impl Wallets {
         ))
         .await?;
         // A newly joined app needs its first listing before it can show requests (Paykit spec 8.1).
-        refusal(payer.recurring_requests().await, "needs_user", "not_now")?;
+        refusal(
+            payer.recurring_requests().await,
+            "retry_later",
+            "records_not_listed",
+        )?;
         receive(&payer).await?;
         let shop = world.identity("shop")?;
         let mut issuer = Box::pin(signer::serving(world, "shop")).await?;
@@ -572,13 +576,28 @@ async fn payment_guards(world: &World) -> TestResult {
                 PeriodPriceChoice::RequestedAmount,
             )
             .await,
-        wallet.pay_period_under_allowance(id.clone(), period).await,
+        wallet
+            .pay_period_under_allowance(id.clone(), period.clone())
+            .await,
     ] {
         assert!(matches!(
             result,
             Err(WalletError::PaymentMethodWithoutLookup)
         ));
     }
+    // A bad price choice is the host's input error before the method's lookup is checked.
+    let choice = wallet
+        .pay_period_automatically(
+            id.clone(),
+            period,
+            PeriodPriceChoice::QuoteFor {
+                endpoint: "bad/endpoint".into(),
+            },
+        )
+        .await;
+    assert!(
+        matches!(choice, Err(WalletError::InvalidInput { field }) if field == "endpoint identifier")
+    );
     for period in [
         BillingPeriod {
             starts_at: 1,
@@ -608,4 +627,72 @@ async fn payment_guards(world: &World) -> TestResult {
 fn test_period_payments_validate_bounds_and_require_lookup() {
     run(Backend::Scripted, payment_guards);
     run(Backend::Service, payment_guards);
+}
+
+async fn running_pay(world: &World) -> TestResult {
+    let w = Box::pin(Wallets::open(world, false)).await?;
+    let id = w.send_request("btc", false).await?;
+    receive(&w.payer).await?;
+    w.account.park.store(true, Ordering::SeqCst);
+    // The host's `pay` is entered and keeps running after the wallet stops waiting for it.
+    {
+        let mut paying = Box::pin(w.payer.pay_request(id, PaymentOptions::default()));
+        tokio::select! {
+            _ = w.account.entered.notified() => {},
+            _ = &mut paying => return Err("the payment never reached the method".into()),
+        }
+    }
+    let entries = w.payer.payments().await?;
+    let [entry] = entries.as_slice() else {
+        return Err("expected one payment".into());
+    };
+    let attempt = entry.attempt_id.clone();
+    // A resume reports the running attempt and pays nothing again: pending while it counts as
+    // in flight, paid once the host's lookup decides, whichever this runner's speed gives
+    // (Paykit spec 7.2).
+    let resumed = Box::pin(w.payer.resume_payments()).await?;
+    let reported: Vec<_> = resumed
+        .iter()
+        .filter(|outcome| match outcome {
+            PaymentOutcome::Pending { attempt_id } | PaymentOutcome::Paid { attempt_id, .. } => {
+                *attempt_id == attempt
+            }
+            _ => false,
+        })
+        .collect();
+    assert_eq!(reported.len(), 1, "one report for the running attempt");
+    assert_eq!(w.account.calls.load(Ordering::SeqCst), 1);
+    // The host's `pay` answers; the payment is recorded paid with that single charge.
+    w.account.park.store(false, Ordering::SeqCst);
+    w.account.finish.notify_one();
+    let mut paid = false;
+    for _ in 0..200 {
+        Box::pin(w.payer.resume_payments()).await?;
+        // Recorded paid: the method reported this payment made, not only a finished entry,
+        // which a recorded failure is too.
+        if w.payer.payments().await?.iter().any(|p| {
+            p.attempt_id == attempt
+                && p.paid_by_method
+                && matches!(
+                    p.stage,
+                    crate::PaymentStage::RailPaid
+                        | crate::PaymentStage::AcceptanceOwed
+                        | crate::PaymentStage::Finished
+                )
+        }) {
+            paid = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(paid, "the running payment was never recorded");
+    assert_eq!(w.account.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(w.account.count(), 1);
+    Ok(())
+}
+
+#[test]
+fn test_payments_resume_reports_a_pay_still_running() {
+    run(Backend::Scripted, running_pay);
+    run(Backend::Service, running_pay);
 }

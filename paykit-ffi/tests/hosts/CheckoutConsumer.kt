@@ -60,10 +60,11 @@ internal open class CheckoutMethod(private val ledger: File) : ReceiptReader() {
         stored()?.takeIf { proofJson.contentEquals(originalProof(it)) }?.toByteArray()
 }
 
+// Read until the feed is done and every record the app's scopes read is listed (Paykit spec 6).
 internal suspend fun NativeWallet.finishReceive() {
     repeat(8) {
         val report = receive()
-        if (!report.more) return
+        if (!report.more && report.recordsUnlisted == null) return
     }
     error("wallet did not complete its feed")
 }
@@ -120,8 +121,8 @@ private suspend fun restoreCheckout(
             try {
                 wallet.confirmRestoredRegistrations(emptyList())
                 error("the stale restore question was accepted")
-            } catch (error: WalletException.NeedsUser) {
-                checkNotNull(error.failure.refusal()).use { check(it.kind() is RefusalKind.NotNow) }
+            } catch (error: WalletException.NotSent) {
+                checkNotNull(error.failure.refusal()).use { check(it.kind() is RefusalKind.Usage) }
             }
             check(wallet.restoreState().registrations == state.registrations)
             suspend fun interruptConfirmation(failure: EnrollmentStore.AnswerFailure) {
@@ -167,8 +168,8 @@ private suspend fun restoreCheckout(
                 check(!report.payerSkipped && wallet.restoreState().registrations.isEmpty())
                 if (action == "doubt") {
                     val charged = method.chargedAttempt()
-                    val doubt = report.doubtful.single { charged in it.attempts }
-                    wallet.resolveConfirmedAttempt(doubt.obligation, charged, ConfirmedResolution.PAID)
+                    val attempt = report.doubtful.flatMap { it.attempts }.single { it.attemptId() == charged }
+                    wallet.resolveConfirmedAttempt(attempt, ConfirmedResolution.PAID)
                     check(wallet.reconcile().doubtful.isEmpty() && method.calls.get() == 1)
                 } else {
                     check(report.doubtful.isEmpty() && method.calls.get() == 0)
@@ -206,7 +207,10 @@ private suspend fun NativeWallet.followLoss(fixture: CheckoutFixture, second: Bo
     fixture.replaceLostProvider(second)
     repeat(12) {
         val read = receive()
-        if (read.generation > before && !read.stopped && !read.more) return
+        // Done once the records are listed under the new certificate, which waits for its
+        // scope keys first: reconciliation refuses until both (Paykit spec 6).
+        if (read.generation > before && !read.stopped && !read.more && read.recordsUnlisted == null &&
+            !read.scopeKeysAwaited) return
     }
     error("wallet did not follow the replacement provider")
 }
@@ -215,7 +219,7 @@ private suspend fun NativeWallet.lossReport(): WalletReconciliation {
     repeat(12) {
         try {
             return reconcile()
-        } catch (error: WalletException.NeedsUser) {
+        } catch (error: WalletException.RetryLater) {
             if (error.failure.refusal()?.kind() !is RefusalKind.NotNow) throw error
         }
     }
@@ -229,7 +233,11 @@ private suspend fun NativeWallet.reviewLoss(
         val report = lossReport()
         val row = report.doubtful.single { it.requestHash.contentEquals(request.requestHash) }
         check(!report.payerSkipped && row.payee.contentEquals(request.payee) && row.attempts.isEmpty())
-        check(row.obligation.size == 32 && row.beforeLoss != null)
+        val loss = checkNotNull(row.beforeLoss)
+        val members = checkNotNull(recoveryMembers())
+        check(row.obligation.size == 32 && members.loss.generation == loss.generation)
+        check(members.loss.declaredAtMs == loss.declaredAtMs && members.loss.uncertainUntilMs == loss.uncertainUntilMs)
+        check(members.loss.payment == null)
         return row
     }
     val first = shown()
@@ -276,7 +284,7 @@ private fun driveCheckout(recovery: CheckoutReview, restore: String? = null) = r
                 val secret = ByteArray(32) { 9 }
                 val enrolled = WalletEnrollment(store).use { owner ->
                     val info = owner.beginEnrollment(reference)
-                    val original = owner.prepareEnrollment(reference, "wallet.example", ByteArray(32) { 8 }, info.appRecordPath + ":rw", secret, WalletScopes(pay = true))
+                    val original = owner.prepareEnrollment(reference, "wallet.example", ByteArray(32) { 8 }, info.appRecordPath + ":rw", secret, WalletScopes(pay = true, recovery = recovery == CheckoutReview.PROVIDER_LOSS))
                     owner.acceptApproval(reference, fixture.identity(), fixture.approve(original.signedRequest, secret))
                     info
                 }
@@ -445,6 +453,124 @@ private fun throwingCallbacks() {
     }
 }
 
+/// A host whose callbacks die with an Error, not an Exception, each naming itself: the store,
+/// the Homeserver and the payment method.
+private class DyingCallbacks : ReceiptReader(), WalletStore {
+    private fun die(callback: String): Nothing = throw AssertionError(callback)
+    override fun get(namespace: String, key: ByteArray): ByteArray? = die("store.get")
+    override fun scan(namespace: String, prefix: ByteArray, after: ByteArray?, limit: UInt): List<StoreEntry> =
+        die("store.scan")
+    override fun acquire(namespace: String, owner: ByteArray): Boolean = die("store.acquire")
+    override fun release(namespace: String, owner: ByteArray) = die("store.release")
+    override fun commitIf(namespace: String, owner: ByteArray, writes: List<StoreWrite>): Boolean = die("store.commit_if")
+    override suspend fun get(identity: ByteArray, path: String): ByteArray? = die("home.get")
+    override suspend fun put(identity: ByteArray, path: String, bytes: ByteArray) = die("home.put")
+    override suspend fun delete(identity: ByteArray, path: String) = die("home.delete")
+    override fun selectEndpoints(candidates: List<EndpointCandidate>, amount: Amount?): SelectedEndpoints =
+        die("method.select_endpoints")
+    override fun transfer(endpoint: String, payload: String, amount: Amount): MethodTransfer = die("method.transfer")
+    override fun settlementId(endpoint: String, proofJson: ByteArray): ByteArray? = die("method.settlement_id")
+    override suspend fun pay(payment: MethodPayment): MethodOutcome = die("method.pay")
+    override suspend fun payment(attemptId: String): MethodOutcome? = die("method.payment")
+    override suspend fun allowanceHistory(payer: ByteArray): List<MethodDispatch>? = die("method.allowance_history")
+    override suspend fun verify(proof: MethodProof): ULong? = die("method.verify")
+}
+
+/// A method whose `pay` dies with an Error after the attempt is journaled, and whose lookup
+/// can't tell yet.
+private class DyingPay : ReceiptReader() {
+    override suspend fun pay(payment: MethodPayment): MethodOutcome = throw AssertionError("method.pay")
+    override suspend fun payment(attemptId: String): MethodOutcome? = MethodOutcome.Pending
+}
+
+/// Pay a checkout through `DyingPay`: the attempt stays open in the journal, possibly sent.
+private suspend fun payThroughADyingMethod() {
+    val store = EnrollmentStore()
+    enrolledTestCheckout(store, DyingPay(), testDeclaration, testEndpoints).use { checkout ->
+        val reference = ByteArray(16) { 41 }
+        val secret = ByteArray(32) { 9 }
+        WalletEnrollment(store).use { owner ->
+            val info = owner.beginEnrollment(reference)
+            val original = owner.prepareEnrollment(reference, "wallet.example", ByteArray(32) { 8 },
+                info.appRecordPath + ":rw", secret, WalletScopes(pay = true))
+            owner.acceptApproval(reference, checkout.identity(), checkout.approve(original.signedRequest, secret))
+        }
+        checkout.host().use { host ->
+            host.completeEnrollment(reference).use { wallet ->
+                wallet.finishReceive()
+                wallet.allowConnect(checkout.payee())
+                val request = checkout.sendCheckout()
+                wallet.finishReceive()
+                val result = wallet.payRequest(request, PaymentOptions(null, null, false, false, emptyList()))
+                check((result.decision as? PaymentDecision.Outcome)?.outcome !is PaymentOutcome.Paid)
+                val entry = wallet.payments().single()
+                check(entry.stage == PaymentStage.PAYING && !entry.paidByMethod)
+                wallet.shutdown()
+            }
+        }
+        checkout.finish()
+    }
+}
+
+/// Whether `dyingCallbacks` ran to its end, which the program checks before it exits.
+private var dyingCallbacksChecked = false
+
+/// A callback that dies with an Error answers Paykit as unknown, never as success, even when
+/// the host's own JNA callback handler throws in turn: a store write isn't read as committed
+/// or released, and a `pay` stays possibly sent. The platform still reports each Error once:
+/// JNA's callback handler for a sync callback, the default uncaught handler for an async one.
+private fun dyingCallbacks() = runBlocking {
+    val reported = java.util.concurrent.ConcurrentHashMap<String, Int>()
+    val count = { e: Throwable -> (e as? AssertionError)?.message?.let { reported.merge(it, 1, Int::plus) } != null }
+    val previousCallbackHandler = com.sun.jna.Native.getCallbackExceptionHandler()
+    val previousThreadHandler = Thread.getDefaultUncaughtExceptionHandler()
+    val handlerFailed = "host callback handler failed"
+    val handlerFailures = AtomicInteger()
+    com.sun.jna.Native.setCallbackExceptionHandler { callback, e ->
+        if (!count(e)) previousCallbackHandler.uncaughtException(callback, e)
+        // A host handler that throws in turn can't undo the answer Paykit already has: the
+        // store's `release` is still read as failed, never as released.
+        if ((e as? AssertionError)?.message == "store.release") throw IllegalStateException(handlerFailed)
+    }
+    Thread.setDefaultUncaughtExceptionHandler { thread, e ->
+        if (e is IllegalStateException && e.message == handlerFailed) {
+            handlerFailures.incrementAndGet()
+        } else if (!count(e)) {
+            previousThreadHandler?.uncaughtException(thread, e)
+        }
+    }
+    try {
+        val host = DyingCallbacks()
+        val proof = """{"settlement":"a1"}""".toByteArray()
+        val answered = testMethodAnswers(host, testDeclaration, testEndpoints, proof)
+        check(answered.selected == null && answered.selectionFailure == "method_unknown")
+        check(answered.transferAmount == null && answered.settlementId == null)
+        check(testCallbackAnswers(host, host, host) == listOf(
+            "store.get=unknown", "store.scan=unknown", "store.acquire=unknown", "store.commit_if=unknown",
+            "store.release=unknown", "home.get=unknown", "home.put=unknown", "home.delete=unknown",
+            "method.pay=possibly_sent", "method.payment=unknown", "method.allowance_history=unknown",
+            "method.verify=unknown",
+        ))
+        payThroughADyingMethod()
+        // Each callback's Error was reported, once per call: `pay` died twice, here and in the
+        // payment above.
+        val expected = listOf(
+            "store.get", "store.scan", "store.acquire", "store.commit_if", "store.release",
+            "method.select_endpoints", "method.transfer", "method.settlement_id",
+            "home.get", "home.put", "home.delete", "method.payment", "method.allowance_history",
+            "method.verify",
+        ).associateWith { 1 } + ("method.pay" to 2)
+        withTimeout(10_000) {
+            while (reported != expected) delay(10)
+        }
+        check(handlerFailures.get() <= 1)
+    } finally {
+        com.sun.jna.Native.setCallbackExceptionHandler(previousCallbackHandler)
+        Thread.setDefaultUncaughtExceptionHandler(previousThreadHandler)
+    }
+    dyingCallbacksChecked = true
+}
+
 /// Text the switch gave never leaves the bindings: not in a message, a description or a reason.
 private fun outsideTextStaysInside() {
     val sentinel = "SENTINEL-outside-text"
@@ -467,8 +593,11 @@ object CheckoutConsumer {
         val restore = System.getenv("PAYKIT_TEST_RESTORE")
         if (restore == null) outsideTextStaysInside()
         if (restore == null) throwingCallbacks()
+        if (restore == null) dyingCallbacks()
         if (restore == null) CheckoutReview.entries.forEach { driveCheckout(it) }
         if (restore == null) driveConsumers()
         else driveCheckout(CheckoutReview.ORDINARY, restore)
+        // The program fails if the check of dying callbacks was left out.
+        check(restore != null || dyingCallbacksChecked)
     }
 }

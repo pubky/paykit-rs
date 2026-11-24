@@ -63,8 +63,8 @@ func checkPayee(fixture: CheckoutFixture, wallet: NativeWallet) async throws {
     do {
         _ = try await seller.payeeActivity()
         preconditionFailure("read activity before the first listing")
-    } catch let WalletError.NeedsUser(failure) {
-        precondition(failure.code() == "not_now")
+    } catch let WalletError.RetryLater(failure) {
+        precondition(failure.code() == "records_not_listed")
     }
     try await seller.finishReceive()
     try await checkSentRequest(fixture: checkout, wallet: seller, draft: draft)

@@ -170,8 +170,9 @@ impl WalletFailure {
     pub fn settlement_bucket(&self) -> Option<u16> {
         self.settlement_bucket
     }
-    /// For `settlement_warning_unsaved`, what became of the bucket's warning in the store:
-    /// not saved, or saved or not, unknown. `None` for every other code.
+    /// For `settlement_warning_unsaved`, what this call did to the bucket's warning in the
+    /// store: wrote none, or can't tell the outcome of its lookup or its write. `None` for
+    /// every other code.
     pub fn settlement_warning_outcome(&self) -> Option<SettlementWarningOutcome> {
         self.settlement_warning
     }
@@ -333,13 +334,18 @@ pub(crate) fn refusal_category(kind: &crate::RefusalKind) -> (Category, &'static
         K::FloorHeld => (NeedsUser, "floor_held"),
         // Confirmed with `confirm_allowance_executor` once the user has seen the Allowance.
         K::AllowanceConfirmationNeeded { .. } => (NeedsUser, "allowance_confirmation_needed"),
-        // The SDK gives its reason as text only, and the reasons span every case, from a wait
-        // to an alarm: shown to the user, it is never retried by itself.
-        K::NotNow => (NeedsUser, "not_now"),
+        // The user answers first, or is shown a hold on one record; every reason of this
+        // refusal comes as `NeedsUser`.
+        K::HeldForUser { reason } => (NeedsUser, held_for_user_code(reason)),
+        // A wait: every reason of this refusal comes as `RetryLater`.
+        K::NotNow { reason } => (RetryLater, not_now_code(reason)),
+        // A recovery step of the wallet as a whole: every reason comes as `Recovery`.
+        K::RecoveryNeeded { reason } => (Recovery, recovery_code(reason)),
         K::WaitingForList {
             device_clock_behind: false,
         } => (RetryLater, "waiting_for_list"),
-        // The list expired only by the service's time: the device clock is behind it.
+        // The list expired only by the service's time: the device clock is behind it, and the
+        // user is told so (Paykit spec 8.4), even if a newer list clears it later.
         K::WaitingForList {
             device_clock_behind: true,
         } => (NeedsUser, "waiting_for_list_clock_behind"),
@@ -378,6 +384,58 @@ pub(crate) fn refusal_category(kind: &crate::RefusalKind) -> (Category, &'static
         // holds that obligation for good; the refusal doesn't say which yet.
         K::RecordHeld => (NeedsUser, "record_held"),
         K::CertificateRefused => (Recovery, "certificate_refused"),
+    }
+}
+
+/// The stable code of each wait.
+fn not_now_code(reason: &crate::NotNowKind) -> &'static str {
+    use crate::NotNowKind as R;
+    match reason {
+        R::RecordsUnlisted { .. } => "records_unlisted",
+        R::RecordsNotListed => "records_not_listed",
+        R::ScopeKeysAwaited => "scope_keys_awaited",
+        R::ValueAwaitsKey => "value_awaits_key",
+        R::FloorUnreadable => "floor_unreadable",
+        R::FloorRaiseWaiting => "floor_raise_waiting",
+        R::NoServiceTime => "no_service_time",
+        R::ReadAgain => "read_again",
+        R::EarlierWriteUnresolved => "earlier_write_unresolved",
+        R::CallAgain => "call_again",
+        R::AllowanceLimit { .. } => "allowance_limit",
+        R::Unknown => "not_now",
+    }
+}
+
+/// The stable code of each answer the user gives first.
+fn held_for_user_code(reason: &crate::HeldForUserKind) -> &'static str {
+    use crate::HeldForUserKind as R;
+    match reason {
+        R::CounterpartyBlocked => "counterparty_blocked",
+        R::HeldFromAutomatic => "held_from_automatic",
+        R::ActivityBaseChanged => "activity_base_changed",
+        R::CancellationOrderUnknown => "cancellation_order_unknown",
+        R::PublicationConflict => "publication_conflict",
+        R::RecordUnreadable => "record_unreadable",
+        R::FloorRecordUnreadable => "floor_record_unreadable",
+        R::AllowanceNotResumed => "allowance_not_resumed",
+        R::AllowanceExecutionHeld => "allowance_execution_held",
+        R::AttemptCheck => "attempt_check",
+        R::ReloadRequired => "reload_required",
+        R::SwitchClient => "switch_client_hold",
+        R::Unresolved => "held_unresolved",
+        R::PendingProposalsFull => "pending_proposals_full",
+        R::AllowanceLedgerFull => "allowance_ledger_full",
+        R::AnswerOutcomeUnknown => "answer_outcome_unknown",
+        R::Unknown => "held_for_user",
+    }
+}
+
+/// The stable code of each recovery step.
+fn recovery_code(reason: &crate::RecoveryNeededKind) -> &'static str {
+    use crate::RecoveryNeededKind as R;
+    match reason {
+        R::PayerPassOwed => "payer_pass_owed",
+        R::Unknown => "recovery_needed",
     }
 }
 
@@ -666,9 +724,12 @@ impl From<PaykitError> for WalletError {
 /// (`settlement_warning_unsaved`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum SettlementWarningOutcome {
-    /// The warning wasn't saved, or its status couldn't be read: nothing of it was applied.
+    /// This call wrote no warning. When it was the lookup of an earlier warning that failed,
+    /// whether one is saved already is unverified: the host shows the bucket's warning if it
+    /// has yet to, either way.
     Failed,
-    /// The store can't tell whether the warning was saved: it may already be.
+    /// The store can't tell the outcome of this call's lookup or write of the warning: it may
+    /// be saved, by this call or an earlier one.
     OutcomeUnknown,
 }
 

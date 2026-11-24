@@ -229,6 +229,20 @@ fn test_payee_inputs_preserve_choices_and_reject_malformed_fields() -> TestResul
             "recurrence",
         ),
         (
+            // A first period past the wire's time range (Paykit wire 4.4).
+            RequestDraft {
+                recurrence: Some(RecurrenceRule {
+                    every: 10_000,
+                    unit: RecurrenceUnit::Year,
+                    anchor: 0,
+                    starts_at: 0,
+                    ends_at: None,
+                }),
+                ..draft()
+            },
+            "recurrence",
+        ),
+        (
             RequestDraft {
                 accepted_endpoint_identifiers: Some(vec!["bad/id".into()]),
                 ..draft()
@@ -250,7 +264,12 @@ fn test_payee_inputs_preserve_choices_and_reject_malformed_fields() -> TestResul
     ] {
         invalid(sdk::RequestDraft::try_from(input), field);
     }
-    for bytes in [b"[]".as_slice(), b"{", br#"{"nested":{"x":1,"x":2}}"#] {
+    for bytes in [
+        b"[]".as_slice(),
+        b"{",
+        br#"{"nested":{"x":1,"x":2}}"#,
+        br#"{"order":18446744073709551617}"#,
+    ] {
         invalid(
             sdk::RequestDraft::try_from(RequestDraft {
                 metadata_json: Some(bytes.to_vec()),
@@ -285,6 +304,26 @@ fn test_payee_inputs_preserve_choices_and_reject_malformed_fields() -> TestResul
             }),
             field,
         );
+    }
+    invalid(
+        sdk::ResendSelection::try_from(ResendSelection {
+            msg_ids: vec!["not-a-message-id".into()],
+            ..Default::default()
+        }),
+        "msg_ids",
+    );
+    // Debug shows lengths and choices, never the host's references, payloads or metadata.
+    let shown = format!(
+        "{:?} {:?}",
+        draft(),
+        ReceiptDetails {
+            metadata_json: Some(br#"{"buyer":"private"}"#.to_vec()),
+            payment_reference: Some("private-reference".into()),
+            ..Default::default()
+        }
+    );
+    for secret in ["checkout-7", "lnbc1checkout", "tax", "private"] {
+        assert!(!shown.contains(secret), "{shown}");
     }
     Ok(())
 }
@@ -339,7 +378,7 @@ async fn requests_and_receipts(world: &World) -> TestResult {
     let (_, wallet, _, mut owner) = Box::pin(enrolled_wallet(
         world,
         root.path(),
-        account,
+        account.clone(),
         WalletScopes {
             request: true,
             contacts: true,
@@ -352,7 +391,11 @@ async fn requests_and_receipts(world: &World) -> TestResult {
         }),
     ))
     .await?;
-    refused(wallet.payee_activity().await, "needs_user", "not_now")?;
+    refused(
+        wallet.payee_activity().await,
+        "retry_later",
+        "records_not_listed",
+    )?;
     while wallet.receive().await?.more {}
     let mut issuer = Box::pin(signer::serving(world, "shop")).await?;
     let mut payer = Box::pin(join(
@@ -409,6 +452,9 @@ async fn requests_and_receipts(world: &World) -> TestResult {
     )?;
 
     Box::pin(receive(&mut payer)).await?;
+    // The method's proof carries numbers the wallet can't hold as written. The payment is
+    // made, so the proof is journaled and sent all the same (Paykit spec 7.2).
+    *account.proof_members.lock().unwrap() = r#","fee":1.50,"order":18446744073709551617"#.into();
     let outcome = Box::pin(payer.pay_request(&request, Default::default()))
         .await
         .outcome?;
