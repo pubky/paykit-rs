@@ -89,9 +89,11 @@ async fn payer_notice(world: &World) -> TestResult {
         // a read during that check fails: `Pending`, with the method not called. A host
         // follows it as the wallet says: a resume closes it unpaid, and the request is paid
         // again. Each is tried at most `MAX_HELD_PAYMENTS` times, and must end in flight.
+        // The method's call hangs; a payment held before its dispatch doesn't call it, so
+        // the one `Hang` waits for the call the retry makes.
         let mut started = None;
+        rail.next(paykit_sdk::rail::Behaviour::Hang);
         for _ in 0..MAX_HELD_PAYMENTS {
-            rail.next(paykit_sdk::rail::Behaviour::Hang);
             let PayOutcome::Pending { attempt_id, .. } =
                 Box::pin(payer.pay_request(unpaid, PayOptions::default()))
                     .await

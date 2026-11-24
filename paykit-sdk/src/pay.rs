@@ -970,6 +970,21 @@ pub(crate) fn unless_local_stop(error: impl Into<PaykitError>) -> Result<()> {
     Ok(())
 }
 
+/// Whether a failure of one entry's step leaves only that entry for the next resume, reported
+/// as its outcome: a refusal of the Switch client for that step, kept or not, a wait
+/// included, or the wallet waiting for its own identity.json to be confirmed again (Switch
+/// spec 12.4, Paykit spec 4). A wallet-wide stop is never one ([`stops_resume`]).
+pub(crate) fn left_to_entry(error: &PaykitError) -> bool {
+    if stops_resume(error) {
+        return false;
+    }
+    match error {
+        PaykitError::Client(client) => matches!(client.unkept(), AppError::Refused(_)),
+        PaykitError::Refused(Refusal::IdentityUnavailable(_)) => true,
+        _ => false,
+    }
+}
+
 /// The wallet-wide stop a read of this app's own record carries in the reason it kept the
 /// earlier copy: the switch refusing the read with an answer [`stops_resume`] counts, which
 /// the read keeps as its code. `None` for any other reason.
@@ -1885,9 +1900,9 @@ impl Paykit {
             }
         }
         if let Some(msg_id) = entry.proof_msg_id.clone() {
-            if let Err(error) = self.send_message(&msg_id).await {
-                unless_stop(error)?;
-            }
+            // The outcome is written and the proof queued with it: the payment is reported
+            // `Paid`, and a delivery failure, a stop included, is the outbox's to meet again.
+            let _ = self.send_message(&msg_id).await;
         }
         Ok(PayOutcome::Paid {
             attempt_id: *attempt_id,
@@ -3853,11 +3868,10 @@ impl Paykit {
             });
         }
         if let Some(msg_id) = entry.proof_msg_id.clone() {
-            // After the payment and its outcome's batch: a delivery failure leaves the proof
-            // queued for the next flush, and decides nothing about paying.
-            if let Err(error) = self.send_message(&msg_id).await {
-                unless_stop(error)?;
-            }
+            // After the payment and its outcome's batch, which finished the entry: the payment
+            // is reported `Paid`, as nothing later reports a finished entry, and a delivery
+            // failure, a stop included, leaves the proof queued for the outbox to meet again.
+            let _ = self.send_message(&msg_id).await;
         }
         Ok(PayOutcome::Paid {
             attempt_id,
@@ -4379,21 +4393,24 @@ impl Paykit {
     /// journal, shows it and stops a second one (Paykit spec 6, 7.2, "The record shows it
     /// paid").
     ///
-    /// One entry's failure short of a wallet-wide stop, such as a refusal of the Switch
-    /// client, the network, or [`Refusal::IdentityUnavailable`] when a repeat is due and
-    /// the own `identity.json` isn't confirmed in the last 60 s, leaves that entry for the
-    /// next resume and is reported as its outcome: [`PayOutcome::PaidOutcomeUnwritten`] when
-    /// the method reported it paid, [`PayOutcome::Pending`] otherwise. The other entries go
-    /// on, and every outcome reached is in the result.
+    /// A refusal of the Switch client for one entry's step, or [`Refusal::IdentityUnavailable`]
+    /// when a repeat is due and the own `identity.json` isn't confirmed in the last 60 s,
+    /// leaves that entry for the next resume and is reported as its outcome:
+    /// [`PayOutcome::PaidOutcomeUnwritten`] when the method reported it paid,
+    /// [`PayOutcome::Pending`] otherwise. The other entries go on, and every outcome reached
+    /// is in the result.
     ///
     /// # Errors
     ///
     /// A wallet-wide stop, at which the resume ends at once: an alarm, a store failure, the
     /// Switch client's word that the app stopped, left or is gone, holds a recovery notice
     /// or has a restore question open, or the switch's answer that the app is no longer
-    /// current, that its certificate expired, or that the account awaits a recovery. The client's and the rail's errors
-    /// from the work before and after the entries: the first read, the first flush, the
-    /// recheck of failed attempts, the ledger and pruning.
+    /// current, that its certificate expired, or that the account awaits a recovery. Any
+    /// other failure of an entry's step, such as the network or a method that can't tell
+    /// now, and the client's and the rail's errors from the work before and after the
+    /// entries (the first read, the first flush, the recheck of failed attempts, the ledger
+    /// and pruning), as they are. A call that returns an error carries no outcome:
+    /// [`Paykit::payments`] lists every payment with [`crate::PaymentView::paid_by_method`].
     pub async fn resume_payments(&mut self) -> Result<Vec<PayOutcome>> {
         // The call's future goes on the heap, as `receive`'s does: it nests deep.
         Box::pin(self.resume_payments_inner()).await
@@ -4428,11 +4445,12 @@ impl Paykit {
             self.place_kept_cancellations().await?;
         }
         let mut out = Vec::new();
-        // Each entry's work stands alone. Only a wallet-wide stop ([`stops_resume`]) ends the
-        // resume and is returned. Any other failure of one entry, a refusal of the Switch
-        // client or the network included, leaves that entry for the next resume and is
-        // reported for it, so every outcome reached stays in the result and a payment the
-        // method reports made is still journaled behind it.
+        // Each entry's work stands alone. A wallet-wide stop ([`stops_resume`]) ends the
+        // resume and is returned. A refusal of the Switch client for one entry, or the wait
+        // for the own identity.json ([`left_to_entry`]), leaves that entry for the next resume
+        // and is reported for it, so every outcome reached stays in the result and a payment
+        // the method reports made is still journaled behind it. Any other failure, such as
+        // the network, ends the call with its error, and the entries after it wait.
         for mut entry in self.journal().await? {
             // An outcome written whose acceptance is still owed: queued and placed now.
             // One that can't be placed now stays owed for the next resume: its outcome is
@@ -4447,13 +4465,14 @@ impl Paykit {
                 }
             } else {
                 let attempt_id = entry.attempt().ok();
+                let obligation = entry.obligation;
                 if let Err(error) = Box::pin(self.resume_entry(entry, payer_waits, &mut out)).await
                 {
-                    if stops_resume(&error) {
+                    if stops_resume(&error) || !left_to_entry(&error) {
                         return Err(error);
                     }
                     if let Some(attempt_id) = attempt_id {
-                        out.extend(self.left_for_next_resume(attempt_id).await?);
+                        out.extend(self.left_for_next_resume(attempt_id, &obligation).await?);
                     }
                 }
             }
@@ -4468,15 +4487,16 @@ impl Paykit {
             out.extend(self.recheck_failed().await?);
             Box::pin(self.record_ledger_outcomes()).await?;
         }
-        self.prune_journal().await?;
-        // Last, after every payment's own work: what can't be delivered now stays queued, but
-        // a wallet-wide stop met on the flush is returned.
+        // After every payment's own work: what can't be delivered now stays queued, but a
+        // wallet-wide stop met on the flush is returned. Pruning comes last, so after a stop
+        // every entry this call finished is still listed by `payments`.
         if let Err(error) = self.send_outbox().await {
             let error = PaykitError::from(error);
             if stops_resume(&error) {
                 return Err(error);
             }
         }
+        self.prune_journal().await?;
         Ok(out)
     }
 
@@ -4499,8 +4519,12 @@ impl Paykit {
     /// left for the next resume as the journal holds it now: paid but unwritten when the
     /// method reported it paid, nothing when its outcome is written already, and pending
     /// otherwise, its attempt open (Paykit spec 7.2).
-    async fn left_for_next_resume(&self, attempt_id: AttemptId) -> Result<Option<PayOutcome>> {
-        let Some(entry) = self.journal_entry(&attempt_id).await? else {
+    async fn left_for_next_resume(
+        &self,
+        attempt_id: AttemptId,
+        obligation: &[u8; 32],
+    ) -> Result<Option<PayOutcome>> {
+        let Some(entry) = self.journal_entry_on(&attempt_id, obligation).await? else {
             return Ok(None);
         };
         Ok(if !entry.open() {
@@ -5958,17 +5982,32 @@ mod tests {
         assert!(stops_resume(&answer(E::NotCurrent)));
         assert!(stops_resume(&answer(E::CertExpired)));
         assert!(stops_resume(&answer(E::RecoveryRequired)));
-        // One entry's wait, refusal, conflict or network failure leaves only that entry.
+        // The Switch client's refusal of one entry, kept or not, and the wait for the own
+        // identity.json leave only that entry.
         for left in [
             held_back(ClientRefusal::NotNow("kept batches".into())),
             kept(ClientRefusal::Usage("bound".into())),
+            PaykitError::Refused(Refusal::IdentityUnavailable("refresh".into())),
+        ] {
+            assert!(!stops_resume(&left), "{left:?}");
+            assert!(left_to_entry(&left), "{left:?}");
+        }
+        // Anything else ends the call with its error, as it is: a conflict, the switch or
+        // the network down, the method that can't tell, or a refusal of the SDK.
+        for ends in [
             answer(E::Conflict),
             answer(E::Unavailable),
+            answer(E::StaleEpoch),
             PaykitError::Rail(crate::RailError::Unavailable("busy".into())),
+            PaykitError::Refused(Refusal::SwitchUnavailable("down".into())),
             PaykitError::Refused(Refusal::NotFound),
             lost().into(),
         ] {
-            assert!(!stops_resume(&left), "{left:?}");
+            assert!(!stops_resume(&ends), "{ends:?}");
+            assert!(!left_to_entry(&ends), "{ends:?}");
+        }
+        for stop in [answer(E::NotCurrent), held_back(ClientRefusal::Left)] {
+            assert!(!left_to_entry(&stop), "{stop:?}");
         }
     }
 

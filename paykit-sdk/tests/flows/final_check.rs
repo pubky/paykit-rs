@@ -2837,9 +2837,8 @@ async fn test_final_check_manual_override_keeps_its_selected_transfer_amount() {
 /// method while the store failed the commit queueing its acceptance, so it is journaled
 /// `RailPaid` with its outcome unwritten, and the second in flight. Worlds are made until the
 /// first comes first in the journal, which is in attempt-ID order, so a resume meets it
-/// before the other. Returns the wallet, its world, the second's attempt and a third
-/// request, open.
-async fn made_then_in_flight() -> (World, Paykit, paykit_sdk::AttemptId, RequestRef) {
+/// before the other. Returns the wallet, its world and the second's attempt.
+async fn made_then_in_flight() -> (World, Paykit, paykit_sdk::AttemptId) {
     for _ in 0..40 {
         let w = World::new();
         let store = Arc::new(HookedStore::default());
@@ -2849,7 +2848,6 @@ async fn made_then_in_flight() -> (World, Paykit, paykit_sdk::AttemptId, Request
         let mut shop = w.shop().await;
         let first = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
         let second = request_from(&mut shop, w.alice_id(), draft("2", w.clock.now_ms())).await;
-        let third = request_from(&mut shop, w.alice_id(), draft("3", w.clock.now_ms())).await;
         wallet.receive(None).await.unwrap();
         paid_while_acceptances_fail(&store, &mut wallet, &first).await;
         w.rail.next(Behaviour::Hang);
@@ -2867,75 +2865,9 @@ async fn made_then_in_flight() -> (World, Paykit, paykit_sdk::AttemptId, Request
         }
         assert_eq!(order[0].stage, paykit_sdk::Stage::RailPaid);
         drop(shop);
-        return (w, wallet, attempt_id, third);
+        return (w, wallet, attempt_id);
     }
     panic!("no world put the made payment first");
-}
-
-/// A batch of the wallet kept unsent, the rejection of `request`, and every later write to
-/// the switch failing to connect: each write after it is kept behind it, refused as
-/// `KeptBatchesAhead`.
-async fn keep_a_batch_ahead(w: &World, wallet: &mut Paykit, request: &RequestRef) {
-    let switch = w.alice.switch();
-    for _ in 0..200 {
-        switch.fail_next(pubky_switch_client::testing::Fault::Unreachable {
-            path: "/ops".into(),
-            after: 0,
-        });
-    }
-    assert!(wallet.reject_request(request, None).await.is_err());
-}
-
-#[tokio::test]
-async fn test_resume_reports_every_entry_whose_write_is_held_behind_a_kept_batch() {
-    // Two payments in flight: the method shows the first paid and the second failed, and
-    // neither outcome can be written, as both wait behind a kept batch the switch can't be
-    // reached for. Each entry is reported for itself, the paid one as paid but unwritten,
-    // rather than the second's failure ending the call and hiding the first.
-    let w = World::new();
-    let mut wallet = w.wallet("wallet").await;
-    let mut shop = w.shop().await;
-    let requests = [
-        request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await,
-        request_from(&mut shop, w.alice_id(), draft("2", w.clock.now_ms())).await,
-    ];
-    let third = request_from(&mut shop, w.alice_id(), draft("3", w.clock.now_ms())).await;
-    wallet.receive(None).await.unwrap();
-    for request in &requests {
-        w.rail.next(Behaviour::Hang);
-        let outcome = wallet
-            .pay_request(request, PayOptions::default())
-            .await
-            .outcome
-            .unwrap();
-        assert!(matches!(outcome, PayOutcome::Pending { .. }), "{outcome:?}");
-    }
-    // The journal is in attempt-ID order: the first entry the resume meets is paid.
-    let order: Vec<_> = wallet
-        .payments()
-        .await
-        .unwrap()
-        .into_iter()
-        .map(|p| p.attempt_id)
-        .collect();
-    let [paid, failed] = order[..] else {
-        panic!("two payments in flight: {order:?}");
-    };
-    w.rail.settle(&paid, true);
-    w.rail.settle(&failed, false);
-    keep_a_batch_ahead(&w, &mut wallet, &third).await;
-    let resumed = wallet.resume_payments().await.unwrap();
-    assert!(
-        matches!(
-            resumed.as_slice(),
-            [
-                PayOutcome::PaidOutcomeUnwritten { attempt_id: a, .. },
-                PayOutcome::Pending { attempt_id: b, .. },
-            ] if *a == paid && *b == failed
-        ),
-        "{resumed:?}"
-    );
-    assert_eq!(w.rail.executions(&paid), 1);
 }
 
 #[tokio::test]
@@ -2946,7 +2878,7 @@ async fn test_resume_ends_at_the_switchs_answer_that_the_wallet_must_stop() {
     // returns it and asks the method about no later entry, so the second stays `Paying`.
     use pubky_switch_core::http::ErrorCode as E;
     for code in [E::NotCurrent, E::CertExpired, E::RecoveryRequired] {
-        let (w, mut wallet, attempt_id, _) = made_then_in_flight().await;
+        let (w, mut wallet, attempt_id) = made_then_in_flight().await;
         w.rail.settle(&attempt_id, true);
         w.alice
             .switch()
