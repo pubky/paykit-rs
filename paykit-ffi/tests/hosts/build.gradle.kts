@@ -19,7 +19,7 @@ kotlin {
         kotlin.srcDirs(".", providers.gradleProperty("bindings").get())
         kotlin.include("WalletConsumer.kt", "com/synonym/paykit/paykit.kt")
         if (checkoutTest.get()) {
-            kotlin.include("CheckoutConsumer.kt", "SliceWallet.kt")
+            kotlin.include("CheckoutConsumer.kt", "ConsumerWallet.kt")
             listOf("Inbox", "Payer", "Payee", "Lists", "Public", "Periods", "Allowance", "Executor")
                 .forEach { kotlin.include("${it}Consumer.kt") }
         }

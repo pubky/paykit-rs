@@ -398,6 +398,12 @@ impl PaykitError {
     pub(crate) fn corrupt() -> Self {
         Self::Client(AppError::Store(StoreError::Corrupt))
     }
+
+    /// Whether this is a value of the app's own state that doesn't read
+    /// ([`PaykitError::corrupt`]).
+    pub(crate) fn is_corrupt_state(&self) -> bool {
+        matches!(self, Self::Client(AppError::Store(StoreError::Corrupt)))
+    }
 }
 
 impl From<AppError> for PaykitError {

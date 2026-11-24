@@ -213,9 +213,9 @@ jobs:
             sources=(paykit-ffi/tests/hosts/WalletConsumer.swift)
             flags=()
             if [ "$variant" = checkout ]; then
-              sources+=(paykit-ffi/tests/hosts/CheckoutConsumer.swift paykit-ffi/tests/hosts/SliceWallet.swift)
-              for slice in Inbox Payer Payee Lists Public Periods Allowance Executor; do
-                sources+=("paykit-ffi/tests/hosts/${slice}Consumer.swift")
+              sources+=(paykit-ffi/tests/hosts/CheckoutConsumer.swift paykit-ffi/tests/hosts/ConsumerWallet.swift)
+              for group in Inbox Payer Payee Lists Public Periods Allowance Executor; do
+                sources+=("paykit-ffi/tests/hosts/${group}Consumer.swift")
               done
               flags=(-D PAYKIT_CHECKOUT_TEST)
             fi

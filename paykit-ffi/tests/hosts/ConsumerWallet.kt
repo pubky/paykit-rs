@@ -8,9 +8,9 @@ import java.nio.file.Files
 // One enrolled payer wallet, the test service's payee allowed to connect, handed to each group
 // of wallet calls in turn. Each group's checks live in its own file, and leave the wallet as
 // they found it for the next.
-internal fun driveSlices() = runBlocking {
+internal fun driveConsumers() = runBlocking {
     withTimeout(120_000) {
-        val directory = Files.createTempDirectory("paykit-slices").toFile()
+        val directory = Files.createTempDirectory("paykit-consumers").toFile()
         try {
             val method = CheckoutMethod(File(directory, "settled"))
             val store = EnrollmentStore()

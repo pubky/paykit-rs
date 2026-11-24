@@ -4,7 +4,7 @@ import Paykit
 /// One enrolled payer wallet, the test service's payee allowed to connect, handed to each group
 /// of wallet calls in turn. Each group's checks live in its own file, and leave the wallet as
 /// they found it for the next.
-func driveSlices() async throws {
+func driveConsumers() async throws {
     let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     defer { try? FileManager.default.removeItem(at: directory) }
