@@ -2102,7 +2102,8 @@ pub(crate) fn claim_read_refused(code: pubky_switch_core::http::ErrorCode) -> bo
 pub(crate) enum ClaimReadAfter {
     /// Refused for good: the receipt settles nothing, and is still recorded.
     Refused,
-    /// An answer a later read may pass: the receipt waits and reads again.
+    /// An answer a later read may pass: the receipt isn't written now, and reads the claim
+    /// again at the next receive, within its 30 days.
     ReadAgain,
     /// Not the switch's answer, or a switch that doesn't answer: the error, nothing decided.
     Error,

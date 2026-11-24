@@ -1344,8 +1344,9 @@ impl Paykit {
                     Err(error) => match crate::receive::claim_read_after(&error) {
                         crate::receive::ClaimReadAfter::Refused => SwitchClaim::Refused,
                         // An answer a later read may pass says nothing of the claim: the
-                        // receipt waits for it, never given up meanwhile.
-                        crate::receive::ClaimReadAfter::ReadAgain => return Ok(Placed::Waits),
+                        // receipt isn't written now, and reads the claim again at the next
+                        // receive, within its 30 days (Paykit spec 8.1, Stored entries).
+                        crate::receive::ClaimReadAfter::ReadAgain => return Ok(Placed::Not),
                         crate::receive::ClaimReadAfter::Error => return Err(error.into()),
                     },
                 };
