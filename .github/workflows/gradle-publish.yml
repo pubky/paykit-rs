@@ -60,6 +60,9 @@ jobs:
           }
           for name in Paykit.swift WalletRedaction.swift; do
             test -s "paykit-ffi/bindings/ios/$name" || { echo "Missing $name in the release tag" >&2; exit 1; }
+            [[ $(head -n 1 "paykit-ffi/bindings/ios/$name") == "// Prepared by paykit-ffi/prepare-bindings.py" ]] || {
+              echo "$name in the release tag was not prepared by prepare-bindings.py" >&2; exit 1;
+            }
           done
       - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
         with:

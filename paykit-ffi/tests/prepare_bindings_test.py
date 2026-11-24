@@ -78,35 +78,22 @@ fileprivate struct UniffiCallbackInterfaceHostAsync {
 }
 
 
-def kotlin(names, blocks=None):
-    """Kotlin declaring the wrappers `names` as the generator shapes them, each around its
+def declared(names, blocks, wrappers, shells, entries):
+    """Source declaring the wrappers `names` as the generator shapes them, each around its
     generated block or the one `blocks` gives for it, and an entry calling each kind."""
     source = ""
     for name in names:
-        block = (blocks or {}).get(name, prepare.KOTLIN_WRAPPERS[name][0])
-        generics = "T, reified E: Throwable" if name.endswith("WithError") else "T"
-        source += f"internal inline fun<{generics}> {name}(\n    makeCall: () -> T,\n)"
-        if "Async" in name:
-            source += (": UniffiForeignFuture {\n    val job = GlobalScope.launch coroutineBlock@ {\n"
-                       f"{block}    }}\n    return UniffiForeignFuture(handle)\n}}\n\n")
-        else:
-            source += f" {{\n{block}}}\n\n"
-    return source + "".join(KOTLIN_ENTRIES[kind] for kind in sorted({"Async" in name for name in names}))
+        head, tail = shells[name]
+        source += head + (blocks or {}).get(name, wrappers[name][0]) + tail + "\n"
+    return source + "".join(entries[kind] for kind in sorted({"Async" in name for name in names}))
+
+
+def kotlin(names, blocks=None):
+    return declared(names, blocks, prepare.KOTLIN_WRAPPERS, prepare.KOTLIN_SHELLS, KOTLIN_ENTRIES)
 
 
 def swift(names, blocks=None):
-    """The same in Swift."""
-    source = ""
-    for name in names:
-        block = (blocks or {}).get(name, prepare.SWIFT_WRAPPERS[name][0])
-        generics = "T, E" if name.endswith("WithError") else "T"
-        source += f"private func {name}<{generics}>(\n    makeCall: () throws -> T\n)"
-        if "Async" in name:
-            source += (" -> UniffiForeignFuture {\n    let task = Task {\n        var callResult: T\n"
-                       f"{block}    }}\n    return UniffiForeignFuture(handle: handle)\n}}\n\n")
-        else:
-            source += f" {{\n{block}}}\n\n"
-    return source + "".join(SWIFT_ENTRIES[kind] for kind in sorted({"Async" in name for name in names}))
+    return declared(names, blocks, prepare.SWIFT_WRAPPERS, prepare.SWIFT_SHELLS, SWIFT_ENTRIES)
 
 
 class GuardCallbacks(unittest.TestCase):
@@ -215,6 +202,27 @@ class GuardCallbacks(unittest.TestCase):
                         self.refused(*sources, f"{language}: {name} isn't the callback wrapper expected")
                         cases += 1
         self.assertEqual(cases, 31)
+
+    def test_guard_refuses_a_host_call_outside_the_block(self):
+        """The block unchanged, and the host's method also called before or after it."""
+        names = SYNC + ASYNC
+        for language, wrappers, build in [("Kotlin", prepare.KOTLIN_WRAPPERS, kotlin),
+                                          ("Swift", prepare.SWIFT_WRAPPERS, swift)]:
+            for name in names:
+                generated = wrappers[name][0]
+                indent = generated[:len(generated) - len(generated.lstrip(" "))]
+                call = f"{indent}makeCall()\n" if language == "Kotlin" else f"{indent}_ = try? makeCall()\n"
+                for changed in [call + generated, generated + call]:
+                    with self.subTest(language=language, wrapper=name, first=changed[:40]):
+                        source = build(names, {name: changed})
+                        sources = (source, swift(names)) if language == "Kotlin" else (kotlin(names), source)
+                        self.refused(*sources, f"{language}: {name} isn't the callback wrapper expected")
+
+    def test_guard_accepts_a_wrapper_with_other_comments(self):
+        commented = kotlin(SYNC).replace("    try {\n", "    // A comment of the generator's.\n    try {\n", 1)
+        guarded, _ = prepare.guard_callbacks(commented, swift(SYNC))
+        self.assertIn("// A comment of the generator's.", guarded)
+        self.assertEqual(guarded.count("} catch(e: kotlin.Throwable) {"), 2)
 
     def test_guard_refuses_a_block_generated_twice(self):
         twice = prepare.KOTLIN_WRAPPERS[SYNC[0]][0] * 2
