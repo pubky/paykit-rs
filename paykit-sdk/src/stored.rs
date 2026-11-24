@@ -411,11 +411,13 @@ impl Paykit {
         self.local_commit(gone).await
     }
 
-    /// A host can change or withdraw its list again after native delivery finished and
-    /// before its next receive. Record the previous issue's first non-delivery or unknown
-    /// delivery while its ID still identifies that recipient's reservation. Its duty
-    /// keeps its ordinary ack order.
-    pub(crate) async fn take_prior_list_delivery(&mut self, msg_id: &str) -> Result<bool> {
+    /// Take now the client's report of the first delivery of `msg_id` ending, undelivered
+    /// or unknown, as the next receive would ([`Paykit::take_stored_events`]). A host can
+    /// change or withdraw its list again after native delivery finished and before its next
+    /// receive: the previous issue's outcome is recorded while its ID still identifies that
+    /// recipient's reservation. A stop ended past its 30 days tells the host at once. Its
+    /// duty keeps its ordinary ack order. Whether it was taken.
+    pub(crate) async fn take_delivery_duty(&mut self, msg_id: &str) -> Result<bool> {
         for duty in self.app.pending_duty_events().await? {
             if duty
                 .owners
@@ -509,6 +511,7 @@ impl Paykit {
             {
                 true
             }
+            _ if self.take_expired_stop(&mut tx, event).await? => true,
             _ => self.take_reply_ask_duty(&mut tx, event).await?,
         };
         if taken {
@@ -640,7 +643,10 @@ impl Paykit {
             Body::PaymentProof(proof)
                 if first.is_none() && crate::protocol::writes_payee_label(&scopes, None) =>
             {
-                let Some(settlement) = self.rail.settlement_id(&proof.proof) else {
+                let Some(settlement) = self
+                    .rail
+                    .settlement_id(&proof.payment_endpoint_identifier, &proof.proof)
+                else {
                     return Ok(None);
                 };
                 record(

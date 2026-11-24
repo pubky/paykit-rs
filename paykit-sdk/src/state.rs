@@ -33,6 +33,8 @@
 //! | `off/<attempt_id>` | the original batch ID for an unresolved offline recording, committed with its signed operations before first submission (Paykit spec 8.4) | yes |
 //! | `j/<attempt_id>` | the payment journal: one payment, from before its `attempt` | yes |
 //! | `side/<msg_id>` | the side a cancellation is sent from, kept with the batch that queues it | |
+//! | `ex/<msg_id>` | why an acceptance this app sent may go while sends to its payee are held: a payment dispatched, or the user's confirmation of that blocked subscription, bound to its payee and request; kept before or with the batch that queues it (`send_holds.rs`) | |
+//! | `qs/<msg_id>` | a rejection or payer's cancellation this app queued: its payee, request, signed hash and `created_at`, written in the commit that queues it, so the receive step ends its outbox copy past 30 days, telling the host as its request record decides, with that decision; gone once neither the outbox nor a report of its end the host hasn't acknowledged names it (`send_holds.rs`); restored whole, since a restored outbox can hold the copy and a restored client an unacknowledged report of its end | |
 //! | `ar/<payee>/<app_id>` | a payee app's records that took part in its comparison, for its public endpoints | |
 //! | `ct` | the acceptance time of the last Paykit entry the receive step passed | |
 //! | `rh` | the cursor verdict, earlier holds and block windows for restored requests (`hold.rs`) | |
@@ -53,6 +55,7 @@
 //! | `lgone/<record key>` | set in the commit in which this app sees the `payment_lists` record deleted, or holds a list over it while it doesn't read: a later absence of it, as after a forgotten delete or a restore, keeps a list held there; never cleared, and a restore keeps the installation's own as well as the backup's | yes |
 //! | `kc/<record key>/<certificate hash>/<feed generation>` | a payee's cancellation of a request, kept until it is placed in the payer's request record | |
 //! | `peer/<pubky>` | a counterparty with Paykit activity, and when | |
+//! | `sv` | the highest service time the app verified, as the receive step and a flush last saw it, for the delivery hook's window of a held message, which judges by it, by the device clock only while none is kept; written also before every delivery Paykit starts. The client's own window for a message it queues again from signed plaintext, which ends a held answer released from its record, takes the later of the device clock and the service time instead, so under a fast device clock such an answer can be given up while a queued stop still goes (`send_holds.rs`, Paykit spec 8.1); never restored, a restore's first read writing it again | |
 //! | `lr` | when the app last read the lists, on the device clock; absent before the first read and after a due read failed, when new activity waits (Paykit wire 4.1); never restored, so a restored app reads the deny list again before any payment | |
 //! | `spam/<pubky>` | how many messages from a blocked or flagged sender only were counted (Paykit wire 4.1) | |
 //! | `rs/<pubky>/<msg_id>` | when a message was last re-sent to a requester | |
@@ -613,7 +616,8 @@ impl Stored for u64 {
             | StateKey::Spam(_)
             | StateKey::Resent { .. }
             | StateKey::ResentDay { .. }
-            | StateKey::ListsRead => Ok(()),
+            | StateKey::ListsRead
+            | StateKey::ServiceTime => Ok(()),
             // A generation recovered at follows another.
             StateKey::LossRecorded if *self > 0 => Ok(()),
             _ => corrupt(),
@@ -818,6 +822,30 @@ impl Stored for KeptSide {
     fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
         match family {
             StateKey::Side(msg_id) if self.msg_id == *msg_id => Ok(()),
+            _ => corrupt(),
+        }
+    }
+}
+
+impl sealed::Sealed for crate::send_holds::QueuedStop {}
+
+/// A stop this app queued: of the message its key names.
+impl Stored for crate::send_holds::QueuedStop {
+    fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
+        match family {
+            StateKey::QueuedStop(msg_id) if self.msg_id == *msg_id => Ok(()),
+            _ => corrupt(),
+        }
+    }
+}
+
+impl sealed::Sealed for crate::send_holds::SendExemption {}
+
+/// Why an acceptance may go while sends are held: of the message its key names.
+impl Stored for crate::send_holds::SendExemption {
+    fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
+        match family {
+            StateKey::SendExemption(msg_id) if self.msg_id == *msg_id => Ok(()),
             _ => corrupt(),
         }
     }
@@ -1859,6 +1887,7 @@ pub(crate) mod key {
     pub(crate) const LIST_RECIPIENTS: &str = "lrec/";
     pub(crate) const LIST_DISCOVERY: &str = "ld";
     pub(crate) const LISTS_READ: &str = "lr";
+    pub(crate) const SERVICE_TIME: &str = "sv";
     pub(crate) const HELD_LISTS: &str = "lh/";
     pub(crate) const LISTS_LOST: &str = "lgone/";
     pub(crate) const RECORDS_UNLISTED: &str = "nl";
@@ -1867,6 +1896,10 @@ pub(crate) mod key {
     pub(crate) const PAYER_PASS_OWED: &str = "pp";
     pub(crate) const OWN_RESEND_OWED: &str = "ro";
     pub(crate) const HELD_ANSWERS: &str = "ha/";
+    /// `qs/<msg_id>`: the rejections and payer's cancellations this app queued.
+    pub(crate) const QUEUED_STOPS: &str = "qs/";
+    /// `ex/<msg_id>`: why an outgoing acceptance may go while sends are held.
+    pub(crate) const SEND_EXEMPTIONS: &str = "ex/";
     pub(crate) const LISTED_CERT: &str = "lc";
     pub(crate) const NOTICES: &str = "nt/";
     pub(crate) const RESTORED_DELIVERIES: &str = "nt/outgoing/";
@@ -2185,6 +2218,14 @@ pub(crate) mod key {
         format!("side/{msg_id}")
     }
 
+    pub(crate) fn send_exemption(msg_id: &str) -> String {
+        format!("ex/{msg_id}")
+    }
+
+    pub(crate) fn queued_stop(msg_id: &str) -> String {
+        format!("{QUEUED_STOPS}{msg_id}")
+    }
+
     pub(crate) fn seen_records(payee: &[u8; 32], app_id: &[u8; 16]) -> String {
         format!("ar/{}/{}", b64(payee), b64(app_id))
     }
@@ -2453,12 +2494,18 @@ pub(crate) enum StateKey {
     },
     /// `lr`: when the lists were last read.
     ListsRead,
+    /// `sv`: the highest service time verified, for the delivery hook.
+    ServiceTime,
     /// `lh/<record key>`: a list held over a record that didn't read.
     HeldList([u8; 32]),
     /// `lgone/<record key>`: a `payment_lists` record seen deleted or unreadable.
     ListRecordLost([u8; 32]),
     /// `side/<msg_id>`: the side of a message the app sent.
     Side(String),
+    /// `ex/<msg_id>`: why an acceptance the app sent may go while sends are held.
+    SendExemption(String),
+    /// `qs/<msg_id>`: a rejection or payer's cancellation the app queued.
+    QueuedStop(String),
     /// `ar/<payee>/<app>`: a payee app's records a reader has seen.
     SeenRecords {
         payee: [u8; 32],
@@ -2680,6 +2727,7 @@ impl StateKey {
             "ro" => Self::OwnResendOwed,
             "lc" => Self::ListedCert,
             "lr" => Self::ListsRead,
+            "sv" => Self::ServiceTime,
             "dl" => Self::Denied,
             "fg" => Self::Flagged,
             "fk" => Self::FloorKept,
@@ -2806,6 +2854,8 @@ impl StateKey {
                     "lh" => Self::HeldList(b64_32(rest)?),
                     "lgone" => Self::ListRecordLost(b64_32(rest)?),
                     "side" => Self::Side(msg_id(rest)?),
+                    "ex" => Self::SendExemption(msg_id(rest)?),
+                    "qs" => Self::QueuedStop(msg_id(rest)?),
                     "ha" => {
                         let (payee, id) = rest.split_once('/')?;
                         Self::HeldAnswer {
@@ -3212,6 +3262,13 @@ mod tests {
     }
 
     #[test]
+    fn test_loss_recorded_binds_a_generation_after_another_only() {
+        assert!(reads::<u64>(key::LOSS_RECORDED, serde_json::json!(2)));
+        assert!(!reads::<u64>(key::LOSS_RECORDED, serde_json::json!(0)));
+        assert!(!reads::<u64>(key::DENIED, serde_json::json!(2)));
+    }
+
+    #[test]
     fn test_loss_current_boundary_requires_exact_members() {
         let loss = serde_json::json!({
             "generation": 2, "declared_at_ms": 5, "uncertain_until_ms": 9
@@ -3532,6 +3589,34 @@ mod tests {
     }
 
     #[test]
+    fn test_state_send_exemption_bound_to_its_message() {
+        let id = "123e4567-e89b-42d3-a456-426614174000";
+        let other = "223e4567-e89b-42d3-a456-426614174000";
+        // Why an acceptance may go while sends are held, of the message its key names, read
+        // at runtime and at a restore alike.
+        let binder = Binder::unblinded([1; 32]);
+        for exemption in [
+            crate::send_holds::SendExemption::dispatched(id),
+            crate::send_holds::SendExemption::confirmed_while_blocked(id, [3; 32], [4; 32]),
+        ] {
+            let bytes = encode(&exemption).unwrap();
+            let read = |key: &str| {
+                (
+                    bound::<crate::send_holds::SendExemption>(key.as_bytes(), &bytes, &binder),
+                    restored::<crate::send_holds::SendExemption>(key.as_bytes(), &bytes, &binder),
+                )
+            };
+            let (runtime, restore) = read(&key::send_exemption(id));
+            assert_eq!(runtime.unwrap(), exemption);
+            assert_eq!(restore.unwrap(), exemption);
+            for key in [key::send_exemption(other), key::side(id)] {
+                let (runtime, restore) = read(&key);
+                assert!(runtime.is_err() && restore.is_err(), "{key}");
+            }
+        }
+    }
+
+    #[test]
     fn test_state_values_bound_to_their_family_and_key() {
         let pubky = [3u8; 32];
         let id = "123e4567-e89b-42d3-a456-426614174000";
@@ -3588,7 +3673,8 @@ mod tests {
         assert!(!reads::<QueuedAsk>(&key::ask(&pubky, 5), ask(6)));
         assert!(!reads::<QueuedAsk>(&key::ask(&[4; 32], 5), ask(5)));
         // A side of the message its key names.
-        let side = |msg_id: &str| serde_json::json!({ "msg_id": msg_id, "side": "payer" });
+        let side =
+            |msg_id: &str| serde_json::json!({ "msg_id": msg_id, "side": "payer", "label": null });
         assert!(reads::<KeptSide>(&key::side(id), side(id)));
         assert!(!reads::<KeptSide>(&key::side(id), side(other)));
         // A held answer of the payee and message its key names.
@@ -3885,6 +3971,7 @@ mod tests {
                 },
             ),
             (key::LISTS_READ.into(), StateKey::ListsRead),
+            (key::SERVICE_TIME.into(), StateKey::ServiceTime),
             (key::DENIED.into(), StateKey::Denied),
             (key::own_block(&pubky), StateKey::OwnBlock(pubky)),
             (
@@ -3897,6 +3984,8 @@ mod tests {
                 StateKey::ListRecordLost(pubky),
             ),
             (key::side(id), StateKey::Side(id.into())),
+            (key::send_exemption(id), StateKey::SendExemption(id.into())),
+            (key::queued_stop(id), StateKey::QueuedStop(id.into())),
             (
                 key::held_answer(&pubky, id),
                 StateKey::HeldAnswer {
@@ -3989,6 +4078,10 @@ mod tests {
             (
                 key::identity_notice(crate::notices::NoticeKind::BlockFloorHeld),
                 StateKey::IdentityNotice(crate::notices::NoticeKind::BlockFloorHeld),
+            ),
+            (
+                key::identity_notice(crate::notices::NoticeKind::FloorRaiseWaiting),
+                StateKey::IdentityNotice(crate::notices::NoticeKind::FloorRaiseWaiting),
             ),
             (
                 key::identity_notice(crate::notices::NoticeKind::AutomaticPaymentsHeld),

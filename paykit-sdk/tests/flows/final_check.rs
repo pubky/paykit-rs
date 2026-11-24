@@ -1396,7 +1396,7 @@ async fn test_fence_unchanged_seller_during_paying_completes_the_original_attemp
         )
         .with_history(true),
     );
-    w.rail.next(Behaviour::InTransaction([17; 32]));
+    w.rail.next(Behaviour::InSettlement([17; 32]));
     let paid = wallet
         .pay_request(&request, PayOptions::default())
         .await
@@ -1805,6 +1805,7 @@ async fn test_fence_holds_a_marked_one_time_request_before_the_first_method_call
                         other.app().naming_key(),
                         &key,
                         None,
+                        &|_, proof| paykit_sdk::rail::fake_settlement_id(proof),
                     )
                     .unwrap();
                     record.lost_to_delete = Some([73; 32]);

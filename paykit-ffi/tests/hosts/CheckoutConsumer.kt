@@ -56,7 +56,7 @@ internal open class CheckoutMethod(private val ledger: File) : ReceiptReader() {
             proof.amount.asset == "btc" && proof.amount.value == "7" &&
             proof.endpoint == "btc-lightning-bolt11" && (proof.payload == null || proof.payload == "lnbc1checkout")) paidAt else null
 
-    override fun settlementId(proofJson: ByteArray): ByteArray? =
+    override fun settlementId(endpoint: String, proofJson: ByteArray): ByteArray? =
         stored()?.takeIf { proofJson.contentEquals(originalProof(it)) }?.toByteArray()
 }
 

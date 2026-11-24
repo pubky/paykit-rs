@@ -64,6 +64,8 @@ impl Paykit {
     /// current authority is unavailable, or the ledger cannot be reconciled yet. Accessing the
     /// store or service can fail too.
     pub async fn resume_allowance_executor(&mut self, record: &[u8; 32]) -> Result<()> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         Box::pin(self.apply_executor_grant(record, None)).await
     }
 
@@ -94,6 +96,8 @@ impl Paykit {
         hold: &crate::AllowanceHold,
         _confirmed: UserConfirmed,
     ) -> Result<()> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         Box::pin(self.apply_executor_grant(&hold.record(), Some(hold))).await
     }
 
@@ -283,6 +287,7 @@ impl Paykit {
             &view.counterparty,
             &view.allowance_id,
             opening.deletion,
+            &opening.deletion_write,
         ))
         .await?
         .ok_or_else(held)?;

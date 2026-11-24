@@ -266,7 +266,9 @@ async fn test_recurring_rejection_failing_otherwise_past_expiry_is_the_failure()
     let mut shop = w.shop().await;
     shop.app_mut().invite(&w.alice_id()).await.unwrap();
     let mut wallet = w.wallet("wallet").await;
-    let expires_at = w.clock.now_ms() + HOUR_MS;
+    // The expiry passes within the deny list's refresh interval: the answer reads nothing
+    // before it is sent (Paykit spec 8.1, "Messages already queued").
+    let expires_at = w.clock.now_ms() + 5 * 60_000;
     let request = monthly_to(&w, &mut wallet, expires_at).await;
     w.clock.advance_ms(expires_at + 1 - w.clock.now_ms());
     w.alice
@@ -332,7 +334,9 @@ async fn rejected_over(w: &World, write: PhoneWrite, heard: bool) -> paykit_sdk:
         )
         .await;
     let mut phone = w.wallet("phone").await;
-    let expires_at = w.clock.now_ms() + HOUR_MS;
+    // The expiry passes within the deny list's refresh interval: the rejection reads
+    // nothing before it is sent (Paykit spec 8.1, "Messages already queued").
+    let expires_at = w.clock.now_ms() + 5 * 60_000;
     let apps = [wallet.app_id(), phone.app_id()];
     monthly(w, &apps, expires_at, "plan-1");
     monthly(w, &apps, expires_at, "plan-2");

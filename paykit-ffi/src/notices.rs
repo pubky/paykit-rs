@@ -52,10 +52,13 @@ pub enum WalletNoticeKind {
     /// A block floor raise the wallet owes isn't written yet, with no divergence hold: until it
     /// is, an unblocked sender's one-time requests wait and it is asked nothing, and while a
     /// widening's raise waits no one is asked to re-send.
-    /// Shown once while it stands; it goes when the raise is written.
+    /// Shown once per load while it stands; it goes when the raise is written, or when the
+    /// divergence hold stands, which its own notice tells.
     FloorRaiseWaiting,
-    /// Automatic one-time payments for the identity are held for good after a provider loss;
-    /// each request can still be paid by hand. Shown once, and again after each reopen.
+    /// Automatic one-time payments for the identity, and resume repeats of one-time payments,
+    /// the user's own included, are held for good after a provider loss; each request can
+    /// still be paid by hand, and Billing Periods and payments without a request go on.
+    /// Shown once, and again after each reopen.
     AutomaticPaymentsHeld,
     /// A native case that this binding does not recognize.
     Other,

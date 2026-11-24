@@ -345,6 +345,15 @@ fn write_base(held: Option<&[u8]>, seen: Option<&[u8]>, floor: Option<u64>) -> B
         .unwrap_or_else(|| BlockFloorRecord::new(floor.unwrap_or(0)))
 }
 
+/// Whether the switch's current floor write is one the app didn't take on the service's word
+/// alone (`not_taken`): its writer's standing can't be established, and it may hold a higher
+/// floor than the copy the app trusts, so no raise is written over it, below it or not; the
+/// raise waits as for a floor that can't be read until a write the app takes replaces it
+/// (Paykit wire 5.6, Seen floor and permanence).
+fn write_not_taken(held: Option<&SharedRecord>) -> bool {
+    held.is_some_and(|held| held.not_taken)
+}
+
 /// What a raise to `to_ms` does, from the shared floor and the floor the switch holds now.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Raise {
@@ -465,6 +474,7 @@ impl Paykit {
         if after.divergent && !kept.divergent {
             self.tell_identity_notice(crate::NoticeKind::BlockFloorHeld)
                 .await?;
+            self.settle_raise_waiting().await?;
         }
         Ok(())
     }
@@ -554,6 +564,11 @@ impl Paykit {
         let owed = self.owed_raises().await?;
         if owed.unread() {
             return Ok(true);
+        }
+        // One read of the lists in a pass tries the raise; a `missed` item taken after it
+        // still has its own read, above.
+        if self.lists_read_this_pass {
+            return Ok(false);
         }
         Ok(owed.any() && (!self.floor_kept().await?.divergent || self.shared_loss_hold().await?))
     }
@@ -718,11 +733,21 @@ impl Paykit {
         }
         let key = self.app.record_key(&floor_target(&self.identity()))?;
         if let Some(read) = self.floor_read_now().await? {
+            if write_not_taken(read.as_ref()) {
+                return Ok((SharedFloor::Unknown, None));
+            }
             let at_switch = value(read.as_ref());
             return Ok((self.floor_of_read(&key, read.as_ref()).await?, at_switch));
         }
         let copy = self.app.shared_record(&key).await?;
-        let at_switch = value(copy.as_ref());
+        if write_not_taken(copy.as_ref()) {
+            return Ok((SharedFloor::Unknown, None));
+        }
+        // A current write the app refused, a lower floor it ignores: the copy keeps the higher
+        // floor it trusts, which the switch doesn't hold, so nothing at the switch spares the
+        // raise, and it writes that floor over the write (Paykit wire 5.6, Seen floor and
+        // permanence).
+        let at_switch = value(copy.as_ref().filter(|held| !held.flagged));
         if at_switch.is_some_and(|floor| floor >= to_ms) {
             return Ok((SharedFloor::Unknown, None));
         }
@@ -827,9 +852,13 @@ impl Paykit {
     /// ([`Paykit::settle_raise_waiting`]).
     pub(crate) async fn commit_with_floor(&mut self, to_ms: u64, tx: Tx) -> Result<()> {
         let result = self.write_with_floor(to_ms, tx).await;
-        if result.as_ref().is_err_and(is_raise_unwritten) {
+        // A raise a read of the lists leaves owed, a conflict after its retry included, is
+        // told to the host as waiting.
+        if result.as_ref().is_err_and(is_raise_left_owed) {
             self.raise_unwritten = true;
         }
+        // Wherever a raise is written or left unwritten, the host is told as it stands now.
+        self.settle_raise_waiting().await?;
         result
     }
 
@@ -919,7 +948,7 @@ impl Paykit {
                     None,
                     &held.key,
                     |t| self.app.record_key(t).ok(),
-                    &|p| self.rail.settlement_id(p),
+                    &|endpoint, proof| self.rail.settlement_id(endpoint, proof),
                 )
             });
             let marks = record.as_ref().and_then(|record| {
@@ -998,6 +1027,16 @@ pub(crate) fn is_raise_unwritten(error: &crate::error::PaykitError) -> bool {
     is_unreadable_floor(error) || matches!(error.refusal(), Some(Refusal::FloorHeld))
 }
 
+/// Whether a raise a read of the lists tried stays owed and the read goes on: unwritten
+/// ([`is_raise_unwritten`]), or still meeting `409 conflict` after its retry, no batch kept.
+/// The conflict refreshed the floor this app holds, never lowering it, and the raise owed
+/// holds what waits for it meanwhile; the raise is built anew at the next read (Paykit wire
+/// 5.6, Raising). A user's own unblock returns the conflict instead.
+pub(crate) fn is_raise_left_owed(error: &crate::error::PaykitError) -> bool {
+    is_raise_unwritten(error)
+        || (error.code() == Some(ErrorCode::Conflict) && error.kept_batch().is_none())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1023,6 +1062,22 @@ mod tests {
 
     fn value(floor_ms: u64) -> RecordContent {
         RecordContent::Value(BlockFloorRecord::new(floor_ms).to_json().unwrap())
+    }
+
+    #[test]
+    fn test_floor_write_not_taken_holds_the_raise_a_refused_one_does_not() {
+        let taken = held(value(70), true, false);
+        assert!(!write_not_taken(None) && !write_not_taken(Some(&taken)));
+        let refused = SharedRecord {
+            flagged: true,
+            ..taken.clone()
+        };
+        assert!(!write_not_taken(Some(&refused)));
+        let not_taken = SharedRecord {
+            not_taken: true,
+            ..taken
+        };
+        assert!(write_not_taken(Some(&not_taken)));
     }
 
     #[test]
@@ -1371,6 +1426,25 @@ mod tests {
         }
         let conflict = floor_write_error(client(answered(ErrorCode::Conflict)));
         assert_eq!(conflict.code(), Some(ErrorCode::Conflict));
+    }
+
+    #[test]
+    fn test_floor_raise_left_owed_after_a_conflict_with_nothing_kept() {
+        use pubky_switch_client::app::AppError;
+        // A conflict after the retry leaves the raise owed and the read of the lists going;
+        // a batch the client kept goes at the next write or read, so the read waits for it.
+        let conflict = floor_write_error(client(answered(ErrorCode::Conflict)));
+        assert!(is_raise_left_owed(&conflict));
+        let kept = floor_write_error(client(AppError::Kept {
+            batch_id: [7; 16],
+            error: Box::new(answered(ErrorCode::Conflict)),
+        }));
+        assert_eq!(kept.code(), Some(ErrorCode::Conflict));
+        assert!(!is_raise_left_owed(&kept));
+        assert!(is_raise_left_owed(&unreadable_floor()));
+        assert!(!is_raise_left_owed(&floor_write_error(client(answered(
+            ErrorCode::PermissionMissing
+        )))));
     }
 
     #[test]

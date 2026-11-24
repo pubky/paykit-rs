@@ -123,7 +123,7 @@ internal open class ReceiptReader : WalletHomeserver, PaymentMethod {
     override suspend fun payment(attemptId: String): MethodOutcome? = null
     override suspend fun allowanceHistory(payer: ByteArray): List<MethodDispatch>? = null
     override suspend fun verify(proof: MethodProof): ULong? = null
-    override fun settlementId(proofJson: ByteArray): ByteArray? = null
+    override fun settlementId(endpoint: String, proofJson: ByteArray): ByteArray? = null
 }
 
 private fun walletRows(issuer: String, mode: String): List<String> {
