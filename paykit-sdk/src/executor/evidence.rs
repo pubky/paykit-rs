@@ -17,6 +17,34 @@ use std::collections::{HashMap, HashSet};
 
 use super::ReservationClaim;
 
+/// What an applied operation is verified for ([`AppliedOperation::applied`]).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Purpose {
+    /// Evidence of what happened: of a generation in the grant's history.
+    Evidence,
+    /// It authorizes or dispatches a new attempt: of the current generation.
+    Authorizes,
+    /// Evidence already verified and retained under this installation's grant checkpoint.
+    /// Once the signer drops its generation's service key (Switch spec 4.3),
+    /// the retained proof can still date the write for the grant's accounting. The writer's
+    /// signature, the proof's binding to the operation, the certificate in force and the
+    /// grant's history are all still checked.
+    Established,
+}
+
+impl Purpose {
+    /// Whether an operation of `generation` serves this purpose, the account being at
+    /// `current` with the last provider loss at `recovery_from` ([`AppliedOperation::applied`]).
+    fn admits(self, generation: u64, current: u64, recovery_from: Option<u64>) -> bool {
+        match self {
+            Self::Evidence | Self::Established => {
+                super::in_grant_history(generation, current, recovery_from)
+            }
+            Self::Authorizes => generation == current,
+        }
+    }
+}
+
 struct AppliedOperation {
     op: SignedOp,
     proof: TransitionProof,
@@ -24,23 +52,60 @@ struct AppliedOperation {
 }
 
 impl AppliedOperation {
-    fn verify(app: &App, kept: &KeptOp) -> Option<Self> {
-        let applied = Self::verify_original(app, kept)?;
-        (applied.op.body().generation == app.own_identity().generation()).then_some(applied)
+    /// `kept` verified for `purpose`: the one place the executor decides which generation an
+    /// applied operation must be of.
+    ///
+    /// - **Evidence of what happened** ([`Purpose::Evidence`]): a record write, an attempt's
+    ///   opening or outcome, a compaction receipt. Its transition proof keeps dating it,
+    ///   verified with its own generation's key as the current `identity.json` lists it,
+    ///   through an orderly generation change or a cooperative move (Pubky Switch spec,
+    ///   Sections 4.3 and 12.5). It counts while that generation is in the grant's history,
+    ///   after the last provider loss, which nothing carries across (Paykit spec 8.3, "After
+    ///   provider loss").
+    /// - **What authorizes or dispatches a new attempt** ([`Purpose::Authorizes`]): acted on
+    ///   only in the current generation, so a stale instance of an earlier generation
+    ///   authorizes nothing (Pubky Switch spec, Section 12.5).
+    fn applied(app: &App, kept: &KeptOp, purpose: Purpose) -> Option<Self> {
+        Self::verify_for(app, kept, purpose)?.fit_for(app, purpose)
     }
 
-    fn verify_original(app: &App, kept: &KeptOp) -> Option<Self> {
+    /// Whether this applied operation's generation fits `purpose` ([`Self::applied`]).
+    fn fit_for(self, app: &App, purpose: Purpose) -> Option<Self> {
+        let current = app.own_identity();
+        purpose
+            .admits(
+                self.op.body().generation,
+                current.generation(),
+                current.body().recovery_from,
+            )
+            .then_some(self)
+    }
+
+    fn verify_for(app: &App, kept: &KeptOp, purpose: Purpose) -> Option<Self> {
         let cert = verify_certificate(&kept.cert, &app.identity()).ok()?;
-        Self::with_certificate(app, kept, cert)
+        Self::with_certificate_for(app, kept, cert, purpose)
     }
 
     fn with_certificate(app: &App, kept: &KeptOp, cert: AppCert) -> Option<Self> {
+        Self::with_certificate_for(app, kept, cert, Purpose::Evidence)
+    }
+
+    fn with_certificate_for(
+        app: &App,
+        kept: &KeptOp,
+        cert: AppCert,
+        purpose: Purpose,
+    ) -> Option<Self> {
         let own = app.identity();
         let op = SignedOp::verify_with_cert(&kept.op, &cert, &own).ok()?;
         check_shape(op.body()).ok()?;
         check_permission(&op.body().kind, Writer::App(&cert)).ok()?;
-        let key = app.own_identity().service_key_of(op.body().generation)?;
-        let proof = TransitionProof::verify(kept.proof.as_ref()?, &key, &own).ok()?;
+        let signed = kept.proof.as_ref()?;
+        let proof = match app.own_identity().service_key_of(op.body().generation) {
+            Some(key) => TransitionProof::verify(signed, &key, &own).ok()?,
+            None if purpose == Purpose::Established => TransitionProof::peek(signed).ok()?,
+            None => return None,
+        };
         proof.check_binds(&op).ok()?;
         let at = proof.envelope().server_time;
         if !certificate_in_force_at_write(app.own_identity(), &cert, at) {
@@ -90,17 +155,16 @@ impl AppliedOperation {
             EntryOutcome::Failed if fields.kind == ClaimType::Failed => Outcome::Failed,
             _ => return None,
         };
-        if &claim.claim_key != obligation
-            || claim.attempt_id != id.to_bytes()
-            || body.generation != app.own_identity().generation()
-        {
+        if &claim.claim_key != obligation || claim.attempt_id != id.to_bytes() {
             return None;
         }
-        let applied = Self::verify(app, kept).or_else(|| {
+        // An outcome is evidence of what happened to the attempt.
+        let applied = Self::applied(app, kept, Purpose::Evidence).or_else(|| {
             certificates
                 .iter()
                 .filter(|c| c.app_id() == writer && c.signed() != &kept.cert)
                 .find_map(|c| Self::with_certificate(app, kept, c.clone()))
+                .and_then(|applied| applied.fit_for(app, Purpose::Evidence))
         })?;
         let proof = applied.proof.body();
         let view = ClaimView::from_value(&proof.state).ok()?;
@@ -200,8 +264,9 @@ impl<'a> ClaimResults<'a> {
                 let owner = result.cert.app_id() == self.app.app_id();
                 !matches!(claim.state, ClaimState::Failed { by_owner } if owner != by_owner)
                     && opened < proof.seq
+                    // The sequence continues across an orderly generation change.
                     && before.is_none_or(|copy| {
-                        proof.generation == copy.revision.generation
+                        proof.generation <= copy.revision.generation
                             && proof.seq < copy.revision.seq
                             && proof.server_time <= copy.at_ms
                     })
@@ -238,6 +303,50 @@ fn pins_selected_proposal(
     }
 }
 
+/// A write of this app's own, retained with its proof and verified as evidence of its
+/// generation ([`AppliedOperation::applied`] with [`Purpose::Evidence`]): the proof verifies
+/// with the service key the current `identity.json` lists for that generation, and the
+/// generation is in the grant's history, after the last provider loss.
+///
+/// After an orderly generation change, the Switch client authenticates the version of a
+/// record read with no copy held (after a restore, or a move that dropped proofs) only for
+/// a proof of the current generation (Pubky Switch spec, Section 12.5). This app's own
+/// retained proof of an earlier generation still dates and places its own write: a read
+/// naming exactly its version, time and writer shows that write. It authenticates no other
+/// write, and no other app's.
+#[derive(Clone, Copy)]
+pub(crate) struct OwnWrite {
+    version: RecordVersion,
+    at_ms: u64,
+    writer: [u8; 16],
+}
+
+impl OwnWrite {
+    /// The write at `version` and `at_ms` by `writer`, when that is `own`, this app: another
+    /// app's write is never vouched for by this app's evidence.
+    pub(crate) fn of(
+        version: RecordVersion,
+        at_ms: u64,
+        writer: Option<[u8; 16]>,
+        own: [u8; 16],
+    ) -> Option<Self> {
+        let writer = writer.filter(|id| *id == own)?;
+        Some(Self {
+            version,
+            at_ms,
+            writer,
+        })
+    }
+
+    /// Whether the read `held` shows this write: exactly this write's version, time and
+    /// writer, whether or not the client authenticated the version.
+    pub(crate) fn stands_for(&self, held: &SharedRecord) -> bool {
+        held.version == self.version
+            && held.written_at_ms == Some(self.at_ms)
+            && held.writer == self.writer
+    }
+}
+
 /// One ordinary application in the current service history. The signed operation names
 /// its predecessor; the service proof binds its version, time and item hash.
 #[derive(Clone)]
@@ -270,8 +379,9 @@ impl AppliedRecord {
         kept: &KeptOp,
         entry: &LedgerEntry,
         grant: &Condition,
+        purpose: Purpose,
     ) -> bool {
-        let Some(applied) = AppliedOperation::verify(app, kept) else {
+        let Some(applied) = AppliedOperation::applied(app, kept, purpose) else {
             return false;
         };
         let b = applied.op.body();
@@ -302,7 +412,7 @@ impl AppliedRecord {
         obligation: &[u8; 32],
         id: paykit_lib::AttemptId,
     ) -> bool {
-        let Some(applied) = AppliedOperation::verify(app, kept) else {
+        let Some(applied) = AppliedOperation::applied(app, kept, Purpose::Evidence) else {
             return false;
         };
         let b = applied.op.body();
@@ -312,18 +422,34 @@ impl AppliedRecord {
         let Ok(claim) = fields.check() else {
             return false;
         };
+        // The sequence continues across an orderly generation change.
         b.app_id == Some(app.app_id())
             && b.conditions.contains(grant)
             && applied.proof.envelope().seq > self.revision.seq
-            && b.generation == self.revision.generation
+            && b.generation >= self.revision.generation
             && fields.kind == ClaimType::Attempt
             && &claim.claim_key == obligation
             && claim.attempt_id == id.to_bytes()
             && check_attempt_proof(&applied.proof, &claim, &app.app_id(), b.generation).is_ok()
     }
 
+    /// As [`Self::retained`], for evidence of an established grant ([`Purpose::Established`]).
+    pub(super) fn established(app: &App, target: &RecordTarget, kept: &KeptOp) -> Option<Self> {
+        Self::retained_for(app, target, kept, Purpose::Established)
+    }
+
+    /// `kept` verified for `purpose`: [`Self::retained`] or [`Self::established`].
+    pub(super) fn retained_for(
+        app: &App,
+        target: &RecordTarget,
+        kept: &KeptOp,
+        purpose: Purpose,
+    ) -> Option<Self> {
+        Self::from_operation(app, target, AppliedOperation::applied(app, kept, purpose)?)
+    }
+
     pub(super) fn retained(app: &App, target: &RecordTarget, kept: &KeptOp) -> Option<Self> {
-        Self::from_operation(app, target, AppliedOperation::verify(app, kept)?)
+        Self::retained_for(app, target, kept, Purpose::Evidence)
     }
 
     /// A selected proposal may retain its original signed write after a cooperative move.
@@ -331,8 +457,9 @@ impl AppliedRecord {
         app: &App,
         target: &RecordTarget,
         kept: &KeptOp,
+        purpose: Purpose,
     ) -> Option<Self> {
-        let applied = AppliedOperation::verify_original(app, kept)?;
+        let applied = AppliedOperation::verify_for(app, kept, purpose)?;
         let current = app.own_identity();
         if !super::in_grant_history(
             applied.op.body().generation,
@@ -364,14 +491,24 @@ impl AppliedRecord {
         })
     }
 
+    /// This write, as [`OwnWrite`] names it, when this app wrote it: another app's write
+    /// is never vouched for by this app's evidence.
+    pub(super) fn own_write(&self, app: &App) -> Option<OwnWrite> {
+        OwnWrite::of(
+            self.version(),
+            self.at_ms,
+            self.op.body().app_id,
+            app.app_id(),
+        )
+    }
+
     pub(super) fn current(
         app: &App,
         target: &RecordTarget,
         fresh: &SharedRecord,
         kept: &KeptOp,
     ) -> Option<Self> {
-        if !fresh.authenticated
-            || fresh.doubtful
+        if fresh.doubtful
             || fresh.flagged
             || fresh.not_taken
             || fresh.different_write_at_held_version
@@ -386,7 +523,12 @@ impl AppliedRecord {
             return None;
         };
         let applied = Self::retained(app, target, kept)?;
-        if applied.version() != fresh.version
+        let shown = fresh.authenticated
+            || applied
+                .own_write(app)
+                .is_some_and(|own| own.stands_for(fresh));
+        if !shown
+            || applied.version() != fresh.version
             || Some(applied.at_ms) != fresh.written_at_ms
             || applied.op.body().app_id != Some(fresh.writer)
             || &applied.value != bytes
@@ -444,8 +586,9 @@ impl AppliedRecord {
         selected: &Self,
         selected_condition: &Condition,
         kept: &KeptOp,
-    ) -> Option<ApplicationRef> {
-        let deleted = AppliedOperation::verify(app, kept)?;
+        purpose: Purpose,
+    ) -> Option<(ApplicationRef, OwnWrite)> {
+        let deleted = AppliedOperation::applied(app, kept, purpose)?;
         let RecordValue::Delete = deleted.open_record(app, pending)? else {
             return None;
         };
@@ -464,7 +607,14 @@ impl AppliedRecord {
             && self.revision.generation == reference.generation
             && self.revision.seq.checked_add(1) == Some(reference.seq)
             && self.at_ms == deleted.proof.envelope().server_time)
-            .then_some(reference)
+            .then_some((
+                reference,
+                OwnWrite {
+                    version: RecordVersion::new(reference.generation, reference.seq),
+                    at_ms: self.at_ms,
+                    writer: app.app_id(),
+                },
+            ))
     }
 
     /// The writer pinned the preceding record application, including its operation hash.
@@ -490,9 +640,10 @@ impl AppliedRecord {
         let OpKind::RecordPut(put) = &self.op.body().kind else {
             return false;
         };
-        self.revision.generation == original.revision.generation
-            && self.expected.generation == original.revision.generation
-            && self.at_ms >= original.at_ms
+        // Versions order by generation, then sequence, which an orderly change continues
+        // (Pubky Switch spec, Section 12.5); both writes were retained as evidence of a
+        // generation in the grant's history.
+        self.at_ms >= original.at_ms
             && original.version() < self.expected
             && self.expected < self.version()
             && self.op.body().conditions.iter().any(|condition| {
@@ -511,14 +662,31 @@ impl AppliedRecord {
 
     /// A current claim read settles the claim state. The independently retained opening
     /// and its proof must name the ledger writer, generation, application batch and time.
+    /// `just_made`: the reservation this app is making now, whose opening authorizes its
+    /// dispatch; otherwise one that already applied, whose opening is evidence of what
+    /// happened ([`AppliedOperation::applied`]).
     pub(super) fn reservation(
         &self,
         app: &App,
         kept: &KeptOp,
         entry: &LedgerEntry,
         read: &pubky_switch_client::app::ClaimRead,
+        just_made: bool,
     ) -> Option<(ReservationClaim, u64)> {
-        self.opening(app, kept, &entry.obligation, entry.attempt_id, read, None)
+        let purpose = if just_made {
+            Purpose::Authorizes
+        } else {
+            Purpose::Evidence
+        };
+        self.opening_for(
+            app,
+            kept,
+            &entry.obligation,
+            entry.attempt_id,
+            read,
+            None,
+            purpose,
+        )
     }
 
     /// The complete ledger already accepted this reservation. Its original opening
@@ -551,13 +719,38 @@ impl AppliedRecord {
         read: &pubky_switch_client::app::ClaimRead,
         accepted_under: Option<(&Condition, u64)>,
     ) -> Option<(ReservationClaim, u64)> {
+        // Counting an attempt that applied: its opening is evidence of what happened.
+        self.opening_for(
+            app,
+            kept,
+            obligation,
+            id,
+            read,
+            accepted_under,
+            Purpose::Evidence,
+        )
+    }
+
+    /// Check the signed opening against the claim read for this reservation (Paykit spec 8.3).
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn opening_for(
+        &self,
+        app: &App,
+        kept: &KeptOp,
+        obligation: &[u8; 32],
+        id: paykit_lib::AttemptId,
+        read: &pubky_switch_client::app::ClaimRead,
+        accepted_under: Option<(&Condition, u64)>,
+        purpose: Purpose,
+    ) -> Option<(ReservationClaim, u64)> {
         // The native upload inventory can attach a renewed certificate with the same
         // signing key. The certificate of the accepted ledger also proves an opening
         // only when it verifies that operation and was in force at its proved time.
-        let applied = AppliedOperation::verify(app, kept).or_else(|| {
-            let applied = AppliedOperation::with_certificate(app, kept, self.cert.clone())?;
-            (applied.op.body().generation == app.own_identity().generation()
-                && applied.op.body().batch == self.op.body().batch
+        let applied = AppliedOperation::applied(app, kept, purpose).or_else(|| {
+            let applied =
+                AppliedOperation::with_certificate_for(app, kept, self.cert.clone(), purpose)?
+                    .fit_for(app, purpose)?;
+            (applied.op.body().batch == self.op.body().batch
                 && applied.proof.envelope().server_time == self.at_ms)
                 .then_some(applied)
         })?;
@@ -654,6 +847,77 @@ impl AppliedRecord {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn test_evidence_authorization_admits_only_the_current_generation() {
+        // An opening answered in an earlier generation authorizes no new attempt, after an
+        // orderly change or a move as after a loss (Pubky Switch spec, Section 12.5).
+        assert!(Purpose::Authorizes.admits(3, 3, None));
+        assert!(!Purpose::Authorizes.admits(2, 3, None));
+        assert!(!Purpose::Authorizes.admits(2, 3, Some(2)));
+        assert!(!Purpose::Authorizes.admits(4, 3, None));
+    }
+
+    #[test]
+    fn test_evidence_own_write_is_only_this_apps() {
+        // Another app's write, or one naming no app, is never this app's own write.
+        let version = RecordVersion::new(1, 7);
+        assert!(OwnWrite::of(version, 1_000, Some([3; 16]), [3; 16]).is_some());
+        assert!(OwnWrite::of(version, 1_000, Some([4; 16]), [3; 16]).is_none());
+        assert!(OwnWrite::of(version, 1_000, None, [3; 16]).is_none());
+    }
+
+    #[test]
+    fn test_evidence_own_write_stands_only_for_its_exact_read() {
+        // A read shows this app's own write only when it names exactly its version, time
+        // and writer, whether the client authenticated the version or not.
+        let own = OwnWrite {
+            version: RecordVersion::new(1, 7),
+            at_ms: 1_000,
+            writer: [3; 16],
+        };
+        let read = |authenticated, version, written_at_ms, writer| SharedRecord {
+            key: [0; 32],
+            collection: String::new(),
+            policy: paykit_lib::collections::Collection::AllowanceLedgers.fixed_policy(),
+            version,
+            authenticated,
+            writer,
+            written_at_ms,
+            content: RecordContent::Deleted,
+            doubtful: false,
+            flagged: false,
+            not_taken: false,
+            different_write_at_held_version: false,
+            divergent: false,
+        };
+        assert!(own.stands_for(&read(false, RecordVersion::new(1, 7), Some(1_000), [3; 16])));
+        assert!(own.stands_for(&read(true, RecordVersion::new(1, 7), Some(1_000), [3; 16])));
+        assert!(!own.stands_for(&read(true, RecordVersion::new(2, 9), Some(5), [4; 16])));
+        for (version, at, writer) in [
+            (RecordVersion::new(1, 8), Some(1_000), [3; 16]),
+            (RecordVersion::new(1, 6), Some(1_000), [3; 16]),
+            (RecordVersion::new(2, 7), Some(1_000), [3; 16]),
+            (RecordVersion::new(1, 7), Some(1_001), [3; 16]),
+            (RecordVersion::new(1, 7), Some(999), [3; 16]),
+            (RecordVersion::new(1, 7), None, [3; 16]),
+            (RecordVersion::new(1, 7), Some(1_000), [4; 16]),
+        ] {
+            assert!(!own.stands_for(&read(false, version, at, writer)));
+        }
+    }
+
+    #[test]
+    fn test_evidence_admits_the_grant_history_after_the_last_loss() {
+        // Evidence of what happened counts from an earlier generation of the same history,
+        // never from one a provider loss ended, nor from a later one (Paykit spec 8.3).
+        assert!(Purpose::Evidence.admits(3, 3, None));
+        assert!(Purpose::Evidence.admits(1, 3, None));
+        assert!(Purpose::Evidence.admits(3, 4, Some(2)));
+        assert!(!Purpose::Evidence.admits(2, 4, Some(2)));
+        assert!(!Purpose::Evidence.admits(1, 4, Some(2)));
+        assert!(!Purpose::Evidence.admits(5, 4, None));
+    }
     use super::*;
 
     #[test]

@@ -1537,7 +1537,7 @@ async fn test_restore_layer_state_that_doesnt_verify_or_read_writes_nothing() {
         (
             "kept side under another message's key",
             format!("side/{other_uuid}"),
-            kept(serde_json::json!({ "msg_id": uuid, "side": "payer" })),
+            kept(serde_json::json!({ "msg_id": uuid, "side": "payer", "label": null })),
         ),
         (
             "missed time other than its key's",
@@ -1612,7 +1612,7 @@ async fn test_restore_layer_state_that_doesnt_verify_or_read_writes_nothing() {
     ));
     state.push((
         format!("side/{uuid}").into_bytes(),
-        kept(serde_json::json!({ "msg_id": uuid, "side": "payer" })),
+        kept(serde_json::json!({ "msg_id": uuid, "side": "payer", "label": null })),
     ));
     // A missed item holding the time its key names restores too.
     state.push((

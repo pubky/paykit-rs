@@ -283,6 +283,8 @@ impl Paykit {
         &mut self,
         report: &PublicationConflict,
     ) -> Result<()> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         let issue = &report.held;
         let key = self.app.record_key(&target(
             &issue.publisher,

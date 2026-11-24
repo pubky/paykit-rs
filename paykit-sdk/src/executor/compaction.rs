@@ -14,7 +14,7 @@ use pubky_switch_core::ops::{Condition, OpKind, SignedOp};
 use serde::{Deserialize, Serialize};
 
 use super::checkpoint::AcceptedLedger;
-use super::evidence::AppliedRecord;
+use super::evidence::{AppliedRecord, Purpose};
 use super::restore::{ledger_change, LedgerChange};
 use crate::state::key;
 use crate::Result;
@@ -104,11 +104,17 @@ impl Retired {
 }
 
 impl CompactionRead<'_> {
-    /// Verify the full successor in the same grant and generation, then identify the
-    /// paid entries it removed. The aggregate amount alone cannot identify a payment.
-    fn retired(&self, app: &App, receipt: &LedgerCompaction) -> Option<Vec<Retired>> {
-        let before = AppliedRecord::retained(app, self.target, &receipt.before)?;
-        let after = AppliedRecord::retained(app, self.target, &receipt.after)?;
+    /// Verify the full successor in the same grant, then identify the paid entries it
+    /// removed. The aggregate amount alone cannot identify a payment.
+    fn retired(
+        &self,
+        app: &App,
+        receipt: &LedgerCompaction,
+        purpose: Purpose,
+    ) -> Option<Vec<Retired>> {
+        // The predecessor came from the accepted checkpoint even for a newly observed successor.
+        let before = AppliedRecord::established(app, self.target, &receipt.before)?;
+        let after = AppliedRecord::retained_for(app, self.target, &receipt.after, purpose)?;
         let terms = match self.accepted.record.proposal.body() {
             Body::AllowanceProposal(p) => &p.terms,
             _ => return None,
@@ -124,8 +130,9 @@ impl CompactionRead<'_> {
         };
         let held = bind(&before)?;
         let newer = bind(&after)?;
-        if before.revision.generation != self.current.revision.generation
-            || after.revision.generation != self.current.revision.generation
+        // An orderly generation change continues the sequence (Switch spec 12.5).
+        if before.revision.generation > after.revision.generation
+            || after.revision.generation > self.current.revision.generation
             || before.revision.seq <= self.accepted.grant.revision.seq
             || after.revision.seq <= before.revision.seq
             || after.revision.seq > self.current.revision.seq
@@ -151,7 +158,7 @@ impl CompactionRead<'_> {
                 return None;
             };
             if !after.opens_in_window(terms, entry).ok()?
-                || !after.signed_opening(app, opening, entry, &self.grant)
+                || !after.signed_opening(app, opening, entry, &self.grant, purpose)
             {
                 return None;
             }
@@ -209,11 +216,11 @@ impl CompactionRead<'_> {
     pub(super) fn payments(
         &self,
         app: &App,
-        receipts: &[LedgerCompaction],
+        receipts: &[(LedgerCompaction, Purpose)],
     ) -> Option<HashMap<AttemptId, Retired>> {
         let mut retired = HashMap::new();
-        for receipt in receipts {
-            let entries = self.retired(app, receipt)?;
+        for (receipt, purpose) in receipts {
+            let entries = self.retired(app, receipt, *purpose)?;
             for entry in entries {
                 if retired.insert(entry.member().0, entry).is_some() {
                     return None;

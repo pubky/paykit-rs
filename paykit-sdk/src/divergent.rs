@@ -1935,6 +1935,8 @@ impl Paykit {
         shown: &DivergentRecord,
         _confirmed: UserConfirmed,
     ) -> Result<()> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         self.refresh_own()?;
         let record = &shown.record;
         // The floor's divergence is no record the user confirms (`crate::floor`).
