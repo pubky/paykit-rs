@@ -591,7 +591,10 @@ async fn regrant_lost(world: &World) -> TestResult {
     Box::pin(receive_app(&mut p.shop)).await?;
 
     let view = p.payer.allowance(record.clone()).await?;
-    assert!(view.confirmation_needed, "the loss asks the user to confirm again");
+    assert!(
+        view.confirmation_needed,
+        "the loss asks the user to confirm again"
+    );
     world.lose_answer("POST", "/ops");
     let lost = p
         .payer
