@@ -24,6 +24,9 @@ pub(super) struct Account {
     pub park: AtomicBool,
     pub entered: Notify,
     pub finish: Notify,
+    /// Raw JSON members every proof carries after its `payment`, as written, such as
+    /// `,"fee":1.50`.
+    pub proof_members: std::sync::Mutex<String>,
     coverage: std::sync::Mutex<Coverage>,
 }
 #[derive(Clone, Copy)]
@@ -47,6 +50,7 @@ impl Account {
             park: AtomicBool::new(true),
             entered: Notify::new(),
             finish: Notify::new(),
+            proof_members: std::sync::Mutex::new(String::new()),
             coverage: std::sync::Mutex::new(Coverage::Complete),
         }
     }
@@ -84,9 +88,10 @@ impl Account {
     pub fn rail_without_history(self: &Arc<Self>) -> HostRail {
         HostRail::new(self.clone(), Self::declaration(false), Self::endpoints())
     }
-    pub fn paid(id: &str) -> MethodOutcome {
+    pub fn paid(&self, id: &str) -> MethodOutcome {
+        let members = self.proof_members.lock().unwrap().clone();
         MethodOutcome::Paid {
-            proof_json: serde_json::to_vec(&serde_json::json!({"payment":id})).unwrap(),
+            proof_json: format!(r#"{{"payment":"{id}"{members}}}"#).into_bytes(),
             paid_at_ms: None,
         }
     }
@@ -145,7 +150,7 @@ impl PaymentMethod for Account {
                 reason: "answer lost after the charge".into(),
             });
         }
-        Ok(Self::paid(&p.attempt_id))
+        Ok(self.paid(&p.attempt_id))
     }
     async fn payment(&self, id: String) -> Result<Option<MethodOutcome>, MethodError> {
         self.lookups.fetch_add(1, Ordering::SeqCst);
@@ -156,7 +161,7 @@ impl PaymentMethod for Account {
             })
             .optional()
             .unwrap();
-        Ok(paid.as_deref().map(Self::paid))
+        Ok(paid.as_deref().map(|id| self.paid(id)))
     }
     async fn allowance_history(
         &self,
@@ -179,7 +184,7 @@ impl PaymentMethod for Account {
             .query_map([], |r| {
                 let id: String = r.get(0)?;
                 Ok(MethodDispatch {
-                    outcome: Self::paid(&id),
+                    outcome: self.paid(&id),
                     attempt_id: id,
                     amount: Amount {
                         asset: r.get(1)?,
