@@ -498,15 +498,15 @@ impl AllowanceReservation {
                         .is_some_and(|cap| amount.value.scaled() > cap.scaled())
             }) || checked.terms.lifetime_amount_limit.as_ref().is_some_and(
                 |cap| {
-                    // The most room the open reservations and the attempts the user may release
-                    // could ever free: if the payment doesn't fit even then, it never does.
-                    let open = checked
+                    // The most room the open reservations could ever free, the attempts the
+                    // user may release among them: if the payment doesn't fit even then, it
+                    // never does.
+                    let freed = checked
                         .ledger
                         .entries
                         .iter()
                         .filter(|entry| entry.outcome.is_none())
                         .fold(0u128, |sum, entry| sum.saturating_add(entry.value.scaled()));
-                    let freed = open.saturating_add(checked.facts.releasable().unwrap_or(0));
                     checked
                         .usage
                         .lifetime()
@@ -518,13 +518,13 @@ impl AllowanceReservation {
             );
             match limit {
                 LimitKind::PerPayment => not_automatic(&why),
-                _ if never_fits => not_automatic(&why),
                 // Room another app's failed attempt holds comes back once the user releases
                 // it, when that makes room for this payment, and room a reserved entry holds
                 // once it is released.
                 // [`crate::Paykit::reserved_by_other_apps`] lists the attempt; only the user
                 // releases it, so it is the user's to answer.
                 LimitKind::Lifetime if release_fits() => execution_held(RELEASE_HELD).into(),
+                _ if never_fits => not_automatic(&why),
                 LimitKind::Lifetime if checked.usage.reserved() == 0 => not_automatic(&why),
                 // Usage of other terms: no window or release mends it (Paykit spec 8.3).
                 LimitKind::InconsistentUsage => execution_held(INCONSISTENT_USAGE).into(),
