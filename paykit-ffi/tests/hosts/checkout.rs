@@ -1,7 +1,7 @@
 //! An enrolled shop for exercising the native host clients on the local Switch harness.
 use crate::{
     Amount, EndpointSupport, HostRail, MethodDeclaration, PaymentMethod, RequestId, RuntimeTimer,
-    WalletError, WalletHost, WalletStore,
+    WalletConfig, WalletError, WalletHost, WalletStore,
 };
 use paykit_lib::{
     Asset, Decimal, PaymentAmount, PaymentEndpointIdentifier, PaymentEndpointPayload,
@@ -62,6 +62,7 @@ impl CheckoutFixture {
     async fn open(
         store: Arc<dyn WalletStore>,
         method: Method,
+        config: paykit_sdk::PaykitConfig,
     ) -> Result<Arc<Self>, Box<dyn Error>> {
         let world = crate::fixture_service::start()?;
         let buyer = world.identity("buyer")?.public();
@@ -70,6 +71,7 @@ impl CheckoutFixture {
         let mut issuer = Box::pin(signer::serving(&world, "shop")).await?;
         let rail = Arc::new(device_rail(&method));
         let host = Arc::new(WalletHost {
+            config,
             clock: world.clock().clone(),
             transport: Arc::new(CheckoutService(world.transport())),
             home: world.files().clone(),
@@ -172,13 +174,18 @@ fn invoice() -> paykit_lib::Result<RequestDraft> {
 
 /// Enroll a local shop and use the supplied foreign store and method on the buyer's wallet,
 /// with the declaration and endpoints the host would give `WalletHost`.
-#[uniffi::export]
+#[uniffi::export(default(config = None))]
 pub async fn enrolled_test_checkout(
     store: Arc<dyn WalletStore>,
     method: Arc<dyn PaymentMethod>,
     declaration: MethodDeclaration,
     endpoints: Vec<EndpointSupport>,
+    config: Option<WalletConfig>,
 ) -> Result<Arc<CheckoutFixture>, WalletError> {
+    let config = config
+        .map(paykit_sdk::PaykitConfig::try_from)
+        .transpose()?
+        .unwrap_or_default();
     let method = Method {
         method,
         declaration,
@@ -186,7 +193,7 @@ pub async fn enrolled_test_checkout(
     };
     crate::runtime::run(async move {
         harness(async move || {
-            CheckoutFixture::open(store, method)
+            CheckoutFixture::open(store, method, config)
                 .await
                 .map_err(|_| WalletError::invalid("test checkout setup"))
         })
@@ -204,6 +211,7 @@ impl CheckoutFixture {
     /// Open a second device's store against the same enrolled services and payment account.
     pub fn host_for_store(&self, store: Arc<dyn WalletStore>) -> Arc<WalletHost> {
         Arc::new(WalletHost {
+            config: self.host.config.clone(),
             clock: self.host.clock.clone(),
             transport: self.host.transport.clone(),
             home: self.host.home.clone(),
@@ -261,6 +269,30 @@ impl CheckoutFixture {
                     .await
                     .map_err(|_| WalletError::ApprovalRefused)
             })
+            .await
+        })
+        .await
+    }
+    /// Restore the shop with one Private Payment List whose delivery is unknown (Paykit spec 8.4.1, 9).
+    pub async fn restored_list_seller(
+        self: Arc<Self>,
+    ) -> Result<Arc<crate::NativeWallet>, WalletError> {
+        crate::runtime::run(async move {
+            let (id, backup) = {
+                let mut shop = self.seller.lock().await;
+                (shop.app_id(), shop.backup().await?.to_bytes()?)
+            };
+            let world = self.world.lock().await;
+            let world = world
+                .as_ref()
+                .ok_or_else(|| WalletError::invalid("test service closed"))?;
+            Box::pin(crate::lists::restored_list_seller(
+                world,
+                &self.host,
+                id.into(),
+                backup,
+                self.buyer,
+            ))
             .await
         })
         .await

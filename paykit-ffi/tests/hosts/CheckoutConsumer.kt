@@ -276,7 +276,7 @@ private fun driveCheckout(recovery: CheckoutReview, restore: String? = null) = r
                 val secret = ByteArray(32) { 9 }
                 val enrolled = WalletEnrollment(store).use { owner ->
                     val info = owner.beginEnrollment(reference)
-                    val original = owner.prepareEnrollment(reference, "wallet.example", ByteArray(32) { 8 }, info.appRecordPath + ":rw", secret)
+                    val original = owner.prepareEnrollment(reference, "wallet.example", ByteArray(32) { 8 }, info.appRecordPath + ":rw", secret, WalletScopes(pay = true))
                     owner.acceptApproval(reference, fixture.identity(), fixture.approve(original.signedRequest, secret))
                     info
                 }

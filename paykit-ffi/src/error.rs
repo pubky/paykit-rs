@@ -116,6 +116,8 @@ pub struct WalletFailure {
     pub(crate) service_code: Option<String>,
     pub(crate) retry_after_ms: Option<u64>,
     pub(crate) quota_limit: Option<String>,
+    pub(crate) settlement_bucket: Option<u16>,
+    pub(crate) settlement_warning: Option<SettlementWarningOutcome>,
     pub(crate) kept_batch: Option<Vec<u8>>,
     pub(crate) switch_refusal: Option<Arc<crate::SwitchRefusal>>,
     pub(crate) refusal: Option<Arc<PaymentRefusal>>,
@@ -129,6 +131,8 @@ impl std::fmt::Debug for WalletFailure {
             .field("service_code", &self.service_code)
             .field("retry_after_ms", &self.retry_after_ms)
             .field("quota_limit", &self.quota_limit)
+            .field("settlement_bucket", &self.settlement_bucket)
+            .field("settlement_warning", &self.settlement_warning)
             .field("kept_batch", &self.kept_batch.is_some())
             .field("switch_refusal", &self.switch_refusal)
             .field("refusal", &self.refusal)
@@ -160,6 +164,16 @@ impl WalletFailure {
     /// name these bindings don't know.
     pub fn quota_limit(&self) -> Option<String> {
         self.quota_limit.clone()
+    }
+    /// For `settlement_warning_unsaved`, the settlement bucket whose record slot the Switch
+    /// refused: the host shows that bucket's warning if it has yet to.
+    pub fn settlement_bucket(&self) -> Option<u16> {
+        self.settlement_bucket
+    }
+    /// For `settlement_warning_unsaved`, what became of the bucket's warning in the store:
+    /// not saved, or saved or not, unknown. `None` for every other code.
+    pub fn settlement_warning_outcome(&self) -> Option<SettlementWarningOutcome> {
+        self.settlement_warning
     }
     /// A Switch batch kept for this call, which the wallet sends again by itself.
     pub fn kept_batch(&self) -> Option<Vec<u8>> {
@@ -267,6 +281,8 @@ fn failure(category: Category, code: &str) -> (Category, WalletFailure) {
             service_code: None,
             retry_after_ms: None,
             quota_limit: None,
+            settlement_bucket: None,
+            settlement_warning: None,
             kept_batch: None,
             switch_refusal: None,
             refusal: None,
@@ -625,9 +641,48 @@ impl From<PaykitError> for WalletError {
             // Nothing applied: read the current state, decide again, then redo.
             PaykitError::Conflict(_) => failure(NotSent, "conflict"),
             PaykitError::Homeserver(_) => failure(RetryLater, "homeserver"),
+            // The Switch refused a new settlement bucket for lack of a record slot, and its
+            // warning couldn't be saved or checked. The marked receipt and its delivery are
+            // still kept, and the kept batch may still apply: the user is shown the bucket's
+            // warning, which grants no consent to issue another receipt.
+            PaykitError::SettlementNoticeUnavailable {
+                bucket,
+                submission,
+                storage,
+            } => {
+                let (_, mut failure) = client_failure(submission);
+                failure.code = "settlement_warning_unsaved".into();
+                failure.settlement_bucket = Some(*bucket);
+                failure.settlement_warning = Some(SettlementWarningOutcome::of(storage));
+                (NeedsUser, failure)
+            }
             _ => failure(UNCLASSIFIED.0, UNCLASSIFIED.1),
         };
         into_error(categorized)
+    }
+}
+
+/// What became of a settlement bucket's warning when the wallet couldn't save or check it
+/// (`settlement_warning_unsaved`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum SettlementWarningOutcome {
+    /// The warning wasn't saved, or its status couldn't be read: nothing of it was applied.
+    Failed,
+    /// The store can't tell whether the warning was saved: it may already be.
+    OutcomeUnknown,
+}
+
+impl SettlementWarningOutcome {
+    /// The outcome of the warning's store write that failed with `storage`.
+    fn of(storage: &PaykitError) -> Self {
+        match storage {
+            PaykitError::Client(error)
+                if matches!(error.unkept(), AppError::Store(StoreError::Unknown)) =>
+            {
+                Self::OutcomeUnknown
+            }
+            _ => Self::Failed,
+        }
     }
 }
 

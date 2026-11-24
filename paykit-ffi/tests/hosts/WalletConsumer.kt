@@ -302,21 +302,21 @@ fun main() = runBlocking {
     val original = host().use { wallet ->
         val entry = wallet.beginEnrollment(reference)
         try {
-            wallet.prepareEnrollment(reference, "wallet.example", clientKey, "/pub/another.json:rw", secret)
+            wallet.prepareEnrollment(reference, "wallet.example", clientKey, "/pub/another.json:rw", secret, WalletScopes(pay = true))
             error("invalid app capabilities were pinned")
         } catch (error: WalletException.InvalidInput) { check(error.field == "capabilities") }
-        wallet.prepareEnrollment(reference, "wallet.example", clientKey, entry.appRecordPath + ":rw", secret)
+        wallet.prepareEnrollment(reference, "wallet.example", clientKey, entry.appRecordPath + ":rw", secret, WalletScopes(pay = true))
     }
     host().use { wallet ->
         val entry = wallet.beginEnrollment(reference)
         check(entry.appId.contentEquals(original.appId))
         val caps = entry.appRecordPath + ":rw"
-        val resumed = wallet.prepareEnrollment(reference, "wallet.example", clientKey, caps, secret)
+        val resumed = wallet.prepareEnrollment(reference, "wallet.example", clientKey, caps, secret, WalletScopes(pay = true))
         check(resumed.requestHash.contentEquals(original.requestHash))
         check(resumed.signedRequest.contentEquals(original.signedRequest))
         check(resumed.toString() == "EnrollmentRequest(<redacted>)")
         try {
-            wallet.prepareEnrollment(reference, "wallet.example", clientKey, caps, ByteArray(32) { 10 })
+            wallet.prepareEnrollment(reference, "wallet.example", clientKey, caps, ByteArray(32) { 10 }, WalletScopes(pay = true))
             error("changed secret accepted")
         } catch (_: WalletException.EnrollmentConflict) { }
     }

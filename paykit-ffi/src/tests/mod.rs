@@ -43,6 +43,10 @@ async fn approval(world: &World) -> TestResult {
             auth.client_key.into(),
             auth.caps.clone(),
             auth.secret.into(),
+            WalletScopes {
+                pay: true,
+                ..Default::default()
+            },
         )
         .await
     };
