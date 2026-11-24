@@ -32,6 +32,20 @@ Paykit layer and installs the payment journal with the client state. The
 `*_with_protocols` constructors allow other protocols on the same App ID. Keep
 the exact Paykit protocol instance supplied to the registration closure.
 
+In Kotlin and Swift, pass `WalletScopes` to `prepareEnrollment`. Choose the
+roles this app needs. A request scope covers every sale, while `requestLabels`
+limits the app to the named labels. The SDK derives required scopes and Switch
+permissions. Keep the same scope set and authentication request when resuming
+a pending enrollment (Paykit spec 3.1, 3.2).
+
+Pass an optional `WalletConfig` to `WalletHost` for join, load and restore.
+Each omitted setting keeps the SDK default. Use `sellingLabel` for the label on
+outgoing requests, `orphanAfterS` for the attempt's orphan age in seconds, and
+`resendBudget` for the maximum number of messages re-sent to each requester per day.
+Register handled message kinds in `extensionKinds` and ask for their prefixes
+at enrollment. Public Payment Endpoints require the unlabelled request scope
+and `publishesRecord` enabled (Paykit spec 3.3, 4, 7.2, 9, Switch spec 4.2).
+
 The one-time payment path uses these SDK calls. Keep the receive summary so
 the host can handle its duty events. List received requests and show the
 selected request's payee and amount. Call `pay_request` with
@@ -189,6 +203,12 @@ access with another protocol.
 Use the SDK states below to explain payment progress in the wallet's own words.
 The wallet chooses how to present each state. While a payment may already have
 gone through, keep that uncertainty clear and follow the reconciliation rules.
+
+A Kotlin or Swift wallet can return no entry from `messageDelivery` after
+delivery retention expires or after a restore. A retry can be refused after
+an earlier try was accepted and its answer was lost. When delivery is
+`Failed`, check the request or record before sending a replacement (Switch
+spec 11, 12.4).
 
 After loading, read the durable journal with `Paykit::payments()`. Match the
 existing `PaymentView::attempt_id` and use its `stage` to track progress. A durable
@@ -471,6 +491,7 @@ the new cursor to the service. Acknowledging the deletion notice leaves the cred
 | `PaykitError::Lib` | Use the rule error to distinguish invalid input from invalid network or shared data. |
 | `PaykitError::Rail` | Preserve any unresolved attempt unless the method established definitive refusal. |
 | `PaykitError::PublicEndpointChangePending` | Keep the previously signed offer visible with a pending change. Resolve the reported signing refusal and check the resulting publication. |
+| `PaykitError::SettlementNoticeUnavailable` | Show the bucket warning from this error if the host has yet to show it. The store could not save or check the notice. Track the original marked receipt through `kept_batch()`. The service code is available through `code()`. The existing batch may still apply and queue its original receipt. |
 | `PaykitError::Homeserver` | Retry discovery when the Homeserver is available. If the user is waiting, explain that discovery could not finish. |
 | `PaykitError::Refused` | Follow the specific refusal below. |
 | `PaykitError::Conflict` | Read the current state and decide again. |
@@ -564,7 +585,7 @@ A refusal of the Switch client for one entry, or the wait for the wallet's own `
 
 Every reason of `NotNow` is `RetryLater`, of `HeldForUser` `NeedsUser`, and of `RecoveryNeeded` `Recovery`. `attempt_failed` takes its cause's case, so it may be `NeedsUser`, `NotSent` or `Permanent`, and `waiting_for_list` is `NeedsUser` when the device clock is behind.
 
-Two rules override a code's case. A failure with a `keptBatch` comes as `OutcomeUnknown`, unless its case is `Recovery`: the wallet sends that batch again by itself, and the outcome shows once it is answered. A pay that may have been sent never comes as an error: it comes as a pending or uncertain outcome. The one exception is a wallet-wide stop met after the call, such as the store failing or an alarm. It comes as that stop, and the journal keeps the payment, which the resume after the recovery settles from the method's history.
+Two rules override a code's case. A failure with a `keptBatch` comes as `OutcomeUnknown`, unless its case is `Recovery`: the wallet sends that batch again by itself, and the outcome shows once it is answered. The one exception is `settlement_warning_unsaved`, which comes as `NeedsUser` with its `keptBatch`: the user is shown the bucket's warning while the kept batch may still apply. A pay that may have been sent never comes as an error: it comes as a pending or uncertain outcome. The one exception is a wallet-wide stop met after the call, such as the store failing or an alarm. It comes as that stop, and the journal keeps the payment, which the resume after the recovery settles from the method's history.
 
 | Code | From | Case | What the host does |
 |---|---|---|---|
@@ -708,6 +729,7 @@ Two rules override a code's case. A failure with a `keptBatch` comes as `Outcome
 | `invalid_protocol_data` | other `paykit_lib::Error` | `Permanent` | Network or stored data breaks a Paykit rule. |
 | `conflict` | `PaykitError::Conflict` | `NotSent` | Read the current state, decide again, then call again. |
 | `homeserver` | `PaykitError::Homeserver` | `RetryLater` | The Homeserver couldn't be read now: call again later. |
+| `settlement_warning_unsaved` | `PaykitError::SettlementNoticeUnavailable` | `NeedsUser` | The Switch refused a new settlement bucket for lack of a record slot, and the wallet couldn't save or check that bucket's warning. Show the warning for `settlement_bucket()` if the host has yet to show it; it grants no consent to issue another receipt. `settlement_warning_outcome()` says whether the warning's save failed (`Failed`) or its outcome is unknown (`OutcomeUnknown`), when it may already be saved. The marked receipt and its delivery are still kept under `kept_batch()`, and that batch may still apply. `service_code()` and `quota_limit()` give the Switch's answer. |
 | `unclassified` | a Paykit failure the bindings don't know | `OutcomeUnknown` | Reconcile before trying again. |
 | `client_unclassified` | a Switch client failure the bindings don't know | `OutcomeUnknown` | Reconcile before trying again. |
 | `method_unclassified` | a method failure the bindings don't know | `OutcomeUnknown` | Reconcile before trying again. |

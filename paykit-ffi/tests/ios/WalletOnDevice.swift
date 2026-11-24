@@ -71,7 +71,7 @@ final class WalletOnDeviceTests: XCTestCase {
         let owner = WalletEnrollment(store: store)
         let info = try await owner.beginEnrollment(reference: reference)
         let request = try await owner.prepareEnrollment(reference: reference, clientId: "wallet.example",
-            clientKey: Data(repeating: 8, count: 32), capabilities: info.appRecordPath + ":rw", authSecret: secret)
+            clientKey: Data(repeating: 8, count: 32), capabilities: info.appRecordPath + ":rw", authSecret: secret, scopes: WalletScopes(pay: true))
         let approval = try await fixture.approve(request: request.signedRequest, secret: secret)
         try await owner.acceptApproval(reference: reference, identity: fixture.identity(), claim: approval)
         let wallet = try await fixture.host().completeEnrollment(reference: reference)

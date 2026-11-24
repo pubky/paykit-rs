@@ -91,6 +91,7 @@ fn stalled_host(root: &std::path::Path, history: bool) -> Arc<WalletHost> {
         Arc::new(Stalled),
         declared(history),
         Vec::new(),
+        None,
     )
     .unwrap()
 }

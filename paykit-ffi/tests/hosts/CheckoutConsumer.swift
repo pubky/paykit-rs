@@ -409,7 +409,7 @@ private func driveCheckout(_ recovery: CheckoutReview, restore: String? = nil) a
     let secret = Data(repeating: 9, count: 32)
     let owner = WalletEnrollment(store: store)
     let enrolled = try await owner.beginEnrollment(reference: reference)
-    let original = try await owner.prepareEnrollment(reference: reference, clientId: "wallet.example", clientKey: Data(repeating: 8, count: 32), capabilities: enrolled.appRecordPath + ":rw", authSecret: secret)
+    let original = try await owner.prepareEnrollment(reference: reference, clientId: "wallet.example", clientKey: Data(repeating: 8, count: 32), capabilities: enrolled.appRecordPath + ":rw", authSecret: secret, scopes: WalletScopes(pay: true))
     let approval = try await fixture.approve(request: original.signedRequest, secret: secret)
     try await owner.acceptApproval(reference: reference, identity: fixture.identity(), claim: approval)
     let host = fixture.host()

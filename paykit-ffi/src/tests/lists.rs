@@ -293,6 +293,7 @@ fn conflict() -> ListPublicationConflict {
 
 #[test]
 fn test_publication_conflict_refuses_malformed_fields() {
+    assert!(paykit_sdk::PublicationConflict::try_from(conflict()).is_ok());
     let invalid = |edit: fn(&mut ListPublicationConflict), name: &str| {
         let mut report = conflict();
         edit(&mut report);
@@ -302,14 +303,14 @@ fn test_publication_conflict_refuses_malformed_fields() {
         ));
     };
     invalid(|r| r.application_hash.clear(), "application_hash");
-    invalid(|r| r.held.publisher.clear(), "publisher");
-    invalid(|r| r.refused.recipient.clear(), "recipient");
-    invalid(|r| r.refused.message_hash.clear(), "message_hash");
-    invalid(|r| r.held.generation = u64::MAX, "publication record");
-    invalid(|r| r.refused.counter = 0, "publication record");
+    invalid(|r| r.held.publisher.clear(), "held.publisher");
+    invalid(|r| r.refused.recipient.clear(), "refused.recipient");
+    invalid(|r| r.refused.message_hash.clear(), "refused.message_hash");
+    invalid(|r| r.held.generation = u64::MAX, "held.generation");
+    invalid(|r| r.refused.counter = 0, "refused.counter");
     invalid(
         |r| r.held.msg_id = "private host input".into(),
-        "publication record",
+        "held.msg_id",
     );
 }
 
@@ -342,4 +343,103 @@ fn test_lists_payer_sharing_and_retained_records_on_scripted() {
 #[test]
 fn test_lists_payer_sharing_and_retained_records_on_service() {
     run(Backend::Service, lists);
+}
+
+async fn restored_list_delivery(world: &World) -> TestResult {
+    use crate::{RuntimeTimer, WalletScopes};
+    use paykit_sdk::{AppScopes, Paykit};
+    use pubky_switch_client::store::MemoryStore;
+    use pubky_switch_harness::parties::Asking;
+
+    let root = tempfile::tempdir()?;
+    let account = Arc::new(Account::open(root.path(), world.clock().clone()));
+    let scopes = WalletScopes {
+        request: true,
+        ..Default::default()
+    };
+    let (host, seller, id, _) = Box::pin(super::wallet::enrolled_wallet(
+        world,
+        root.path(),
+        account,
+        scopes,
+        None,
+    ))
+    .await?;
+    let peer = world.identity("payer")?;
+    let mut signer = Box::pin(super::signer::serving(world, "payer")).await?;
+    let scopes = AppScopes::new().pay().build()?;
+    let names: Vec<_> = scopes.scopes.iter().map(String::as_str).collect();
+    let asking = Asking::for_scopes(world.app_keys(&peer, "wallet")?, &names)?;
+    let review = signer.review(asking.request.signed(), &asking.auth)?;
+    let approved = Box::pin(signer.approve(review)).await?;
+    let mut payer = Box::pin(Paykit::join(
+        world.app_env(Arc::new(MemoryStore::new())),
+        Default::default(),
+        asking.join_request(peer.public(), &approved)?,
+        seller.rail(),
+        Arc::new(RuntimeTimer),
+    ))
+    .await?;
+    signer.claim_delivered(&approved.request).await?;
+    let publisher = fixed(seller.identity().await?, "identity")?;
+    Box::pin(payer.allow_connect(&publisher)).await?;
+    while seller.receive().await?.more {}
+    let backup = seller.backup().await?;
+    seller.shutdown().await?;
+    let seller = Box::pin(crate::lists::restored_list_seller(
+        world,
+        &host,
+        id,
+        backup,
+        peer.public(),
+    ))
+    .await?;
+    let Err(WalletError::NeedsUser { failure }) =
+        seller.publish_list_to(peer.public().into()).await
+    else {
+        return Err("expected a list delivery refusal".into());
+    };
+    let refusal = failure.refusal().ok_or("missing list refusal")?;
+    let RefusalKind::ListDeliveryUnknown {
+        msg_id,
+        recipient,
+        withdrawal: false,
+        ..
+    } = refusal.kind()
+    else {
+        return Err("expected the unknown nonempty list".into());
+    };
+    assert_eq!(recipient, peer.public());
+    seller.send_list_again(refusal).await?;
+    let mut ids = Vec::new();
+    for _ in 0..8 {
+        let report = Box::pin(payer.receive(None)).await?.report;
+        for event in report.events {
+            if let pubky_switch_client::app::AppEvent::MessageReceived {
+                kind,
+                msg_id,
+                sender,
+                ..
+            } = event
+            {
+                if kind == "paykit.private_payment_list" && sender == publisher {
+                    ids.push(msg_id);
+                }
+            }
+        }
+        if ids.len() >= 2 {
+            break;
+        }
+    }
+    assert_eq!(ids.len(), 2);
+    assert_eq!(ids.first(), Some(&msg_id));
+    assert_ne!(ids.first(), ids.last());
+    seller.shutdown().await?;
+    Ok(())
+}
+
+#[test]
+fn test_lists_restored_seller_sends_another_list_after_confirmation() {
+    run(Backend::Scripted, restored_list_delivery);
+    run(Backend::Service, restored_list_delivery);
 }

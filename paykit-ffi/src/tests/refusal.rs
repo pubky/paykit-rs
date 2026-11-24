@@ -628,6 +628,9 @@ fn every_other_failure() -> Vec<WalletError> {
         }
         errors.push(PaykitError::Client(answer));
     }
+    errors.push(unsaved_settlement_warning(
+        pubky_switch_client::StoreError::Unavailable.into(),
+    ));
     let app = [
         AppError::ExpiredUnsent,
         AppError::Transport(TransportError::Timeout),
@@ -1222,4 +1225,55 @@ fn test_wallet_errors_sdk_refusals_take_the_table_code_through_the_conversion() 
         let (found, failure) = categorized(PaykitError::Refused(refusal).into()).unwrap();
         assert_eq!((found, failure.code.as_str()), (case, code));
     }
+}
+
+/// A refused record slot for settlement bucket 176, kept, whose warning couldn't be saved
+/// for `storage`.
+fn unsaved_settlement_warning(storage: PaykitError) -> PaykitError {
+    let mut answer = switch_answer(ErrorCode::QuotaExceeded, None);
+    if let AppError::Switch(ClientError::Switch { current, .. }) = &mut answer {
+        *current = serde_json::json!({ "limit": "record_keys" });
+    }
+    PaykitError::SettlementNoticeUnavailable {
+        bucket: 176,
+        submission: Box::new(AppError::Kept {
+            batch_id: [4; 16],
+            error: Box::new(answer),
+        }),
+        storage: Box::new(storage),
+    }
+}
+
+#[test]
+fn test_wallet_errors_unsaved_settlement_warning_keeps_its_bucket_outcome_and_kept_batch() {
+    use crate::SettlementWarningOutcome::{Failed, OutcomeUnknown};
+    for (storage, outcome) in [
+        (
+            PaykitError::from(pubky_switch_client::StoreError::Unavailable),
+            Failed,
+        ),
+        (
+            PaykitError::from(pubky_switch_client::StoreError::Unknown),
+            OutcomeUnknown,
+        ),
+        (PaykitError::Conflict("notice".into()), Failed),
+    ] {
+        let (case, failure) =
+            categorized(unsaved_settlement_warning(storage).into()).expect("a categorized failure");
+        // The user is shown the bucket's warning; the kept submission may still apply.
+        assert_eq!(
+            (case, failure.code().as_str()),
+            ("needs_user", "settlement_warning_unsaved")
+        );
+        assert_eq!(failure.settlement_bucket(), Some(176));
+        assert_eq!(failure.kept_batch().as_deref(), Some(&[4; 16][..]));
+        assert_eq!(failure.service_code().as_deref(), Some("quota_exceeded"));
+        assert_eq!(failure.quota_limit().as_deref(), Some("record_keys"));
+        // Whether the warning may already be saved.
+        assert_eq!(failure.settlement_warning_outcome(), Some(outcome));
+    }
+    // Every other failure carries no bucket and no warning outcome.
+    let (_, other) = categorized(PaykitError::Conflict("state".into()).into()).unwrap();
+    assert_eq!(other.settlement_bucket(), None);
+    assert_eq!(other.settlement_warning_outcome(), None);
 }

@@ -5,22 +5,23 @@ import kotlinx.coroutines.*
 import java.io.File
 import java.nio.file.Files
 
-// One enrolled payer wallet, the test service's payee allowed to connect, handed to each group
-// of wallet calls in turn. Each group's checks live in its own file, and leave the wallet as
-// they found it for the next.
+// Run the wallet calls with the scopes approved for this app (Paykit spec 3.1).
 internal fun driveConsumers() = runBlocking {
     withTimeout(120_000) {
         val directory = Files.createTempDirectory("paykit-consumers").toFile()
         try {
             val method = CheckoutMethod(File(directory, "settled"))
             val store = EnrollmentStore()
-            enrolledTestCheckout(store, method, testDeclaration, testEndpoints).use { fixture ->
+            val scopes = WalletScopes(pay = true, request = true, contacts = true, manageContacts = true,
+                extensions = listOf("paykit-cap"))
+            val config = WalletConfig(extensionKinds = listOf("paykit-cap.offer"), publishesRecord = true)
+            enrolledTestCheckout(store, method, testDeclaration, testEndpoints, config).use { fixture ->
                 method.clock = { fixture.nowMs() }
                 val reference = ByteArray(16) { 31 }
                 val secret = ByteArray(32) { 9 }
                 WalletEnrollment(store).use { owner ->
                     val info = owner.beginEnrollment(reference)
-                    val original = owner.prepareEnrollment(reference, "wallet.example", ByteArray(32) { 8 }, info.appRecordPath + ":rw", secret)
+                    val original = owner.prepareEnrollment(reference, "wallet.example", ByteArray(32) { 8 }, info.appRecordPath + ":rw", secret, scopes)
                     owner.acceptApproval(reference, fixture.identity(), fixture.approve(original.signedRequest, secret))
                 }
                 fixture.host().use { host ->
@@ -35,6 +36,7 @@ internal fun driveConsumers() = runBlocking {
                         checkAllowances(fixture, wallet)
                         checkExecutor(fixture, wallet)
                         wallet.shutdown()
+                        checkClosedInbox(wallet, fixture.payee())
                     }
                 }
                 fixture.finish()

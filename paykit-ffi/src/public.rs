@@ -130,6 +130,8 @@ pub enum MessageDelivery {
         accepted_at_ms: u64,
     },
     /// The delivery ended or its kept batch was dropped (Switch spec 11, Switch wire 6.4).
+    /// A retry may be refused after an accepted try lost its answer. Check the request or
+    /// record before sending a replacement (Switch spec 11).
     Failed {
         /// The reason code, or `unknown` for an unrecognized reason (Switch spec 11).
         reason: String,
@@ -182,9 +184,18 @@ fn delivery_code(error: &str) -> &'static str {
                 .strip_prefix("the batch carrying it was refused: ")
                 .unwrap_or(error);
             let header = error.split_once(':').map_or(error, |(header, _)| header);
+            let checked = |name: &str, status: &str| {
+                ErrorCode::parse(name)
+                    .filter(|code| Some(code.status()) == status.parse::<u16>().ok())
+            };
+            if let Some((name, status)) = header
+                .strip_suffix(')')
+                .and_then(|s| s.split_once(" before the body was read (status "))
+            {
+                return checked(name, status).map_or("unknown", ErrorCode::as_str);
+            }
             let code = match header.split_once(' ') {
-                Some((status, name)) => ErrorCode::parse(name)
-                    .filter(|code| Some(code.status()) == status.parse::<u16>().ok()),
+                Some((status, name)) => checked(name, status),
                 None => ErrorCode::parse(header),
             };
             code.map_or("unknown", ErrorCode::as_str)
@@ -271,7 +282,8 @@ impl NativeWallet {
             .await
     }
 
-    /// Read the delivery retained for a message ID, or none if the client keeps no entry (Switch spec 11).
+    /// Read the delivery retained for a message ID, or none if the client keeps no entry, including
+    /// after retention expires or after a restore (Switch spec 11, 12.4).
     pub async fn message_delivery(
         &self,
         msg_id: String,

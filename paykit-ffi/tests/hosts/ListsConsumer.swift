@@ -1,34 +1,11 @@
 import Foundation
 import Paykit
 
-/// A payer can inspect Private Payment Lists and acknowledge an old report (Paykit spec 8.4.1).
+/// Share Private Payment Lists and confirm another list after an unknown delivery (Paykit spec 8.4.1).
 func checkLists(fixture: CheckoutFixture, wallet: NativeWallet) async throws {
     let recipient = fixture.payee()
     let endpoint = ListEndpoint(identifier: "btc-lightning-bolt11", payload: "lnbc1example")
-    do {
-        try await wallet.setListEndpoints(endpoints: [endpoint])
-        preconditionFailure("payer set a Private Payment List")
-    } catch let WalletError.NeedsUser(failure) {
-        precondition(failure.code() == "scope_missing")
-        guard case let .scopeMissing(scope)? = failure.refusal()?.kind() else {
-            preconditionFailure("missing selling scope refusal")
-        }
-        precondition(scope == "paykit_request")
-    }
-    do {
-        try await wallet.publishListTo(recipient: recipient)
-        preconditionFailure("payer published a Private Payment List")
-    } catch let WalletError.NeedsUser(failure) {
-        precondition(failure.code() == "scope_missing")
-        // Only an unknown list delivery is a confirmation to send another list.
-        guard let refusal = failure.refusal() else { preconditionFailure("missing scope refusal") }
-        do {
-            try await wallet.sendListAgain(refusal: refusal)
-            preconditionFailure("a refusal other than an unknown delivery sent a list")
-        } catch let WalletError.InvalidInput(field) {
-            precondition(field == "refusal")
-        }
-    }
+    try await wallet.setListEndpoints(endpoints: [endpoint])
     try await wallet.withdrawListFrom(recipient: recipient)
     let lists = try await wallet.heldLists()
     let conflicts = try await wallet.publicationConflicts()
@@ -51,9 +28,37 @@ func checkLists(fixture: CheckoutFixture, wallet: NativeWallet) async throws {
         try await wallet.acknowledgePublicationConflict(conflict: malformed)
         preconditionFailure("acknowledged a malformed message hash")
     } catch WalletError.InvalidInput(let field) {
-        precondition(field == "message_hash")
+        precondition(field == "refused.message_hash")
     }
     try await wallet.acknowledgePublicationConflict(conflict: report)
     let remaining = try await wallet.publicationConflicts()
     precondition(remaining.isEmpty)
+
+    let seller = try await fixture.restoredListSeller()
+    let payer = try await wallet.identity()
+    let original: String
+    do {
+        try await seller.publishListTo(recipient: payer)
+        preconditionFailure("sent a replacement without confirmation")
+    } catch let WalletError.NeedsUser(failure) {
+        guard let refusal = failure.refusal(),
+              case let .listDeliveryUnknown(to, _, _, msgId, withdrawal, _) = refusal.kind(),
+              to == payer, !withdrawal else { preconditionFailure("expected an unknown list delivery") }
+        original = msgId
+        try await seller.sendListAgain(refusal: refusal)
+    }
+    var received: [String] = []
+    // A list can wait for a record listing even after the last feed page.
+    for _ in 0..<8 {
+        let report = try await wallet.receive()
+        for event in report.events {
+            if case let .messageReceived(_, _, kind, id, sender) = event.data,
+               kind == "paykit.private_payment_list", sender == recipient {
+                received.append(id)
+            }
+        }
+        if received.count >= 2 { break }
+    }
+    precondition(received.count == 2 && received.first == original && received.last != original)
+    try await seller.shutdown()
 }
