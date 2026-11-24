@@ -216,6 +216,14 @@ existing `PaymentView::attempt_id` and use its `stage` to track progress. A dura
 pending. Use `resume_payments` to progress outstanding work, then read
 `payments()` again to refresh the journal view.
 
+`resume_payments` returns one outcome for each payment that is still open
+and one for each payment the call ended, as the journal holds it when the
+call returns. A payment that ended without this wallet's own outcome, because
+the user or another app resolved it, comes as `PayOutcome::Resolved`: show
+nothing new to pay and read its state from `payments()`. A payment that was
+already over before the call is not listed again, unless the call found it
+made after all.
+
 When another wallet marks a subscription manual-only, the wallet that started
 a payment by hand can still resume that attempt after a restart. The SDK
 reuses the same attempt ID if the method still guarantees idempotency. A
@@ -245,6 +253,7 @@ current store.
 | `PayOutcome::PaidOutcomeUnwritten` | The method paid and the proof is in the journal. Resume the same attempt to record it and queue the proof. |
 | `PayOutcome::RecordHeld` | The method paid, but the record update is held. Resume when the record is readable or repaired. |
 | `PayOutcome::RecordDivergent` | The method paid and the record awaits confirmation. Show the named record, confirm it with the user and resume. |
+| `PayOutcome::Resolved` | The attempt is over: the user or another app resolved it, or it finished with nothing of this call's to report. Nothing new is paid. It doesn't say that no payment was made: read the payment's state from `payments` and the claim. |
 | `Stage::Recorded` | The journal exists before the Switch attempt write. |
 | `Stage::Attempted` | The attempt is written and checked. Payment has yet to be dispatched. |
 | `Stage::Paying` | Dispatch may have happened. Treat the attempt as potentially paid. |

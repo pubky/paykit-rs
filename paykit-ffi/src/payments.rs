@@ -142,6 +142,13 @@ pub enum PaymentOutcome {
         /// The payer's activity record.
         record: Vec<u8>,
     },
+    /// Over, with nothing of this call's to tell: the attempt was resolved by the user or by
+    /// another app, or it finished with nothing of this call's to report. The claim and the
+    /// wallet's payments say which. It is not a statement that no payment was made.
+    Resolved {
+        /// The attempt.
+        attempt_id: String,
+    },
     /// A native case that this binding does not recognize.
     Other {
         /// The SDK attempt ID associated with this outcome.
@@ -166,6 +173,7 @@ impl From<PayOutcome> for PaymentOutcome {
                 attempt_id,
                 record: record.into(),
             },
+            PayOutcome::Resolved { .. } => Self::Resolved { attempt_id },
             _ => Self::Other { attempt_id },
         }
     }

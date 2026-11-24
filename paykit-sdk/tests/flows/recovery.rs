@@ -314,9 +314,19 @@ async fn test_recovery_attempt_resolved_on_the_claim_not_dispatched_again() {
         )
         .await
         .unwrap();
-    assert!(wallet.resume_payments().await.unwrap().is_empty());
+    // The entry ends with nothing of this journal's to tell: reported once as resolved,
+    // never as failed, and nothing after.
+    let outcomes = wallet.resume_payments().await.unwrap();
+    assert!(
+        matches!(
+            outcomes.as_slice(),
+            [PayOutcome::Resolved { attempt_id: resolved, .. }] if *resolved == attempt_id
+        ),
+        "{outcomes:?}"
+    );
     assert_eq!(w.rail.pay_calls(&attempt_id), 1);
     assert_eq!(wallet.payments().await.unwrap()[0].stage, Stage::Finished);
+    assert!(wallet.resume_payments().await.unwrap().is_empty());
 }
 
 #[tokio::test]

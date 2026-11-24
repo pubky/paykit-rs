@@ -481,8 +481,8 @@ async fn test_resume_reports_a_payment_found_made_after_its_failure_once() {
     assert!(
         matches!(
             outcomes.as_slice(),
-            [PayOutcome::Pending { attempt_id: open, .. }, PayOutcome::Paid { attempt_id: paid, proof_msg_id: Some(_), .. }]
-                if *open == second && *paid == first
+            [PayOutcome::Paid { attempt_id: paid, proof_msg_id: Some(_), .. }, PayOutcome::Pending { attempt_id: open, .. }]
+                if *paid == first && *open == second
         ),
         "{outcomes:?}"
     );
@@ -580,4 +580,197 @@ async fn test_resume_keeps_the_methods_failure_over_a_replayed_resolution() {
         "{outcomes:?}"
     );
     assert_eq!(w.rail.pay_calls(&second), 1);
+}
+
+#[tokio::test]
+async fn test_resume_reports_a_payment_whose_outcome_another_entrys_write_sent() {
+    // Both payments are made, and neither outcome write is answered: both batches are kept.
+    // At the next resume the first flush fails too, and the first payment's write sends
+    // both kept batches ahead of it, so the second entry is finished before its own turn.
+    // It is still reported, once, as the journal holds it.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let [first, second] = two_in_flight(&w, &mut wallet).await;
+    for attempt in [first, second] {
+        w.rail.settle(&attempt, true);
+    }
+    let unanswered = |n: usize| {
+        for _ in 0..n {
+            w.alice.switch().fail_next(Fault::Unanswered {
+                path: "/ops".into(),
+                after: 0,
+            });
+        }
+    };
+    // The first's write, its retry ahead of the second's, and the last flush.
+    unanswered(3);
+    let outcomes = wallet.resume_payments().await.unwrap();
+    assert!(
+        matches!(
+            outcomes.as_slice(),
+            [PayOutcome::PaidOutcomeUnwritten { attempt_id: a, .. }, PayOutcome::PaidOutcomeUnwritten { attempt_id: b, .. }]
+                if *a == first && *b == second
+        ),
+        "{outcomes:?}"
+    );
+    unanswered(1);
+    let outcomes = wallet.resume_payments().await.unwrap();
+    assert!(
+        matches!(
+            outcomes.as_slice(),
+            [
+                PayOutcome::Paid { attempt_id: a, proof_msg_id: Some(_), .. },
+                PayOutcome::Paid { attempt_id: b, proof_msg_id: Some(_), .. },
+            ] if *a == first && *b == second
+        ),
+        "{outcomes:?}"
+    );
+    for attempt in [first, second] {
+        assert_eq!(stage(&wallet, &attempt).await, Stage::Finished);
+        assert_eq!(w.rail.executions(&attempt), 1);
+    }
+    assert!(wallet.resume_payments().await.unwrap().is_empty());
+}
+
+/// How the user's resolution of one of two payments in flight reached the switch.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Sent {
+    /// Its batch never left: kept, nothing applied.
+    Unsent,
+    /// Applied at the switch, the answer lost: kept, to be sent again.
+    AnswerLost,
+    /// Applied and answered: the entry is over before the resume.
+    Applied,
+}
+
+/// What the method's history shows for a payment when the resume runs.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Shows {
+    Paid,
+    Failed,
+    Pending,
+}
+
+/// Two payments in flight, one of them (`target`) resolved by the user as `resolution` with
+/// its batch `sent` so, the method showing `shows` for the two, and the switch failing as
+/// `timeouts` and `claim_unavailable` say: resumed twice. `resume_payments` checks in test
+/// builds that each result agrees with the journal it left, every entry that ended in the
+/// call reported exactly once; this adds that no payment is made twice.
+async fn resumed_under(
+    target: usize,
+    resolution: Option<(paykit_sdk::Resolution, Sent)>,
+    shows: [Shows; 2],
+    timeouts: usize,
+    claim_unavailable: bool,
+) {
+    use pubky_switch_client::app::UserConfirmed;
+    let case = format!(
+        "target {target}, {resolution:?}, {shows:?}, {timeouts} timeouts, claims \
+         unavailable {claim_unavailable}"
+    );
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let attempts = two_in_flight(&w, &mut wallet).await;
+    let ops_time_out = |n: usize| {
+        for _ in 0..n {
+            w.alice.switch().fail_next(Fault::Unanswered {
+                path: "/ops".into(),
+                after: 0,
+            });
+        }
+    };
+    if let Some((resolution, sent)) = resolution {
+        let obligation = wallet
+            .payments()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|p| p.attempt_id == attempts[target])
+            .unwrap()
+            .obligation;
+        match sent {
+            Sent::Unsent => ops_time_out(1),
+            Sent::AnswerLost => w.alice.switch().fail_next(Fault::LoseAnswer {
+                path: "/ops".into(),
+            }),
+            Sent::Applied => {}
+        }
+        // Refused, kept or applied: each is a state a resume may meet.
+        let _ = wallet
+            .resolve_attempt(
+                &obligation,
+                attempts[target],
+                resolution,
+                UserConfirmed::new(),
+            )
+            .await;
+    }
+    for (attempt, shows) in attempts.iter().zip(shows) {
+        match shows {
+            Shows::Paid => w.rail.settle(attempt, true),
+            Shows::Failed => w.rail.settle(attempt, false),
+            Shows::Pending => {}
+        }
+    }
+    ops_time_out(timeouts);
+    if claim_unavailable {
+        w.alice.switch().fail_next(Fault::Error {
+            path: "claims".into(),
+            code: pubky_switch_core::http::ErrorCode::Unavailable,
+            current: serde_json::Value::Null,
+        });
+    }
+    for _ in 0..2 {
+        // An error carries no outcome and is no disagreement; a result is checked inside.
+        let _ = wallet.resume_payments().await;
+    }
+    for attempt in attempts {
+        assert!(w.rail.executions(&attempt) <= 1, "{case}");
+    }
+    // With the switch answering again, the journal settles: nothing is left told as open
+    // that the journal holds as over, which the check inside judges once more.
+    let settled = wallet.resume_payments().await;
+    assert!(settled.is_ok(), "{case}: {settled:?}");
+}
+
+/// Every combination for a resolution of the payment at `target`.
+async fn every_combination(target: usize) {
+    use paykit_sdk::Resolution;
+    let mut resolutions = vec![None];
+    for resolution in [Resolution::Failed, Resolution::Unknown, Resolution::Done] {
+        for sent in [Sent::Unsent, Sent::AnswerLost, Sent::Applied] {
+            resolutions.push(Some((resolution, sent)));
+        }
+    }
+    for resolution in resolutions {
+        for resolved in [Shows::Paid, Shows::Failed, Shows::Pending] {
+            // The other payment either writes, which sends a kept batch ahead of it, or
+            // doesn't.
+            for other in [Shows::Paid, Shows::Pending] {
+                let mut shows = [other; 2];
+                shows[target] = resolved;
+                for (timeouts, claim_unavailable) in [(0, false), (1, false), (1, true), (2, false)]
+                {
+                    Box::pin(resumed_under(
+                        target,
+                        resolution,
+                        shows,
+                        timeouts,
+                        claim_unavailable,
+                    ))
+                    .await;
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_resume_result_agrees_with_the_journal_whatever_happens_to_the_first_payment() {
+    every_combination(0).await;
+}
+
+#[tokio::test]
+async fn test_resume_result_agrees_with_the_journal_whatever_happens_to_the_second_payment() {
+    every_combination(1).await;
 }

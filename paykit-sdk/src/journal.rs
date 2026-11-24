@@ -420,11 +420,34 @@ pub(crate) struct JournalEntry {
     /// the claim is gone raises [`crate::NoticeKind::PaidAfterFailed`] (Paykit spec 7.2,
     /// "What a payment method declares").
     pub(crate) failed_on_claim: bool,
+    /// This app wrote `failed` on the claim for this attempt while it was still before the
+    /// payment method's call: no payment started for it (Paykit spec 7.2). Set in the journal
+    /// copy the failed outcome's own batch carries, so the entry holds it however that batch
+    /// came to apply.
+    pub(crate) failed_before_call: bool,
+    /// How the user resolved this attempt ([`crate::Resolution`]), on its claim or, for a
+    /// restored dispatch no claim shows, off it (Paykit spec 7.3). Set in the journal copy the
+    /// resolution's batch carries, so the entry holds it however that batch came to apply.
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub(crate) user_resolved: Option<UserResolution>,
     /// The Billing Period paid, for a recurring request (Paykit spec 8.2): the obligation is
     /// the period's, the record the outcome writes is the payer's period record, and the
     /// proof names the period. `None` for a one-time request and a payment without one.
     #[serde(deserialize_with = "Option::deserialize")]
     pub(crate) billing_period: Option<KeptPeriod>,
+}
+
+/// The user's resolution of an attempt, as its journal entry keeps it
+/// ([`crate::Resolution`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum UserResolution {
+    /// The user confirmed it was paid.
+    Done,
+    /// The user couldn't tell.
+    Unknown,
+    /// The user confirmed it wasn't paid.
+    Failed,
 }
 
 impl std::fmt::Debug for JournalEntry {
@@ -764,6 +787,12 @@ impl JournalEntry {
             return bad();
         }
         if (self.record_held || self.failed_on_claim) && self.rail_proof.is_none() {
+            return bad();
+        }
+        // "No payment started" is this app's own finished failure, never a method's word.
+        if self.failed_before_call
+            && (self.stage != Stage::Finished || self.rail_proof.is_some() || self.failed_by_method)
+        {
             return bad();
         }
         // The call amount is the amount asked, but for a payment of a request: one priced by

@@ -635,6 +635,8 @@ impl Paykit {
             transfer_bound: None,
             price: None,
             failed_on_claim: false,
+            failed_before_call: false,
+            user_resolved: None,
             billing_period: obligation
                 .period
                 .map(|period| KeptPeriod::of(&PeriodRef::from(period))),
@@ -837,8 +839,17 @@ impl Paykit {
         }
         // With no claim entry, record or ledger write to make, only the journal changes:
         // the entry finishes locally.
+        // The entry keeps how the user resolved it, in the journal copy the batch carries:
+        // however that batch comes to apply, a later resume reads the resolution from the
+        // entry, never a failure the user didn't state (Paykit spec 7.3).
+        let resolved = match resolution {
+            Resolution::Done => crate::journal::UserResolution::Done,
+            Resolution::Unknown => crate::journal::UserResolution::Unknown,
+            Resolution::Failed => crate::journal::UserResolution::Failed,
+        };
         if batch.is_empty() {
             if let Some(entry) = entry.as_mut().filter(|e| e.open()) {
+                entry.user_resolved = Some(resolved);
                 self.set_stage(entry, Stage::Finished).await?;
             }
             return Ok(());
@@ -847,6 +858,7 @@ impl Paykit {
             if resolution == Resolution::Failed {
                 entry.end_before_the_call();
             }
+            entry.user_resolved = Some(resolved);
             entry.stage = Stage::Finished;
             batch = batch.local(self.journal_write(entry)?);
         }
