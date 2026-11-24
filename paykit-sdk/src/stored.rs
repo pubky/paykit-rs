@@ -175,9 +175,9 @@ fn refused(error: &AppError) -> bool {
 /// does, so it counts nothing toward the window.
 ///
 /// The receive goes on past a failed upkeep of the app record only where the switch doesn't
-/// answer ([`crate::pay::switch_unavailable`]), a strict subset of the answers this never
-/// counts, so no step after the upkeep gives a stored message up on an answer the upkeep was
-/// allowed past.
+/// answer ([`crate::own_record::own_record_left_owed`], by [`crate::pay::switch_unavailable`]),
+/// a strict subset of the answers this never counts, so no step after the upkeep gives a
+/// stored message up on an answer the upkeep was allowed past.
 pub(crate) fn refuses_the_content(code: pubky_switch_core::http::ErrorCode) -> bool {
     use pubky_switch_core::http::Retry;
     matches!(code.retry(), Retry::No | Retry::WhenLimitFrees)
@@ -1558,6 +1558,16 @@ mod tests {
                 retry_after: None,
             });
             let placed = submitted::<()>(Err(answer.clone()));
+            // A failed upkeep of the app record goes past this answer only if no stored
+            // message's write counts it (`own_record::own_record_left_owed`).
+            if crate::own_record::own_record_left_owed(&PaykitError::Client(answer.clone()))
+                .is_some()
+            {
+                assert!(
+                    !matches!(placed, Ok(Placed::Not)),
+                    "{code:?} goes past the upkeep but counts here"
+                );
+            }
             // A switch that doesn't answer is never counted: a failed upkeep goes past it.
             if crate::pay::switch_unavailable(&answer) {
                 assert!(placed.is_err(), "{code:?}");
