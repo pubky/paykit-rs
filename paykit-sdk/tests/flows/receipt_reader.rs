@@ -64,7 +64,11 @@ async fn test_receipt_reader_reloads_the_held_marked_receipt() {
 }
 
 #[tokio::test]
-async fn test_receipt_reader_restores_the_held_marked_receipt() {
+async fn test_receipt_reader_after_a_fresh_restore_keeps_the_restriction_over_the_repair() {
+    // The backup carries the mark of the eager write, with its loss marker, but not the
+    // held version the repair builds on (Switch spec 12.4 "Seen marks"): the restored
+    // reader can't verify the repair, so it keeps the restriction it saw and flags the
+    // repair (Paykit wire 5).
     Box::pin(read_repaired_marker(ReadCase::FreshRestore)).await;
 }
 
@@ -342,10 +346,7 @@ async fn read_repaired_marker(case: ReadCase) {
     witness.receive(None).await.unwrap();
     witness.app_mut().flush_cursor().await.unwrap();
     let read = witness.app().shared_record(&key).await.unwrap().unwrap();
-    let covered = matches!(
-        case,
-        ReadCase::Live | ReadCase::Reload | ReadCase::FreshRestore
-    );
+    let covered = matches!(case, ReadCase::Live | ReadCase::Reload);
     let cursor = w.bob.switch().app(&app_id).cursor;
     println!(
         "receipt reader {}",
@@ -364,6 +365,11 @@ async fn read_repaired_marker(case: ReadCase) {
         assert_eq!(read.version, repaired.version);
         assert_eq!(read.writer, shop.app_id());
         assert_eq!(read.content, repaired.content);
+    } else if case == ReadCase::FreshRestore {
+        // The repair is the version shown, flagged, and its value isn't taken.
+        assert_eq!(read.version, repaired.version);
+        assert!(read.flagged);
+        assert!(read.content.value().is_none());
     } else {
         assert_eq!(read.version, eager_write.version);
         assert_eq!(read.content, eager_write.content);
@@ -401,6 +407,49 @@ async fn read_repaired_marker(case: ReadCase) {
         Some(Refusal::CreditHistoryLost)
     ));
     assert_eq!(w.record_writes(&w.bob, &key), before + 1);
+    if case == ReadCase::FreshRestore {
+        // What the restored reader is left with. A later own write that keeps the loss
+        // marker is taken and clears the flag, and receives go on taking other records. But
+        // the record's hold keeps the reader's service cursor below the delete, and its
+        // put-back duty stays, as for any reader without the evidence to verify the repair.
+        let mut kept: serde_json::Value =
+            serde_json::from_slice(repaired.content.value().unwrap()).unwrap();
+        kept["lost_to_delete"] = pubky_switch_core::enc::b64(&notice.delete).into();
+        shop.app_mut().read_record_fresh(&target).await.unwrap();
+        let later = shop
+            .app_mut()
+            .put_record(&target, &serde_json::to_vec(&kept).unwrap(), Vec::new())
+            .await
+            .unwrap();
+        let next = request_from(&mut shop, w.alice_id(), draft("0.00031", w.clock.now_ms())).await;
+        let other = witness
+            .app()
+            .record_key(&RecordTarget::new(
+                SwitchCollection::new(
+                    Collection::PayeeActivity.name(),
+                    Collection::PayeeActivity.fixed_policy(),
+                ),
+                &natural_key::request_record(&w.bob_id(), &next.request_hash),
+            ))
+            .unwrap();
+        for _ in 0..2 {
+            witness.receive(None).await.unwrap();
+            witness.app_mut().flush_cursor().await.unwrap();
+        }
+        let read = witness.app().shared_record(&key).await.unwrap().unwrap();
+        assert!(!read.flagged);
+        assert_eq!(read.version, later.version);
+        let taken = witness.app().shared_record(&other).await.unwrap().unwrap();
+        assert!(taken.authenticated && !taken.flagged);
+        assert!(w.bob.switch().app(&witness.app_id()).cursor < deletion.version.version);
+        assert!(witness
+            .app_mut()
+            .unacknowledged_events()
+            .await
+            .unwrap()
+            .iter()
+            .any(|e| matches!(e, pubky_switch_client::app::AppEvent::PutBackWaits { .. })));
+    }
 }
 
 async fn keep_recovered_delete(
