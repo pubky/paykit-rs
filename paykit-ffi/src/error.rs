@@ -538,65 +538,73 @@ fn switch_client_category(e: &pubky_switch_client::error::ClientError) -> (Categ
         C::Chain(_) => CHAIN,
         C::DisplayReadPending => (RetryLater, "display_read_pending"),
         C::Transport(transport) => transport_category(transport),
-        C::BadServiceSignature { status } => unverified_category(*status),
+        // No answer of the service: the request went out and may have taken effect.
+        C::BadServiceSignature { .. } => SENT_UNVERIFIED,
+        // A public read outside its window: a read, so calling again is safe.
         C::StaleAnswer { .. } => (RetryLater, "stale_answer"),
-        // Before the body was read only a `429` passes by itself; another answer keeps its
-        // service code's case and name, so a `404` or `413` that comes again for the same
-        // bytes is told apart from a wait.
-        C::BodyUnread { code, .. }
-            if code.retry() == pubky_switch_core::http::Retry::AfterRetryAfter =>
-        {
-            (RetryLater, "body_unread")
-        }
-        C::BodyUnread { code, .. } => {
-            return (
-                service_category(*code).0,
-                format!("body_unread_{}", code.as_str()),
-            )
-        }
-        C::InvalidResponse(_) => (RetryLater, "invalid_response"),
+        C::BodyUnread { code, .. } => body_unread_category(*code),
+        // The call's own answer, verified, doesn't read: the request went out.
+        C::InvalidResponse(_) => (OutcomeUnknown, "invalid_response"),
         C::BodyOverCap { .. } => (NotSent, "body_over_cap"),
         C::Unpinned => (NotSent, "unpinned"),
         C::Usage(_) => (NotSent, "client_usage"),
-        C::Core(_) => (Permanent, "invalid_data"),
+        // A document of an answer to this call that fails a check of the core: the request
+        // went out and may have taken effect.
+        C::Core(_) => (OutcomeUnknown, "invalid_data"),
         _ => CLIENT_UNCLASSIFIED,
     };
     (category, code.into())
 }
 
-/// The action and stable code of an answer whose signature doesn't verify, or whose signed
-/// header doesn't read: nothing of it was used. Under a `5xx` status, as from a proxy in front
-/// of the service, it passes by itself. Under another, the same call gets it again, and the
-/// request went out, so it may have applied (Switch wire 7.1, "Response signature").
-fn unverified_category(status: u16) -> (Category, &'static str) {
-    if status >= 500 {
-        (Category::RetryLater, "bad_service_signature")
-    } else {
-        (Category::Permanent, "unverified_answer")
-    }
-}
+// A failure that comes after the request left the device is `RetryLater` only where calling
+// again is safe whatever the first request did. Not every request the Switch client sends
+// outside a kept batch is: an accepted recovery upload after a provider loss appends a
+// transition each time, and an inbox append the service no longer holds is appended again
+// (Switch wire 7.4.3, 7.4.14). A failure doesn't name the request it came from, so each such
+// failure is `OutcomeUnknown`, bare as well as behind a kept batch.
 
-/// The action and stable code of a failure of the host's transport. Only the network's own
-/// failures pass by themselves; each other cause keeps its own code, as the host acts on it.
+/// An answer whose response signature doesn't verify, or whose signed headers don't read:
+/// nothing of it was used, its status included, which proves nothing (Switch wire 7.1,
+/// "Response signature"). The request went out and may have taken effect.
+const SENT_UNVERIFIED: (Category, &str) = (Category::OutcomeUnknown, "bad_service_signature");
+
+/// The action and stable code of a failure of the host's transport: one that sent nothing
+/// keeps its cause's code, and one once the request may have gone out is `OutcomeUnknown`.
 fn transport_category(
     error: &pubky_switch_client::error::TransportError,
 ) -> (Category, &'static str) {
     use pubky_switch_client::error::TransportError as T;
     use Category::*;
     match error {
-        T::Connect(_) | T::Timeout | T::Other(_) => (RetryLater, "transport"),
-        T::UnreadableSignedHeader { status } => unverified_category(*status),
+        // No connection could be made: nothing was sent, so calling again is safe.
+        T::Connect(_) => (RetryLater, "transport"),
         // The transport has no first-handoff facility: it gives this every time.
         T::FirstSendUnavailable => (NotSent, "transport_first_send_unavailable"),
         // A guarded first send passed its deadline and was never released.
         T::FirstSendExpired => (NotSent, "transport_first_send_expired"),
-        // The transport may not connect to the service's origin.
+        // The transport may not connect to the service's origin: nothing was sent.
         T::Refused(_) => (NotSent, "transport_refused"),
-        // The request went out and its answer was too large to take: it may have applied.
-        T::TooLarge(_) => (Permanent, "transport_too_large"),
         // The transport couldn't build the request.
         T::InvalidRequest(_) => (NotSent, "transport_invalid_request"),
+        // The call took longer than its timeout, or failed otherwise, once the request may
+        // have gone out.
+        T::Timeout | T::Other(_) => (OutcomeUnknown, "transport_no_answer"),
+        // The request went out and its answer was larger than the transport takes.
+        T::TooLarge(_) => (OutcomeUnknown, "transport_answer_too_large"),
+        T::UnreadableSignedHeader { .. } => SENT_UNVERIFIED,
         // A cause these bindings don't know: the request may have gone out.
+        _ => CLIENT_UNCLASSIFIED,
+    }
+}
+
+/// An error answer the service gave before it read the request's body: it binds the request
+/// without its body, so it is final for nothing, and the call failed as when no answer comes
+/// (Switch wire 7.1). The client gives it for these three codes only.
+fn body_unread_category(code: pubky_switch_core::http::ErrorCode) -> (Category, &'static str) {
+    use pubky_switch_core::http::ErrorCode as E;
+    match code {
+        E::TooLarge | E::RateLimited | E::NotFound => (Category::OutcomeUnknown, "body_unread"),
+        // A code the client doesn't give here, so unknown to these bindings.
         _ => CLIENT_UNCLASSIFIED,
     }
 }
@@ -638,7 +646,9 @@ fn client_failure(e: &AppError) -> (Category, WalletFailure) {
             failure(category, code)
         }
         AppError::NotAnsweringAsAccount { .. } => failure(RetryLater, "account_not_answering"),
-        AppError::InvalidData(_) => failure(Permanent, "invalid_data"),
+        // Data that doesn't verify, from the store or from an answer to this call, which may
+        // have taken effect: these bindings can't tell which.
+        AppError::InvalidData(_) => failure(OutcomeUnknown, "invalid_data"),
         AppError::Alarm(_) => failure(Recovery, "alarm"),
         AppError::Refused(refusal) => {
             let (category, code) = app_refusal_category(refusal);

@@ -463,7 +463,7 @@ async fn release(world: &World) -> TestResult {
     // The service applied the reservation but its reply never reached the executor (Paykit spec 8.3).
     world.lose_answer("POST", "/ops");
     let result = p.payer.pay_under_allowance(request, record.clone()).await?;
-    let lost = refusal(decision(result), "outcome_unknown", "transport")?;
+    let lost = refusal(decision(result), "outcome_unknown", "transport_no_answer")?;
     assert!(lost.kept_batch().is_some());
     receive(&p.payer).await?;
     let entries = p.payer.payments().await?;
@@ -543,6 +543,26 @@ fn not_resumed<T>(result: Result<T, WalletError>) -> TestResult {
     Ok(())
 }
 
+/// The grants this app holds on the Allowance record, as its store has it.
+async fn grant_count(wallet: &NativeWallet, record: &[u8]) -> TestResult<usize> {
+    let key = crate::fixed(record.to_vec(), "record")?;
+    wallet
+        .lend(async |app| {
+            let held = app
+                .app()
+                .shared_record(&key)
+                .await?
+                .ok_or("missing the Allowance record")?;
+            let value = held
+                .content
+                .value()
+                .ok_or("the Allowance record doesn't read")?;
+            let allowance = paykit_lib::records::AllowanceRecord::read(value, &app.identity())?;
+            Ok::<_, Box<dyn Error>>(allowance.grants.len())
+        })
+        .await?
+}
+
 /// After a provider loss the user confirms the Allowance again and the regrant's reply is
 /// lost. The call again lands the kept regrant and builds no second one; the resume then
 /// answers that automatic payments under it don't resume in this version, as a typed
@@ -550,24 +570,7 @@ fn not_resumed<T>(result: Result<T, WalletError>) -> TestResult {
 async fn regrant_lost(world: &World) -> TestResult {
     let mut p = Box::pin(Parties::open(world)).await?;
     let record = Box::pin(p.accept()).await?;
-    let grants = || async {
-        p.payer
-            .lend(async |app| {
-                let held = app
-                    .app()
-                    .shared_record(&crate::fixed(record.clone(), "record")?)
-                    .await?;
-                let held = held.ok_or("missing the Allowance record")?;
-                let value = held
-                    .content
-                    .value()
-                    .ok_or("the Allowance record doesn't read")?;
-                let allowance = paykit_lib::records::AllowanceRecord::read(value, &app.identity())?;
-                Ok::<_, Box<dyn Error>>(allowance.grants.len())
-            })
-            .await?
-    };
-    let before = grants().await?;
+    let before = grant_count(&p.payer, &record).await?;
 
     let buyer = world.identity("buyer")?;
     let successor = "https://recovered-buyer.payments.test";
@@ -605,6 +608,13 @@ async fn regrant_lost(world: &World) -> TestResult {
         .and_then(categorized)
         .ok_or("the regrant's answer is lost")?;
     assert_eq!(case, "outcome_unknown");
+    // The service applied it, and this app doesn't know yet.
+    assert_eq!(
+        grant_count(&p.payer, &record).await?,
+        before,
+        "the lost regrant isn't landed here yet"
+    );
+    // The call again sends the kept regrant first, so it lands here, once.
     match p
         .payer
         .confirm_allowance_executor(view.hold.clone(), true)
@@ -613,12 +623,21 @@ async fn regrant_lost(world: &World) -> TestResult {
         Ok(()) => {}
         again => not_resumed(again)?,
     }
+    assert_eq!(
+        grant_count(&p.payer, &record).await?,
+        before + 1,
+        "the call again lands the regrant"
+    );
+    // Automatic payments under it don't resume, and no retry changes that.
+    not_resumed(p.payer.resume_allowance_executor(record.clone()).await)?;
+    not_resumed(p.payer.resume_allowance_executor(record.clone()).await)?;
     receive(&p.payer).await?;
-    assert_eq!(grants().await?, before + 1, "one regrant, landed once");
-    not_resumed(p.payer.resume_allowance_executor(record.clone()).await)?;
-    not_resumed(p.payer.resume_allowance_executor(record.clone()).await)?;
-    not_resumed(p.payer.confirm_allowance_executor(view.hold, true).await)?;
-    assert_eq!(grants().await?, before + 1, "no retry builds another grant");
+    assert_eq!(
+        grant_count(&p.payer, &record).await?,
+        before + 1,
+        "no retry builds another grant"
+    );
+    assert_eq!(p.account.count(), 0);
     p.payer.shutdown().await?;
     Ok(())
 }

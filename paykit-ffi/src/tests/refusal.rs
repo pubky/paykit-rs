@@ -172,7 +172,7 @@ fn test_wallet_errors_categorize_each_failure_with_a_stable_code() {
             "not_current",
         ),
         (
-            PaykitError::Client(AppError::Transport(TransportError::Timeout)),
+            PaykitError::Client(AppError::Transport(TransportError::Connect(reason()))),
             "retry_later",
             "transport",
         ),
@@ -183,7 +183,7 @@ fn test_wallet_errors_categorize_each_failure_with_a_stable_code() {
         ),
         (
             PaykitError::Client(AppError::InvalidData(reason())),
-            "permanent",
+            "outcome_unknown",
             "invalid_data",
         ),
         (
@@ -345,7 +345,9 @@ fn test_wallet_errors_carry_the_service_code_and_its_retry_time() {
 fn test_wallet_errors_kept_batch_makes_the_outcome_unknown() {
     let kept = AppError::Kept {
         batch_id: [7; 16],
-        error: Box::new(AppError::Transport(TransportError::Timeout)),
+        error: Box::new(AppError::Transport(TransportError::Connect(
+            "reason".into(),
+        ))),
     };
     let (category, failure) = categorized(kept.into()).unwrap();
     assert_eq!(
@@ -353,9 +355,9 @@ fn test_wallet_errors_kept_batch_makes_the_outcome_unknown() {
         ("outcome_unknown", "transport")
     );
     assert_eq!(failure.kept_batch.as_deref(), Some([7; 16].as_slice()));
-    // Without a kept batch the same failure is only a retry.
+    // Without a kept batch a failure that sent nothing is only a retry.
     let (category, failure) =
-        categorized(AppError::Transport(TransportError::Timeout).into()).unwrap();
+        categorized(AppError::Transport(TransportError::Connect("reason".into())).into()).unwrap();
     assert_eq!(category, "retry_later");
     assert_eq!(failure.kept_batch, None);
 }
@@ -646,6 +648,7 @@ fn every_other_failure() -> Vec<WalletError> {
     let app = [
         AppError::ExpiredUnsent,
         AppError::Transport(TransportError::Timeout),
+        AppError::Transport(TransportError::Connect(reason())),
         AppError::InvalidData(reason()),
         client(ClientError::Transport(TransportError::Timeout)),
         client(ClientError::DisplayReadPending),
@@ -814,7 +817,6 @@ fn test_wallet_errors_match_the_host_guide_table() {
         not_sent,
         [
             "body_over_cap",                    // not sent: over its call's cap
-            "body_unread_too_large",            // refused as too large before the body was read
             "carried_too_large",                // nothing written by the restore
             "client_usage",                     // not sent: breaks a Switch rule
             "conflict",                         // nothing applied: the state changed first
@@ -1305,12 +1307,12 @@ fn test_wallet_errors_unsaved_settlement_warning_keeps_its_bucket_outcome_and_ke
     assert_eq!(other.settlement_warning_outcome(), None);
 }
 
-/// A failure of the host's transport, an answer that doesn't verify and an answer given before
-/// the body was read each keep their cause's code. Only the network's own failures, a `5xx`
-/// answer that doesn't verify and a `429` pass by themselves; behind a kept batch each comes
-/// as `OutcomeUnknown` with the same code (Switch wire 7.1).
+/// A failure that comes after the request left the device is `OutcomeUnknown`, bare as well as
+/// behind a kept batch: a timeout, an answer whose signature doesn't verify at any status, one
+/// too large to take, one given before the body was read, and one that doesn't read or
+/// verify. Only a failure that sent nothing keeps a case that calls again (Switch wire 7.1).
 #[test]
-fn test_wallet_errors_transport_and_unverified_answers_keep_their_cause() {
+fn test_wallet_errors_failures_after_sending_are_outcome_unknown() {
     use pubky_switch_client::error::{ClientError as C, TransportError as T};
     let reason = || String::from("reason");
     let unread = |status, code| {
@@ -1321,36 +1323,11 @@ fn test_wallet_errors_transport_and_unverified_answers_keep_their_cause() {
         })
     };
     let rows = [
+        // Nothing was sent.
         (
             AppError::Transport(T::Connect(reason())),
             "retry_later",
             "transport",
-        ),
-        (AppError::Transport(T::Timeout), "retry_later", "transport"),
-        (
-            AppError::Transport(T::Other(reason())),
-            "retry_later",
-            "transport",
-        ),
-        (
-            AppError::Switch(C::Transport(T::Timeout)),
-            "retry_later",
-            "transport",
-        ),
-        (
-            AppError::Transport(T::UnreadableSignedHeader { status: 503 }),
-            "retry_later",
-            "bad_service_signature",
-        ),
-        (
-            AppError::Transport(T::UnreadableSignedHeader { status: 401 }),
-            "permanent",
-            "unverified_answer",
-        ),
-        (
-            AppError::Switch(C::Transport(T::UnreadableSignedHeader { status: 499 })),
-            "permanent",
-            "unverified_answer",
         ),
         (
             AppError::Transport(T::FirstSendUnavailable),
@@ -1368,45 +1345,87 @@ fn test_wallet_errors_transport_and_unverified_answers_keep_their_cause() {
             "transport_refused",
         ),
         (
-            AppError::Transport(T::TooLarge(1)),
-            "permanent",
-            "transport_too_large",
-        ),
-        (
             AppError::Transport(T::InvalidRequest(reason())),
             "not_sent",
             "transport_invalid_request",
         ),
+        // The request may have gone out.
         (
-            AppError::Switch(C::BadServiceSignature { status: 500 }),
-            "retry_later",
+            AppError::Transport(T::Timeout),
+            "outcome_unknown",
+            "transport_no_answer",
+        ),
+        (
+            AppError::Switch(C::Transport(T::Timeout)),
+            "outcome_unknown",
+            "transport_no_answer",
+        ),
+        (
+            AppError::Transport(T::Other(reason())),
+            "outcome_unknown",
+            "transport_no_answer",
+        ),
+        (
+            AppError::Transport(T::TooLarge(1)),
+            "outcome_unknown",
+            "transport_answer_too_large",
+        ),
+        (
+            AppError::Transport(T::UnreadableSignedHeader { status: 503 }),
+            "outcome_unknown",
             "bad_service_signature",
         ),
         (
-            AppError::Switch(C::BadServiceSignature { status: 401 }),
-            "permanent",
-            "unverified_answer",
+            AppError::Switch(C::BadServiceSignature { status: 502 }),
+            "outcome_unknown",
+            "bad_service_signature",
+        ),
+        (
+            AppError::Switch(C::BadServiceSignature { status: 200 }),
+            "outcome_unknown",
+            "bad_service_signature",
         ),
         (
             unread(429, ErrorCode::RateLimited),
-            "retry_later",
+            "outcome_unknown",
             "body_unread",
         ),
         (
             unread(404, ErrorCode::NotFound),
-            "permanent",
-            "body_unread_not_found",
+            "outcome_unknown",
+            "body_unread",
         ),
         (
             unread(413, ErrorCode::TooLarge),
-            "not_sent",
-            "body_unread_too_large",
+            "outcome_unknown",
+            "body_unread",
+        ),
+        (
+            unread(409, ErrorCode::Conflict),
+            "outcome_unknown",
+            "client_unclassified",
+        ),
+        (
+            AppError::Switch(C::InvalidResponse(reason())),
+            "outcome_unknown",
+            "invalid_response",
+        ),
+        (
+            AppError::Switch(C::Core(pubky_switch_core::Error::Invalid(reason()))),
+            "outcome_unknown",
+            "invalid_data",
+        ),
+        (
+            AppError::InvalidData(reason()),
+            "outcome_unknown",
+            "invalid_data",
         ),
     ];
     for (error, case, code) in rows {
         let (bare_case, bare) =
             categorized(PaykitError::Client(error.clone()).into()).expect("categorized");
         assert_eq!((bare_case, bare.code.as_str()), (case, code));
+        // Behind a kept batch the code stays the cause's.
         let kept = AppError::Kept {
             batch_id: [5; 16],
             error: Box::new(error),
