@@ -1341,20 +1341,13 @@ impl Paykit {
             if matches!(view, FailureView::ReadSwitch) {
                 let read = match self.app.read_claim(&obligation).await {
                     Ok(read) => SwitchClaim::Read(read.map(|read| read.view)),
-                    Err(error) if refused(&error) => {
+                    Err(error) => match crate::receive::claim_read_after(&error) {
+                        crate::receive::ClaimReadAfter::Refused => SwitchClaim::Refused,
                         // An answer a later read may pass says nothing of the claim: the
-                        // receipt waits for it, never given up meanwhile
-                        // (`receive::claim_read_refused`).
-                        if error
-                            .unkept()
-                            .code()
-                            .is_some_and(|code| !crate::receive::claim_read_refused(code))
-                        {
-                            return Ok(Placed::Waits);
-                        }
-                        SwitchClaim::Refused
-                    }
-                    Err(error) => return Err(error.into()),
+                        // receipt waits for it, never given up meanwhile.
+                        crate::receive::ClaimReadAfter::ReadAgain => return Ok(Placed::Waits),
+                        crate::receive::ClaimReadAfter::Error => return Err(error.into()),
+                    },
                 };
                 view = failure_view(None, Some(read));
             }

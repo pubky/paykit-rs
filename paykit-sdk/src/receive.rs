@@ -2069,7 +2069,62 @@ fn admits_receipt_over_unread_record(
 /// and the read is made again later: settling nothing on it would leave a paid attempt
 /// unsettled, its late-receipt notice unraised and its journal entry not updated.
 pub(crate) fn claim_read_refused(code: pubky_switch_core::http::ErrorCode) -> bool {
-    code.retry() == pubky_switch_core::http::Retry::No
+    use pubky_switch_core::http::ErrorCode as E;
+    // No wildcard: a code the switch adds fails to build here until it is classified.
+    match code {
+        E::BadRequest
+        | E::BadSignature
+        | E::NotAdmitted
+        | E::PermissionMissing
+        | E::NotCurrent
+        | E::CertExpired
+        | E::NotFound
+        | E::StaleIdentity
+        | E::TooLarge => true,
+        E::StaleTimestamp
+        | E::Conflict
+        | E::StaleEpoch
+        | E::StaleGeneration
+        | E::StaleKey
+        | E::IdentityNeeded
+        | E::Moved
+        | E::RateLimited
+        | E::QuotaExceeded
+        | E::Staged
+        | E::Unavailable
+        | E::RecoveryRequired => false,
+    }
+}
+
+/// What a failed read of a receipt's claim at a later write comes to
+/// ([`claim_read_after`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ClaimReadAfter {
+    /// Refused for good: the receipt settles nothing, and is still recorded.
+    Refused,
+    /// An answer a later read may pass: the receipt waits and reads again.
+    ReadAgain,
+    /// Not the switch's answer, or a switch that doesn't answer: the error, nothing decided.
+    Error,
+}
+
+/// What `error`, a failed read of a receipt's claim at a stored receipt's later write, comes
+/// to, by the rule of the first read ([`claim_read_refused`]): a switch that doesn't answer and
+/// a failure that isn't the switch's answer are the error.
+pub(crate) fn claim_read_after(error: &pubky_switch_client::app::AppError) -> ClaimReadAfter {
+    if crate::pay::switch_unavailable(error) {
+        return ClaimReadAfter::Error;
+    }
+    match error.unkept().code() {
+        Some(code) => {
+            if claim_read_refused(code) {
+                ClaimReadAfter::Refused
+            } else {
+                ClaimReadAfter::ReadAgain
+            }
+        }
+        None => ClaimReadAfter::Error,
+    }
 }
 
 /// What the switch answered for a receipt's claim (Switch wire 7.4.8).
@@ -4515,7 +4570,40 @@ mod tests {
                 | ErrorCode::RecoveryRequired => false,
             };
             assert_eq!(super::claim_read_refused(code), refused, "{code:?}");
+            // The Switch's own table agrees: refused only where the read never passes
+            // unchanged (Switch spec 6.4).
+            assert_eq!(
+                code.retry() == pubky_switch_core::http::Retry::No,
+                refused,
+                "{code:?}"
+            );
+            // The stored receipt's later read follows the same rule.
+            let answer = pubky_switch_client::app::AppError::Switch(
+                pubky_switch_client::error::ClientError::Switch {
+                    status: code.status(),
+                    code,
+                    message: String::new(),
+                    current: serde_json::Value::Null,
+                    known_version: None,
+                    retry_after: None,
+                },
+            );
+            let expected = if crate::pay::switch_unavailable(&answer) {
+                super::ClaimReadAfter::Error
+            } else if refused {
+                super::ClaimReadAfter::Refused
+            } else {
+                super::ClaimReadAfter::ReadAgain
+            };
+            assert_eq!(super::claim_read_after(&answer), expected, "{code:?}");
         }
+        // A failure that isn't the switch's answer decides nothing.
+        assert_eq!(
+            super::claim_read_after(&pubky_switch_client::app::AppError::Transport(
+                pubky_switch_client::error::TransportError::Timeout
+            )),
+            super::ClaimReadAfter::Error
+        );
     }
 
     #[test]
