@@ -260,7 +260,8 @@ impl Paykit {
     /// # Errors
     ///
     /// A store failure, an alarm, or Paykit's own refusal of the record. The client's other
-    /// failures are left to the read that follows, which meets them too.
+    /// failures, a change a sibling's record holds back included, are left to the read that
+    /// follows.
     pub(crate) async fn withhold_saved_endpoints(&mut self) -> Result<()> {
         if self.own_record_unknown
             || holds_public_endpoints(self.app.cert(), self.app.publishes_record())
@@ -276,7 +277,7 @@ impl Paykit {
             Ok(())
         };
         match tended.await {
-            Err(PaykitError::Client(error))
+            Err(PaykitError::Client(error) | PaykitError::PublicEndpointChangePending(error))
                 if !matches!(error, AppError::Store(_) | AppError::Alarm(_)) =>
             {
                 Ok(())
@@ -289,9 +290,11 @@ impl Paykit {
     /// what the payment method pays, and a record with public endpoints renewed once less
     /// than half of its lifetime is left. Returns where a record changed or renewed stands on
     /// the Homeserver, and `None` when the record held went to the client unchanged. A
-    /// delivery that fails stays owed by the client, which sends it again at a later read; a
-    /// definite failure before the client kept the record leaves the record
-    /// held unchanged, so the next call finds it differs and puts it again. An unknown
+    /// delivery that fails stays owed by the client, which sends it again at a later read.
+    /// The client saves an edit before it reads the service time to sign it: when that read
+    /// fails, the edit stays saved and a later read signs it. A definite failure before the
+    /// client saved the edit leaves the record held unchanged, so the next call finds it
+    /// differs and puts it again. An unknown
     /// store result holds upkeep until the app is loaded again ([`Paykit::load`]).
     ///
     /// # Errors

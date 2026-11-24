@@ -126,8 +126,9 @@ client retained the requested edit. Show the withdrawal as pending until the
 client signs the updated record and reports its publication.
 
 The client saves an endpoint edit before it reads the service time to sign it.
-So an edit that fails with a `transport` error may already be saved, and the
-next `receive` signs and publishes it. Call `receive` and read
+So an edit whose time read failed may already be saved, and the next `receive`
+signs and publishes it. That read fails on a `transport` error, and on an error
+answer of the service such as `switch_unavailable`. Call `receive` and read
 `own_public_endpoints` before trying again: sending the same map again changes
 nothing, while a different map replaces the saved edit.
 
