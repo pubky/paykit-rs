@@ -249,6 +249,28 @@ impl Paykit {
         })
     }
 
+    /// [`Paykit::local_scan`], leaving out a value that doesn't read or bind to its key: for
+    /// a scan that gathers hints across counterparties, where one entry's damage must not
+    /// stop the action for another.
+    pub(crate) async fn local_scan_readable<T: BoundRead>(
+        &self,
+        prefix: &str,
+    ) -> Result<Vec<(String, T)>> {
+        let held = self
+            .app
+            .protocol_scan(crate::protocol::BACKUP_NAME, prefix.as_bytes())
+            .await?;
+        self.binding(|binder| {
+            Ok(held
+                .iter()
+                .filter_map(|(key, value)| {
+                    let rest = rest_of(key, prefix.as_bytes())?;
+                    bound(key, value, binder).ok().map(|v| (rest, v))
+                })
+                .collect())
+        })
+    }
+
     pub(crate) async fn publication_batches(
         &self,
         recipient: &[u8; 32],
