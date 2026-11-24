@@ -249,6 +249,42 @@ impl Paykit {
         }
     }
 
+    /// Replace a saved, unsigned edit that carries public endpoints this app no longer
+    /// publishes, as after a load that stopped publishing its record or a certificate
+    /// without `paykit_request`, before the client's read signs what is saved (Paykit spec 4;
+    /// Switch spec 4.2). The client saves an edit before it reads the service time to sign
+    /// it, so an edit whose signing failed is signed at a later read: without this, that
+    /// read would sign the endpoints and the upkeep after it withdraw them. The replacement
+    /// is saved without them, whether or not its own signing goes through now.
+    ///
+    /// # Errors
+    ///
+    /// A store failure, an alarm, or Paykit's own refusal of the record. The client's other
+    /// failures are left to the read that follows, which meets them too.
+    pub(crate) async fn withhold_saved_endpoints(&mut self) -> Result<()> {
+        if self.own_record_unknown
+            || holds_public_endpoints(self.app.cert(), self.app.publishes_record())
+        {
+            return Ok(());
+        }
+        let tended = async {
+            let desired = self.desired_record().await?;
+            let held = PaykitMember::from_member(desired.member.as_ref())?;
+            if desired.pending && !held.public_endpoints.is_empty() {
+                Box::pin(self.tend_own_record()).await?;
+            }
+            Ok(())
+        };
+        match tended.await {
+            Err(PaykitError::Client(error))
+                if !matches!(error, AppError::Store(_) | AppError::Alarm(_)) =>
+            {
+                Ok(())
+            }
+            result => result,
+        }
+    }
+
     /// Bring the app's record up to date at a receive (module docs): its capabilities to
     /// what the payment method pays, and a record with public endpoints renewed once less
     /// than half of its lifetime is left. Returns where a record changed or renewed stands on

@@ -1083,9 +1083,12 @@ impl Paykit {
         if self.certificate_refused().is_none() {
             Box::pin(self.drop_unblocks_not_kept()).await?;
         }
-        // The record accepts the kinds this app handles now, extension kinds included
+        // A saved record edit with public endpoints this app no longer publishes is replaced
+        // first, so neither step below nor the read signs them (`crate::own_record`). Then
+        // the record accepts the kinds this app handles now, extension kinds included
         // (`crate::extensions`), before the feed is read.
         if self.certificate_refused().is_none() {
+            Box::pin(self.withhold_saved_endpoints()).await?;
             Box::pin(self.align_accepts()).await?;
         }
         // An app holding `paykit_contacts` reads the flagged senders again first, at most every 10

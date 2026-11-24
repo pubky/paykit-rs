@@ -3,6 +3,7 @@
 //! lifetime, and the capabilities of a paying app.
 
 mod restored_publication;
+mod saved_edits;
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
