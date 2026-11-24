@@ -905,9 +905,9 @@ async fn test_provider_loss_disputed_request_keeps_its_known_payers_proof() {
         shop.confirm_payment(&key).await.unwrap_err().refusal(),
         Some(Refusal::MaybeCredited)
     ));
-    assert_ne!(
+    assert_eq!(
         sale_status(&shop, &key).await,
-        paykit_sdk::PayeeStatus::Receipted
+        paykit_sdk::PayeeStatus::ProofReceived
     );
     let (receipt, refused_divergent) = credit_as_a_host(&mut shop, &key).await;
     assert_eq!(refused_divergent, 1);
@@ -1267,9 +1267,9 @@ async fn test_provider_loss_credit_uses_the_signed_payer_of_a_disputed_period() 
                 .unwrap()
                 .iter()
                 .all(|r| r.record != sale && r.record != period_key));
-            assert_ne!(
+            assert_eq!(
                 sale_status(&shop, &credit).await,
-                paykit_sdk::PayeeStatus::Receipted
+                paykit_sdk::PayeeStatus::ProofReceived
             );
             let consent = || {
                 paykit_sdk::ReceiptDetails::default()
@@ -1291,7 +1291,7 @@ async fn test_provider_loss_credit_uses_the_signed_payer_of_a_disputed_period() 
             }
             let receipt = if same_payer {
                 let (receipt, refused_divergent) = credit_as_a_host(&mut shop, &credit).await;
-                assert!(refused_divergent >= 1);
+                assert_eq!(refused_divergent, 1);
                 receipt
             } else {
                 shop.confirm_payment_with(&credit, consent())
@@ -1444,6 +1444,7 @@ async fn test_provider_loss_restore_waits_for_the_parent_before_noting_period_de
             crate::common::possibly_delivered(&shop, &sent.msg_id).await,
             "by confirmation: {by_confirmation}"
         );
+        assert!(!queued(&shop, &sent.msg_id).await);
         assert!(shop
             .app()
             .protocol_get("paykit", b"ro")
@@ -2056,7 +2057,6 @@ fn shown_generation(doubt: &PaymentDoubt) -> u64 {
     doubt.before_loss.unwrap().generation()
 }
 
-/// Every payment the method carried out, repeats included.
 /// The status of the payee activity record `record` that `shop` shows.
 async fn sale_status(shop: &Paykit, record: &[u8; 32]) -> paykit_sdk::PayeeStatus {
     shop.payee_activity()
@@ -2068,6 +2068,7 @@ async fn sale_status(shop: &Paykit, record: &[u8; 32]) -> paykit_sdk::PayeeStatu
         .status
 }
 
+/// Every payment the method carried out, repeats included.
 fn executions(w: &World) -> u64 {
     w.rail.all_executions().values().sum()
 }
@@ -2452,7 +2453,7 @@ async fn test_provider_loss_consent_to_one_attempt_pays_it_once_and_states_nothi
         .unwrap()
         .unwrap();
     assert_eq!(claim.view.status, ClaimStatus::Settled);
-    assert_ne!(status(&wallet, &request).await, RequestStatus::MayBePaid);
+    assert_eq!(status(&wallet, &request).await, RequestStatus::Paid);
     let again = wallet
         .pay_request(
             &request,
@@ -2460,20 +2461,40 @@ async fn test_provider_loss_consent_to_one_attempt_pays_it_once_and_states_nothi
         )
         .await
         .outcome;
-    assert!(!matches!(again, Ok(PayOutcome::Paid { .. })), "{again:?}");
+    assert!(
+        matches!(
+            again.as_ref().err().and_then(PaykitError::refusal),
+            Some(Refusal::AlreadyPaid)
+        ),
+        "{again:?}"
+    );
     assert_eq!(executions(&w), 1);
 }
 
 #[tokio::test]
 async fn test_provider_loss_nothing_the_user_states_releases_an_automatic_payment() {
     // Paykit spec 7.3: whatever the user confirms or states, an obligation from before the
-    // loss is never paid automatically, and a resume repeats nothing. The user's statement
-    // that it wasn't paid before the loss lets a payment by hand go as any other.
+    // loss is never paid automatically: the shared post-loss hold refuses it (Paykit spec
+    // 8.1). A payment the method made before the loss, its answer lost, is resolved from the
+    // method's history and not paid again. The user's statement that a request wasn't paid
+    // before the loss lets a payment by hand of it go as any other.
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
     let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    let in_flight = request_from(&mut shop, w.alice_id(), draft("2", w.clock.now_ms())).await;
     wallet.receive(None).await.unwrap();
+    // Before the loss, the method is called for the second request and its answer is lost;
+    // the method's history knows it was paid.
+    w.rail.set_idempotent(true);
+    w.rail.next(Behaviour::LoseAnswer);
+    let lost = wallet
+        .pay_request(&in_flight, PayOptions::default())
+        .await
+        .outcome
+        .unwrap();
+    assert!(!matches!(lost, PayOutcome::Paid { .. }), "{lost:?}");
+    assert_eq!(executions(&w), 1);
     w.clock.advance_ms(60_000);
     declare_loss(&w);
     follow_loss(&mut wallet).await;
@@ -2483,6 +2504,12 @@ async fn test_provider_loss_nothing_the_user_states_releases_an_automatic_paymen
             .await
             .outcome,
     );
+    // Before any statement, the shared post-loss hold refuses an automatic payment.
+    let refused = wallet
+        .pay_request_automatically(&request, PayOptions::default())
+        .await
+        .outcome;
+    assert!(held_after_loss(&refused), "{refused:?}");
     wallet
         .confirm_not_paid_before_loss(
             &doubt.obligation,
@@ -2491,6 +2518,17 @@ async fn test_provider_loss_nothing_the_user_states_releases_an_automatic_paymen
         )
         .await
         .unwrap();
+    // The statement is kept for that request alone, which reads open again.
+    assert_eq!(
+        wallet
+            .app()
+            .protocol_scan("paykit", b"pn/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(status(&wallet, &request).await, RequestStatus::Open);
     for options in [
         PayOptions::default(),
         PayOptions::default().with_may_be_paid_confirmed(doubt.clone()),
@@ -2501,16 +2539,23 @@ async fn test_provider_loss_nothing_the_user_states_releases_an_automatic_paymen
             .outcome;
         assert!(held_after_loss(&refused), "{refused:?}");
     }
+    // The payment from before the loss is resolved from the method's history: nothing is paid
+    // again.
     let resumed = wallet.resume_payments().await.unwrap();
-    assert!(resumed.is_empty(), "{resumed:?}");
-    assert_eq!(executions(&w), 0);
+    assert!(
+        !resumed
+            .iter()
+            .any(|outcome| matches!(outcome, PayOutcome::Paid { .. })),
+        "{resumed:?}"
+    );
+    assert_eq!(executions(&w), 1);
     let paid = wallet
         .pay_request(&request, PayOptions::default())
         .await
         .outcome
         .unwrap();
     assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
-    assert_eq!(executions(&w), 1);
+    assert_eq!(executions(&w), 2);
 }
 
 #[tokio::test]

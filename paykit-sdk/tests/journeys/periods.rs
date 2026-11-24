@@ -27,15 +27,25 @@ async fn test_recurring_request_periods_paid_by_policy_and_receipted() -> TestRe
 
 /// An hourly request for 0.00025 btc from now, its first period paid to `first`; with
 /// `per_period`, each later period is paid to the endpoints of its period details.
-fn hourly(
+pub(super) fn hourly(
     world: &World,
     first: &str,
     per_period: bool,
 ) -> TestResult<(RequestDraft, Vec<PeriodRef>)> {
+    hourly_periods(world, first, per_period, 2)
+}
+
+/// [`hourly`], with its first `count` periods.
+pub(super) fn hourly_periods(
+    world: &World,
+    first: &str,
+    per_period: bool,
+    count: usize,
+) -> TestResult<(RequestDraft, Vec<PeriodRef>)> {
     let start = world.now_ms() / 1000 * 1000;
     let recurrence = Recurrence::new(AnchoredRule::new(start, 1, Unit::Hour)?, start, None)?;
     let periods = recurrence
-        .periods(2)?
+        .periods(count)?
         .into_iter()
         .map(PeriodRef::from)
         .collect();
@@ -85,27 +95,29 @@ async fn subscribed(
 }
 
 /// Move the world's clock to the start of `period`.
-fn at_start(world: &World, period: PeriodRef) {
+pub(super) fn at_start(world: &World, period: PeriodRef) {
     world.advance_ms(period.starts_at.saturating_sub(world.now_ms()));
 }
 
 /// A Billing Period due: the subscription's request, the seller's record of it, the period,
 /// and the payload its destination publishes.
 #[derive(Clone, Copy)]
-struct Due<'a> {
-    request: RequestRef,
-    sale: [u8; 32],
-    period: PeriodRef,
-    published: &'a str,
+pub(super) struct Due<'a> {
+    pub(super) request: RequestRef,
+    pub(super) sale: [u8; 32],
+    pub(super) period: PeriodRef,
+    pub(super) published: &'a str,
 }
 
 /// How the payer's wallet pays a period.
 #[derive(Clone, Copy)]
-enum How {
+pub(super) enum How {
     /// The user pays it by hand.
     ByHand,
     /// The app's policy pays the requested amount.
     ByPolicy,
+    /// The executing app pays it under the Allowance the subscription was accepted under.
+    UnderAllowance,
 }
 
 /// The payer's wallet pays `due` as `how` says. Then: the method was handed one new
@@ -113,7 +125,7 @@ enum How {
 /// finished, and its request shows the period paid; the seller holds the proof, verifies
 /// and confirms it and shows the period credited; and the payer then holds exactly that
 /// receipt, in its receipts and in its journal's entry. Returns the receipt's `msg_id`.
-async fn period_paid_and_receipted(
+pub(super) async fn period_paid_and_receipted(
     wallet: &mut Paykit,
     shop: &mut Paykit,
     rail: &FakeRail,
@@ -141,6 +153,11 @@ async fn period_paid_and_receipted(
             ))
             .await
             .outcome?
+        }
+        How::UnderAllowance => {
+            Box::pin(wallet.pay_period_under_allowance(&request, &period))
+                .await
+                .outcome?
         }
     };
     let PayOutcome::Paid {
