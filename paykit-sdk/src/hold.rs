@@ -1259,7 +1259,9 @@ impl Paykit {
                     }
                     match self.app.queue_stored(stored.plaintext()).await {
                         Ok(msg_id) => {
-                            let _ = self.send_message(&msg_id).await;
+                            if let Err(error) = self.send_message(&msg_id).await {
+                                crate::pay::unless_stop(error)?;
+                            }
                         }
                         // Refused for good: nothing is queued; the pass doesn't ask again. A
                         // held answer never went, so the host is told.
@@ -1462,7 +1464,9 @@ impl Paykit {
     ) -> Result<()> {
         match self.app.queue_stored(stored.plaintext()).await {
             Ok(msg_id) => {
-                let _ = self.send_message(&msg_id).await;
+                if let Err(error) = self.send_message(&msg_id).await {
+                    crate::pay::unless_stop(error)?;
+                }
                 Ok(())
             }
             // Refused for good, or not this app's own: nothing is queued and nothing is

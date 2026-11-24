@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use paykit_lib::allowances::{record_outcomes, AttemptEvidence, ClaimState, EntryOutcome, Ledger};
 use paykit_lib::records::{ActivityRecord, RecordBinding};
 use paykit_lib::{Asset, AttemptId, Body, Decimal};
-use pubky_switch_client::app::{AppError, OpBatch, RecordRead, UserConfirmed};
+use pubky_switch_client::app::{OpBatch, RecordRead, UserConfirmed};
 use pubky_switch_core::ops::Condition;
 
 use super::evidence::AppliedRecord;
@@ -206,9 +206,9 @@ impl Paykit {
                 Ok(())
             }
             .await;
-            if matches!(&result, Err(crate::PaykitError::Client(e)) if matches!(e.unkept(), AppError::Store(_) | AppError::Alarm(_)))
-            {
-                return result;
+            let result: Result<()> = result;
+            if let Err(error) = result {
+                crate::pay::unless_stop(error)?;
             }
         }
         Ok(())

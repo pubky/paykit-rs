@@ -12,25 +12,17 @@ private final class CallbackThreads: @unchecked Sendable {
 
 private final class DeviceMethod: CheckoutMethod, @unchecked Sendable {
     let threads = CallbackThreads()
-    override func declaration() -> MethodDeclaration {
-        threads.record()
-        return super.declaration()
-    }
     override func selectEndpoints(candidates: [EndpointCandidate], amount: Amount?) throws -> SelectedEndpoints {
         threads.record()
         return try super.selectEndpoints(candidates: candidates, amount: amount)
     }
-    override func transfer(endpoint: String, payload: String, amount: Amount) -> MethodTransfer {
+    override func transfer(endpoint: String, payload: String, amount: Amount) throws -> MethodTransfer {
         threads.record()
-        return super.transfer(endpoint: endpoint, payload: payload, amount: amount)
+        return try super.transfer(endpoint: endpoint, payload: payload, amount: amount)
     }
-    override func fractionDigits(endpoint: String) -> UInt32? {
+    override func settlementId(endpoint: String, proofJson: Data) throws -> Data? {
         threads.record()
-        return super.fractionDigits(endpoint: endpoint)
-    }
-    override func settlementId(endpoint: String, proofJson: Data) -> Data? {
-        threads.record()
-        return super.settlementId(endpoint: endpoint, proofJson: proofJson)
+        return try super.settlementId(endpoint: endpoint, proofJson: proofJson)
     }
 }
 
@@ -72,7 +64,7 @@ final class WalletOnDeviceTests: XCTestCase {
         let method = DeviceMethod(ledger: directory.appendingPathComponent("settled"))
         await method.release.signal()
         let store = DeviceStore(threads: method.threads)
-        let fixture = try await enrolledTestCheckout(store: store, method: method)
+        let fixture = try await enrolledTestCheckout(store: store, method: method, declaration: testDeclaration, endpoints: testEndpoints)
         method.useClock { fixture.nowMs() }
         let reference = Data(repeating: 23, count: 16)
         let secret = Data(repeating: 9, count: 32)

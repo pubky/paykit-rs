@@ -55,14 +55,19 @@ async fn test_restore_reconciles_a_payment_made_after_the_backup() {
         &PaykitBackup::from_bytes(&backup.to_bytes().unwrap()).unwrap(),
     )
     .await;
-    // Reconcile mode: no attempt before reconciliation.
+    // Reconcile mode: no attempt before reconciliation, as the client reports it.
     let refused = app
         .pay_request(&request, PayOptions::default())
         .await
         .outcome
         .unwrap_err();
     assert!(
-        matches!(refused.refusal(), Some(Refusal::NotNow(_))),
+        matches!(
+            refused,
+            paykit_sdk::PaykitError::Client(pubky_switch_client::app::AppError::Refused(
+                pubky_switch_client::app::Refusal::NotNow(_)
+            ))
+        ),
         "{refused:?}"
     );
 

@@ -460,7 +460,13 @@ impl Paykit {
                 return Ok(Some(record));
             }
         }
-        let held = match Box::pin(self.app.read_record_fresh(&target.record_target())).await? {
+        let read = Box::pin(self.app.read_record_fresh(&target.record_target())).await?;
+        if let RecordRead::Kept { reason, .. } = &read {
+            if let Some(stop) = crate::pay::kept_read_stop(reason) {
+                return Err(stop);
+            }
+        }
+        let held = match read {
             RecordRead::Fresh(held) => held,
             RecordRead::Kept {
                 reason: KeptReason::NotFound,
@@ -896,9 +902,19 @@ impl Paykit {
         funding: Option<&paykit_lib::AllowanceId>,
         crossing_payee: Option<[u8; 32]>,
     ) -> Result<Option<AutomaticPeriodWrite>> {
-        let Ok(RecordRead::Fresh(held)) = self.app.read_record_fresh(&target.record_target()).await
-        else {
-            return Ok(None);
+        let held = match self.app.read_record_fresh(&target.record_target()).await {
+            Ok(RecordRead::Fresh(held)) => held,
+            Ok(RecordRead::Kept { reason, .. }) => {
+                if let Some(stop) = crate::pay::kept_read_stop(&reason) {
+                    return Err(stop);
+                }
+                return Ok(None);
+            }
+            Ok(_) => return Ok(None),
+            Err(error) => {
+                crate::pay::unless_stop(error)?;
+                return Ok(None);
+            }
         };
         if held.doubtful || self.pause_of(&held).await?.blocks_automatic() {
             return Ok(None);
@@ -1083,6 +1099,7 @@ impl Paykit {
         options: PayOptions,
         public_failures: &mut Vec<PublicAppFailure>,
     ) -> Result<Plan> {
+        self.refuse_held_back()?;
         self.refresh_own()?;
         if options.quote_only {
             self.require_first_read()?;
@@ -1101,7 +1118,7 @@ impl Paykit {
         };
         self.app
             .may_attempt(automatic)
-            .map_err(crate::pay::not_now)?;
+            .map_err(crate::pay::held_back)?;
         self.refuse_while_payer_pass_owed().await?;
         let parent = ActivityTarget::payer(natural_key::request_record(
             &request.payee,
