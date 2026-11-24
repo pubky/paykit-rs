@@ -1401,10 +1401,7 @@ async fn test_blocked_resend_request_to_a_blocked_counterparty_refused_with_noth
         .request_resend(w.bob_id(), selection.clone())
         .await
         .unwrap_err();
-    assert!(
-        matches!(refused.refusal(), Some(Refusal::NotNow(_))),
-        "{refused:?}"
-    );
+    assert!(blocked_send(&refused), "{refused:?}");
     wallet.flush().await.unwrap();
     assert_eq!(w.bob.switch().entries_from(&w.alice_id()), before);
     wallet.unblock(&w.bob_id()).await.unwrap();
@@ -1575,10 +1572,7 @@ async fn test_blocked_resend_request_while_the_deny_list_is_unknown_refused_with
         .request_resend(w.bob_id(), selection.clone())
         .await
         .unwrap_err();
-    assert!(
-        matches!(refused.refusal(), Some(Refusal::NotNow(_))),
-        "{refused:?}"
-    );
+    assert!(Held::Unknown.refused(&refused), "{refused:?}");
     wallet.flush().await.unwrap();
     assert_eq!(w.bob.switch().entries_from(&w.alice_id()), before);
     wallet.request_resend(w.bob_id(), selection).await.unwrap();
@@ -1945,6 +1939,30 @@ enum Held {
     Blocked,
     /// The wallet's copy of the deny list isn't known, and a read of it fails.
     Unknown,
+}
+
+impl Held {
+    /// Whether `error` is the refusal of a send held this way (Paykit spec 8.1): the user's
+    /// to answer while he is blocked, a wait for a read while the copy isn't known.
+    fn refused(self, error: &paykit_sdk::PaykitError) -> bool {
+        match self {
+            Self::Blocked => blocked_send(error),
+            Self::Unknown => matches!(
+                error.refusal(),
+                Some(Refusal::NotNow(paykit_sdk::NotNowReason::ReadAgain(_)))
+            ),
+        }
+    }
+}
+
+/// Whether `error` refuses a send because the deny list holds its counterparty.
+fn blocked_send(error: &paykit_sdk::PaykitError) -> bool {
+    matches!(
+        error.refusal(),
+        Some(Refusal::HeldForUser(
+            paykit_sdk::HeldForUserReason::CounterpartyBlocked(_)
+        ))
+    )
 }
 
 /// The payer's answer to bob's request.
@@ -2626,10 +2644,7 @@ async fn no_list_asked_while_held(held: Held) {
         .outcome
         .unwrap_err();
     match held {
-        Held::Blocked => assert!(
-            matches!(refused.refusal(), Some(Refusal::NotNow(_))),
-            "{refused:?}"
-        ),
+        Held::Blocked => assert!(blocked_send(&refused), "{refused:?}"),
         Held::Unknown => assert!(
             !matches!(refused.refusal(), Some(Refusal::WaitingForList { .. })),
             "{refused:?}"
@@ -2742,7 +2757,7 @@ async fn refused_first_share(held: Held, previously_withdrawn: bool) {
     let delivered = w.alice.switch().entries_from(&w.bob_id());
     hold_publication(&w, &mut shop, held).await;
     let err = shop.publish_list_to(recipient).await.unwrap_err();
-    assert!(matches!(err.refusal(), Some(Refusal::NotNow(_))), "{err}");
+    assert!(held.refused(&err), "{err}");
     assert_eq!(w.record_writes(&w.bob, &key), prior);
     assert!(shop.queued_in_delivery().await.unwrap().is_empty());
     drop(shop);
@@ -2878,10 +2893,7 @@ async fn request_held(held: Held, recurring: bool) {
         .send_request(w.alice_id(), draft(&w))
         .await
         .unwrap_err();
-    assert!(
-        matches!(refused.refusal(), Some(Refusal::NotNow(_))),
-        "{held:?}: {refused:?}"
-    );
+    assert!(held.refused(&refused), "{held:?}: {refused:?}");
     seller_wallet.flush().await.unwrap();
     assert_eq!(
         counts.queued.load(std::sync::atomic::Ordering::SeqCst),
@@ -2967,10 +2979,7 @@ async fn details_held(held: Held) {
         .send_period_details(&sale, details())
         .await
         .unwrap_err();
-    assert!(
-        matches!(refused.refusal(), Some(Refusal::NotNow(_))),
-        "{held:?}: {refused:?}"
-    );
+    assert!(held.refused(&refused), "{held:?}: {refused:?}");
     seller_wallet.flush().await.unwrap();
     assert_eq!(
         counts.queued.load(std::sync::atomic::Ordering::SeqCst),
@@ -6875,6 +6884,46 @@ async fn test_blocked_held_rejection_after_the_backup_survives_an_older_in_place
     let options = crate::common::over_hold(&wallet, &next).await;
     let paid = wallet.pay_request(&next, options).await.outcome.unwrap();
     assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+}
+
+#[tokio::test]
+async fn test_blocked_settled_unblock_waits_for_a_read_rather_than_asks_the_user() {
+    // The wallet's unblock of bob is kept unanswered, then sent again and applied by the
+    // next write, a block of carol, while the copy of the deny list is still fresh. The
+    // unblock counts no more, so the copy holds bob, failing closed, until a read of the
+    // lists judges him again: a send to bob waits for that read; it isn't a block the user
+    // has to lift (Paykit spec 8.1).
+    let w = World::new();
+    let (mut wallet, _, _) = received(&w, PaykitConfig::default()).await;
+    wallet.block(&w.bob_id()).await.unwrap();
+    keep_unblock_ops(&w, 1);
+    wallet.unblock(&w.bob_id()).await.unwrap();
+    wallet.block(&w.carol_id()).await.unwrap();
+    let refused = wallet
+        .request_resend(
+            w.bob_id(),
+            paykit_sdk::ResendSelection::default().with_accepted_from_ms(0),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        !matches!(
+            refused.refusal(),
+            Some(paykit_sdk::Refusal::HeldForUser(
+                paykit_sdk::HeldForUserReason::CounterpartyBlocked(_)
+            ))
+        ),
+        "{refused}"
+    );
+    assert!(
+        matches!(
+            refused.refusal(),
+            Some(paykit_sdk::Refusal::NotNow(
+                paykit_sdk::NotNowReason::ReadAgain(_)
+            ))
+        ),
+        "{refused}"
+    );
 }
 
 /// An original and a reconstructed copy of a `kind` message from `app` to `to`, each with the

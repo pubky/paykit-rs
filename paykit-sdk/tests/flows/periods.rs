@@ -2732,7 +2732,10 @@ async fn test_periods_send_details_never_writes_over_a_period_record_that_doesnt
         .await
         .unwrap_err();
     assert!(
-        matches!(refusal(&refused), Refusal::NotNow(_)),
+        matches!(
+            refusal(&refused),
+            Refusal::HeldForUser(paykit_sdk::HeldForUserReason::RecordUnreadable(_))
+        ),
         "{refused:?}"
     );
     // What the switch holds, as the seller wallet reads it: its own write, not written over.
@@ -5731,7 +5734,7 @@ async fn credit_after_wrong_period(period: PeriodRef, missing_request: bool) {
                 .await
                 .unwrap_err()
                 .refusal(),
-            Some(Refusal::NotNow(_))
+            Some(Refusal::HeldForUser(_))
         ));
         assert_eq!(w.record_writes(&w.bob, &other), count);
         seller_wallet

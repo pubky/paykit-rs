@@ -266,11 +266,12 @@ async fn test_payee_deletion_unresolved_source_limit_preserves_the_installation(
         .unwrap();
     drop(pending);
     let overflow = Box::pin(restore(&w, &device, &weak, w.rail.clone())).await;
-    assert!(overflow
-        .err()
-        .unwrap()
-        .to_string()
-        .contains("too many source keys for a retained receipt"));
+    // The restore carries the refusal as the protocol's failure, by its text (Paykit spec 6).
+    let overflow = overflow.err().unwrap().to_string();
+    assert!(
+        overflow.contains(&paykit_sdk::Refusal::CreditHistoryLost.to_string()),
+        "{overflow}"
+    );
     let mut installed = Paykit::load(
         w.env(&w.bob, device.clone()),
         Default::default(),

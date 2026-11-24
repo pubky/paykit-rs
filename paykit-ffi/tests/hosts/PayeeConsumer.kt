@@ -62,8 +62,8 @@ internal suspend fun checkPayee(fixture: CheckoutFixture, wallet: NativeWallet) 
                 try {
                     seller.payeeActivity()
                     error("read activity before the first listing")
-                } catch (error: WalletException.NeedsUser) {
-                    error.failure.use { check(it.code() == "not_now") }
+                } catch (error: WalletException.RetryLater) {
+                    error.failure.use { check(it.code() == "records_not_listed") }
                 }
                 seller.finishReceive()
                 checkSentRequest(checkout, seller, draft)

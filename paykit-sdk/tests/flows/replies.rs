@@ -412,7 +412,9 @@ async fn test_replies_dropped_restore_holds_a_window_widened_after_its_last_ask(
             .await
             .unwrap_err()
             .refusal(),
-        Some(paykit_sdk::Refusal::NotNow(_))
+        Some(paykit_sdk::Refusal::HeldForUser(
+            paykit_sdk::HeldForUserReason::Unresolved(_)
+        ))
     ));
 }
 
@@ -2526,7 +2528,9 @@ async fn check_dropped_replies(
                 .await
                 .unwrap_err()
                 .refusal(),
-            Some(paykit_sdk::Refusal::NotNow(_))
+            Some(paykit_sdk::Refusal::HeldForUser(
+                paykit_sdk::HeldForUserReason::Unresolved(_)
+            ))
         ));
         let earlier = paykit_sdk::ResendSelection::default()
             .with_accepted_from_ms(accepted - 1)
@@ -2576,7 +2580,9 @@ async fn check_dropped_replies(
                 .await
                 .unwrap_err()
                 .refusal(),
-            Some(paykit_sdk::Refusal::NotNow(_))
+            Some(paykit_sdk::Refusal::HeldForUser(
+                paykit_sdk::HeldForUserReason::Unresolved(_)
+            ))
         ));
 
         let mut carol = w
@@ -2634,7 +2640,9 @@ async fn check_dropped_replies(
                 .await
                 .unwrap_err()
                 .refusal(),
-            Some(paykit_sdk::Refusal::NotNow(_))
+            Some(paykit_sdk::Refusal::HeldForUser(
+                paykit_sdk::HeldForUserReason::Unresolved(_)
+            ))
         ));
         assert_eq!(w.rail.all_executions().len(), 1);
         return;

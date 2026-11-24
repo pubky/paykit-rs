@@ -118,7 +118,13 @@ pub(super) async fn follow_loss(app: &mut Paykit) -> u64 {
     for _ in 1..pages.div_ceil(pubky_switch_client::app::LISTING_PAGES_PER_READ as usize) {
         let Err(error) = &reconciled else { break };
         assert!(
-            matches!(error.refusal(), Some(paykit_sdk::Refusal::NotNow(why)) if why.contains("shared records aren't listed")),
+            matches!(
+                error.refusal(),
+                Some(paykit_sdk::Refusal::NotNow(
+                    paykit_sdk::NotNowReason::RecordsUnlisted { .. }
+                        | paykit_sdk::NotNowReason::RecordsNotListed
+                ))
+            ),
             "{error}"
         );
         reconciled = app.reconcile().await;
@@ -2788,7 +2794,7 @@ async fn test_provider_loss_confirm_not_paid_before_loss_refused_without_a_loss_
         .await
         .unwrap_err();
     assert!(
-        matches!(refused.refusal(), Some(Refusal::NotNow(_))),
+        matches!(refused.refusal(), Some(Refusal::Usage(_))),
         "{refused:?}"
     );
     assert!(wallet
@@ -4684,7 +4690,7 @@ async fn test_provider_loss_unblock_at_the_upload_step_waits_for_the_list_step()
         loss_interrupted_at_upload(&w, AppScopes::new().pay().manage_contacts(), true).await;
     let refused = wallet.unblock(&w.bob_id()).await.unwrap_err();
     assert!(
-        matches!(refused.refusal(), Some(Refusal::NotNow(why)) if why.contains("after the next receive")),
+        matches!(refused.refusal(), Some(Refusal::NotNow(paykit_sdk::NotNowReason::ReadAgain(why))) if why.contains("after the next receive")),
         "{refused:?}"
     );
     let (copy, _) = deny_copy(&wallet).await;

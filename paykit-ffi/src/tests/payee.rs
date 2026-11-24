@@ -391,7 +391,11 @@ async fn requests_and_receipts(world: &World) -> TestResult {
         }),
     ))
     .await?;
-    refused(wallet.payee_activity().await, "needs_user", "not_now")?;
+    refused(
+        wallet.payee_activity().await,
+        "retry_later",
+        "records_not_listed",
+    )?;
     while wallet.receive().await?.more {}
     let mut issuer = Box::pin(signer::serving(world, "shop")).await?;
     let mut payer = Box::pin(join(

@@ -340,8 +340,9 @@ async fn confirmation(world: &World) -> TestResult {
     loop {
         match restored.reconcile().await {
             Ok(_) => break,
-            Err(WalletError::NeedsUser { failure })
-                if failure.code() == "not_now" && remaining > 1 =>
+            // The restored records are still being listed: a wait.
+            Err(WalletError::RetryLater { failure })
+                if failure.code() == "records_unlisted" && remaining > 1 =>
             {
                 remaining -= 1;
             }

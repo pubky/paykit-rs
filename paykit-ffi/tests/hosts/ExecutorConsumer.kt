@@ -49,7 +49,7 @@ private suspend fun checkExecutorCheckout(
             check(error.field == "user_confirmed")
         }
         if (account == null) {
-            (refused as WalletException.NeedsUser).failure.use { check(it.code() == "not_now") }
+            (refused as WalletException.NeedsUser).failure.use { check(it.code() == "allowance_execution_held") }
         } else {
             (refused as WalletException.Permanent).failure.use { check(it.code() == "not_automatic") }
             check(account.transfers == 0)
