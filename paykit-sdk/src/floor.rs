@@ -54,7 +54,7 @@ use paykit_lib::derive::natural_key;
 use paykit_lib::records::{BlockFloorRecord, StoredMessage};
 use paykit_lib::Body;
 use pubky_switch_client::app::{
-    AppEvent, KeptReason, OpBatch, RecordContent, RecordRead, RecordTarget, SharedRecord,
+    AppEvent, KeptReason, OpBatch, RecordContent, RecordRead, RecordTarget, SharedRecord, Unopened,
 };
 use pubky_switch_core::http::ErrorCode;
 use pubky_switch_core::ops::Condition;
@@ -362,11 +362,28 @@ pub(crate) fn delivery_raise_holds(
 pub(crate) enum SharedFloor {
     /// The floor, `None` with no record.
     Known(Option<u64>),
-    /// It can't be read now (module docs, "Unknown holds").
-    Unknown,
+    /// It can't be read (module docs, "Unknown holds"), for the reason given.
+    Unknown(FloorUnknown),
     /// The record was seen divergent, now or before: held for good (module docs,
     /// "Divergence holds for good").
     Divergent,
+}
+
+/// Why an app can't read the shared floor: what clears it differs, so what a host is told
+/// does too.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FloorUnknown {
+    /// Not read yet, or not readable for now: the payer's records not listed, a scope key
+    /// awaited, a read that failed, a write the app hasn't taken yet, or a delete nothing
+    /// authenticates. A later read tells it, with no one acting.
+    Unread,
+    /// The record's value doesn't read, and no floor was seen before it. No later read of
+    /// this app clears that: an own app writes the floor again.
+    Unreadable,
+    /// The permanent record is deleted by an authenticated write, or absent after it was
+    /// seen live with no provider loss to cover it: the rollback alarm's case (Paykit wire
+    /// 5.6, Seen floor and permanence).
+    Gone,
 }
 
 /// What this app keeps of the block floor in its own state (`fk`, Paykit wire 5.6, Divergent
@@ -457,20 +474,30 @@ pub(crate) fn shared_floor_of(
         .and_then(|value| BlockFloorRecord::read(value).ok())
         .map(|record| record.floor_ms)
         .max(kept.seen_ms);
-    let seen_or_unknown = || seen.map_or(SharedFloor::Unknown, |s| SharedFloor::Known(Some(s)));
+    let seen_or = |why| seen.map_or(SharedFloor::Unknown(why), |s| SharedFloor::Known(Some(s)));
     let Some(held) = held else {
         if kept.absence_unlawful(lost) {
-            return SharedFloor::Unknown;
+            return SharedFloor::Unknown(FloorUnknown::Gone);
         }
         return SharedFloor::Known(seen);
     };
     match &held.content {
         RecordContent::Value(value) => match BlockFloorRecord::read(value) {
             Ok(record) => SharedFloor::Known(Some(record.floor_ms.max(seen.unwrap_or(0)))),
-            Err(_) => seen_or_unknown(),
+            Err(_) => seen_or(FloorUnknown::Unreadable),
         },
-        RecordContent::Deleted if !held.authenticated => seen_or_unknown(),
-        RecordContent::Deleted | RecordContent::Unreadable(_) => SharedFloor::Unknown,
+        // Only the service's word: a later read authenticates it or shows a value.
+        RecordContent::Deleted if !held.authenticated => seen_or(FloorUnknown::Unread),
+        RecordContent::Deleted => SharedFloor::Unknown(FloorUnknown::Gone),
+        // Sealed under a key the app doesn't hold yet: it opens once the key comes.
+        RecordContent::Unreadable(Unopened::KeyNotHeld { .. }) => {
+            SharedFloor::Unknown(FloorUnknown::Unread)
+        }
+        // A value that doesn't open with its key, a write the app refused, and any kind a
+        // later client adds: nothing this app reads makes it a floor.
+        RecordContent::Unreadable(Unopened::DoesNotOpen | Unopened::Refused | _) => {
+            SharedFloor::Unknown(FloorUnknown::Unreadable)
+        }
     }
 }
 
@@ -547,8 +574,8 @@ enum Raise {
     Write { floor: Option<u64>, to: u64 },
     /// The divergence hold stands: nothing can be written.
     Held,
-    /// The floor can't be read now.
-    Unreadable,
+    /// The floor can't be read, for the reason given.
+    Unreadable(FloorUnknown),
 }
 
 /// The raise to `to_ms` (Paykit wire 5.6, Raising): only a floor applied at the switch
@@ -564,7 +591,7 @@ fn raise_of(shared: SharedFloor, at_switch: Option<u64>, to_ms: u64) -> Raise {
             to: floor.map_or(to_ms, |floor| floor.max(to_ms)),
         },
         SharedFloor::Divergent => Raise::Held,
-        SharedFloor::Unknown => Raise::Unreadable,
+        SharedFloor::Unknown(why) => Raise::Unreadable(why),
     }
 }
 
@@ -595,7 +622,7 @@ impl Paykit {
     /// The shared floor as this app holds it now (module docs).
     pub(crate) async fn shared_floor(&self) -> Result<SharedFloor> {
         if self.side_unlisted(RecordSide::Payer).await? {
-            return Ok(SharedFloor::Unknown);
+            return Ok(SharedFloor::Unknown(FloorUnknown::Unread));
         }
         let key = self.app.record_key(&floor_target(&self.identity()))?;
         let held = self.app.shared_record(&key).await?;
@@ -1046,19 +1073,19 @@ impl Paykit {
         // Sealed under `paykit_pay` at the current data epoch: without that key nothing is written,
         // and nothing read while the copy waits for a wider certificate's keys.
         if !self.holds_scope_keys() {
-            return Ok((SharedFloor::Unknown, None));
+            return Ok((SharedFloor::Unknown(FloorUnknown::Unread), None));
         }
         let key = self.app.record_key(&floor_target(&self.identity()))?;
         if let Some(read) = self.floor_read_now().await? {
             if write_not_taken(read.as_ref()) {
-                return Ok((SharedFloor::Unknown, None));
+                return Ok((SharedFloor::Unknown(FloorUnknown::Unread), None));
             }
             let at_switch = value(read.as_ref());
             return Ok((self.floor_of_read(&key, read.as_ref()).await?, at_switch));
         }
         let copy = self.app.shared_record(&key).await?;
         if write_not_taken(copy.as_ref()) {
-            return Ok((SharedFloor::Unknown, None));
+            return Ok((SharedFloor::Unknown(FloorUnknown::Unread), None));
         }
         // A current write the app refused, a lower floor it ignores: the copy keeps the higher
         // floor it trusts, which the switch doesn't hold, so nothing at the switch spares the
@@ -1066,12 +1093,12 @@ impl Paykit {
         // permanence).
         let at_switch = value(copy.as_ref().filter(|held| !held.flagged));
         if at_switch.is_some_and(|floor| floor >= to_ms) {
-            return Ok((SharedFloor::Unknown, None));
+            return Ok((SharedFloor::Unknown(FloorUnknown::Unread), None));
         }
         let held = self.shared_floor().await?;
         Ok(match held {
             SharedFloor::Known(_) | SharedFloor::Divergent => (held, at_switch),
-            SharedFloor::Unknown => (SharedFloor::Unknown, None),
+            SharedFloor::Unknown(why) => (SharedFloor::Unknown(why), None),
         })
     }
 
@@ -1102,7 +1129,18 @@ impl Paykit {
             // divergence hold alone it waits.
             Raise::Held if self.shared_loss_hold().await? => return Ok(None),
             Raise::Held => return Err(Refusal::FloorHeld.into()),
-            Raise::Unreadable => return Err(unreadable_floor()),
+            Raise::Unreadable(FloorUnknown::Unread) => return Err(unreadable_floor()),
+            // The permanent floor deleted or unlawfully absent is the rollback alarm's case:
+            // the alarm the client holds is returned, as a read that finds the absence
+            // returns it ([`Paykit::floor_read_now`]). With none held, and for a value that
+            // doesn't read, no later read clears it: held for the user.
+            Raise::Unreadable(FloorUnknown::Gone) => {
+                return Err(match self.app.alarm().cloned() {
+                    Some(alarm) => pubky_switch_client::app::AppError::Alarm(alarm).into(),
+                    None => floor_record_unreadable(),
+                })
+            }
+            Raise::Unreadable(FloorUnknown::Unreadable) => return Err(floor_record_unreadable()),
             Raise::Write { floor, to } => (floor, to),
         };
         let target = floor_target(&self.identity());
@@ -1182,6 +1220,8 @@ impl Paykit {
         }
         // A `409 conflict` neither starts nor ends a wait, and the divergence hold isn't a cause
         // the retry waits on (Paykit wire 5.6, Raising).
+        // A floor record that doesn't read is such a cause: the app tries again on the
+        // schedule, and at once when the record it holds changes.
         if result.as_ref().is_err_and(|error| {
             is_raise_unwritten(error) && !matches!(error.refusal(), Some(Refusal::FloorHeld))
         }) {
@@ -1257,7 +1297,7 @@ impl Paykit {
         }
         // A divergent floor marks every open one-time request; an unknown one waits.
         let floor = self.shared_floor().await?;
-        if floor == SharedFloor::Unknown {
+        if matches!(floor, SharedFloor::Unknown(_)) {
             return Ok(());
         }
         let owed = self.owed_floor().await?;
@@ -1325,6 +1365,21 @@ pub(crate) fn unreadable_floor() -> crate::error::PaykitError {
     Refusal::NotNow(crate::NotNowReason::FloorUnreadable).into()
 }
 
+/// The refusal while the floor record doesn't read, and no later read of this app clears it.
+pub(crate) fn floor_record_unreadable() -> crate::error::PaykitError {
+    Refusal::HeldForUser(crate::HeldForUserReason::FloorRecordUnreadable).into()
+}
+
+/// Whether the floor record doesn't read for good: told by the reason, never by its text.
+pub(crate) fn is_floor_record_unreadable(error: &crate::error::PaykitError) -> bool {
+    matches!(
+        error.refusal(),
+        Some(Refusal::HeldForUser(
+            crate::HeldForUserReason::FloorRecordUnreadable
+        ))
+    )
+}
+
 /// Report an unavailable floor for retryable service failures. Preserve definite refusals,
 /// conflicts, kept batch identities and errors that require action by the host.
 pub(crate) fn floor_write_error(error: crate::error::PaykitError) -> crate::error::PaykitError {
@@ -1357,11 +1412,12 @@ pub(crate) fn is_unreadable_floor(error: &crate::error::PaykitError) -> bool {
     )
 }
 
-/// Whether a raise couldn't be written: the floor can't be read now, the divergence hold
-/// stands, or a raise left unwritten waits. None fails a read of the lists: the raise stays
-/// owed (module docs).
+/// Whether a raise couldn't be written: the floor can't be read now or doesn't read, the
+/// divergence hold stands, or a raise left unwritten waits. None fails a read of the lists:
+/// the raise stays owed (module docs).
 pub(crate) fn is_raise_unwritten(error: &crate::error::PaykitError) -> bool {
     is_unreadable_floor(error)
+        || is_floor_record_unreadable(error)
         || matches!(error.refusal(), Some(Refusal::FloorHeld))
         || matches!(
             error.refusal(),
@@ -1437,7 +1493,7 @@ mod tests {
         let malformed = RecordContent::Value(br#"{"v":1}"#.to_vec());
         assert_eq!(
             shared_floor_of(Some(&held(malformed, true, false)), None, none, None),
-            SharedFloor::Unknown
+            SharedFloor::Unknown(FloorUnknown::Unreadable)
         );
     }
 
@@ -1478,7 +1534,7 @@ mod tests {
         for lost in [None, Some(2)] {
             assert_eq!(
                 shared_floor_of(None, None, kept, lost),
-                SharedFloor::Unknown
+                SharedFloor::Unknown(FloorUnknown::Gone)
             );
         }
         // A loss of that generation or a later one covers it; the floor seen stays.
@@ -1507,7 +1563,7 @@ mod tests {
         );
         assert_eq!(
             shared_floor_of(Some(&delete), None, FloorKept::default(), None),
-            SharedFloor::Unknown
+            SharedFloor::Unknown(FloorUnknown::Unread)
         );
         // An authenticated one, which the permanent policy forbids, holds whatever was seen.
         let authenticated = held(RecordContent::Deleted, true, false);
@@ -1518,7 +1574,7 @@ mod tests {
                 FloorKept::default(),
                 None
             ),
-            SharedFloor::Unknown
+            SharedFloor::Unknown(FloorUnknown::Gone)
         );
     }
 
@@ -1551,7 +1607,9 @@ mod tests {
         for shared in [
             SharedFloor::Known(Some(10)),
             SharedFloor::Divergent,
-            SharedFloor::Unknown,
+            SharedFloor::Unknown(FloorUnknown::Unread),
+            SharedFloor::Unknown(FloorUnknown::Unreadable),
+            SharedFloor::Unknown(FloorUnknown::Gone),
         ] {
             assert_eq!(raise_of(shared, Some(100), 100), Raise::Spared);
         }
@@ -1579,7 +1637,16 @@ mod tests {
         );
         // Under the hold, or unreadable, nothing is written.
         assert_eq!(raise_of(SharedFloor::Divergent, Some(50), 100), Raise::Held);
-        assert_eq!(raise_of(SharedFloor::Unknown, None, 100), Raise::Unreadable);
+        for why in [
+            FloorUnknown::Unread,
+            FloorUnknown::Unreadable,
+            FloorUnknown::Gone,
+        ] {
+            assert_eq!(
+                raise_of(SharedFloor::Unknown(why), None, 100),
+                Raise::Unreadable(why)
+            );
+        }
     }
 
     fn missed(floor_ms: u64, deny: Option<Vec<[u8; 32]>>) -> crate::marks::MissedWidening {

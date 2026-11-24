@@ -446,9 +446,9 @@ async fn test_own_record_upkeep_without_publishing_withdraws_every_endpoint() {
 /// A store whose next commit of the client's own state, once armed, is applied and then
 /// answers that its result is unknown, as a store that can't tell may. Paykit's own state
 /// (`p/paykit/`) commits as it is.
-struct UnknownOnce {
-    inner: Arc<dyn pubky_switch_client::store::StateStore>,
-    armed: std::sync::atomic::AtomicBool,
+pub(crate) struct UnknownOnce {
+    pub(crate) inner: Arc<dyn pubky_switch_client::store::StateStore>,
+    pub(crate) armed: std::sync::atomic::AtomicBool,
 }
 
 impl UnknownOnce {

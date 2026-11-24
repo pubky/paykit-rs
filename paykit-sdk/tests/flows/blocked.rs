@@ -4119,7 +4119,7 @@ async fn test_blocked_withdrawal_goes_first_and_on_retry_but_its_resend_waits() 
     assert_eq!(verdict(&shop, &withdrawal).await, Some(true));
     shop.app_mut().release_queued(&w.alice_id()).await.unwrap();
     w.alice.switch().fail_next(Fault::Unreachable {
-        path: "inbox".into(),
+        path: "/inbox".into(),
         after: 0,
     });
     let _ = shop.flush().await;

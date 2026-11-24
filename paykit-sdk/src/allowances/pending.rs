@@ -134,14 +134,14 @@ impl Paykit {
         let Some(current) = self.app.current_collection(&family, report).await? else {
             return Ok(Err(unlisted()));
         };
-        // Members not verified yet, which a decision on every value waits for. Where each of
-        // them is held and only sealed under a scope key the app doesn't hold yet, the key is
-        // what is awaited (Switch spec 3.5); any other is read again.
+        // Members not verified yet, which a decision on every value waits for. Where the
+        // current value of each of them needs nothing but a scope key the app doesn't hold
+        // yet, the key is what is awaited (Switch spec 3.5); any other is read again.
         if !current.uncertain_keys.is_empty() {
             let mut await_keys = true;
             for key in &current.uncertain_keys {
                 let held = self.app.shared_record(key).await?;
-                await_keys &= held.is_some_and(|held| crate::hold::awaits_key(&held.content));
+                await_keys &= held.as_ref().is_some_and(solely_awaits_key);
             }
             return Ok(Err(Refusal::NotNow(if await_keys {
                 crate::NotNowReason::ValueAwaitsKey
@@ -1373,5 +1373,84 @@ impl Paykit {
         self.submit(OpBatch::for_protocol(crate::protocol::BACKUP_NAME).entry(delete))
             .await?;
         Ok(())
+    }
+}
+
+/// Whether the record's current value needs nothing but its scope key to be read: the app
+/// took the write, with nothing in doubt about it, and its value is sealed under a key the
+/// app doesn't hold yet. A newer write the client follows without taking it, or one it
+/// flagged, leaves the member unverified for another reason, and the value held under it
+/// is an older one: the signer's key wouldn't settle that, a later read does.
+fn solely_awaits_key(held: &pubky_switch_client::app::SharedRecord) -> bool {
+    crate::hold::awaits_key(&held.content)
+        && held.authenticated
+        && !held.doubtful
+        && !held.flagged
+        && !held.not_taken
+        && !held.different_write_at_held_version
+        && !held.divergent
+}
+
+#[cfg(test)]
+mod tests {
+    use pubky_switch_client::app::{RecordContent, SharedRecord, Unopened};
+
+    use super::*;
+
+    #[test]
+    fn test_pending_awaits_its_key_only_when_the_current_write_needs_nothing_else() {
+        let sealed = SharedRecord {
+            key: [4; 32],
+            collection: Collection::AllowanceProposals.name().into(),
+            policy: Collection::AllowanceProposals.fixed_policy(),
+            version: pubky_switch_core::ops::RecordVersion::new(1, 2),
+            authenticated: true,
+            writer: [1; 16],
+            written_at_ms: Some(10),
+            content: RecordContent::Unreadable(Unopened::KeyNotHeld { data_epoch: 2 }),
+            doubtful: false,
+            flagged: false,
+            not_taken: false,
+            different_write_at_held_version: false,
+            divergent: false,
+        };
+        assert!(solely_awaits_key(&sealed));
+        // A newer write the client follows without taking it, over that older sealed value:
+        // the key wouldn't settle it.
+        let followed = SharedRecord {
+            not_taken: true,
+            ..sealed.clone()
+        };
+        assert!(!solely_awaits_key(&followed));
+        for unverified in [
+            SharedRecord {
+                flagged: true,
+                ..sealed.clone()
+            },
+            SharedRecord {
+                authenticated: false,
+                ..sealed.clone()
+            },
+            SharedRecord {
+                doubtful: true,
+                ..sealed.clone()
+            },
+            SharedRecord {
+                different_write_at_held_version: true,
+                ..sealed.clone()
+            },
+            SharedRecord {
+                divergent: true,
+                ..sealed.clone()
+            },
+        ] {
+            assert!(!solely_awaits_key(&unverified), "{unverified:?}");
+        }
+        // A value that opens awaits no key.
+        let open = SharedRecord {
+            content: RecordContent::Value(Vec::new()),
+            ..sealed
+        };
+        assert!(!solely_awaits_key(&open));
     }
 }

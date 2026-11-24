@@ -184,9 +184,8 @@ pub enum RefusalKind {
     AllowanceConflicted,
     /// The user must confirm this Allowance again before this app pays under it, after a missed
     /// item, a restore until it is judged clean or the user confirms, or a provider loss, for one
-    /// the user confirmed before the loss. Show the Allowance and,
-    /// once the user confirms, call `confirm_allowance_executor` (Paykit spec 8.3). No Allowance
-    /// payment, resume or confirm call is bound yet, so hosts don't receive it today.
+    /// the user confirmed before the loss. Show the view from `allowance(record)`. Once the
+    /// user confirms it, pass its `hold` to `confirm_allowance_executor` (Paykit spec 8.3).
     AllowanceConfirmationNeeded {
         /// The 32-byte record key of the Allowance to confirm.
         record: Vec<u8>,
@@ -556,6 +555,10 @@ pub enum HeldForUserKind {
     PublicationConflict,
     /// A held record doesn't read; it is rewritten or recovered.
     RecordUnreadable,
+    /// The block floor record doesn't read and nothing in this version repairs it: an
+    /// unblock is refused, a block still takes effect, and one-time requests are paid by
+    /// hand.
+    FloorRecordUnreadable,
     /// After a provider loss this version doesn't resume automatic payments under the
     /// Allowance: the user ends it and sets up a new one.
     AllowanceNotResumed,
@@ -634,6 +637,7 @@ impl From<&paykit_sdk::HeldForUserReason> for HeldForUserKind {
             R::CancellationOrderUnknown => Self::CancellationOrderUnknown,
             R::PublicationConflict(_) => Self::PublicationConflict,
             R::RecordUnreadable(_) => Self::RecordUnreadable,
+            R::FloorRecordUnreadable => Self::FloorRecordUnreadable,
             R::AllowanceNotResumed => Self::AllowanceNotResumed,
             R::AllowanceExecutionHeld(_) => Self::AllowanceExecutionHeld,
             R::AttemptCheck(_) => Self::AttemptCheck,

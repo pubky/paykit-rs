@@ -36,10 +36,12 @@ pub enum NotNowReason {
          the signer stores when it is next online"
     )]
     ValueAwaitsKey,
-    /// The block floor can't be read now: a kept floor write, no service time verified yet, a
-    /// first read pending or the switch not answering, which a later receive clears. A floor
-    /// deleted, lost or not readable keeps it until the floor is written again, so a host
-    /// that meets it on every try shows that blocks and unblocks wait (Paykit wire 5.6).
+    /// The block floor can't be read now: the payer's records not listed yet, a scope key
+    /// awaited, a kept floor write, a read or a write the switch didn't answer, or a delete
+    /// nothing authenticates. A later receive clears each of them with no one acting
+    /// (Paykit wire 5.6). A floor record that doesn't read is
+    /// [`HeldForUserReason::FloorRecordUnreadable`], and one deleted or unlawfully absent is
+    /// the rollback alarm.
     #[error("Paykit wire 5.6: the block floor can't be read now")]
     FloorUnreadable,
     /// A raise of the block floor left unwritten waits before it is tried again; the same
@@ -131,6 +133,14 @@ pub enum HeldForUserReason {
     /// wire 5.3). The text names the record.
     #[error("{0}")]
     RecordUnreadable(&'static str),
+    /// The block floor record doesn't read, and this app has seen no floor it could write
+    /// back, so it writes no raise (Paykit wire 5.6). No later read of this app clears it,
+    /// and this version has no call that repairs the record: it reads again only once an own
+    /// app that holds a readable floor writes it. Until then an unblock, which needs the
+    /// raise, is refused and the counterparty stays blocked; a block still takes effect; and
+    /// one-time requests are paid by hand, none automatically.
+    #[error("Paykit wire 5.6: the block floor record doesn't read")]
+    FloorRecordUnreadable,
     /// After a provider loss this version doesn't resume automatic payments under the
     /// Allowance, whose usage needs a repair it doesn't make: the user ends it and sets up a
     /// new one (Paykit spec 8.3, "After provider loss").

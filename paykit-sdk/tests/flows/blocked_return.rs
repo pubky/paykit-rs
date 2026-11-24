@@ -1208,7 +1208,7 @@ async fn test_blocked_return_queued_ask_not_flushed_by_a_receive_once_blocked_ag
     w.bob
         .switch()
         .fail_next(pubky_switch_client::testing::Fault::Error {
-            path: "inbox".into(),
+            path: "/inbox".into(),
             code: pubky_switch_core::http::ErrorCode::Unavailable,
             current: serde_json::Value::Null,
         });
@@ -2028,7 +2028,7 @@ async fn test_blocked_return_own_unblock_reads_a_concurrent_floor_first() {
 }
 
 #[tokio::test]
-async fn test_blocked_return_own_unblock_waits_for_an_unreadable_floor() {
+async fn test_blocked_return_own_unblock_is_held_while_the_floor_record_doesnt_read() {
     let w = World::new();
     let mut wallet = contacts_wallet(&w, store()).await;
     wallet
@@ -2037,12 +2037,18 @@ async fn test_blocked_return_own_unblock_waits_for_an_unreadable_floor() {
         .await
         .unwrap();
     wallet.block(&w.bob_id()).await.unwrap();
-    assert!(matches!(
-        wallet.unblock(&w.bob_id()).await.unwrap_err().refusal(),
-        Some(paykit_sdk::Refusal::NotNow(
-            paykit_sdk::NotNowReason::FloorUnreadable
-        ))
-    ));
+    // A floor record that doesn't read, with no floor seen before it: no later read clears
+    // that, so the unblock is held for the user, before a receive and after it, until the
+    // floor is written again.
+    for _ in 0..2 {
+        assert_eq!(
+            wallet.unblock(&w.bob_id()).await.unwrap_err().refusal(),
+            Some(&paykit_sdk::Refusal::HeldForUser(
+                paykit_sdk::HeldForUserReason::FloorRecordUnreadable
+            ))
+        );
+        wallet.receive(None).await.unwrap();
+    }
     assert!(wallet
         .app_mut()
         .allow_list()
@@ -2050,6 +2056,8 @@ async fn test_blocked_return_own_unblock_waits_for_an_unreadable_floor() {
         .unwrap()
         .deny
         .contains(&w.bob_id()));
+    // A readable floor written at the record, as another of the user's wallets that holds
+    // one writes it: nothing this wallet calls repairs the record itself.
     wallet
         .app_mut()
         .put_record(

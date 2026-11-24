@@ -416,6 +416,7 @@ fn held_for_user_code(reason: &crate::HeldForUserKind) -> &'static str {
         R::CancellationOrderUnknown => "cancellation_order_unknown",
         R::PublicationConflict => "publication_conflict",
         R::RecordUnreadable => "record_unreadable",
+        R::FloorRecordUnreadable => "floor_record_unreadable",
         R::AllowanceNotResumed => "allowance_not_resumed",
         R::AllowanceExecutionHeld => "allowance_execution_held",
         R::AttemptCheck => "attempt_check",

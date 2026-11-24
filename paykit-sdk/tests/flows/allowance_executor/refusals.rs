@@ -436,10 +436,11 @@ async fn test_allowance_refusals_payment_outside_the_per_payment_range_is_not_au
 }
 
 #[tokio::test]
-async fn test_allowance_refusals_lifetime_limit_waits_while_reserved_then_is_final() {
+async fn test_allowance_refusals_lifetime_limit_counts_a_dispatched_payment_as_spent() {
     let (w, mut payer, mut shop, key) = Box::pin(first_grant_in(store(), terms())).await;
     w.rail.set_history_payer(payer.identity());
-    // 70 of 100 in flight: its reservation holds the room.
+    // 70 of 100 dispatched and still pending: spent whether it pays or fails (Paykit spec
+    // 8.3), so 50 never fits.
     let first = Box::pin(one_time(&w, &mut shop, &mut payer, "70")).await;
     w.rail.next(Behaviour::Hang);
     let PayOutcome::Pending { attempt_id, .. } = Box::pin(payer.pay_under_allowance(&first, &key))
@@ -452,9 +453,7 @@ async fn test_allowance_refusals_lifetime_limit_waits_while_reserved_then_is_fin
     let second = Box::pin(one_time(&w, &mut shop, &mut payer, "50")).await;
     assert_eq!(
         refused(Box::pin(payer.pay_under_allowance(&second, &key)).await),
-        paykit_sdk::Refusal::NotNow(paykit_sdk::NotNowReason::AllowanceLimit {
-            limit: "lifetime".into()
-        })
+        Refusal::NotAutomatic("the lifetime limit has no room".into())
     );
     // More than the lifetime limit alone never fits, whatever the reservation does.
     let over = Box::pin(one_time(&w, &mut shop, &mut payer, "101")).await;
@@ -469,8 +468,7 @@ async fn test_allowance_refusals_lifetime_limit_waits_while_reserved_then_is_fin
         refused(Box::pin(payer.pay_under_allowance(&second, &key)).await),
         Refusal::NotAutomatic("the lifetime limit has no room".into())
     );
-    // 70 paid and 10 more in flight: 25 fits if those 10 fail, so it waits; 40 never fits,
-    // even with the 10 released.
+    // 70 paid and 10 more dispatched: 25 and 40 never fit, whatever the 10 answer.
     let third = Box::pin(one_time(&w, &mut shop, &mut payer, "10")).await;
     w.rail.next(Behaviour::Hang);
     assert!(matches!(
@@ -483,9 +481,7 @@ async fn test_allowance_refusals_lifetime_limit_waits_while_reserved_then_is_fin
     let fits_later = Box::pin(one_time(&w, &mut shop, &mut payer, "25")).await;
     assert_eq!(
         refused(Box::pin(payer.pay_under_allowance(&fits_later, &key)).await),
-        paykit_sdk::Refusal::NotNow(paykit_sdk::NotNowReason::AllowanceLimit {
-            limit: "lifetime".into()
-        })
+        Refusal::NotAutomatic("the lifetime limit has no room".into())
     );
     let never = Box::pin(one_time(&w, &mut shop, &mut payer, "40")).await;
     assert_eq!(
@@ -495,11 +491,61 @@ async fn test_allowance_refusals_lifetime_limit_waits_while_reserved_then_is_fin
     assert_eq!(w.rail.all_executions().len(), 2);
 }
 #[tokio::test]
-async fn test_allowance_refusals_lifetime_limit_waits_for_a_reservation_beside_a_paid_one() {
+async fn test_allowance_refusals_lifetime_limit_stays_final_once_the_method_reports_failure() {
+    let (w, mut payer, mut shop, key) = Box::pin(first_grant_in(store(), terms())).await;
+    w.rail.set_history_payer(payer.identity());
+    // 70 of 100 at the method and still pending: 50 never fits, whatever the 70 answer.
+    let first = Box::pin(one_time(&w, &mut shop, &mut payer, "70")).await;
+    w.rail.next(Behaviour::Hang);
+    let PayOutcome::Pending { attempt_id, .. } = Box::pin(payer.pay_under_allowance(&first, &key))
+        .await
+        .outcome
+        .unwrap()
+    else {
+        panic!("the first payment did not stay in flight");
+    };
+    let second = Box::pin(one_time(&w, &mut shop, &mut payer, "50")).await;
+    let never = Refusal::NotAutomatic("the lifetime limit has no room".into());
+    assert_eq!(
+        refused(Box::pin(payer.pay_under_allowance(&second, &key)).await),
+        never
+    );
+    // The method reports the failure, and its outcome isn't written yet: the attempt is
+    // still counted reserved, but it reached the method, so nothing gives its room back.
+    w.rail.settle(&attempt_id, false);
+    assert_eq!(
+        refused(Box::pin(payer.pay_under_allowance(&second, &key)).await),
+        never
+    );
+    // The failure written: an attempt that reached the method stays counted (Paykit spec
+    // 8.3), so the same payment is refused the same way.
+    let resumed = Box::pin(payer.resume_payments()).await.unwrap();
+    assert!(
+        matches!(resumed.as_slice(), [PayOutcome::Failed { .. }]),
+        "{resumed:?}"
+    );
+    assert_eq!(
+        refused(Box::pin(payer.pay_under_allowance(&second, &key)).await),
+        never
+    );
+    // What still fits beside the 70 goes.
+    let fits = Box::pin(one_time(&w, &mut shop, &mut payer, "30")).await;
+    assert!(matches!(
+        Box::pin(payer.pay_under_allowance(&fits, &key))
+            .await
+            .outcome
+            .unwrap(),
+        PayOutcome::Paid { .. }
+    ));
+    assert_eq!(w.rail.all_executions().len(), 2);
+}
+
+#[tokio::test]
+async fn test_allowance_refusals_lifetime_limit_waits_for_a_reservation_before_the_call() {
     let (w, mut payer, mut shop, key) = Box::pin(first_grant_in(store(), terms())).await;
     w.rail.set_history_payer(payer.identity());
     // 70 of 100 made on the method, its history showing it paid while the claim is still
-    // open: spent.
+    // open and the journal still at the call: spent.
     let first = Box::pin(one_time(&w, &mut shop, &mut payer, "70")).await;
     w.rail.next(Behaviour::Hang);
     let PayOutcome::Pending { attempt_id, .. } = Box::pin(payer.pay_under_allowance(&first, &key))
@@ -510,7 +556,7 @@ async fn test_allowance_refusals_lifetime_limit_waits_for_a_reservation_beside_a
         panic!("the first payment did not stay in flight");
     };
     w.rail.settle(&attempt_id, true);
-    // 10 more reserved, by an attempt whose answer was lost.
+    // 10 more reserved, by an attempt whose answer was lost before the method was called.
     let second = Box::pin(one_time(&w, &mut shop, &mut payer, "10")).await;
     w.alice
         .switch()
