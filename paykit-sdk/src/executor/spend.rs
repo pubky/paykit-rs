@@ -1016,6 +1016,10 @@ mod tests {
         ];
         assert_eq!(room(&entries, &paid_by_history, "0", "25"), Automatic);
         assert_eq!(room(&entries, &paid_by_history, "0", "40"), Never);
+        // 70 at the method, which reported a failure the claim doesn't show yet: still
+        // reserved, and its room may come back, so 50 waits.
+        let failed_unwritten = [(1, evidence(ClaimState::Open, false, false))];
+        assert_eq!(room(&entries[..1], &failed_unwritten, "0", "50"), Automatic);
         // 70 paid on the method with its ledger outcome unwritten, and 10 in flight: the 70
         // are spent, so 40 never fits.
         let facts = [
