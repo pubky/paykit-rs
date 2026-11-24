@@ -101,6 +101,13 @@ async fn check_sharing(wallet: &NativeWallet, recipient: &[u8; 32]) -> TestResul
         assert!(matches!(result, Err(WalletError::InvalidInput { field }) if field == "recipient"));
     }
     wallet.withdraw_list_from(recipient.to_vec()).await?;
+    // Only the refusal of a list delivered with an unknown outcome is a confirmation to send
+    // another; any other is the caller's mistake, refused before anything is read.
+    let other = Arc::new(crate::PaymentRefusal(paykit_sdk::Refusal::NotFound));
+    assert!(matches!(
+        wallet.send_list_again(other).await,
+        Err(WalletError::InvalidInput { field }) if field == "refusal"
+    ));
     Ok(())
 }
 

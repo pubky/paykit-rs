@@ -20,6 +20,14 @@ func checkLists(fixture: CheckoutFixture, wallet: NativeWallet) async throws {
         preconditionFailure("payer published a Private Payment List")
     } catch let WalletError.NeedsUser(failure) {
         precondition(failure.code() == "not_now")
+        // Only an unknown list delivery is a confirmation to send another list.
+        guard let refusal = failure.refusal() else { preconditionFailure("missing not_now refusal") }
+        do {
+            try await wallet.sendListAgain(refusal: refusal)
+            preconditionFailure("a refusal other than an unknown delivery sent a list")
+        } catch let WalletError.InvalidInput(field) {
+            precondition(field == "refusal")
+        }
     }
     try await wallet.withdrawListFrom(recipient: recipient)
     let lists = try await wallet.heldLists()

@@ -1,11 +1,14 @@
 //! Sharing and receiving Private Payment Lists (Paykit spec 8.4.1).
 
-use crate::{fixed, NativeWallet, WalletError};
+use crate::{fixed, NativeWallet, PaymentRefusal, WalletError};
 use paykit_lib::records::ListPublicationRecord as Publication;
 use paykit_lib::{PaymentEndpointIdentifier, PaymentEndpointPayload};
 use paykit_sdk::PublicationConflict;
+use paykit_sdk::Refusal;
+use pubky_switch_client::app::UserConfirmed;
 use pubky_switch_core::enc::b64;
 use serde_json::{json, Value};
+use std::sync::Arc;
 use std::{collections::BTreeMap, fmt};
 
 /// A reusable Payment Endpoint in a Private Payment List (Paykit wire 4.13).
@@ -236,6 +239,22 @@ impl NativeWallet {
         let report = conflict.try_into()?;
         self.with_wallet(move |app| {
             Box::pin(async move { Ok(app.acknowledge_publication_conflict(&report).await?) })
+        })
+        .await
+    }
+
+    /// Send another list to a counterparty whose current list was given up with an unknown
+    /// outcome, once the user confirmed it (Paykit spec 8.4, 9). `refusal` is the exact
+    /// `ListDeliveryUnknown` refusal a list call returned, which the host showed. Any other
+    /// refusal is `InvalidInput` naming `refusal`; a list that changed since comes back as a
+    /// new `ListDeliveryUnknown`, and nothing is sent.
+    pub async fn send_list_again(&self, refusal: Arc<PaymentRefusal>) -> Result<(), WalletError> {
+        let Refusal::ListDeliveryUnknown(shown) = &refusal.0 else {
+            return Err(WalletError::invalid("refusal"));
+        };
+        let shown = (**shown).clone();
+        self.with_wallet(move |app| {
+            Box::pin(async move { Ok(app.send_list_again(&shown, UserConfirmed::new()).await?) })
         })
         .await
     }

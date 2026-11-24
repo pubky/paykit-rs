@@ -21,7 +21,18 @@ internal suspend fun checkLists(fixture: CheckoutFixture, wallet: NativeWallet) 
         wallet.publishListTo(recipient)
         error("payer published a Private Payment List")
     } catch (error: WalletException.NeedsUser) {
-        error.failure.use { check(it.code() == "not_now") }
+        error.failure.use { failure ->
+            check(failure.code() == "not_now")
+            // Only an unknown list delivery is a confirmation to send another list.
+            checkNotNull(failure.refusal()).use { refusal ->
+                try {
+                    wallet.sendListAgain(refusal)
+                    throw AssertionError("a refusal other than an unknown delivery sent a list")
+                } catch (invalid: WalletException.InvalidInput) {
+                    check(invalid.field == "refusal")
+                }
+            }
+        }
     }
     wallet.withdrawListFrom(recipient)
     check(wallet.heldLists().isEmpty())
