@@ -837,6 +837,26 @@ pub(crate) fn restore_paykit_layer(
         }
         stop_notices.insert(at.into_bytes(), held);
     }
+    // And its notices of payments and messages: a restore keeps each one either side holds,
+    // so a notice the installation raised after the backup isn't lost (Paykit spec 7.2,
+    // "What a restore loses"). One the host acknowledged after the backup can be listed
+    // again; none is lost. A fresh store has none.
+    let mut notices: std::collections::BTreeMap<Vec<u8>, crate::notices::KeptNotice> =
+        std::collections::BTreeMap::new();
+    for (k, value) in restoring
+        .previous_local_scan(key::NOTICES.as_bytes())
+        .map_err(|_| "the installation's notices cannot be read")?
+    {
+        if matches!(
+            StateKey::parse(&k),
+            Some(StateKey::Notice { .. } | StateKey::MessageNotice { .. })
+        ) && !stop_notices.contains_key(&k)
+        {
+            let notice = state::restored::<KeptNotice>(&k, &value, &binder)
+                .map_err(|_| "the installation holds an invalid notice")?;
+            notices.insert(k, notice);
+        }
+    }
     let mut cursor_time_ms = 0;
     let mut bounded = BoundedFamilies::default();
     for (key, value) in state {
@@ -1443,10 +1463,25 @@ pub(crate) fn restore_paykit_layer(
                 // An acknowledged notice of an attempt is kept only while the journal holds
                 // the attempt (`Paykit::acknowledge_notice`): one without its entry is a
                 // state no run leaves.
-                if let (true, StateKey::Notice { attempt, .. }) = (notice.acknowledged, family) {
-                    acknowledged.push(attempt);
+                if let (true, StateKey::Notice { attempt, .. }) = (notice.acknowledged, &family) {
+                    acknowledged.push(*attempt);
                 }
-                writes.push(LocalWrite::Put { key, value });
+                if matches!(family, StateKey::BlockedLost { .. }) {
+                    writes.push(LocalWrite::Put { key, value });
+                    continue;
+                }
+                // Merged with the installation's: acknowledged if either side is, raised at
+                // the earlier time.
+                match notices.entry(key) {
+                    std::collections::btree_map::Entry::Occupied(mut held) => {
+                        let held = held.get_mut();
+                        held.acknowledged |= notice.acknowledged;
+                        held.raised_at_ms = held.raised_at_ms.min(notice.raised_at_ms);
+                    }
+                    std::collections::btree_map::Entry::Vacant(slot) => {
+                        slot.insert(notice);
+                    }
+                }
                 continue;
             }
         };
@@ -1524,6 +1559,19 @@ pub(crate) fn restore_paykit_layer(
         if let Some(value) = value {
             writes.push(LocalWrite::Put { key, value });
         }
+    }
+    for (key, notice) in notices {
+        // An acknowledged one of a payment the restored journal doesn't hold has nothing left
+        // to keep it (`Paykit::acknowledge_notice`).
+        if let (true, Some(StateKey::Notice { attempt, .. })) =
+            (notice.acknowledged, StateKey::parse(&key))
+        {
+            if !journaled.contains(&attempt) {
+                continue;
+            }
+        }
+        let value = state::encode(&notice).map_err(|_| "a notice cannot be written")?;
+        writes.push(LocalWrite::Put { key, value });
     }
     if !recordings.is_subset(&awaiting_recording) {
         return Err("an offline recording has no matching payment journal entry".into());

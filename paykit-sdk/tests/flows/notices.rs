@@ -21,7 +21,14 @@ const PAST_THE_CLAIM_MS: u64 = 32 * DAY_MS;
 /// and its history then shows the payment made, so the proof goes (Paykit spec 7.2). Bob
 /// takes the proof. Returns the wallet, the shop and the attempt.
 async fn paid_after_failed(w: &World) -> (Paykit, Paykit, paykit_lib::AttemptId) {
-    let mut wallet = w.wallet("wallet").await;
+    paid_after_failed_by(w, w.wallet("wallet").await).await
+}
+
+/// [`paid_after_failed`], paid by `wallet`.
+async fn paid_after_failed_by(
+    w: &World,
+    mut wallet: Paykit,
+) -> (Paykit, Paykit, paykit_lib::AttemptId) {
     let mut shop = w.shop().await;
     let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
     wallet.receive(None).await.unwrap();
@@ -857,4 +864,47 @@ async fn test_notices_receipt_waiting_for_its_key_never_shown_as_a_store_unavail
         })
         .collect();
     assert!(store_causes.is_empty(), "{store_causes:?}");
+}
+
+/// `backup` restored in place over the wallet's installation on `storage`, its first read
+/// done.
+async fn restored_in_place(
+    w: &World,
+    storage: Arc<dyn pubky_switch_client::store::StateStore>,
+    backup: &paykit_sdk::PaykitBackup,
+) -> Paykit {
+    let mut wallet = Paykit::restore(
+        w.env(&w.alice, storage),
+        PaykitConfig::default(),
+        backup,
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    crate::common::finish_listing(&mut wallet).await;
+    wallet
+}
+
+#[tokio::test]
+async fn test_notices_raised_after_the_backup_kept_through_an_in_place_restore() {
+    let w = World::new();
+    let storage = store();
+    let wallet = w.wallet_on("wallet", Arc::clone(&storage)).await;
+    let (mut wallet, mut shop, attempt_id) = paid_after_failed_by(&w, wallet).await;
+    let backup = wallet.backup().await.unwrap();
+    w.clock.advance_ms(PAST_THE_CLAIM_MS);
+    wallet.receive(None).await.unwrap();
+    wallet.resume_payments().await.unwrap();
+    receipt(&mut shop).await;
+    wallet.receive(None).await.unwrap();
+    assert_eq!(wallet.notices().await.unwrap().len(), 1);
+    drop(wallet);
+    // Restored in place from the backup taken before it, the notice the installation raised
+    // is still listed: a restore never loses one (Paykit spec 7.2).
+    let wallet = restored_in_place(&w, storage, &backup).await;
+    let notices = wallet.notices().await.unwrap();
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert_eq!(notices[0].kind, NoticeKind::PaidAfterFailed);
+    assert_eq!(notices[0].attempt_id, Some(attempt_id));
 }
