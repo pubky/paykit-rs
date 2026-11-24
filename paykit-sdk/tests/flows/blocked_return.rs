@@ -2028,7 +2028,7 @@ async fn test_blocked_return_own_unblock_reads_a_concurrent_floor_first() {
 }
 
 #[tokio::test]
-async fn test_blocked_return_own_unblock_waits_for_an_unreadable_floor() {
+async fn test_blocked_return_own_unblock_is_held_while_the_floor_record_doesnt_read() {
     let w = World::new();
     let mut wallet = contacts_wallet(&w, store()).await;
     wallet
@@ -2037,10 +2037,18 @@ async fn test_blocked_return_own_unblock_waits_for_an_unreadable_floor() {
         .await
         .unwrap();
     wallet.block(&w.bob_id()).await.unwrap();
-    assert!(matches!(
-        wallet.unblock(&w.bob_id()).await.unwrap_err().refusal(),
-        Some(paykit_sdk::Refusal::NotNow(_))
-    ));
+    // A floor record that doesn't read, with no floor seen before it: no later read clears
+    // that, so the unblock is held for the user, before a receive and after it, until the
+    // floor is written again.
+    for _ in 0..2 {
+        assert_eq!(
+            wallet.unblock(&w.bob_id()).await.unwrap_err().refusal(),
+            Some(&paykit_sdk::Refusal::HeldForUser(
+                paykit_sdk::HeldForUserReason::FloorRecordUnreadable
+            ))
+        );
+        wallet.receive(None).await.unwrap();
+    }
     assert!(wallet
         .app_mut()
         .allow_list()
@@ -2048,6 +2056,8 @@ async fn test_blocked_return_own_unblock_waits_for_an_unreadable_floor() {
         .unwrap()
         .deny
         .contains(&w.bob_id()));
+    // A readable floor written at the record, as another of the user's wallets that holds
+    // one writes it: nothing this wallet calls repairs the record itself.
     wallet
         .app_mut()
         .put_record(
@@ -3581,7 +3591,7 @@ async fn test_blocked_return_restore_widening_held_asks_no_one() {
         .await
         .unwrap_err();
     assert!(
-        matches!(error.refusal(), Some(paykit_sdk::Refusal::NotNow(_))),
+        matches!(error.refusal(), Some(paykit_sdk::Refusal::FloorHeld)),
         "{error}"
     );
 }
@@ -3747,7 +3757,7 @@ async fn test_blocked_return_missed_item_under_the_hold_asks_no_one() {
         .await
         .unwrap_err();
     assert!(
-        matches!(error.refusal(), Some(paykit_sdk::Refusal::NotNow(_))),
+        matches!(error.refusal(), Some(paykit_sdk::Refusal::FloorHeld)),
         "{error}"
     );
 }
@@ -5132,7 +5142,7 @@ async fn test_blocked_return_owed_raise_asks_the_unblocked_sender_nothing() {
         .await
         .unwrap_err();
     assert!(
-        matches!(error.refusal(), Some(paykit_sdk::Refusal::NotNow(_))),
+        matches!(error.refusal(), Some(paykit_sdk::Refusal::FloorHeld)),
         "{error}"
     );
     assert!(asked(&wallet, &w.bob_id()).await.is_empty());
@@ -6267,7 +6277,12 @@ async fn test_blocked_return_kept_floor_batch_holds_an_open_restore_verdict() {
         .await
         .expect_err("reconcile mode waits for the kept floor batch");
     assert!(
-        matches!(refused.refusal(), Some(paykit_sdk::Refusal::NotNow(why)) if why.contains("floor")),
+        matches!(
+            refused.refusal(),
+            Some(paykit_sdk::Refusal::NotNow(
+                paykit_sdk::NotNowReason::FloorUnreadable
+            ))
+        ),
         "{refused:?}"
     );
     assert_eq!(verdict(&restored).await, serde_json::json!("open"));

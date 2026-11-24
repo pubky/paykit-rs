@@ -17,8 +17,6 @@ use crate::common::{draft, request_from, store, World};
 
 type Service = std::sync::Arc<pubky_switch_client::testing::ScriptedSwitch>;
 
-const NEEDS_REPAIR: &str = "after a provider loss this version doesn't resume automatic payments under the Allowance, whose usage needs a repair it doesn't make: the user ends it and sets up a new one";
-
 fn refusal_of<T: std::fmt::Debug>(result: paykit_sdk::Result<T>) -> Refusal {
     result
         .expect_err("refused")
@@ -125,7 +123,7 @@ async fn test_allowance_regrant_after_a_provider_loss_writes_the_current_generat
     // It establishes no usage authority: nothing is paid, and the user isn't asked again.
     let view = payer.allowance(&key).await.unwrap();
     assert!(!view.confirmation_needed, "{view:?}");
-    let waits = Refusal::NotNow(NEEDS_REPAIR.into());
+    let waits = Refusal::HeldForUser(paykit_sdk::HeldForUserReason::AllowanceNotResumed);
     assert_eq!(
         Box::pin(subscription_refused(&w, &mut shop, &mut payer, &key)).await,
         waits
@@ -265,7 +263,9 @@ async fn test_allowance_regrant_no_other_own_app_lifts_the_pause() {
     // on: it isn't taken up here, asks no confirmation, and pays nothing, as without a loss.
     assert_eq!(
         refused,
-        Refusal::NotNow("this app hasn't taken up the Allowance's execution".into())
+        paykit_sdk::Refusal::HeldForUser(paykit_sdk::HeldForUserReason::AllowanceExecutionHeld(
+            "this app hasn't taken up the Allowance's execution"
+        ))
     );
     assert!(!payer.allowance(&key).await.unwrap().confirmation_needed);
     // A `missed` item after that asks nothing either: no confirmation lifts it.
@@ -355,10 +355,9 @@ async fn test_allowance_regrant_a_known_wait_comes_before_the_confirmation() {
     assert!(!payer.allowance(&key).await.unwrap().confirmation_needed);
     assert_eq!(
         refusal_of(Box::pin(payer.resume_allowance_executor(&key)).await),
-        Refusal::NotNow(
+        paykit_sdk::Refusal::NotNow(paykit_sdk::NotNowReason::ReadAgain(
             "a missed item holds every Allowance until the next receive marks it for confirmation"
-                .into()
-        )
+        ))
     );
 }
 
@@ -400,7 +399,7 @@ async fn test_allowance_regrant_kept_and_landed_under_a_newer_hold_asks_again() 
     assert!(!payer.allowance(&key).await.unwrap().confirmation_needed);
     assert_eq!(
         refusal_of(Box::pin(payer.resume_allowance_executor(&key)).await),
-        Refusal::NotNow(NEEDS_REPAIR.into())
+        Refusal::HeldForUser(paykit_sdk::HeldForUserReason::AllowanceNotResumed)
     );
     assert!(w.rail.all_executions().is_empty());
 }
@@ -430,9 +429,7 @@ async fn test_allowance_regrant_divergent_record_waits_then_confirms() {
     let (_w, mut payer, _shop, key, _) = Box::pin(lost(w, payer, shop, key)).await;
     crate::divergent::set_divergent(&disk, &payer, &key, true);
     assert!(!payer.allowance(&key).await.unwrap().confirmation_needed);
-    let waits = Refusal::NotNow(
-        "the Allowance record is divergent or has messages to write first: the user confirms the record as shown, a newer write ends it, or the next receive writes the messages".into(),
-    );
+    let waits = paykit_sdk::Refusal::HeldForUser(paykit_sdk::HeldForUserReason::AllowanceExecutionHeld("the Allowance record is divergent or has messages to write first: the user confirms the record as shown, a newer write ends it, or the next receive writes the messages"));
     assert_eq!(
         refusal_of(Box::pin(payer.resume_allowance_executor(&key)).await),
         waits
@@ -479,7 +476,7 @@ async fn test_allowance_regrant_answers_a_hold_marked_before_it_was_shown() {
     assert!(!after.confirmation_needed, "{after:?}");
     assert_eq!(
         refusal_of(Box::pin(payer.resume_allowance_executor(&key)).await),
-        Refusal::NotNow(NEEDS_REPAIR.into())
+        Refusal::HeldForUser(paykit_sdk::HeldForUserReason::AllowanceNotResumed)
     );
 }
 
@@ -535,7 +532,9 @@ async fn test_allowance_regrant_lost_answer_writes_one_grant() {
         .expect_err("the regrant's answer is lost");
     let again = Box::pin(payer.confirm_allowance_executor(&hold, UserConfirmed::new())).await;
     assert!(
-        again.is_ok() || refusal_of(again) == Refusal::NotNow(NEEDS_REPAIR.into()),
+        again.is_ok()
+            || refusal_of(again)
+                == Refusal::HeldForUser(paykit_sdk::HeldForUserReason::AllowanceNotResumed),
         "the call again lands the regrant"
     );
     Box::pin(payer.receive(None)).await.unwrap();
@@ -545,7 +544,7 @@ async fn test_allowance_regrant_lost_answer_writes_one_grant() {
     );
     assert_eq!(
         refusal_of(Box::pin(payer.resume_allowance_executor(&key)).await),
-        Refusal::NotNow(NEEDS_REPAIR.into())
+        Refusal::HeldForUser(paykit_sdk::HeldForUserReason::AllowanceNotResumed)
     );
 }
 
@@ -630,7 +629,9 @@ async fn test_allowance_regrant_kept_unapplied_and_confirmed_again_writes_one_gr
         .expect_err("the regrant's batch is unanswered");
     let again = Box::pin(payer.confirm_allowance_executor(&hold, UserConfirmed::new())).await;
     assert!(
-        again.is_ok() || refusal_of(again) == Refusal::NotNow(NEEDS_REPAIR.into()),
+        again.is_ok()
+            || refusal_of(again)
+                == Refusal::HeldForUser(paykit_sdk::HeldForUserReason::AllowanceNotResumed),
         "the call again lands the kept regrant"
     );
     Box::pin(payer.receive(None)).await.unwrap();

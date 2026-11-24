@@ -22,11 +22,17 @@ use crate::{AllowanceRole, AllowanceStatus, Paykit, Refusal, Result};
 const REGRANT_WAITS: &str = "the Allowance record isn't read as writing on it needs yet";
 
 fn regrant_waits() -> Refusal {
-    Refusal::NotNow(REGRANT_WAITS.into())
+    Refusal::HeldForUser(crate::HeldForUserReason::AllowanceExecutionHeld(
+        REGRANT_WAITS,
+    ))
 }
 
+/// The executor can't establish the original grant and ledger: as after a restore that
+/// lost what verifies them, or a paused record, which no read alone mends.
 fn held() -> Refusal {
-    Refusal::NotNow("the executor cannot establish the original Allowance grant and ledger".into())
+    Refusal::HeldForUser(crate::HeldForUserReason::AllowanceExecutionHeld(
+        "the executor cannot establish the original Allowance grant and ledger",
+    ))
 }
 
 impl Paykit {
@@ -138,7 +144,7 @@ impl Paykit {
         let standing = standing(self, &shown, consent);
         match standing {
             Standing::Final(refusal) => return Err(refusal.into()),
-            Standing::Temporary(why) => return Err(Refusal::NotNow(why.into()).into()),
+            Standing::Temporary(refusal) => return Err(refusal.into()),
             Standing::Confirm | Standing::Payable | Standing::NotTakenUp => {}
         }
         // The user's confirmation counts only under the hold it was given for: a restore or a
@@ -597,7 +603,7 @@ impl Paykit {
         let consent = Box::pin(self.consent_state(record)).await?;
         match standing(self, &shown, consent) {
             Standing::Final(refusal) => Err(refusal.into()),
-            Standing::Temporary(why) => Err(Refusal::NotNow(why.into()).into()),
+            Standing::Temporary(refusal) => Err(refusal.into()),
             Standing::Confirm | Standing::Payable | Standing::NotTakenUp => Ok(()),
         }
     }
@@ -619,9 +625,9 @@ impl Paykit {
             let summary = Box::pin(self.receive(None)).await?;
             self.remember_read(summary);
             if kept(self.app.kept_batch(id).await?) {
-                return Err(Refusal::NotNow(
-                    "the executor grant's write waits to be sent again".into(),
-                )
+                return Err(Refusal::NotNow(crate::NotNowReason::EarlierWriteUnresolved(
+                    "the executor grant's write waits to be sent again",
+                ))
                 .into());
             }
         }

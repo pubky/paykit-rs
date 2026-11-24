@@ -76,7 +76,7 @@ impl Paykit {
         }
         let checked = Box::pin(self.executor_base(record, LedgerRead::Inventory))
             .await?
-            .ok_or_else(|| Refusal::NotNow("cannot verify the current Allowance ledger".into()))?;
+            .ok_or_else(super::preparation::no_executor_base)?;
         Ok(checked.facts.other_failures)
     }
 
@@ -105,7 +105,7 @@ impl Paykit {
         }
         let mut checked = Box::pin(self.executor_base(record, LedgerRead::Inventory))
             .await?
-            .ok_or_else(super::preparation::unavailable)?;
+            .ok_or_else(super::preparation::no_executor_base)?;
         let refused = || {
             Refusal::Usage("release requires another app's failed claim and this wallet's evidence that the attempt ended before dispatch".into())
         };
@@ -172,10 +172,10 @@ impl Paykit {
             .iter()
             .find(|p| p.body().object == name)
             .and_then(|p| p.record_revision().ok())
-            .ok_or_else(super::preparation::unavailable)?;
+            .ok_or_else(super::preparation::written_unverified)?;
         Box::pin(self.executor_base(record, LedgerRead::Applied(revision)))
             .await?
-            .ok_or_else(super::preparation::unavailable)?;
+            .ok_or_else(super::preparation::written_unverified)?;
         Ok(())
     }
 

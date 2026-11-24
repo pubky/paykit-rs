@@ -625,7 +625,13 @@ async fn test_outcome_record_value_awaiting_its_epoch_key_is_never_repaired_over
         .await
         .unwrap_err();
     assert!(
-        matches!(refused.refusal(), Some(paykit_sdk::Refusal::NotNow(why)) if why.contains("scope keys")),
+        matches!(
+            refused.refusal(),
+            Some(paykit_sdk::Refusal::NotNow(
+                paykit_sdk::NotNowReason::ScopeKeysAwaited
+                    | paykit_sdk::NotNowReason::ValueAwaitsKey
+            ))
+        ),
         "{refused:?}"
     );
     let resumed = wallet.resume_payments().await.unwrap();
@@ -690,7 +696,13 @@ async fn test_outcome_record_user_done_over_a_value_awaiting_its_epoch_key_waits
     record_awaiting_its_epoch_key(&w, &mut phone, &mut wallet, &request).await;
     let refused = resolve_done(&mut wallet, attempt_id).await.unwrap_err();
     assert!(
-        matches!(refused.refusal(), Some(paykit_sdk::Refusal::NotNow(why)) if why.contains("scope keys")),
+        matches!(
+            refused.refusal(),
+            Some(paykit_sdk::Refusal::NotNow(
+                paykit_sdk::NotNowReason::ScopeKeysAwaited
+                    | paykit_sdk::NotNowReason::ValueAwaitsKey
+            ))
+        ),
         "{refused:?}"
     );
     assert_eq!(claim_outcome(&mut wallet, &attempt_id).await, Outcome::Open);

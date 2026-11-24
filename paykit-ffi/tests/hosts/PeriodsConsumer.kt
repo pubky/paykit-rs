@@ -43,8 +43,8 @@ internal suspend fun checkPeriods(fixture: CheckoutFixture, wallet: NativeWallet
             try {
                 restored.recurringRequests()
                 error("listed recurring requests before the restored records were read")
-            } catch (error: WalletException.NeedsUser) {
-                error.failure.use { check(it.code() == "not_now") }
+            } catch (error: WalletException.RetryLater) {
+                error.failure.use { check(it.code() == "records_not_listed") }
             } finally {
                 restored.shutdown()
             }

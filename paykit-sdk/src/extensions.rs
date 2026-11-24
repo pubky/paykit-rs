@@ -330,8 +330,8 @@ impl Paykit {
     ///
     /// [`Refusal::CertificateRefused`]; [`Refusal::ScopeMissing`] without `paykit_contacts` or `paykit_ext:<prefix>`;
     /// [`Refusal::Usage`] for the app's own identity, or a body the switch would refuse;
-    /// [`Refusal::NotNow`] while sends to `to` are held, the deny list holding it or its
-    /// copy not known, with nothing signed or queued; the client's errors.
+    /// [`Refusal::HeldForUser`] while the deny list holds `to`, and [`Refusal::NotNow`] while
+    /// its copy isn't known, with nothing signed or queued; the client's errors.
     pub async fn send_extension(
         &mut self,
         to: [u8; 32],

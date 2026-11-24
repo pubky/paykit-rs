@@ -302,7 +302,7 @@ impl Paykit {
                         .await
                 }
                 _ => {
-                    return Err(Refusal::NotNow(UNKNOWN_EXPIRY_POLICY.into()).into());
+                    return Err(Refusal::Usage(UNKNOWN_EXPIRY_POLICY.into()).into());
                 }
             };
             self.note_own_record_write(&renewed);
@@ -442,12 +442,7 @@ impl Paykit {
     /// stored ([`Paykit::set_public_endpoints`]).
     fn own_record_known(&self) -> Result<()> {
         if self.own_record_unknown {
-            return Err(Refusal::NotNow(
-                "the store couldn't tell whether the last write of the app's record was \
-                 applied: load the app again (Paykit::load) before editing its record"
-                    .into(),
-            )
-            .into());
+            return Err(Refusal::HeldForUser(crate::HeldForUserReason::ReloadRequired).into());
         }
         Ok(())
     }
@@ -706,7 +701,7 @@ pub(crate) const OWED_UNTIL_LOADED: &str =
 pub(crate) fn own_record_left_owed(error: &PaykitError) -> Option<&'static str> {
     let client = match error {
         PaykitError::Client(client) | PaykitError::PublicEndpointChangePending(client) => client,
-        PaykitError::Refused(Refusal::NotNow(reason)) if reason == UNKNOWN_EXPIRY_POLICY => {
+        PaykitError::Refused(Refusal::Usage(reason)) if reason == UNKNOWN_EXPIRY_POLICY => {
             return Some(
                 "the app record has an expiry policy this version doesn't know; a newer \
                  version brings it up to date",
@@ -940,10 +935,11 @@ mod upkeep_tests {
     #[test]
     fn test_own_record_left_owed_takes_only_the_unknown_expiry_policy() {
         assert!(
-            own_record_left_owed(&Refusal::NotNow(UNKNOWN_EXPIRY_POLICY.into()).into()).is_some()
+            own_record_left_owed(&Refusal::Usage(UNKNOWN_EXPIRY_POLICY.into()).into()).is_some()
         );
         for refused in [
-            Refusal::NotNow("load the app again".into()),
+            Refusal::Usage("load the app again".into()),
+            Refusal::NotNow(crate::NotNowReason::CallAgain("load the app again")),
             Refusal::IdentityUnavailable("first read".into()),
         ] {
             assert_eq!(

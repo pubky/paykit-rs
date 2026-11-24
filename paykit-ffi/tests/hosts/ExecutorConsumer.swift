@@ -60,7 +60,7 @@ private func checkExecutorCheckout(
             guard case let .error(.NeedsUser(failure)) = result.decision else {
                 preconditionFailure("expected unavailable account history to hold the payment")
             }
-            precondition(failure.code() == "not_now")
+            precondition(failure.code() == "allowance_execution_held")
         }
         let entries = try await wallet.payments()
         precondition(!entries.contains { $0.requestHash == request.requestHash })

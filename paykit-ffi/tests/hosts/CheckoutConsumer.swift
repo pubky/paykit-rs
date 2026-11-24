@@ -162,8 +162,8 @@ private func restoreCheckout(
     do {
         try await reopen.confirmRestoredRegistrations(registrations: [])
         preconditionFailure("the stale restore question was accepted")
-    } catch let WalletError.NeedsUser(failure) {
-        guard case .notNow? = failure.refusal()?.kind() else { preconditionFailure("unexpected restore refusal") }
+    } catch let WalletError.NotSent(failure) {
+        guard case .usage? = failure.refusal()?.kind() else { preconditionFailure("unexpected restore refusal") }
     }
     let stillPending = try await reopen.restoreState()
     precondition(stillPending.registrations == state.registrations)
@@ -293,8 +293,8 @@ private extension NativeWallet {
     func lossReport() async throws -> WalletReconciliation {
         for _ in 0..<12 {
             do { return try await reconcile() }
-            catch let WalletError.NeedsUser(failure) {
-                guard case .notNow? = failure.refusal()?.kind() else { throw WalletError.NeedsUser(failure: failure) }
+            catch let WalletError.RetryLater(failure) {
+                guard case .notNow? = failure.refusal()?.kind() else { throw WalletError.RetryLater(failure: failure) }
             }
         }
         preconditionFailure("reconciliation did not finish its listing")
