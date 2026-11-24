@@ -8,7 +8,7 @@ func driveConsumers() async throws {
     defer { try? FileManager.default.removeItem(at: directory) }
     let method = CheckoutMethod(ledger: directory.appendingPathComponent("settled"))
     let store = EnrollmentStore()
-    let scopes = WalletScopes(pay: true, request: true, contacts: true, manageContacts: true,
+    let scopes = WalletScopes(pay: true, request: true, allowance: true, allowanceExecute: true, contacts: true, manageContacts: true,
                               extensions: ["paykit-cap"])
     let config = WalletConfig(extensionKinds: ["paykit-cap.offer"], publishesRecord: true)
     let fixture = try await enrolledTestCheckout(store: store, method: method, declaration: testDeclaration, endpoints: testEndpoints, config: config)
