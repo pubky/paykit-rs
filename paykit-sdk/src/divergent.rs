@@ -1232,6 +1232,40 @@ impl Paykit {
         responses_of(&self.identity(), values.into_iter().map(|(_, value)| value))
     }
 
+    /// The Private Payment Lists of `payee`'s apps kept over their records until the user
+    /// confirms them (`dw/`, the list role), as `(app, list version, record)`: each names a
+    /// `payment_lists` record of that app the list request must judge ([`Paykit::pause_at`]),
+    /// though the record may not read. A kept list that doesn't read, or is kept under
+    /// another record than its app's, is left out: placing it reports it (Paykit spec 6).
+    pub(crate) async fn lists_kept_over(
+        &self,
+        payee: &[u8; 32],
+    ) -> Result<Vec<([u8; 16], paykit_lib::ListVersion, [u8; 32])>> {
+        let own = self.identity();
+        let mut kept = Vec::new();
+        for (_, value) in self
+            .local_scan_readable::<DivergentWrite>(key::DIVERGENT_WRITES)
+            .await?
+        {
+            if value.role != WriteRole::List {
+                continue;
+            }
+            let Ok(stored) = value.message.stored(&own) else {
+                continue;
+            };
+            let app_id = stored.message().from.app_id;
+            if stored.sender() != *payee
+                || self.app.record_key(&list_target(payee, &app_id))? != value.record
+            {
+                continue;
+            }
+            if let Some(version) = crate::receive::list_version(&stored) {
+                kept.push((app_id, version, value.record));
+            }
+        }
+        Ok(kept)
+    }
+
     /// The mark at `record`, read bound ([`state::Stored`]) and checked against the record
     /// held there, `view` ([`Marked::of`]), before anything is decided on it.
     async fn marked(&self, record: &[u8; 32], view: Option<&View>) -> Result<Marked> {
