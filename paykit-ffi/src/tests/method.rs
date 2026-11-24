@@ -21,8 +21,8 @@ pub(super) struct Account {
     pub throw_after_charge: AtomicBool,
     /// `transfer` and `settlement_id` throw instead of answering.
     pub throw_callbacks: AtomicBool,
-    /// A payment lookup can't reach the account's history for now.
-    pub lookup_unavailable: AtomicBool,
+    /// A payment lookup answers that the payment hasn't settled yet.
+    pub lookup_pending: AtomicBool,
     pub park: AtomicBool,
     pub entered: Notify,
     pub finish: Notify,
@@ -49,7 +49,7 @@ impl Account {
             stall_verify: AtomicBool::new(false),
             throw_after_charge: AtomicBool::new(false),
             throw_callbacks: AtomicBool::new(false),
-            lookup_unavailable: AtomicBool::new(false),
+            lookup_pending: AtomicBool::new(false),
             park: AtomicBool::new(true),
             entered: Notify::new(),
             finish: Notify::new(),
@@ -157,10 +157,8 @@ impl PaymentMethod for Account {
     }
     async fn payment(&self, id: String) -> Result<Option<MethodOutcome>, MethodError> {
         self.lookups.fetch_add(1, Ordering::SeqCst);
-        if self.lookup_unavailable.load(Ordering::SeqCst) {
-            return Err(MethodError::Unknown {
-                reason: "account history unavailable".into(),
-            });
+        if self.lookup_pending.load(Ordering::SeqCst) {
+            return Ok(Some(MethodOutcome::Pending));
         }
         let paid = Connection::open(&self.file)
             .unwrap()
@@ -215,7 +213,12 @@ impl PaymentMethod for Account {
         let members = self.proof_members.lock().unwrap().clone();
         let written: serde_json::Value =
             serde_json::from_str(&format!(r#"{{"payment":"{}"{members}}}"#, p.attempt_id)).unwrap();
-        if written.as_object().unwrap().iter().any(|(k, v)| proof.get(k) != Some(v)) {
+        if written
+            .as_object()
+            .unwrap()
+            .iter()
+            .any(|(k, v)| proof.get(k) != Some(v))
+        {
             return Ok(None);
         }
         let found=Connection::open(&self.file).unwrap().query_row("SELECT paid_at FROM payments WHERE attempt=?1 AND asset=?2 AND amount=?3 AND endpoint=?4 AND (?5 IS NULL OR payload=?5)",params![p.attempt_id,p.amount.asset,p.amount.value,p.endpoint,p.payload],|r|r.get::<_,i64>(0)).optional().unwrap();

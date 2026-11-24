@@ -475,7 +475,6 @@ async fn restored_dispatch(world: &World, resolution: ConfirmedResolution) -> Te
     use crate::{BackupDevice, PaymentOptions, PaymentStage};
     use paykit_lib::{PaymentEndpointIdentifier, PaymentEndpointPayload};
     use std::sync::atomic::Ordering;
-    let paid = matches!(resolution, ConfirmedResolution::Paid);
     let root = tempfile::tempdir()?;
     let account = Arc::new(Account::open(root.path(), world.clock().clone()));
     let scopes = WalletScopes {
@@ -526,7 +525,7 @@ async fn restored_dispatch(world: &World, resolution: ConfirmedResolution) -> Te
     wallet.shutdown().await?;
 
     // The provider is lost; the backup comes back on a new device, and the method can't
-    // look the payment up.
+    // tell yet whether the payment settled.
     world.advance_ms(11 * 60_000);
     let buyer = world.identity("buyer")?;
     let successor = "https://recovered-buyer.payments.test";
@@ -540,12 +539,10 @@ async fn restored_dispatch(world: &World, resolution: ConfirmedResolution) -> Te
     ))
     .await?;
     Box::pin(signer.end_staged_admission()).await?;
-    account.lookup_unavailable.store(true, Ordering::SeqCst);
+    account.lookup_pending.store(true, Ordering::SeqCst);
     let other = tempfile::tempdir()?;
     let host = super::wallet::host(world, other.path(), account.clone());
-    let restored = host
-        .restore(id, backup, BackupDevice::InPossession)
-        .await?;
+    let restored = host.restore(id, backup, BackupDevice::InPossession).await?;
     receive(&restored, opening.generation()).await?;
     reconcile(&restored).await?;
     let entries = restored.payments().await?;
@@ -569,7 +566,10 @@ async fn restored_dispatch(world: &World, resolution: ConfirmedResolution) -> Te
         return Err("expected the resolved payment".into());
     };
     assert!(matches!(settled.stage, PaymentStage::Finished));
-    assert_eq!(settled.paid_by_method, paid);
+    // The user's word, not the method's, finishes the entry: the method still reports
+    // nothing (Paykit spec 7.2).
+    assert!(!settled.paid_by_method);
+    assert_eq!(settled.attempt_id, entry.attempt_id);
     assert_eq!(account.count(), 1);
     restored.shutdown().await?;
     Ok(())
