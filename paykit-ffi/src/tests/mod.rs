@@ -9,6 +9,7 @@ mod extensions;
 mod host_calls;
 mod lists;
 mod method;
+mod opaque;
 mod payee;
 mod payer;
 mod periods;

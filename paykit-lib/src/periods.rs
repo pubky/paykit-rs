@@ -327,13 +327,21 @@ pub struct Recurrence {
 }
 
 impl Recurrence {
-    /// A recurrence the caller supplies.
+    /// A recurrence the caller supplies. Its first period, and its last when it ends, are
+    /// Billing Periods a message can name, so their times are within the wire's range
+    /// (Paykit wire 4.4).
     ///
     /// # Errors
     ///
-    /// [`Error::Validation`] for an `ends_at` not after `starts_at`.
+    /// [`Error::Validation`] for an `ends_at` not after `starts_at`, or a first or last period
+    /// with a time past the wire's range.
     pub fn new(rule: AnchoredRule, starts_at: u64, ends_at: Option<u64>) -> Result<Self> {
-        Self::read(rule, starts_at, ends_at).map_err(Error::into_validation)
+        let recurrence = Self::read(rule, starts_at, ends_at).map_err(Error::into_validation)?;
+        recurrence
+            .first()
+            .and(recurrence.last())
+            .map_err(Error::into_validation)?;
+        Ok(recurrence)
     }
 
     /// A recurrence read from a document (Paykit wire 4.4).
@@ -669,6 +677,24 @@ mod tests {
         assert!(rule.boundary(i64::MAX).is_err());
         let yearly = AnchoredRule::new(0, u64::MAX, Unit::Year).unwrap();
         assert!(yearly.boundary(i64::MAX).is_err());
+    }
+
+    #[test]
+    fn test_periods_recurrence_refuses_periods_past_the_time_range() {
+        // A ten-thousand-year cadence: the first period ends past the latest wire time.
+        let rule = AnchoredRule::new(0, 10_000, Unit::Year).unwrap();
+        assert!(matches!(
+            Recurrence::new(rule, 0, None),
+            Err(Error::Validation(_))
+        ));
+        // A last period past the range, from an end just inside it.
+        let daily = AnchoredRule::new(0, 1, Unit::Day).unwrap();
+        assert!(matches!(
+            Recurrence::new(daily, 0, Some(MAX_TIME_MS)),
+            Err(Error::Validation(_))
+        ));
+        assert!(Recurrence::new(daily, 0, Some(86_400_000)).is_ok());
+        assert!(Recurrence::new(daily, 0, None).is_ok());
     }
 
     #[test]

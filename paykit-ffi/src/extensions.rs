@@ -135,5 +135,5 @@ fn extension_body(
     let message = format!(r#"{{"kind":"{}","body":{body_json}}}"#, kind.as_string());
     check_json_as(message.as_bytes(), Doc::Message(OPAQUE_MEMBERS))
         .map_err(|_| WalletError::invalid("body_json"))?;
-    serde_json::from_str(body_json).map_err(|_| WalletError::invalid("body_json"))
+    crate::opaque::object(body_json.as_bytes()).ok_or_else(|| WalletError::invalid("body_json"))
 }

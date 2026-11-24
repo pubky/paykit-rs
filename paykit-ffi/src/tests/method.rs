@@ -339,3 +339,23 @@ fn test_method_fraction_digits_come_from_the_declared_endpoints() {
     let (lightning, _) = Account::endpoints().remove(0);
     assert_eq!(rail.fraction_digits(&lightning), None);
 }
+
+#[test]
+fn test_method_paid_proof_keeps_its_numbers() {
+    let paid = |proof: &[u8]| {
+        crate::MethodOutcome::Paid {
+            proof_json: proof.to_vec(),
+            paid_at_ms: None,
+        }
+        .into_rail()
+    };
+    assert!(matches!(
+        paid(br#"{"settlement":"a1","fee":12}"#),
+        Ok(paykit_sdk::RailOutcome::Paid(_))
+    ));
+    // A number the proof would be signed with other digits for is the method's malformed answer.
+    assert!(matches!(
+        paid(br#"{"settlement":18446744073709551617}"#),
+        Err(paykit_sdk::RailError::Unavailable(_))
+    ));
+}
