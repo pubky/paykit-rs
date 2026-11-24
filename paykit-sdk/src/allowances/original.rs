@@ -112,6 +112,12 @@ impl OriginalAllowance {
         Ok(Some((self.peer, id.clone())))
     }
 
+    /// Whether the acceptance that opened the Allowance was captured here, which a
+    /// confirmation needs to grant it ([`Paykit::applied_original_approval`]).
+    pub(crate) fn opened(&self) -> bool {
+        self.opening.is_some()
+    }
+
     pub(crate) fn check(&self, record: &[u8; 32], binder: &Binder<'_>) -> Result<()> {
         let decision = self.decision.stored(&self.peer)?;
         let id = named_allowance(decision.body()).ok_or_else(PaykitError::corrupt)?;

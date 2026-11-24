@@ -30,6 +30,33 @@ pub(super) struct LedgerFacts {
     other_failures: Vec<ReservedByOtherApp>,
 }
 
+impl LedgerFacts {
+    /// Whether an attempt another app reported failed still holds room the user can give
+    /// back ([`Paykit::release_allowance_attempt`]).
+    /// The amount, scaled, the user could give back by releasing every attempt another app
+    /// reported failed that is releasable by the evidence the release itself requires:
+    /// never paid, ended before dispatch on this installation, failed by another app, and
+    /// with the record write the release is conditioned on. `None` when there is none.
+    pub(super) fn releasable(&self) -> Option<u128> {
+        self.other_failures
+            .iter()
+            .filter(|failure| {
+                self.release_records.contains_key(&failure.attempt_id)
+                    && self.signed.get(&failure.attempt_id).is_some_and(|fact| {
+                        !fact.paid
+                            && fact.never_dispatched
+                            && fact.claim == Some(ClaimState::Failed { by_owner: false })
+                    })
+            })
+            .try_fold(None, |freed: Option<u128>, failure| {
+                Some(Some(
+                    freed.unwrap_or(0).checked_add(failure.value.scaled())?,
+                ))
+            })
+            .flatten()
+    }
+}
+
 impl Paykit {
     /// Reservations whose failure another app reported (Paykit spec 8.3). Display the
     /// amount and exact attempt when asking the user to release a reservation.

@@ -25,8 +25,9 @@ pub enum Refusal {
     /// label it holds (Paykit spec 3.1, 8.1).
     #[error("Paykit spec 3.1: {0}")]
     Label(String),
-    /// The request was rejected by this identity (Paykit spec 8.1).
-    #[error("the request was rejected")]
+    /// The request was rejected by this identity (Paykit spec 8.1), or the Allowance by
+    /// either side (Paykit spec 8.3): nothing more is done under it.
+    #[error("the request or Allowance was rejected")]
     Rejected,
     /// Restored from a backup, or past a `missed` item, the app holds the request: the payee
     /// may have cancelled it since the backup, or among the entries the service deleted. It
@@ -43,9 +44,9 @@ pub enum Refusal {
     /// The request was cancelled by either side (Paykit spec 8.1).
     #[error("the request was cancelled")]
     Cancelled,
-    /// The Allowance has ended, by either side or by its proposal's withdrawal, or this app
-    /// keeps the counterparty's end as its stop: nothing more is done under it (Paykit spec
-    /// 8.3).
+    /// The Allowance has ended, by either side, by its proposal's withdrawal or when its
+    /// terms expire, or this app keeps the counterparty's end as its stop: nothing more is
+    /// done under it, and no later call changes that (Paykit spec 8.3).
     #[error("Paykit spec 8.3: the Allowance has ended")]
     AllowanceEnded,
     /// The Allowance is conflicted: a second, different proposal or response came, so
@@ -53,6 +54,30 @@ pub enum Refusal {
     /// "Conflicted").
     #[error("Paykit spec 8.3: the Allowance is conflicted")]
     AllowanceConflicted,
+    /// The user must confirm this Allowance again before this app pays under it: after a
+    /// `missed` item, or a restore until it is judged clean or the user confirms, an
+    /// executor pays under no Allowance on its consent list until the user has confirmed it
+    /// again, since an end may be among what was lost (Paykit spec 8.3, "Ends reach the
+    /// executor"). After a provider loss, an Allowance this app executes that the user last
+    /// confirmed before the loss gets it too: confirming writes its grant at the current
+    /// generation, but automatic payments under it don't resume in this version, which
+    /// doesn't repair its usage: they answer [`Refusal::NotNow`] with that reason, and the
+    /// user who wants them ends the Allowance and sets up a new one (Paykit spec 8.3, "After
+    /// provider loss"). It is
+    /// returned only where confirming lifts it, so not while the Allowance
+    /// is ended, expired, executed by another app or its counterparty blocked. The host shows
+    /// the Allowance `hold` names and, once the user confirms, calls
+    /// [`crate::Paykit::confirm_allowance_executor`] with `hold`; if that answers
+    /// [`Refusal::NotNow`], it keeps the confirmation with `hold` and calls again later,
+    /// except for the repair after a provider loss, which no confirmation lifts. The
+    /// confirmation counts only for the hold it was given under: after a newer restore,
+    /// `missed` item or provider loss the call answers this refusal again, with the new hold,
+    /// and the host asks the user again.
+    #[error("Paykit spec 8.3: the user must confirm this Allowance again")]
+    AllowanceConfirmationNeeded {
+        /// The Allowance to confirm, with the hold in force when it was shown.
+        hold: crate::AllowanceHold,
+    },
     /// A payee activity record lost credit history to a delete. A new receipt cannot
     /// be issued for this occurrence, including by hand (Paykit spec 6).
     #[error("Paykit spec 6: the payee record lost credit history to a delete")]
@@ -142,13 +167,27 @@ pub enum Refusal {
     /// start").
     #[error("Paykit spec 8.2: the Billing Period hasn't started")]
     PeriodNotStarted,
-    /// The occurrence carries a manual-only mark or is funded under an Allowance.
-    #[error("Paykit spec 8.2, 8.3: this occurrence cannot be paid by the wallet's own policy")]
+    /// Not paid by this call's automatic payer (Paykit spec 8.2, 8.3), in one of three cases:
+    /// - the occurrence carries a manual-only mark: no wallet's policy and no Allowance's
+    ///   executor pays it automatically, and it is left for the user;
+    /// - asked of the wallet's own policy ([`crate::Paykit::pay_period_automatically`]), the
+    ///   Billing Period is funded under an Allowance: it is left for that Allowance's executor
+    ///   ([`crate::Paykit::pay_period_under_allowance`]);
+    /// - asked of an executor ([`crate::Paykit::pay_period_under_allowance`]), the Billing
+    ///   Period is funded under no Allowance: it is left for the wallet's own policy or the
+    ///   user.
+    #[error("Paykit spec 8.2, 8.3: this occurrence cannot be paid by this automatic payer")]
     ManualOnly,
-    /// Not paid automatically: the authenticated subscription and service time do not
-    /// authorize this automatic Billing Period (Paykit spec 8.2), or the Allowance the
-    /// payment was reserved under expired before its first dispatch (Paykit spec 8.3). At an
-    /// open attempt's first dispatch this is an [`Self::AttemptFailed`].
+    /// Not paid automatically, for good: the authenticated subscription and service time
+    /// don't authorize this automatic Billing Period (Paykit spec 8.2); the request or
+    /// Billing Period doesn't qualify under the Allowance it is paid under, outside its terms
+    /// or with its lifetime limit used up and nothing reserved or to release; the Allowance
+    /// the payment was reserved under expired before its first dispatch; or the Allowance was
+    /// set up before a provider loss and never granted here, so it can't be granted now and
+    /// the user can end it and set up a new one (Paykit spec 8.3, "After provider loss"); or,
+    /// after a provider loss, the request is one-time, under the shared post-loss hold
+    /// (Paykit spec 8.1). The user may still pay it by hand. At an open
+    /// attempt's first dispatch this is an [`Self::AttemptFailed`].
     #[error("Paykit spec 8.2, 8.3: not paid automatically: {0}")]
     NotAutomatic(String),
     /// The request record lists 16 Billing Periods that may have an open attempt and none of
