@@ -3252,7 +3252,21 @@ impl Paykit {
             }
             .to_body()?;
             let signed = self.sign(*payee, Kind::PrivatePaymentListRequest, Vec::new(), body)?;
-            let msg_id = self.app.queue_signed(signed).await?;
+            // What ends its outbox copy past its 30 days, in the commit that queues it
+            // (Paykit spec 8.1).
+            let kept = state::local_put(
+                &key::queued_stop(signed.msg_id()),
+                &crate::send_holds::QueuedStop::signed(
+                    &signed,
+                    crate::send_holds::HeldKind::ListRequest,
+                    None,
+                    None,
+                )?,
+            )?;
+            let msg_id = self
+                .app
+                .queue_signed_with(crate::protocol::BACKUP_NAME, signed, &[kept])
+                .await?;
             self.local_put(
                 &mark,
                 &ListAsk {

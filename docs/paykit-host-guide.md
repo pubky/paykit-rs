@@ -429,10 +429,52 @@ The SDK checks the automatic payment window, the request and period records, and
 usual payment restrictions again before dispatch. A missed period remains available for
 `pay_period` when its other payment conditions hold.
 
+## Blocked counterparties
+
+Blocking pauses what is open with a counterparty. It ends nothing (Paykit spec 8.1).
+When the user blocks a counterparty with `block`, tell them that their open
+subscriptions and Allowances with it are paused, not ended: while the block holds, no
+Billing Period is paid automatically and no payment is made under an Allowance. To end
+one, call `cancel_request` for a subscription the user pays, `cancel_sent_request` for a
+request the user's shop sent, or `end_allowance` for an Allowance. List them with
+`requests`, where a request from a blocked payee shows `RequestStatus::Blocked`, with
+`payee_activity` for the requests the shop sent, and with `allowances`.
+
+When the user unblocks a counterparty with `unblock`, show the subscriptions and
+Allowances with it that resume paying automatically, from the same calls, so the user
+can end any they no longer want before its next period is due. An unblocked subscription
+pays its later periods automatically; cancelling or ending it is the explicit stop.
+Messages held while the counterparty was blocked go once it is unblocked, unless they
+are more than 30 days old. Those are given up and never sent from this installation, and
+`NoticeKind::MessageGivenUp` names each one an activity record holds. The notice says
+only that this installation never saw the message accepted: after a restore, the device
+the backup came from may have delivered it.
+
 ## Notices and errors
 
 Read `notices` and `payee_deletion_notices` by their stable identities. Acknowledge
-each through its matching SDK API after recording or showing it. Handle Switch
+each through its matching SDK API after recording or showing it.
+
+Notices through a restore. Identity notices (`BlockFloorHeld`, `FloorRaiseWaiting`,
+`AutomaticPaymentsHeld`) aren't restored: the restored wallet tells them again while
+they hold, at its load or a later receive. A restore onto a fresh store brings back the
+backup's notices. A restore in place, over the installation that kept running after the
+backup, keeps, kind by kind:
+- `PaidAfterFailed`, `HeldWithoutPay` and the Allowance notices
+  (`AllowancePlacementExpired`, `AllowanceAcceptanceBeforeLoss`,
+  `AllowanceWithdrawalConfirmed`): the installation's where it holds one, else the
+  backup's, so one raised after the backup isn't lost;
+- the settlement notices, `PossiblyDelivered`, `ListDeliveryUnknown` and
+  `DroppedMessagesLost`: both sides', merged;
+- `MessageGivenUp` and `BlockedMessagesLost`: the backup's, except that a held stop the
+  installation told keeps its notice. One raised after the backup is lost.
+
+A notice the host acknowledged after the backup, which acknowledging deleted, can be
+listed again after the restore: the same occurrence comes back with the same `id` and
+`raised_at_ms`, and the host may skip one it recorded acknowledging with both. A notice
+raised again is a new occurrence with the same `id` and a later `raised_at_ms`, such as a
+`HeldWithoutPay` whose hold started again, or an identity notice told again while its
+hold stands: show it as the table below says. Handle Switch
 duty events from `ReceiveSummary::report`. Call `receive` on startup and after a
 feed wake. It returns one bounded report. Use `more` to decide when to read another
 page. `ReceiveSummary::report.more` says the read stopped on one of its per-call
@@ -693,7 +735,7 @@ Two rules override a code's case. A failure with a `keptBatch` comes as `Outcome
 | `invalid_protocol_data` | other `paykit_lib::Error` | `Permanent` | Network or stored data breaks a Paykit rule. |
 | `conflict` | `PaykitError::Conflict` | `NotSent` | Read the current state, decide again, then call again. |
 | `homeserver` | `PaykitError::Homeserver` | `RetryLater` | The Homeserver couldn't be read now: call again later. |
-| `settlement_warning_unsaved` | `PaykitError::SettlementNoticeUnavailable` | `NeedsUser` | The Switch refused a new settlement bucket for lack of a record slot, and the wallet couldn't save or check that bucket's warning. Show the warning for `settlement_bucket()` if the host has yet to show it; it grants no consent to issue another receipt. `settlement_warning_outcome()` says whether the warning's save failed (`Failed`) or its outcome is unknown (`OutcomeUnknown`), when it may already be saved. The marked receipt and its delivery are still kept under `kept_batch()`, and that batch may still apply. `service_code()` and `quota_limit()` give the Switch's answer. |
+| `settlement_warning_unsaved` | `PaykitError::SettlementNoticeUnavailable` | `NeedsUser` | The Switch refused a new settlement bucket for lack of a record slot, and the wallet couldn't save or check that bucket's warning. Show the warning for `settlement_bucket()` if the host has yet to show it; it grants no consent to issue another receipt. `settlement_warning_outcome()` says what this call did to the warning: `Failed` when it wrote none, and when its lookup of an earlier warning failed, whether one is saved already is unverified; `OutcomeUnknown` when the store can't tell the outcome of its lookup or its write: it may be saved, by this call or an earlier one. The marked receipt and its delivery are still kept under `kept_batch()`, and that batch may still apply. `service_code()` and `quota_limit()` give the Switch's answer. |
 | `unclassified` | a Paykit failure the bindings don't know | `OutcomeUnknown` | Reconcile before trying again. |
 | `client_unclassified` | a Switch client failure the bindings don't know | `OutcomeUnknown` | Reconcile before trying again. |
 | `method_unclassified` | a method failure the bindings don't know | `OutcomeUnknown` | Reconcile before trying again. |

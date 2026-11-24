@@ -80,7 +80,9 @@ impl CheckoutFixture {
             rail: rail.clone(),
             timer: Arc::new(RuntimeTimer),
         });
-        let scopes = AppScopes::new().request().build()?;
+        // The shop sells, pays the requests a payee wallet sends it, and proposes Allowances
+        // in either role (Paykit spec 3.1).
+        let scopes = AppScopes::new().request().allowance_execute().build()?;
         let names: Vec<_> = scopes.scopes.iter().map(String::as_str).collect();
         let asking = Asking::for_scopes(world.app_keys(&owner, "wallet")?, &names)?;
         let review = issuer.review(asking.request.signed(), &asking.auth)?;
@@ -95,6 +97,8 @@ impl CheckoutFixture {
         .await?;
         issuer.claim_delivered(&approval.request).await?;
         Box::pin(seller.allow_connect(&buyer)).await?;
+        // The shop lists its records and its deny list before it sends (Paykit spec 3.1, 6).
+        Box::pin(shop_listed(&mut seller)).await?;
         Ok(Arc::new(Self {
             world: Mutex::new(Some(world)),
             host,
@@ -334,6 +338,27 @@ impl CheckoutFixture {
         })
         .await
     }
+    /// Send a daily recurring seven-unit checkout from the shop, its first period starting now
+    /// (Paykit spec 8.2, Paykit wire 4.4).
+    pub async fn send_recurring_checkout(self: Arc<Self>) -> Result<RequestId, WalletError> {
+        use paykit_lib::periods::{AnchoredRule, Recurrence, Unit};
+        crate::runtime::run(async move {
+            let start = self.host.clock.now_ms();
+            let terms = AnchoredRule::new(start, 1, Unit::Day)
+                .and_then(|rule| Recurrence::new(rule, start, None))
+                .map_err(paykit_sdk::PaykitError::from)?;
+            let draft = invoice()
+                .map_err(paykit_sdk::PaykitError::from)?
+                .with_recurrence(terms);
+            let mut seller = self.seller.lock().await;
+            Ok(Box::pin(seller.send_request(self.buyer, draft))
+                .await?
+                .request
+                .ok_or(WalletError::invalid("signed recurring checkout"))?
+                .into())
+        })
+        .await
+    }
     /// Have the enrolled seller verify the original payer proof and issue its signed receipt.
     pub async fn confirm_payment(
         self: Arc<Self>,
@@ -342,24 +367,99 @@ impl CheckoutFixture {
         crate::runtime::run(async move {
             let request: RequestRef = request.try_into()?;
             let mut seller = self.seller.lock().await;
-            for _ in 0..8 {
-                if !Box::pin(seller.receive(None)).await?.report.more {
-                    break;
-                }
-            }
-            let entry = seller
-                .payee_activity()
-                .await?
-                .into_iter()
-                .find(|entry| {
-                    entry.payer == self.buyer
-                        && entry.request_hash == Some(request.request_hash)
-                        && request.payee == self.payee
-                })
-                .ok_or(WalletError::invalid("original payer proof"))?;
+            Box::pin(shop_listed(&mut seller)).await?;
+            let found = seller.payee_activity().await?.into_iter().find(|entry| {
+                entry.payer == self.buyer
+                    && entry.request_hash == Some(request.request_hash)
+                    && request.payee == self.payee
+            });
+            let entry = found.ok_or(WalletError::invalid("original payer proof"))?;
             Box::pin(seller.confirm_payment(&entry.record))
                 .await?
                 .ok_or(WalletError::invalid("original seller receipt"))
+        })
+        .await
+    }
+    /// Have the shop pay a request the buyer's wallet sent it, through the host's payment
+    /// method, so the buyer's wallet holds the proof as the payee (Paykit spec 7.2, 8.1).
+    pub async fn pay_request(self: Arc<Self>, request: RequestId) -> Result<(), WalletError> {
+        crate::runtime::run(async move {
+            let request: RequestRef = request.try_into()?;
+            let mut seller = self.seller.lock().await;
+            Box::pin(shop_holds(&mut seller, &request)).await?;
+            let outcome = Box::pin(seller.pay_request(&request, Default::default()))
+                .await
+                .outcome?;
+            shop_paid(outcome)
+        })
+        .await
+    }
+    /// Have the shop accept a recurring request the buyer's wallet sent it and pay `period`
+    /// through the host's payment method (Paykit spec 8.2).
+    pub async fn pay_period(
+        self: Arc<Self>,
+        request: RequestId,
+        period: crate::BillingPeriod,
+    ) -> Result<(), WalletError> {
+        crate::runtime::run(async move {
+            let request: RequestRef = request.try_into()?;
+            let period = paykit_lib::periods::PeriodRef {
+                starts_at: period.starts_at,
+                ends_at: period.ends_at,
+            };
+            let mut seller = self.seller.lock().await;
+            Box::pin(shop_holds(&mut seller, &request)).await?;
+            Box::pin(seller.accept_subscription(&request)).await?;
+            let outcome = Box::pin(seller.pay_period(&request, &period, Default::default()))
+                .await
+                .outcome?;
+            shop_paid(outcome)
+        })
+        .await
+    }
+    /// Have the shop propose an Allowance in which the buyer takes `role`: the shop pays the
+    /// buyer when the buyer is allowee, and is paid when it is allower. Return the Allowance
+    /// ID (Paykit spec 8.3.1).
+    pub async fn propose_allowance(
+        self: Arc<Self>,
+        role: crate::AllowanceRole,
+    ) -> Result<String, WalletError> {
+        crate::runtime::run(async move {
+            let terms = paykit_lib::allowances::AllowanceTerms::from_json(&serde_json::json!({
+                "asset": "btc",
+                "per_payment_amount": {"minimum": "0.01", "maximum": "2.00"},
+                "period_limits": [{
+                    "amount_limit": null,
+                    "payment_count_limit": 3,
+                    "period": {"kind": "rolling", "every": 1, "unit": "week"},
+                }],
+                "lifetime_amount_limit": "10.0",
+                "active_from": null,
+                "expires_at": null,
+                "allowed_payment_endpoint_identifiers": ["btc-lightning-bolt11"],
+            }))
+            .map_err(paykit_sdk::PaykitError::from)?;
+            let mut seller = self.seller.lock().await;
+            let sent = match role {
+                crate::AllowanceRole::Allower => {
+                    Box::pin(seller.propose_allowance(
+                        self.buyer,
+                        paykit_sdk::AllowanceRole::Allowee,
+                        terms,
+                    ))
+                    .await?
+                }
+                crate::AllowanceRole::Allowee => {
+                    Box::pin(seller.propose_executable_allowance(
+                        self.buyer,
+                        terms,
+                        paykit_sdk::UserConfirmed::new(),
+                    ))
+                    .await?
+                }
+                crate::AllowanceRole::Other => return Err(WalletError::invalid("role")),
+            };
+            Ok(sent.allowance_id.as_str().into())
         })
         .await
     }
@@ -467,6 +567,42 @@ impl CheckoutFixture {
             .await
         })
         .await
+    }
+}
+
+/// Read the shop's feed until it is done and every record its scopes read is listed
+/// (Paykit spec 6).
+async fn shop_listed(seller: &mut Paykit) -> Result<(), WalletError> {
+    for _ in 0..8 {
+        let summary = Box::pin(seller.receive(None)).await?;
+        if !summary.report.more && summary.records_unlisted.is_none() {
+            return Ok(());
+        }
+    }
+    Err(WalletError::invalid("test shop listing"))
+}
+
+/// Read the shop's feed until it holds `request`.
+async fn shop_holds(seller: &mut Paykit, request: &RequestRef) -> Result<(), WalletError> {
+    for _ in 0..8 {
+        Box::pin(shop_listed(seller)).await?;
+        if seller
+            .requests()
+            .await?
+            .iter()
+            .any(|r| &r.request == request)
+        {
+            return Ok(());
+        }
+    }
+    Err(WalletError::invalid("request the test shop never received"))
+}
+
+/// The shop's payment settled; any other outcome fails the host test.
+fn shop_paid(outcome: paykit_sdk::PayOutcome) -> Result<(), WalletError> {
+    match outcome {
+        paykit_sdk::PayOutcome::Paid { .. } => Ok(()),
+        _ => Err(WalletError::invalid("test shop payment")),
     }
 }
 

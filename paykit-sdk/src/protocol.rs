@@ -44,6 +44,7 @@ use pubky_switch_client::app::{
     RecordExpiry, RecordMarkContext, RecordRepair, RecordSuccessor, ResendNeeded, RestoreContext,
     StoreFailure, WriteBase,
 };
+use pubky_switch_client::app::{DenyListChange, DenyListGap};
 use pubky_switch_client::error::StoreError;
 use pubky_switch_core::enc::{serde_b64, unb64_array};
 use pubky_switch_core::message::{Message, MessagePlaintext};
@@ -817,12 +818,12 @@ pub(crate) fn restore_paykit_layer(
             .map_err(|_| "the installation holds an invalid queued stop")?;
         previous_stops.insert(k, stop);
     }
-    // A stop told is told with its notice: the installation's notice of a stop it gave up
-    // stays with the stop, and one the host has acknowledged, which deleted it, stays gone
-    // whatever the backup holds (Paykit spec 8.1, "Undelivered messages").
+    // A held send told is told with its notice: the installation's notice of one it gave
+    // up stays with its entry, and one the host has acknowledged, which deleted it, stays
+    // gone whatever the backup holds (Paykit spec 8.1, "Undelivered messages").
     let mut stop_notices = std::collections::BTreeMap::new();
     for stop in previous_stops.values().filter(|stop| stop.told) {
-        let at = key::message_notice(&stop.payee, &stop.msg_id);
+        let at = key::message_notice(&stop.to, &stop.msg_id);
         let mut held = None;
         for (k, value) in restoring
             .previous_local_scan(at.as_bytes())
@@ -835,6 +836,27 @@ pub(crate) fn restore_paykit_layer(
             }
         }
         stop_notices.insert(at.into_bytes(), held);
+    }
+    // And its notices of payments, keyed by their attempt and kind: a restore keeps each one
+    // either side holds, the installation's where both do, so a notice the installation
+    // raised after the backup isn't lost (Paykit spec 7.2, "What a restore loses"). A
+    // `PaidAfterFailed` is raised again at its key only once an acknowledgement dropped it,
+    // and a `HeldWithoutPay` once a resume under `paykit_pay` did: either way the
+    // installation's copy is the later one. One the host acknowledged after the backup,
+    // which acknowledging deleted, can be listed again. A fresh store has none. A message's
+    // notice is the backup's: its kind, origin and kept entry can differ from the
+    // installation's at one key, and its own restore steps write it.
+    let mut notices: std::collections::BTreeMap<Vec<u8>, crate::notices::KeptNotice> =
+        std::collections::BTreeMap::new();
+    for (k, value) in restoring
+        .previous_local_scan(key::NOTICES.as_bytes())
+        .map_err(|_| "the installation's notices cannot be read")?
+    {
+        if matches!(StateKey::parse(&k), Some(StateKey::Notice { .. })) {
+            let notice = state::restored::<KeptNotice>(&k, &value, &binder)
+                .map_err(|_| "the installation holds an invalid notice")?;
+            notices.insert(k, notice);
+        }
     }
     let mut cursor_time_ms = 0;
     let mut bounded = BoundedFamilies::default();
@@ -910,7 +932,8 @@ pub(crate) fn restore_paykit_layer(
             // The time of the last read of the lists isn't restored: the copy of the deny
             // list the backup holds may be stale by any time, so the list is read again before
             // any payment (Paykit spec 8.1).
-            StateKey::ListsRead | StateKey::ListsReadUnder => continue,
+            // A deny change told goes with them: a restore reads the lists again anyway.
+            StateKey::ListsRead | StateKey::ListsReadUnder | StateKey::ListsTold => continue,
             // How a raise was last tried belongs to the installation that tried it.
             StateKey::RaiseRetry => continue,
             // Nor the service time the delivery hook judges by: the restore's first read
@@ -1441,10 +1464,18 @@ pub(crate) fn restore_paykit_layer(
                 // An acknowledged notice of an attempt is kept only while the journal holds
                 // the attempt (`Paykit::acknowledge_notice`): one without its entry is a
                 // state no run leaves.
-                if let (true, StateKey::Notice { attempt, .. }) = (notice.acknowledged, family) {
-                    acknowledged.push(attempt);
+                if let (true, StateKey::Notice { attempt, .. }) = (notice.acknowledged, &family) {
+                    acknowledged.push(*attempt);
                 }
-                writes.push(LocalWrite::Put { key, value });
+                if !matches!(family, StateKey::Notice { .. }) {
+                    writes.push(LocalWrite::Put { key, value });
+                    continue;
+                }
+                // The installation's notice at this key is the newer one, as raised or
+                // acknowledged since the backup, and wins: no flag of the backup's is merged
+                // into it, so an acknowledgement before the backup never hides a notice raised
+                // again after it. The backup's is taken only where the installation has none.
+                notices.entry(key).or_insert(notice);
                 continue;
             }
         };
@@ -1522,6 +1553,19 @@ pub(crate) fn restore_paykit_layer(
         if let Some(value) = value {
             writes.push(LocalWrite::Put { key, value });
         }
+    }
+    for (key, notice) in notices {
+        // An acknowledged one of a payment the restored journal doesn't hold has nothing left
+        // to keep it (`Paykit::acknowledge_notice`).
+        if let (true, Some(StateKey::Notice { attempt, .. })) =
+            (notice.acknowledged, StateKey::parse(&key))
+        {
+            if !journaled.contains(&attempt) {
+                continue;
+            }
+        }
+        let value = state::encode(&notice).map_err(|_| "a notice cannot be written")?;
+        writes.push(LocalWrite::Put { key, value });
     }
     if !recordings.is_subset(&awaiting_recording) {
         return Err("an offline recording has no matching payment journal entry".into());
@@ -1932,7 +1976,7 @@ impl Protocol for PaykitProtocol {
         }
         // No message the counterparty hold governs goes past its window, whichever rules
         // its kind has besides (Paykit spec 8.1, "Messages already queued").
-        if crate::send_holds::held_past_window(delivery, self.delivery.observed())
+        if crate::send_holds::held_past_window(delivery, self.delivery.observed(delivery.now_ms()))
             .map_err(view_failure)?
         {
             return Ok(false);
@@ -2190,6 +2234,23 @@ impl Protocol for PaykitProtocol {
             // marks its sender to ask again once the key is held (`stored.rs`, `marks.rs`).
             Err(Fail::AwaitsKey { data_epoch }) => Outcome::AwaitKey { data_epoch },
         }
+    }
+
+    /// A deny change the feed shows takes effect before the next delivery decision: none is
+    /// taken on the copy of the lists until they are read again, and the copy's deny list
+    /// stays, so that read sees an unblock (Paykit spec 8.1, "Messages already queued";
+    /// Paykit wire 5.6).
+    fn deny_list_changed(&self, change: &DenyListChange) -> Result<Vec<LocalWrite>, StoreFailure> {
+        self.delivery.learned(None);
+        // Its service time, the latest of those told, as the feed tells them in order.
+        Ok(vec![local_write(key::LISTS_TOLD, &change.at_ms)?])
+    }
+
+    /// A gap in the deny list's history (Switch spec 8.3), taken as a change, with its list
+    /// kept for the receive (`Paykit::take_learned_lists`).
+    fn deny_list_gap(&self, gap: &DenyListGap) -> Result<Vec<LocalWrite>, StoreFailure> {
+        self.delivery.learned(gap.list_read.then_some(&gap.denied));
+        Ok(vec![local_write(key::LISTS_TOLD, &u64::MAX)?])
     }
 
     /// Entries the app can't read: ask the sender to send again (Paykit spec 9).

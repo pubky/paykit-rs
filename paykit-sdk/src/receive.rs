@@ -3564,10 +3564,12 @@ impl Paykit {
             self.local_delete(key::LISTS_READ).await?;
         }
         // A raise owed that can be written goes at the next receive, whatever the copy's age,
-        // with one read of the lists in a pass.
+        // with one read of the lists in a pass, and so does a read after a deny change the
+        // client told (Paykit spec 8.1).
         if last.is_some_and(|read| lists_read_is_fresh(read, now))
             && !self.raise_owed().await?
             && !Box::pin(self.missed_widening_unread()).await?
+            && self.local_get::<u64>(key::LISTS_TOLD).await?.is_none()
         {
             return Ok(());
         }
@@ -3774,14 +3776,18 @@ impl Paykit {
             }
             let mut read = Tx::default();
             put_lists_read(&mut read, loss, read_at, self.recovery_from())?;
+            read.delete(key::LISTS_TOLD);
             self.put_service_time(&mut read).await?;
             self.local_commit(read).await?;
         } else {
             put_lists_read(&mut tx, loss, read_at, self.recovery_from())?;
-            tx.put(key::DENIED, &deny)?;
+            tx.put(key::DENIED, &deny)?.delete(key::LISTS_TOLD);
             put_flagged(&mut tx, &lists.flagged)?;
             self.put_service_time(&mut tx).await?;
             self.local_commit(tx).await?;
+        }
+        if let Some(at) = verified {
+            self.protocol.delivery.lists_read(at);
         }
         Ok(deny)
     }
@@ -3793,7 +3799,7 @@ impl Paykit {
     /// The marks the list shows landed go, in the returned commit, and so does an unblock
     /// that counts no more ([`Paykit::own_change`]), so a block another own app made since
     /// isn't overridden by it.
-    async fn judged_deny(
+    pub(crate) async fn judged_deny(
         &self,
         mut deny: Vec<[u8; 32]>,
     ) -> crate::error::Result<(Vec<[u8; 32]>, Tx)> {
@@ -4236,9 +4242,9 @@ impl Paykit {
     /// Whether a message to `pubky` that the counterparty hold governs would wait at its
     /// delivery now, on the deny decision the delivery takes
     /// ([`crate::send_holds::deny_decision`]): while the copy holds `pubky`, and while it
-    /// isn't known or is [`LISTS_REFRESH_MS`] old or more (Paykit spec 8.1, "Messages
-    /// already queued"). An answer released from its record on this judgement is never
-    /// queued only to wait as one not known.
+    /// isn't known, is [`LISTS_REFRESH_MS`] old or more, or a deny change told awaits a read
+    /// (Paykit spec 8.1, "Messages already queued"). An answer released from its record on
+    /// this judgement is never queued only to wait as one not known.
     pub(crate) async fn delivery_held(&self, pubky: &[u8; 32]) -> crate::error::Result<bool> {
         // An app that doesn't read the lists can never decide `pubky` isn't blocked
         // (Paykit spec 3.1).
@@ -4254,6 +4260,7 @@ impl Paykit {
                 .local_get::<Vec<[u8; 32]>>(key::DENIED)
                 .await?
                 .is_none()
+            || self.local_get::<u64>(key::LISTS_TOLD).await?.is_some()
         {
             return Ok(true);
         }
