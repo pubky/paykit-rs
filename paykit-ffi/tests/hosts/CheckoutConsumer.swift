@@ -283,7 +283,10 @@ private extension NativeWallet {
         try await fixture.replaceLostProvider(second: second)
         for _ in 0..<12 {
             let read = try await receive()
-            if read.generation > before && !read.stopped && !read.more && read.recordsUnlisted == nil { return }
+            // Done once the records are listed under the new certificate, which waits for its
+            // scope keys first: reconciliation refuses until both (Paykit spec 6).
+            if read.generation > before && !read.stopped && !read.more && read.recordsUnlisted == nil
+                && !read.scopeKeysAwaited { return }
         }
         preconditionFailure("wallet did not follow the replacement provider")
     }

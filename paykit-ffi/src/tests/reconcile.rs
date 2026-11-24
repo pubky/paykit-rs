@@ -163,6 +163,112 @@ async fn members(world: &World) -> TestResult {
     Ok(())
 }
 
+/// Another own app joined before the loss: the wallet publishes that app's report, signed by
+/// it, and the signer then removes it. The members show each id where it belongs.
+async fn members_of_another_app(world: &World) -> TestResult {
+    let root = tempfile::tempdir()?;
+    let account = Arc::new(Account::open(root.path(), world.clock().clone()));
+    let scopes = WalletScopes {
+        pay: true,
+        recovery: true,
+        ..Default::default()
+    };
+    let (_, wallet, id, mut signer) =
+        Box::pin(enrolled_wallet(world, root.path(), account, scopes, None)).await?;
+    receive(&wallet, 0).await?;
+    let buyer = world.identity("buyer")?;
+    let grant = AppScopes::new().pay().build()?;
+    let names = grant.scopes.iter().map(String::as_str).collect::<Vec<_>>();
+    let asking = Asking::for_scopes(world.app_keys(&buyer, "laptop")?, &names)?;
+    let review = signer.review(asking.request.signed(), &asking.auth)?;
+    let approval = Box::pin(signer.approve(review)).await?;
+    let mut laptop = Box::pin(Paykit::join(
+        world.app_env(Arc::new(MemoryStore::new())),
+        Default::default(),
+        asking.join_request(buyer.public(), &approval)?,
+        wallet.rail(),
+        Arc::new(RuntimeTimer),
+    ))
+    .await?;
+    signer.claim_delivered(&approval.request).await?;
+    let laptop_id = laptop.app_id();
+    let commitments = RecoveryCommitments::from_evidence(
+        &[RecoveryWitness::Identity(laptop.app().own_identity())],
+        &[],
+        &[],
+    )?;
+
+    let successor = "https://recovered-buyer.payments.test";
+    world.advance_ms(11 * 60_000);
+    world
+        .set_account_missing("https://buyer.payments.test", &buyer, true)
+        .await?;
+    world.add_switch(successor, &[&buyer]).await?;
+    let opening = Box::pin(signer.declare_provider_loss(
+        successor,
+        pubky_switch_signer::UserConfirmed::shown_and_confirmed(),
+    ))
+    .await?;
+    Box::pin(signer.end_staged_admission()).await?;
+    receive(&wallet, opening.generation()).await?;
+    reconcile(&wallet).await?;
+    wallet.end_confirmed_reconciliation().await?;
+    world.advance_ms(3_000);
+    // The laptop signs its report; the wallet publishes it (Paykit wire 5.10).
+    let field = commitments.signing_field(&opening, &laptop_id)?;
+    let signature = laptop
+        .app_mut()
+        .sign_protocol(RECOVERY_UPLOAD_LABEL, &[&field])?;
+    let certificate = laptop.app().cert().signed().clone();
+    wallet
+        .lend(async |app| -> TestResult {
+            let value = serde_json::to_vec(&serde_json::json!({
+                "v": 1,
+                "cutoff": b64(&commitments.cutoff),
+                "inventory": b64(&commitments.inventory),
+                "dispositions": b64(&commitments.dispositions),
+                "signature": b64(&signature),
+                "author_certificate": certificate,
+            }))?;
+            let family = Collection::RecoveryUploads;
+            let target = RecordTarget::new(
+                SwitchCollection::new(family.name(), family.fixed_policy()),
+                &lp(&[&laptop_id, &opening.hash()]),
+            );
+            app.app_mut().put_record(&target, &value, vec![]).await?;
+            Ok(())
+        })
+        .await??;
+    // The signer removes the laptop from the recovered identity.
+    Box::pin(signer.revoke(
+        laptop_id,
+        None,
+        pubky_switch_signer::UserConfirmed::shown_and_confirmed(),
+    ))
+    .await?;
+    receive(&wallet, opening.generation()).await?;
+    let members = wallet
+        .recovery_members()
+        .await?
+        .ok_or("missing recovery opening")?;
+    assert_eq!(members.originals.as_slice(), std::slice::from_ref(&id));
+    assert_eq!(members.removed, [laptop_id.to_vec()]);
+    let [report] = members.reports.as_slice() else {
+        return Err("expected the laptop's report".into());
+    };
+    assert_eq!(report.original, laptop_id);
+    assert_eq!(report.publisher, id);
+    assert_ne!(report.original, report.publisher);
+    wallet.shutdown().await?;
+    Ok(())
+}
+
+#[test]
+fn test_recovery_members_name_a_removed_app_and_another_publisher() {
+    run(Backend::Scripted, members_of_another_app);
+    run(Backend::Service, members_of_another_app);
+}
+
 #[test]
 fn test_recovery_members_follow_the_signed_opening() {
     run(Backend::Scripted, members);
@@ -360,4 +466,131 @@ async fn resolve(world: &World) -> TestResult {
 fn test_doubtful_attempt_resolves_its_original_claim_until_expiry() {
     run(Backend::Scripted, resolve);
     run(Backend::Service, resolve);
+}
+
+/// A payment the method charged, whose answer was lost, restored from a backup after a
+/// provider loss: the new service holds no claim for it, so only the journal entry's own
+/// handle can carry the user's answer (Paykit spec 7.2, 7.3).
+async fn restored_dispatch(world: &World, resolution: ConfirmedResolution) -> TestResult {
+    use crate::{BackupDevice, PaymentOptions, PaymentStage};
+    use paykit_lib::{PaymentEndpointIdentifier, PaymentEndpointPayload};
+    use std::sync::atomic::Ordering;
+    let paid = matches!(resolution, ConfirmedResolution::Paid);
+    let root = tempfile::tempdir()?;
+    let account = Arc::new(Account::open(root.path(), world.clock().clone()));
+    let scopes = WalletScopes {
+        pay: true,
+        recovery: true,
+        ..Default::default()
+    };
+    let (_, wallet, id, mut signer) = Box::pin(enrolled_wallet(
+        world,
+        root.path(),
+        account.clone(),
+        scopes,
+        None,
+    ))
+    .await?;
+    receive(&wallet, 0).await?;
+    let mut shop = Box::pin(shop(world, &wallet)).await?;
+    let draft = RequestDraft::new(
+        PaymentAmount {
+            asset: Asset::new("btc")?,
+            value: Decimal::new("1")?,
+        },
+        PaymentReference::new("restored")?,
+        RequestDestination::Endpoints(std::collections::BTreeMap::from([(
+            PaymentEndpointIdentifier::new("btc-lightning-bolt11")?,
+            PaymentEndpointPayload::new("lnbc1restored")?,
+        )])),
+    );
+    let request = Box::pin(shop.send_request(world.identity("buyer")?.public(), draft))
+        .await?
+        .request
+        .ok_or("missing request")?;
+    receive(&wallet, 0).await?;
+
+    // The method charges, then its answer is lost: the entry stays open in the journal.
+    account.park.store(true, Ordering::SeqCst);
+    account.throw_after_charge.store(true, Ordering::SeqCst);
+    {
+        let mut paying = Box::pin(wallet.pay_request(request.into(), PaymentOptions::default()));
+        tokio::select! {
+            _ = account.entered.notified() => {},
+            _ = &mut paying => return Err("the payment never reached the method".into()),
+        }
+    }
+    let backup = wallet.backup().await?;
+    account.park.store(false, Ordering::SeqCst);
+    account.finish.notify_one();
+    wallet.shutdown().await?;
+
+    // The provider is lost; the backup comes back on a new device, and the method can't
+    // look the payment up.
+    world.advance_ms(11 * 60_000);
+    let buyer = world.identity("buyer")?;
+    let successor = "https://recovered-buyer.payments.test";
+    world
+        .set_account_missing("https://buyer.payments.test", &buyer, true)
+        .await?;
+    world.add_switch(successor, &[&buyer]).await?;
+    let opening = Box::pin(signer.declare_provider_loss(
+        successor,
+        pubky_switch_signer::UserConfirmed::shown_and_confirmed(),
+    ))
+    .await?;
+    Box::pin(signer.end_staged_admission()).await?;
+    account.lookup_unavailable.store(true, Ordering::SeqCst);
+    let other = tempfile::tempdir()?;
+    let host = super::wallet::host(world, other.path(), account.clone());
+    let restored = host
+        .restore(id, backup, BackupDevice::InPossession)
+        .await?;
+    receive(&restored, opening.generation()).await?;
+    reconcile(&restored).await?;
+    let entries = restored.payments().await?;
+    let [entry] = entries.as_slice() else {
+        return Err("expected the restored payment".into());
+    };
+    assert!(entry.restored);
+    assert_eq!(entry.attempt.attempt_id(), entry.attempt_id);
+    let obligation: [u8; 32] = crate::fixed(entry.obligation.clone(), "obligation")?;
+    assert!(restored
+        .lend(async |app| app.app_mut().read_claim(&obligation).await)
+        .await??
+        .is_none());
+
+    // The user's answer goes to the journal entry through its handle.
+    restored
+        .resolve_confirmed_attempt(entry.attempt.clone(), resolution)
+        .await?;
+    let after = restored.payments().await?;
+    let [settled] = after.as_slice() else {
+        return Err("expected the resolved payment".into());
+    };
+    assert!(matches!(settled.stage, PaymentStage::Finished));
+    assert_eq!(settled.paid_by_method, paid);
+    assert_eq!(account.count(), 1);
+    restored.shutdown().await?;
+    Ok(())
+}
+
+async fn restored_paid(world: &World) -> TestResult {
+    Box::pin(restored_dispatch(world, ConfirmedResolution::Paid)).await
+}
+
+async fn restored_failed(world: &World) -> TestResult {
+    Box::pin(restored_dispatch(world, ConfirmedResolution::Failed)).await
+}
+
+#[test]
+fn test_doubtful_attempt_journaled_without_a_claim_resolves_paid() {
+    run(Backend::Scripted, restored_paid);
+    run(Backend::Service, restored_paid);
+}
+
+#[test]
+fn test_doubtful_attempt_journaled_without_a_claim_resolves_failed() {
+    run(Backend::Scripted, restored_failed);
+    run(Backend::Service, restored_failed);
 }

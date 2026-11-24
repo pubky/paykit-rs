@@ -207,7 +207,10 @@ private suspend fun NativeWallet.followLoss(fixture: CheckoutFixture, second: Bo
     fixture.replaceLostProvider(second)
     repeat(12) {
         val read = receive()
-        if (read.generation > before && !read.stopped && !read.more && read.recordsUnlisted == null) return
+        // Done once the records are listed under the new certificate, which waits for its
+        // scope keys first: reconciliation refuses until both (Paykit spec 6).
+        if (read.generation > before && !read.stopped && !read.more && read.recordsUnlisted == null &&
+            !read.scopeKeysAwaited) return
     }
     error("wallet did not follow the replacement provider")
 }

@@ -2,11 +2,19 @@ use crate::{NativeWallet, PaymentOutcome, ProviderLossBoundary, WalletError};
 use paykit_lib::AttemptId;
 use std::sync::Arc;
 
-/// An original attempt on the obligation shown in reconciliation (Paykit spec 7.3).
+/// An original attempt and the obligation it pays, as the wallet reports it: among a doubtful
+/// payment's attempts, or on a payment entry of the journal. `resolve_confirmed_attempt`
+/// takes it back, so an attempt is never paired with another obligation (Paykit spec 7.3).
 #[derive(uniffi::Object)]
 pub struct DoubtfulAttempt {
     obligation: [u8; 32],
     id: AttemptId,
+}
+
+impl DoubtfulAttempt {
+    pub(crate) fn new(obligation: [u8; 32], id: AttemptId) -> Arc<Self> {
+        Arc::new(Self { obligation, id })
+    }
 }
 
 #[uniffi::export]
@@ -40,7 +48,7 @@ impl From<paykit_sdk::Doubtful> for DoubtfulPayment {
             attempts: payment
                 .attempts
                 .into_iter()
-                .map(|id| Arc::new(DoubtfulAttempt { obligation, id }))
+                .map(|id| DoubtfulAttempt::new(obligation, id))
                 .collect(),
             payee: payment.payee.map(Vec::from),
             request_hash: payment.request_hash.map(Vec::from),

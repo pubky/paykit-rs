@@ -647,9 +647,16 @@ async fn running_pay(world: &World) -> TestResult {
     // in flight, paid once the host's lookup decides, whichever this runner's speed gives
     // (Paykit spec 7.2).
     let resumed = Box::pin(w.payer.resume_payments()).await?;
-    assert!(resumed.iter().any(|outcome| matches!(outcome,
-        PaymentOutcome::Pending { attempt_id } | PaymentOutcome::Paid { attempt_id, .. }
-            if *attempt_id == attempt)));
+    let reported: Vec<_> = resumed
+        .iter()
+        .filter(|outcome| match outcome {
+            PaymentOutcome::Pending { attempt_id } | PaymentOutcome::Paid { attempt_id, .. } => {
+                *attempt_id == attempt
+            }
+            _ => false,
+        })
+        .collect();
+    assert_eq!(reported.len(), 1, "one report for the running attempt");
     assert_eq!(w.account.calls.load(Ordering::SeqCst), 1);
     // The host's `pay` answers; the payment is recorded paid with that single charge.
     w.account.park.store(false, Ordering::SeqCst);
