@@ -344,7 +344,7 @@ async fn manual_period(world: &World) -> TestResult {
     let [sent] = view.details.as_slice() else {
         return Err("expected one set of details".into());
     };
-    assert_eq!(sent.msg_id, message);
+    assert_eq!(sent.msg_id, message.msg_id);
     assert_eq!(sent.app_id, w.seller.app_id().await?);
     assert_eq!(sent.created_at_ms, world.now_ms());
     assert_eq!(sent.expires_at_ms, period.ends_at);
@@ -397,7 +397,8 @@ async fn automatic_price(world: &World) -> TestResult {
     check_uuid_v4(
         &payer
             .accept_subscription(id.clone(), Some(AcceptOptions::default()))
-            .await?,
+            .await?
+            .msg_id,
     )?;
     let record = w.sale(&id).await?.record;
     let mut price = details(period.clone());
