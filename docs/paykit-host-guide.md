@@ -396,6 +396,9 @@ calls `accept_subscription_under_allowance` with the request and its permanent A
 handle. For each eligible occurrence, call `pay_period_under_allowance` with that request
 and its exact Billing Period. The wallet checks the pinned Allowance, available budget and
 payment method before it pays. A rate-priced endpoint requires a different funding decision.
+A subscription stays under the Allowance it was accepted under. After that Allowance ends,
+its periods answer `Refusal::AllowanceEnded` and are paid by hand (`pay_period`). A new
+Allowance pays only subscriptions accepted under it.
 If a later period requires its own destination, the wallet waits for signed details for that
 occurrence from the selling app named by the request, if one is named. It selects the
 latest valid details the payment method can pay within the request and Allowance. A newer
