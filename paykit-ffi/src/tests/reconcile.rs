@@ -58,7 +58,10 @@ async fn receive(wallet: &NativeWallet, generation: u64) -> TestResult {
 async fn reconcile(wallet: &NativeWallet) -> TestResult<WalletReconciliation> {
     for _ in 0..12 {
         match wallet.reconcile().await {
-            Err(WalletError::NeedsUser { failure }) if failure.code() == "not_now" => continue,
+            // The records are still being listed: a wait.
+            Err(WalletError::RetryLater { failure }) if failure.code() == "records_unlisted" => {
+                continue
+            }
             result => return Ok(result?),
         }
     }
@@ -280,7 +283,11 @@ async fn no_recovery_grant(world: &World) -> TestResult {
     let account = Arc::new(Account::open(root.path(), world.clock().clone()));
     let (_, wallet, _, _) = Box::pin(enrolled_payer(world, root.path(), account)).await?;
     receive(&wallet, 0).await?;
-    refused(wallet.recovery_members().await, "needs_user", "not_now")?;
+    refused(
+        wallet.recovery_members().await,
+        "needs_user",
+        "scope_missing",
+    )?;
     wallet.shutdown().await?;
     Ok(())
 }
