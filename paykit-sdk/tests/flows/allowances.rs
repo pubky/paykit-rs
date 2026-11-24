@@ -2459,6 +2459,27 @@ fn stored_locally(summary: &paykit_sdk::ReceiveSummary) -> bool {
 }
 
 #[tokio::test]
+async fn test_allowances_proposal_waits_while_a_pending_record_awaits_its_key() {
+    // A pending proposal sealed under a key the phone doesn't hold yet, after an ordinary
+    // rotation: the client lists it as not verified, never as absent, so the count waits
+    // for the key, which comes without the user.
+    let w = World::new();
+    let (mut phone, record, _, _) = Box::pin(sealed_pending_rejection(&w, false)).await;
+    assert_sealed_pending(&phone, &record).await;
+    let refused = phone
+        .propose_executable_allowance(w.bob_id(), terms(), UserConfirmed::new())
+        .await
+        .unwrap_err();
+    assert_eq!(
+        refusal(&refused),
+        Some(&Refusal::NotNow(paykit_sdk::NotNowReason::ReadAgain(
+            "the current pending proposals have not been read"
+        ))),
+        "{refused:?}"
+    );
+}
+
+#[tokio::test]
 async fn test_allowances_answer_over_a_record_that_doesnt_read_kept_then_written() {
     let w = World::new();
     let (mut phone, record, _, rejection) = Box::pin(sealed_pending_rejection(&w, false)).await;

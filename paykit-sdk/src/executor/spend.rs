@@ -158,6 +158,26 @@ fn waits(reason: crate::NotNowReason) -> crate::PaykitError {
     Refusal::NotNow(reason).into()
 }
 
+/// The refusal of a payment the first failing `limit` has no room for (Paykit spec 8.3),
+/// given whether a period never fits it and where the lifetime limit leaves it.
+fn limit_refusal(limit: LimitKind, period_never: bool, room: LifetimeRoom) -> crate::PaykitError {
+    let why = format!("the {} limit has no room", limit.as_str());
+    match limit {
+        LimitKind::PerPayment => not_automatic(&why),
+        // Usage of other terms: no window or release mends it (Paykit spec 8.3).
+        LimitKind::InconsistentUsage => execution_held(INCONSISTENT_USAGE).into(),
+        _ if period_never || room == LifetimeRoom::Never => not_automatic(&why),
+        // Room only the user gives back, releasing another app's failed attempt
+        // ([`crate::Paykit::reserved_by_other_apps`] lists it): the user's to answer, also
+        // when a period limit fails first, since no period roll makes lifetime room.
+        _ if room == LifetimeRoom::Manual => execution_held(RELEASE_HELD).into(),
+        // A window rolling, or a reserved entry's outcome, gives the room back.
+        _ => waits(crate::NotNowReason::AllowanceLimit {
+            limit: limit.as_str().into(),
+        }),
+    }
+}
+
 /// Where an Allowance stands for a payment by this app as its executor (Paykit spec 8.3,
 /// "Executor", "Ends reach the executor"): the one classification the payment paths, the
 /// executor's grant paths and [`crate::AllowanceView::confirmation_needed`] follow.
@@ -526,35 +546,17 @@ impl AllowanceReservation {
                 _ => not_automatic("the transfer does not satisfy the Allowance terms"),
             })?;
         check_limits(&checked.terms, &checked.usage, &amount.value).map_err(|limit| {
-            let why = format!("the {} limit has no room", limit.as_str());
-            let no_room = || {
-                waits(crate::NotNowReason::AllowanceLimit {
-                    limit: limit.as_str().into(),
-                })
-            };
             let room = lifetime_room(
                 &checked.terms,
                 &checked.usage,
                 checked.facts.releasable().unwrap_or(0),
                 &amount.value,
             );
-            match limit {
-                LimitKind::PerPayment => not_automatic(&why),
-                // Usage of other terms: no window or release mends it (Paykit spec 8.3).
-                LimitKind::InconsistentUsage => execution_held(INCONSISTENT_USAGE).into(),
-                _ if period_never_fits(&checked.terms, &amount.value)
-                    || room == LifetimeRoom::Never =>
-                {
-                    not_automatic(&why)
-                }
-                // Room only the user gives back, releasing another app's failed attempt
-                // ([`crate::Paykit::reserved_by_other_apps`] lists it): the user's to answer.
-                LimitKind::Lifetime if room == LifetimeRoom::Manual => {
-                    execution_held(RELEASE_HELD).into()
-                }
-                // A window rolling, or a reserved entry's outcome, gives the room back.
-                _ => no_room(),
-            }
+            limit_refusal(
+                limit,
+                period_never_fits(&checked.terms, &amount.value),
+                room,
+            )
         })?;
         checked.ledger = reserved_ledger(
             &checked.terms,
@@ -908,6 +910,40 @@ impl Paykit {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_spend_limit_refusal_holds_for_the_user_whatever_limit_fails_first() {
+        let refusal =
+            |limit, period_never, room| limit_refusal(limit, period_never, room).refusal().cloned();
+        let held = Some(execution_held(RELEASE_HELD));
+        // Period cap 50, lifetime cap 100, 60 spent in earlier periods and 30 held by another
+        // app's failed attempt: a payment of 30 fails the period amount first, but only the
+        // user's release makes lifetime room, which no period roll gives.
+        for limit in [
+            LimitKind::PeriodAmount,
+            LimitKind::PeriodCount,
+            LimitKind::Lifetime,
+        ] {
+            assert_eq!(
+                refusal(limit, false, LifetimeRoom::Manual),
+                held,
+                "{limit:?}"
+            );
+        }
+        // A period that rolls or a reservation that ends gives the room back.
+        assert_eq!(
+            refusal(LimitKind::PeriodAmount, false, LifetimeRoom::Automatic),
+            Some(Refusal::NotNow(crate::NotNowReason::AllowanceLimit {
+                limit: "period_amount".into()
+            }))
+        );
+        assert_eq!(
+            refusal(LimitKind::PeriodAmount, false, LifetimeRoom::Never),
+            Some(Refusal::NotAutomatic(
+                "the period_amount limit has no room".into()
+            ))
+        );
+    }
 
     #[test]
     fn test_spend_lifetime_room_frees_only_what_is_still_reserved() {

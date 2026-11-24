@@ -57,14 +57,6 @@ pub enum NotNowReason {
     /// An earlier write of this app is unresolved; its answer clears this. The text names it.
     #[error("{0}")]
     EarlierWriteUnresolved(&'static str),
-    /// The counterparty's message is awaited; it clears this when it arrives in a receive.
-    /// The text names it.
-    #[error("{0}")]
-    AwaitingCounterparty(&'static str),
-    /// The block marks are full; a mark whose asks are delivered becomes droppable and makes
-    /// room (Paykit spec 8.1).
-    #[error("the block marks are full")]
-    BlockMarksFull,
     /// The same call made again clears this: it picks a new identifier or reads again. The
     /// text names why.
     #[error("{0}")]

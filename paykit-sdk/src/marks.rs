@@ -902,10 +902,10 @@ impl Paykit {
                 .position(|mark| mark.sender == sender)
                 .map(|index| marks.swap_remove(index));
             match count_blocked(existing, &marks, sender, (from, until), false) {
-                BlockedCount::Held => {
-                    return Err(Refusal::NotNow(crate::NotNowReason::BlockMarksFull).into())
-                }
-                BlockedCount::Dropped => {
+                // A widening's mark is speculative, so it may itself be the one dropped and
+                // `Held` never comes back for it ([`count_blocked`]): either way the window
+                // is told lost.
+                BlockedCount::Held | BlockedCount::Dropped => {
                     tx.put(
                         &key::blocked_lost(&sender, from),
                         &crate::notices::KeptNotice::blocked_lost(sender, from, until, raised),
@@ -1550,6 +1550,11 @@ mod tests {
         assert_eq!(
             count_blocked(None, &others, [1; 32], (2_000, 2_000), true),
             BlockedCount::Held
+        );
+        // A widening's speculative mark is never held: it is the one dropped.
+        assert_eq!(
+            count_blocked(None, &others, [1; 32], (2_000, 2_000), false),
+            BlockedCount::Dropped
         );
         // One free of them goes, however new.
         others[MAX_DROPPED_MARKS - 1].pending_forget.clear();

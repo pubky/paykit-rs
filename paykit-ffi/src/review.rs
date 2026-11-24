@@ -512,10 +512,6 @@ pub enum NotNowKind {
     ReadAgain,
     /// An earlier write is unresolved; its answer clears this.
     EarlierWriteUnresolved,
-    /// The counterparty's message is awaited; a receive brings it.
-    AwaitingCounterparty,
-    /// The block marks are full until a mark's asks are delivered.
-    BlockMarksFull,
     /// The same call made again clears this.
     CallAgain,
     /// An Allowance limit has no room now; its window rolling makes room.
@@ -619,8 +615,6 @@ impl From<&paykit_sdk::NotNowReason> for NotNowKind {
             R::NoServiceTime(_) => Self::NoServiceTime,
             R::ReadAgain(_) => Self::ReadAgain,
             R::EarlierWriteUnresolved(_) => Self::EarlierWriteUnresolved,
-            R::AwaitingCounterparty(_) => Self::AwaitingCounterparty,
-            R::BlockMarksFull => Self::BlockMarksFull,
             R::CallAgain(_) => Self::CallAgain,
             R::AllowanceLimit { limit } => Self::AllowanceLimit {
                 limit: limit.clone(),

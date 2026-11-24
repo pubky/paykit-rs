@@ -399,8 +399,6 @@ fn not_now_code(reason: &crate::NotNowKind) -> &'static str {
         R::NoServiceTime => "no_service_time",
         R::ReadAgain => "read_again",
         R::EarlierWriteUnresolved => "earlier_write_unresolved",
-        R::AwaitingCounterparty => "awaiting_counterparty",
-        R::BlockMarksFull => "block_marks_full",
         R::CallAgain => "call_again",
         R::AllowanceLimit { .. } => "allowance_limit",
         R::Unknown => "not_now",

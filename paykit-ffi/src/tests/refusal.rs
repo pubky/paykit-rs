@@ -932,8 +932,6 @@ fn every_not_now_kind() -> Vec<NotNowKind> {
         R::NoServiceTime,
         R::ReadAgain,
         R::EarlierWriteUnresolved,
-        R::AwaitingCounterparty,
-        R::BlockMarksFull,
         R::CallAgain,
         R::AllowanceLimit {
             limit: "lifetime".into(),
@@ -951,8 +949,6 @@ fn every_not_now_kind() -> Vec<NotNowKind> {
             | R::NoServiceTime
             | R::ReadAgain
             | R::EarlierWriteUnresolved
-            | R::AwaitingCounterparty
-            | R::BlockMarksFull
             | R::CallAgain
             | R::AllowanceLimit { .. }
             | R::Unknown => {}
