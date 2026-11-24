@@ -161,7 +161,18 @@ async fn cancel_received_request(
     .await?;
     issuer.claim_delivered(&approval.request).await?;
     let buyer = world.identity("buyer")?.public();
-    payer.allow_connect(shop.public().into()).await?;
+    // The payer invites the shop, as a host does for a seller it chose (Switch spec 7).
+    let invitation = payer
+        .lend(async |app| -> Result<_, Box<dyn Error>> {
+            while Box::pin(app.receive(None)).await?.report.more {}
+            Ok(app
+                .app_mut()
+                .register_invite_code(world.now_ms() + 3_600_000, 1)
+                .await?)
+        })
+        .await??;
+    while Box::pin(seller.receive(None)).await?.report.more {}
+    seller.app_mut().allow_connect(&buyer).await?;
     let draft = RequestDraft::new(
         PaymentAmount {
             asset: Asset::new("btc")?,
@@ -172,7 +183,8 @@ async fn cancel_received_request(
             PaymentEndpointIdentifier::new(IDENTIFIER)?,
             PaymentEndpointPayload::new("lnbc1checkout")?,
         )])),
-    );
+    )
+    .with_invite_code(invitation.code);
     let sent = Box::pin(seller.send_request(buyer, draft)).await?;
     let request = sent.request.ok_or("missing signed request")?;
     while Box::pin(payer.receive()).await?.more {}
