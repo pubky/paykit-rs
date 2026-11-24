@@ -7,10 +7,10 @@ use super::{
     wallet::{enrolled_payer, enrolled_wallet, run},
 };
 use crate::{
-    AcceptOptions, BillingPeriod, ConversionRate, ListEndpoint, NativeWallet, PaymentDecision,
-    PaymentOptions, PaymentOutcome, PaymentResult, PeriodDetails, PeriodPriceChoice,
-    RecurrenceUnit, RecurringRequest, RecurringRequestStatus, RefusalKind, RequestId, RuntimeTimer,
-    WalletError, WalletFailure, WalletScopes,
+    AcceptOptions, BillingPeriod, ConversionRate, ListEndpoint, MessageDelivery, NativeWallet,
+    PaymentDecision, PaymentOptions, PaymentOutcome, PaymentResult, PeriodDetails,
+    PeriodPriceChoice, RecurrenceUnit, RecurringRequest, RecurringRequestStatus, RefusalKind,
+    RequestId, RuntimeTimer, WalletError, WalletFailure, WalletScopes,
 };
 use paykit_lib::{
     allowances::AllowanceTerms,
@@ -217,7 +217,7 @@ impl Wallets {
 
 fn details(period: BillingPeriod) -> PeriodDetails {
     PeriodDetails {
-        expires_at: period.ends_at,
+        expires_at_ms: period.ends_at,
         billing_period: period,
         payment_endpoints: Some(vec![ListEndpoint {
             identifier: ENDPOINT.into(),
@@ -306,7 +306,11 @@ async fn manual_period(world: &World) -> TestResult {
         .await;
     assert!(matches!(result, Err(WalletError::InvalidInput { field }) if field == "quote"));
     let acceptance = payer.accept_subscription(id.clone(), None).await?;
-    check_uuid_v4(&acceptance)?;
+    check_uuid_v4(&acceptance.msg_id)?;
+    assert!(matches!(
+        acceptance.delivery,
+        MessageDelivery::Accepted { .. }
+    ));
     refusal(
         payer
             .accept_subscription(id.clone(), Some(AcceptOptions::default()))
@@ -321,7 +325,8 @@ async fn manual_period(world: &World) -> TestResult {
         .seller
         .send_period_details(sale.into(), details(period.clone()))
         .await?;
-    check_uuid_v4(&message)?;
+    check_uuid_v4(&message.msg_id)?;
+    assert!(matches!(message.delivery, MessageDelivery::Accepted { .. }));
     receive(payer).await?;
     let accepted = w.request(&id).await?;
     assert!(matches!(
@@ -430,7 +435,7 @@ async fn automatic_price(world: &World) -> TestResult {
     assert!(
         matches!(quote.kind(), RefusalKind::PricedByRate { request, period: Some(p), detail_message_id: Some(source), amount, .. }
         if request.request_hash == id.request_hash && (p.starts_at, p.ends_at) == (period.starts_at, period.ends_at)
-        && source == message && amount.asset == "btc" && amount.value == "0.0007")
+        && source == message.msg_id && amount.asset == "btc" && amount.value == "0.0007")
     );
     assert_eq!(w.account.count(), 0);
     paid(
@@ -499,7 +504,11 @@ async fn funded_period(world: &World) -> TestResult {
         .payer
         .accept_subscription_under_allowance(id.clone(), key.into())
         .await?;
-    check_uuid_v4(&accepted)?;
+    check_uuid_v4(&accepted.msg_id)?;
+    assert!(matches!(
+        accepted.delivery,
+        MessageDelivery::Accepted { .. }
+    ));
     assert_eq!(w.account.count(), 0);
     refusal(
         decision(

@@ -2,8 +2,8 @@
 
 use crate::{
     fixed, lists::list_endpoints, Amount, BillingPeriod, ConversionRate, ListEndpoint,
-    NativeWallet, PaymentOptions, PaymentRefusal, PaymentResult, PeriodView, Receipt, Recurrence,
-    RequestId, WalletError,
+    MessageDelivery, NativeWallet, PaymentOptions, PaymentRefusal, PaymentResult, PeriodView,
+    Receipt, Recurrence, RequestId, WalletError,
 };
 use paykit_lib::{bodies, periods::PeriodRef, PaymentEndpointIdentifier, Rate};
 use paykit_sdk::{PeriodPrice, Refusal, RequestStatus};
@@ -123,15 +123,15 @@ pub struct PeriodDetails {
     /// The period's cross-asset Conversion Rates (Paykit wire 4.9).
     pub rates: Option<Vec<ConversionRate>>,
     /// Inclusive expiry in Unix milliseconds (Paykit wire 4.9).
-    pub expires_at: u64,
+    pub expires_at_ms: u64,
 }
 
 impl TryFrom<PeriodDetails> for bodies::PeriodDetails {
     type Error = WalletError;
 
     fn try_from(details: PeriodDetails) -> Result<Self, Self::Error> {
-        if details.expires_at > MAX_TIME_MS {
-            return Err(WalletError::invalid("expires_at"));
+        if details.expires_at_ms > MAX_TIME_MS {
+            return Err(WalletError::invalid("expires_at_ms"));
         }
         Ok(Self {
             billing_period: details.billing_period.try_into()?,
@@ -145,7 +145,7 @@ impl TryFrom<PeriodDetails> for bodies::PeriodDetails {
                         .collect::<Result<_, _>>()
                 })
                 .transpose()?,
-            expires_at: details.expires_at,
+            expires_at: details.expires_at_ms,
         })
     }
 }
@@ -246,6 +246,25 @@ impl RecurringRequest {
     }
 }
 
+/// A signed message and where its delivery stands. A kept batch goes at the wallet's next
+/// write or read, so calling again would send a second message (Switch spec 11).
+#[derive(uniffi::Record)]
+pub struct SentMessage {
+    /// The signed message's ID (Switch wire 5.1).
+    pub msg_id: String,
+    /// Where delivery stands (Switch spec 11).
+    pub delivery: MessageDelivery,
+}
+
+impl From<paykit_sdk::SentMessage> for SentMessage {
+    fn from(sent: paykit_sdk::SentMessage) -> Self {
+        Self {
+            msg_id: sent.msg_id,
+            delivery: sent.delivery.into(),
+        }
+    }
+}
+
 #[uniffi::export]
 impl NativeWallet {
     /// List recurring requests and their period records as of the last read. Receive brings
@@ -268,29 +287,30 @@ impl NativeWallet {
     }
 
     /// Record and queue the payee's details for an eligible unpaid period of an accepted
-    /// subscription. Each message stays valid until its own expiry. Return its ID even
-    /// when the batch is kept for delivery (Paykit spec 8.2, Paykit wire 4.9).
+    /// subscription. Each message stays valid until its own expiry. Return the message and
+    /// its delivery, which is kept when the batch waits for the next write or read (Paykit
+    /// spec 8.2, Paykit wire 4.9).
     pub async fn send_period_details(
         &self,
         record: Vec<u8>,
         details: PeriodDetails,
-    ) -> Result<String, WalletError> {
+    ) -> Result<SentMessage, WalletError> {
         let record = fixed(record, "request record")?;
         let details = details.try_into()?;
         self.with_wallet(move |app| {
-            Box::pin(async move { Ok(app.send_period_details(&record, details).await?.msg_id) })
+            Box::pin(async move { Ok(app.send_period_details(&record, details).await?.into()) })
         })
         .await
     }
 
-    /// Record and send acceptance within the proposal's expiry, returning its message ID.
-    /// Held and blocked requests require the user's exact confirmation. Each period is paid
-    /// separately (Paykit spec 7.2, 8.1, 8.2).
+    /// Record and send acceptance within the proposal's expiry, returning the message and its
+    /// delivery. Held and blocked requests require the user's exact confirmation. Each period
+    /// is paid separately (Paykit spec 7.2, 8.1, 8.2).
     pub async fn accept_subscription(
         &self,
         id: RequestId,
         options: Option<AcceptOptions>,
-    ) -> Result<String, WalletError> {
+    ) -> Result<SentMessage, WalletError> {
         let request = id.try_into()?;
         let options = options.map(TryInto::try_into).transpose()?;
         self.with_wallet(move |app| {
@@ -299,19 +319,20 @@ impl NativeWallet {
                     Some(options) => app.accept_subscription_with(&request, options).await?,
                     None => app.accept_subscription(&request).await?,
                 };
-                Ok(sent.msg_id)
+                Ok(sent.into())
             })
         })
         .await
     }
 
-    /// Record the acceptance and its approved Allowance together and return the message ID.
-    /// Each period still requires eligibility and available budget (Paykit spec 8.2, 8.3).
+    /// Record the acceptance and its approved Allowance together and return the message and
+    /// its delivery. Each period still requires eligibility and available budget (Paykit spec
+    /// 8.2, 8.3).
     pub async fn accept_subscription_under_allowance(
         &self,
         id: RequestId,
         allowance: Vec<u8>,
-    ) -> Result<String, WalletError> {
+    ) -> Result<SentMessage, WalletError> {
         let request = id.try_into()?;
         let allowance = fixed(allowance, "allowance")?;
         self.with_wallet(move |app| {
@@ -319,7 +340,7 @@ impl NativeWallet {
                 Ok(app
                     .accept_subscription_under_allowance(&request, &allowance)
                     .await?
-                    .msg_id)
+                    .into())
             })
         })
         .await

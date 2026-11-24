@@ -13,9 +13,9 @@ func checkPeriods(fixture: CheckoutFixture, wallet: NativeWallet) async throws {
     let details = PeriodDetails(
         billingPeriod: period,
         paymentEndpoints: [ListEndpoint(identifier: "btc-lightning-bolt11", payload: "lnbc1period")],
-        rates: nil, expiresAt: period.endsAt
+        rates: nil, expiresAtMs: period.endsAt
     )
-    func missingRecord(_ call: () async throws -> String) async throws {
+    func missingRecord(_ call: () async throws -> SentMessage) async throws {
         do {
             _ = try await call()
             preconditionFailure("sent a message for a missing record")
@@ -73,7 +73,9 @@ func checkPeriods(fixture: CheckoutFixture, wallet: NativeWallet) async throws {
     precondition(open.recurrence.every == 1 && open.recurrence.unit == .day && open.periods.isEmpty)
     precondition(open.paymentReference == "checkout-7" && open.record.count == 32 && !open.manualOnly)
     let acceptance = try await wallet.acceptSubscription(id: id, options: nil)
-    precondition(UUID(uuidString: acceptance) != nil)
+    let recorded = try await wallet.messageDelivery(msgId: acceptance.msgId)
+    guard case .accepted = acceptance.delivery, UUID(uuidString: acceptance.msgId) != nil,
+          recorded == acceptance.delivery else { preconditionFailure("acceptance was not delivered") }
     let subscribed = try await listed()
     precondition(subscribed.status == .subscribed)
     do {

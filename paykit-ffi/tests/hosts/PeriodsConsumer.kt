@@ -13,9 +13,9 @@ internal suspend fun checkPeriods(fixture: CheckoutFixture, wallet: NativeWallet
     val details = PeriodDetails(
         billingPeriod = period,
         paymentEndpoints = listOf(ListEndpoint("btc-lightning-bolt11", "lnbc1period")),
-        rates = null, expiresAt = period.endsAt,
+        rates = null, expiresAtMs = period.endsAt,
     )
-    suspend fun missingRecord(call: suspend () -> String) {
+    suspend fun missingRecord(call: suspend () -> Any) {
         try {
             call()
             error("sent a message for a missing record")
@@ -58,7 +58,9 @@ internal suspend fun checkPeriods(fixture: CheckoutFixture, wallet: NativeWallet
     check(listed.status == RecurringRequestStatus.OPEN && listed.amount == Amount("btc", "7"))
     check(listed.recurrence.every == 1uL && listed.recurrence.unit == RecurrenceUnit.DAY && listed.periods.isEmpty())
     check(listed.paymentReference == "checkout-7" && listed.record.size == 32 && !listed.manualOnly)
-    check(java.util.UUID.fromString(wallet.acceptSubscription(id, null)).version() == 4)
+    val acceptance = wallet.acceptSubscription(id, null)
+    check(java.util.UUID.fromString(acceptance.msgId).version() == 4)
+    check(acceptance.delivery is MessageDelivery.Accepted && wallet.messageDelivery(acceptance.msgId) == acceptance.delivery)
     check(wallet.recurringRequests().single { it.id.requestHash.contentEquals(id.requestHash) }.status ==
         RecurringRequestStatus.SUBSCRIBED)
     try {
