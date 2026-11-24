@@ -434,3 +434,108 @@ async fn test_resume_returns_paid_outcomes_when_a_timed_out_write_applied() {
         assert_eq!(stage(&wallet, &attempt).await, Stage::Finished);
     }
 }
+
+/// Two payments in flight on a wallet whose transport refuses its next `/ops` write with
+/// the error put in `next`.
+async fn in_flight_behind(w: &World) -> (Paykit, [AttemptId; 2], Arc<RefusingOps>) {
+    let base = store();
+    let mut wallet = w.wallet_on("wallet", Arc::clone(&base)).await;
+    let app_id = wallet.app_id();
+    let attempts = two_in_flight(w, &mut wallet).await;
+    drop(wallet);
+    let transport = Arc::new(RefusingOps {
+        inner: Arc::clone(&w.router),
+        next: std::sync::Mutex::new(None),
+    });
+    let wallet = w
+        .load_with_transport(
+            &w.alice,
+            base,
+            app_id,
+            Arc::clone(&transport) as Arc<dyn pubky_switch_client::transport::Transport>,
+        )
+        .await;
+    (wallet, attempts, transport)
+}
+
+#[tokio::test]
+async fn test_resume_reports_a_payment_found_made_after_its_failure_once() {
+    // The method reported the first payment failed, and its failure is written. Its history
+    // then shows the payment made after all: the recheck's write times out and goes through
+    // on the last flush. The attempt is reported once, as the journal holds it: paid.
+    let w = World::new();
+    let (mut wallet, [first, second], transport) = in_flight_behind(&w).await;
+    w.rail.settle(&first, false);
+    let outcomes = wallet.resume_payments().await.unwrap();
+    assert!(
+        matches!(
+            outcomes.as_slice(),
+            [PayOutcome::Failed { attempt_id: failed, .. }, PayOutcome::Pending { attempt_id: open, .. }]
+                if *failed == first && *open == second
+        ),
+        "{outcomes:?}"
+    );
+    w.rail.complete_after_failure(&first);
+    *transport.next.lock().unwrap() = Some(TransportError::Timeout);
+    let outcomes = wallet.resume_payments().await.unwrap();
+    assert!(
+        matches!(
+            outcomes.as_slice(),
+            [PayOutcome::Pending { attempt_id: open, .. }, PayOutcome::Paid { attempt_id: paid, proof_msg_id: Some(_), .. }]
+                if *open == second && *paid == first
+        ),
+        "{outcomes:?}"
+    );
+    assert_eq!(stage(&wallet, &first).await, Stage::Finished);
+    assert_eq!(w.rail.pay_calls(&first), 1);
+}
+
+#[tokio::test]
+async fn test_resume_keeps_the_methods_proof_over_a_replayed_resolution() {
+    // The user's resolution of the second payment as failed timed out and is kept, and the
+    // resume's first flush can't send it either. The method's history then shows both
+    // payments made, and the next write sends the kept resolution ahead of it, whose journal
+    // write replaces the second entry. The proof the method gave outlasts it: the payment
+    // is reported paid with its proof queued, never paid without one.
+    let w = World::new();
+    let (mut wallet, [first, second], transport) = in_flight_behind(&w).await;
+    let obligation = wallet
+        .payments()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|p| p.attempt_id == second)
+        .unwrap()
+        .obligation;
+    *transport.next.lock().unwrap() = Some(TransportError::Timeout);
+    let kept = wallet
+        .resolve_attempt(
+            &obligation,
+            second,
+            paykit_sdk::Resolution::Failed,
+            pubky_switch_client::app::UserConfirmed::new(),
+        )
+        .await
+        .unwrap_err();
+    assert!(kept.kept_batch().is_some(), "{kept:?}");
+    assert_eq!(stage(&wallet, &second).await, Stage::Paying);
+    for attempt in [first, second] {
+        w.rail.settle(&attempt, true);
+    }
+    *transport.next.lock().unwrap() = Some(TransportError::Timeout);
+    let outcomes = wallet.resume_payments().await.unwrap();
+    assert_eq!(outcomes.len(), 2, "{outcomes:?}");
+    for (outcome, attempt) in outcomes.iter().zip([first, second]) {
+        assert!(
+            matches!(
+                outcome,
+                PayOutcome::Paid { attempt_id, proof_msg_id: Some(_), .. } if *attempt_id == attempt
+            ),
+            "{outcome:?}"
+        );
+        assert_eq!(w.rail.executions(&attempt), 1);
+        assert_eq!(stage(&wallet, &attempt).await, Stage::Finished);
+    }
+    let paid = wallet.payments().await.unwrap();
+    assert!(paid.iter().all(|p| p.paid_by_method), "{paid:?}");
+}
