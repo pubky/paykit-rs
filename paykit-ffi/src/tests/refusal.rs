@@ -308,6 +308,13 @@ fn test_switch_events_carry_the_lists_and_backup_evidence() {
             over: 4
         }
     ));
+    // A restore's incomplete marks reach the host as their own notice, not as `Other`.
+    assert!(matches!(
+        WalletEventData::from(AppEvent::SeenMarksIncomplete {
+            protocol: "paykit".into()
+        }),
+        WalletEventData::SeenMarksIncomplete { protocol } if protocol == "paykit"
+    ));
     assert!(matches!(
         BackupRefusal::from(app::BackupRefusal::DutiesTooLarge { duty_events: 5 }),
         BackupRefusal::DutiesTooLarge { duty_events: 5 }
