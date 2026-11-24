@@ -180,17 +180,21 @@ pub(crate) fn may_deliver(delivery: &DeliveryView<'_>, kind: Kind) -> Result<boo
     if delivery.resend() {
         return Ok(reads_lists && deny_decision(delivery)? == DenyDecision::Permits);
     }
+    // The exceptions go as their owed delivery from the outbox or a kept batch: never a copy
+    // reconstructed from shared records or signed plaintext, which the deny decision
+    // judges (Paykit spec 8.1, "Messages already queued").
+    let original = delivery.origin() == DeliveryOrigin::Original;
     match kind {
         // A proof and a receipt report a payment already made (Paykit spec 8.1).
-        Kind::PaymentProof | Kind::PaymentReceipt => return Ok(true),
-        Kind::PaymentRequestCancellation if payee_cancellation => return Ok(true),
+        Kind::PaymentProof | Kind::PaymentReceipt if original => return Ok(true),
+        Kind::PaymentRequestCancellation if payee_cancellation && original => return Ok(true),
         Kind::PaymentRequestAcceptance => {
             let exemption = state::delivery_get::<SendExemption>(
                 delivery,
                 &key::send_exemption(&message.msg_id),
             )?;
             match exemption.map(|e| e.reason) {
-                Some(ExemptionReason::DispatchedPayment) => return Ok(true),
+                Some(ExemptionReason::DispatchedPayment) if original => return Ok(true),
                 Some(ExemptionReason::ConfirmedWhileBlocked {
                     payee,
                     request_hash,
@@ -357,8 +361,9 @@ impl Drop for DeliveryOperation {
 /// 8.1, "Messages already queued"), a subscription acceptance the user confirmed while its
 /// payee was blocked included. What still goes when first sent while sends are held keeps
 /// the client's own deadline instead, as the hold doesn't govern it: a payment's proof, a
-/// receipt, a payee's cancellation, the acceptance of a dispatched payment, the user's
-/// `allowance_end`, a list's withdrawal and an own app's `executor_notice`. A re-send keeps
+/// receipt, a payee's cancellation and the acceptance of a dispatched payment, each as its
+/// original delivery only, the user's `allowance_end`, a list's withdrawal and an own app's
+/// `executor_notice`. A copy of one reconstructed from signed plaintext is governed. A re-send keeps
 /// the client's replay deadline from its first acceptance (Switch spec 11).
 ///
 /// Not every window has this rule: the client judges one it queues again from signed
@@ -371,18 +376,26 @@ pub(crate) fn held_past_window(delivery: &DeliveryView<'_>, observed: Option<u64
         return Ok(false);
     }
     let message = delivery.message();
+    // The payment reports and the payee's cancellation keep no window only as their owed
+    // delivery, never as a reconstructed copy ([`may_deliver`]; Paykit spec 8.1).
+    let original = delivery.origin() == DeliveryOrigin::Original;
     let goes = match paykit_lib::kinds::MessageKind::parse(&message.kind) {
         Ok(paykit_lib::kinds::MessageKind::Paykit(kind)) => match kind {
-            Kind::PaymentProof | Kind::PaymentReceipt | Kind::ExecutorNotice => true,
+            Kind::ExecutorNotice => true,
+            Kind::PaymentProof | Kind::PaymentReceipt => original,
             Kind::PaymentRequestCancellation => {
-                state::delivery_get::<KeptSide>(delivery, &key::side(&message.msg_id))?
-                    .is_some_and(|kept| kept.side == SideTag::Payee)
+                original
+                    && state::delivery_get::<KeptSide>(delivery, &key::side(&message.msg_id))?
+                        .is_some_and(|kept| kept.side == SideTag::Payee)
             }
-            Kind::PaymentRequestAcceptance => state::delivery_get::<SendExemption>(
-                delivery,
-                &key::send_exemption(&message.msg_id),
-            )?
-            .is_some_and(|e| e.reason == ExemptionReason::DispatchedPayment),
+            Kind::PaymentRequestAcceptance => {
+                original
+                    && state::delivery_get::<SendExemption>(
+                        delivery,
+                        &key::send_exemption(&message.msg_id),
+                    )?
+                    .is_some_and(|e| e.reason == ExemptionReason::DispatchedPayment)
+            }
             Kind::AllowanceEnd => crate::allowances::user_end(delivery)?,
             Kind::PrivatePaymentList => {
                 paykit_lib::bodies::PrivatePaymentList::from_body(&message.body)

@@ -6876,3 +6876,144 @@ async fn test_blocked_held_rejection_after_the_backup_survives_an_older_in_place
     let paid = wallet.pay_request(&next, options).await.outcome.unwrap();
     assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
 }
+
+/// An original and a reconstructed copy of a `kind` message from `app` to `to`, each with the
+/// local state `local` gives its `msg_id`, queued while `to` is blocked: whether each may go
+/// then and, `to` unblocked, past the replay window (Paykit spec 8.1, "Messages already
+/// queued": the exceptions cover an owed delivery from a kept batch or outbox, never a
+/// copy reconstructed from shared records).
+async fn exempt_copies(
+    w: &World,
+    app: &mut Paykit,
+    to: [u8; 32],
+    kind: paykit_lib::Kind,
+    local: impl Fn(&str) -> Vec<pubky_switch_client::app::LocalWrite>,
+) -> [(bool, bool); 2] {
+    use pubky_switch_client::app::{DeliveryOrigin, OutgoingMessage};
+    app.block(&to).await.unwrap();
+    app.app_mut().hold_queued(&to).await.unwrap();
+    let sign = |app: &Paykit| {
+        let mut message = OutgoingMessage::new(to, kind.as_str(), serde_json::Map::new());
+        message.refs = vec![[3; 32]];
+        app.app().sign_message(message).unwrap()
+    };
+    let original = sign(app);
+    let reconstructed = sign(app);
+    for signed in [&original, &reconstructed] {
+        app.app_mut()
+            .protocol_commit("paykit", &local(signed.msg_id()))
+            .await
+            .unwrap();
+    }
+    app.app_mut().queue_signed(original.clone()).await.unwrap();
+    app.app_mut()
+        .queue_stored(reconstructed.plaintext())
+        .await
+        .unwrap();
+    let may_send = |queued: &[pubky_switch_client::app::QueuedMessage],
+                    msg_id: &str,
+                    origin: DeliveryOrigin| {
+        let message = queued.iter().find(|m| m.msg_id == msg_id).unwrap();
+        assert_eq!(message.origin, origin);
+        message.may_send
+    };
+    let queued = app.queued_in_delivery().await.unwrap();
+    let blocked = (
+        may_send(&queued, original.msg_id(), DeliveryOrigin::Original),
+        may_send(
+            &queued,
+            reconstructed.msg_id(),
+            DeliveryOrigin::Reconstructed,
+        ),
+    );
+    app.unblock(&to).await.unwrap();
+    w.clock.advance_ms(31 * 24 * HOUR_MS);
+    app.receive(None).await.unwrap();
+    let queued = app.queued_in_delivery().await.unwrap();
+    let past = (
+        may_send(&queued, original.msg_id(), DeliveryOrigin::Original),
+        queued
+            .iter()
+            .find(|m| m.msg_id == reconstructed.msg_id())
+            .is_some_and(|m| m.may_send),
+    );
+    [blocked, past]
+}
+
+/// `value` kept under `key` of Paykit's local state, as its stored entries are.
+fn kept(key: String, value: serde_json::Value) -> Vec<pubky_switch_client::app::LocalWrite> {
+    vec![pubky_switch_client::app::LocalWrite::Put {
+        key: key.into_bytes(),
+        value: serde_json::to_vec(&serde_json::json!({ "v": 1, "d": value })).unwrap(),
+    }]
+}
+
+#[tokio::test]
+async fn test_blocked_proof_exempt_only_as_its_original_delivery() {
+    let w = World::new();
+    let (mut wallet, _shop, _) = received(&w, PaykitConfig::default()).await;
+    let bob = w.bob_id();
+    let copies = exempt_copies(&w, &mut wallet, bob, paykit_lib::Kind::PaymentProof, |_| {
+        Vec::new()
+    })
+    .await;
+    assert_eq!(copies, [(true, false), (true, false)]);
+}
+
+#[tokio::test]
+async fn test_blocked_dispatched_acceptance_exempt_only_as_its_original_delivery() {
+    let w = World::new();
+    let (mut wallet, _shop, _) = received(&w, PaykitConfig::default()).await;
+    let bob = w.bob_id();
+    let copies = exempt_copies(
+        &w,
+        &mut wallet,
+        bob,
+        paykit_lib::Kind::PaymentRequestAcceptance,
+        |msg_id| {
+            kept(
+                format!("ex/{msg_id}"),
+                serde_json::json!({ "msg_id": msg_id, "reason": "dispatched_payment" }),
+            )
+        },
+    )
+    .await;
+    assert_eq!(copies, [(true, false), (true, false)]);
+}
+
+#[tokio::test]
+async fn test_blocked_receipt_exempt_only_as_its_original_delivery() {
+    let w = World::new();
+    let mut shop = contacts_shop(&w).await;
+    let alice = w.alice_id();
+    let copies = exempt_copies(
+        &w,
+        &mut shop,
+        alice,
+        paykit_lib::Kind::PaymentReceipt,
+        |_| Vec::new(),
+    )
+    .await;
+    assert_eq!(copies, [(true, false), (true, false)]);
+}
+
+#[tokio::test]
+async fn test_blocked_payee_cancellation_exempt_only_as_its_original_delivery() {
+    let w = World::new();
+    let mut shop = contacts_shop(&w).await;
+    let alice = w.alice_id();
+    let copies = exempt_copies(
+        &w,
+        &mut shop,
+        alice,
+        paykit_lib::Kind::PaymentRequestCancellation,
+        |msg_id| {
+            kept(
+                format!("side/{msg_id}"),
+                serde_json::json!({ "msg_id": msg_id, "side": "payee", "label": null }),
+            )
+        },
+    )
+    .await;
+    assert_eq!(copies, [(true, false), (true, false)]);
+}
