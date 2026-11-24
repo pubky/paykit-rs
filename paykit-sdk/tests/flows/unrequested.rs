@@ -950,7 +950,7 @@ async fn test_unrequested_with_the_own_switch_unavailable_refused_and_nothing_pa
     w.alice
         .switch()
         .fail_next(pubky_switch_client::testing::Fault::Error {
-            path: "claims".into(),
+            path: "/claims".into(),
             code: pubky_switch_core::http::ErrorCode::Unavailable,
             current: serde_json::Value::Null,
         });
