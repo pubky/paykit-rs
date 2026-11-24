@@ -2493,8 +2493,9 @@ impl Protocol for PaykitProtocol {
                 )?,
             }));
         }
-        // An activity record is never deleted once its policy names a delete scope no app
-        // holds (Paykit spec 6, "Records never deleted"): nothing is put back.
+        // No other collection's delete is put back or observed. Activity records are never
+        // deleted, as their policy names a delete scope no app holds (Paykit spec 6,
+        // "Records never deleted").
         Ok(None)
     }
 
