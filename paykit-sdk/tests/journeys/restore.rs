@@ -38,7 +38,11 @@ async fn test_restore_behind_the_old_device_holds_the_request_until_the_user_con
 }
 
 /// Restore `backup` into a fresh store, as a host does on a new device, and read the inbox.
-async fn restore(world: &World, backup: &PaykitBackup, rail: &Arc<FakeRail>) -> TestResult<Paykit> {
+pub(super) async fn restore(
+    world: &World,
+    backup: &PaykitBackup,
+    rail: &Arc<FakeRail>,
+) -> TestResult<Paykit> {
     let mut restored = Box::pin(Paykit::restore(
         app_env(world, Arc::new(MemoryStore::new())),
         PaykitConfig::default(),
@@ -53,7 +57,7 @@ async fn restore(world: &World, backup: &PaykitBackup, rail: &Arc<FakeRail>) -> 
 
 /// The restored app reconciles, finding nothing in doubt, its payer pass run only for a
 /// payer, and ends reconciling.
-async fn reconciled(app: &mut Paykit, payer: bool) -> TestResult {
+pub(super) async fn reconciled(app: &mut Paykit, payer: bool) -> TestResult {
     let report = Box::pin(app.reconcile()).await?;
     assert!(report.doubtful.is_empty(), "{report:?}");
     assert_eq!(report.payer_skipped, !payer, "{report:?}");
