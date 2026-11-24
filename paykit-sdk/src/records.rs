@@ -554,6 +554,22 @@ impl Paykit {
             .collect())
     }
 
+    /// Whether `list`, a `payment_lists` value read at its key, may be used: never over a
+    /// record this app saw deleted, or read naming a delete, whatever its list and marks
+    /// ([`crate::state::LostListRecord`]; Paykit spec 6, "Visible deletion without a copy";
+    /// wire 5, "Incomplete protected-record contract").
+    pub(crate) async fn list_admitted(&self, list: &PaymentListRecord) -> Result<bool> {
+        let record = self
+            .app
+            .record_key(&list_target(&list.payee, &list.app_id))?;
+        let lost = self
+            .local_get::<crate::state::LostListRecord>(&crate::state::key::list_record_lost(
+                &record,
+            ))
+            .await?;
+        Ok(lost.is_none())
+    }
+
     /// As [`Paykit::lists_of`], each with the version of the write whose content it is: the
     /// write the app took, never one it refused (Switch spec 8.2).
     pub(crate) async fn lists_read_of(
@@ -812,13 +828,20 @@ pub(crate) fn refuse_unless_may_send(
 }
 
 /// Bind a `payment_lists` value held at `key` (Paykit wire 5.4): `key` is the one derived
-/// from its `payee` and `app_id`.
+/// from its `payee` and `app_id`. A value carrying `lost_to_delete`, a put-back from an older
+/// copy, binds as none: no endpoint of its list is paid automatically (Paykit spec 6, wire
+/// 5), and this revision has no path by hand, so it reads as a record that doesn't read,
+/// never written over and never paid from.
 pub(crate) fn bind_list(
     value: &[u8],
     own: &[u8; 32],
     key: &[u8; 32],
     record_key: impl Fn(&RecordTarget) -> Option<[u8; 32]>,
 ) -> Option<PaymentListRecord> {
+    let members: Map<String, Value> = serde_json::from_slice(value).ok()?;
+    if members.contains_key("lost_to_delete") {
+        return None;
+    }
     let record = PaymentListRecord::read(value, own).ok()?;
     (record_key(&list_target(&record.payee, &record.app_id))? == *key).then_some(record)
 }

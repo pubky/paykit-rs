@@ -2248,7 +2248,14 @@ impl Paykit {
                 .choose(payee, gathered, pricing, options, Some(&identity))?
                 .ok_or_else(|| unsupported("the payee's public endpoints"));
         }
-        let read = self.lists_read_of(payee).await?;
+        let mut read = Vec::new();
+        for (list, version) in self.lists_read_of(payee).await? {
+            // Over a `payment_lists` record seen deleted, no list is paid from: it waits
+            // (Paykit spec 6; wire 5, "Incomplete protected-record contract").
+            if self.list_admitted(&list).await? {
+                read.push((list, version));
+            }
+        }
         // The version of each record's write selected from: every attempt on a list endpoint
         // is conditioned on it, never on a write the app refused (Switch spec 8.2).
         let versions: Vec<([u8; 16], RecordVersion)> =

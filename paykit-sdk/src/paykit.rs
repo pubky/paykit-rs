@@ -874,6 +874,9 @@ impl Paykit {
         // as the hold (`crate::floor`), whatever the receive that met it got to, under a
         // refused certificate too: it is this app's own state.
         Box::pin(self.keep_held_floor()).await?;
+        // So does the loss marker of a list record the client holds, read before the receive
+        // that would keep it (`Paykit::place_held_lists`).
+        Box::pin(self.keep_list_loss_markers()).await?;
         Ok(PaykitBackup {
             app: self.app.backup_layered().await?,
         })
