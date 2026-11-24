@@ -1143,7 +1143,10 @@ impl Paykit {
 
     /// Count proposals against this completed client read before combining its events with
     /// any earlier report the host has yet to collect.
-    pub(crate) async fn own_pending_count(&mut self, peer: &[u8; 32]) -> Result<Option<usize>> {
+    pub(crate) async fn own_pending_count(
+        &mut self,
+        peer: &[u8; 32],
+    ) -> Result<std::result::Result<usize, crate::Refusal>> {
         let read = Box::pin(self.read_before_effects(None)).await?;
         let summary = Box::pin(self.after_read(read)).await?;
         let report = summary

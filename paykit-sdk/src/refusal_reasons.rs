@@ -36,6 +36,11 @@ pub enum NotNowReason {
          the signer stores when it is next online"
     )]
     ValueAwaitsKey,
+    /// The block floor can't be read now: a kept floor write, no service time verified yet, a
+    /// first read pending or the switch not answering, which a later receive clears (Paykit
+    /// wire 5.6).
+    #[error("Paykit wire 5.6: the block floor can't be read now")]
+    FloorUnreadable,
     /// A raise of the block floor left unwritten waits before it is tried again; the same
     /// call once the wait has passed clears this (Paykit wire 5.6).
     #[error("Paykit wire 5.6: a block floor raise left unwritten waits before it is tried again")]
@@ -97,10 +102,11 @@ impl ListingRetry {
     }
 }
 
-/// What the user answers or is shown before the call goes on: an unblock, a paused record's
-/// confirmation, or a hold on one record or publication that only its repair or the loss
-/// steps lift (Paykit spec 7.3, 8.1, 8.4). It holds that record, not the wallet. Nothing was
-/// written for the call that was refused.
+/// What the user or the host acts on before the call goes on, which no wait clears: an
+/// unblock, a paused record's confirmation, a new decision to pay, a reload, the execution of
+/// an Allowance taken up or a new one set up, or a hold on one record, publication or
+/// delivery that only its repair or the loss steps lift (Paykit spec 7.3, 8.1, 8.3, 8.4). It
+/// holds that item, not the wallet.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum HeldForUserReason {
@@ -185,10 +191,6 @@ pub enum HeldForUserReason {
     /// 8.3).
     #[error("the original Allowance answer has no verified outcome")]
     AnswerOutcomeUnknown,
-    /// The block floor can't be read now: a later read may clear this, or never, as for a
-    /// floor deleted, so it is shown (Paykit wire 5.6).
-    #[error("Paykit wire 5.6: the block floor can't be read now")]
-    FloorUnreadable,
 }
 
 /// The recovery step of the wallet as a whole that clears a refusal: no wait does (Paykit

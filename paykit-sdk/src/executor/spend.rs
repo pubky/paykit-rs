@@ -83,6 +83,53 @@ fn not_automatic(why: &str) -> crate::PaykitError {
     Refusal::NotAutomatic(why.into()).into()
 }
 
+/// Whether a payment of `value` never fits the Allowance's limits, whatever later outcomes
+/// or releases do (Paykit spec 8.3): a period that admits no payment, a payment alone above
+/// a period's amount limit, or the lifetime limit with every entry still reserved freed by
+/// its outcome and every failed attempt the user may release (`releasable`, which counts as
+/// spent until then) given back. An entry spent or released already frees nothing more.
+fn never_fits(
+    terms: &paykit_lib::allowances::AllowanceTerms,
+    ledger: &paykit_lib::allowances::Ledger,
+    usage: &paykit_lib::allowances::Usage,
+    evidence: &std::collections::HashMap<
+        paykit_lib::AttemptId,
+        paykit_lib::allowances::AttemptEvidence,
+    >,
+    releasable: u128,
+    value: &paykit_lib::Decimal,
+) -> bool {
+    use paykit_lib::allowances::{counts, Counting};
+    if terms.period_limits.iter().any(|period| {
+        period.payment_count_limit == Some(0)
+            || period
+                .amount_limit
+                .as_ref()
+                .is_some_and(|cap| value.scaled() > cap.scaled())
+    }) {
+        return true;
+    }
+    let Some(cap) = &terms.lifetime_amount_limit else {
+        return false;
+    };
+    let reserved = ledger
+        .entries
+        .iter()
+        .filter(|entry| {
+            counts(
+                entry,
+                evidence.get(&entry.attempt_id).copied().unwrap_or_default(),
+            ) == Counting::Reserved
+        })
+        .fold(0u128, |sum, entry| sum.saturating_add(entry.value.scaled()));
+    usage
+        .lifetime()
+        .scaled()
+        .saturating_sub(reserved.saturating_add(releasable))
+        .checked_add(value.scaled())
+        .is_none_or(|sum| sum > cap.scaled())
+}
+
 /// Terms whose start is still ahead: the same call once it has passed clears this (Paykit
 /// spec 8.3).
 fn terms_not_active() -> crate::PaykitError {
@@ -190,7 +237,7 @@ pub(crate) fn standing(app: &Paykit, view: &AllowanceView, consent: ConsentState
     // A missed item or a record not held as executing needs: a flagged record can stay so,
     // so it is shown, not waited on.
     if let ConsentState::Waiting(why) = consent {
-        return Standing::Temporary(execution_held(why));
+        return Standing::Temporary(why);
     }
     // The regrant is a write over the record: while that waits for the user's confirmation
     // of the record, or for the messages kept over it, so does the Allowance's (Paykit spec 6).
@@ -233,7 +280,7 @@ pub(crate) fn standing(app: &Paykit, view: &AllowanceView, consent: ConsentState
         (ConsentState::Unrecorded, true) => {
             Standing::Temporary(execution_held(CONSENT_NOT_ON_DEVICE))
         }
-        (ConsentState::Waiting(why), _) => Standing::Temporary(execution_held(why)),
+        (ConsentState::Waiting(why), _) => Standing::Temporary(why),
         (ConsentState::Removed(reason), _) => Standing::Final(removed_refusal(reason)),
     }
 }
@@ -490,31 +537,13 @@ impl AllowanceReservation {
                 })
             };
             // A limit this payment alone exceeds, or a count limit of none, never makes room.
-            let never_fits = checked.terms.period_limits.iter().any(|period| {
-                period.payment_count_limit == Some(0)
-                    || period
-                        .amount_limit
-                        .as_ref()
-                        .is_some_and(|cap| amount.value.scaled() > cap.scaled())
-            }) || checked.terms.lifetime_amount_limit.as_ref().is_some_and(
-                |cap| {
-                    // The most room the open reservations could ever free, the attempts the
-                    // user may release among them: if the payment doesn't fit even then, it
-                    // never does.
-                    let freed = checked
-                        .ledger
-                        .entries
-                        .iter()
-                        .filter(|entry| entry.outcome.is_none())
-                        .fold(0u128, |sum, entry| sum.saturating_add(entry.value.scaled()));
-                    checked
-                        .usage
-                        .lifetime()
-                        .scaled()
-                        .saturating_sub(freed)
-                        .checked_add(amount.value.scaled())
-                        .is_none_or(|sum| sum > cap.scaled())
-                },
+            let never_fits = never_fits(
+                &checked.terms,
+                &checked.ledger,
+                &checked.usage,
+                &checked.facts.signed,
+                checked.facts.releasable().unwrap_or(0),
+                &amount.value,
             );
             match limit {
                 LimitKind::PerPayment => not_automatic(&why),
@@ -883,6 +912,90 @@ impl Paykit {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_spend_never_fits_frees_only_what_is_still_reserved() {
+        use paykit_lib::allowances::{
+            usage, AllowanceTerms, AttemptEvidence, ClaimState, EntryOutcome, Ledger, LedgerEntry,
+        };
+        use paykit_lib::{AttemptId, Decimal};
+        let terms = AllowanceTerms::from_json(&serde_json::json!({
+            "asset": "btc", "lifetime_amount_limit": "100", "period_limits": [],
+            "per_payment_amount": null, "active_from": null, "expires_at": null,
+            "allowed_payment_endpoint_identifiers": null
+        }))
+        .unwrap();
+        let entry = |id: u8, value: &str, outcome| LedgerEntry {
+            obligation: [id; 32],
+            attempt_id: AttemptId::from_bytes([id; 16]),
+            value: Decimal::parse(value).unwrap(),
+            asset: paykit_lib::Asset::parse("btc").unwrap(),
+            at: 1_000,
+            outcome,
+        };
+        let evidence = |claim, never_dispatched| AttemptEvidence {
+            claim: Some(claim),
+            paid: false,
+            never_dispatched,
+        };
+        let check = |entries: Vec<LedgerEntry>, facts: Vec<(u8, AttemptEvidence)>, value: &str| {
+            let ledger = Ledger {
+                entries,
+                ..Ledger::empty(
+                    [5; 32],
+                    AllowanceId::parse("d0efffb7-191b-4709-b6c7-e343af5500b4").unwrap(),
+                    [9; 32],
+                )
+            };
+            let facts: std::collections::HashMap<_, _> = facts
+                .into_iter()
+                .map(|(id, fact)| (AttemptId::from_bytes([id; 16]), fact))
+                .collect();
+            let used = usage(&terms, &ledger, &facts, 2_000).unwrap();
+            never_fits(
+                &terms,
+                &ledger,
+                &used,
+                &facts,
+                0,
+                &Decimal::parse(value).unwrap(),
+            )
+        };
+        // 70 dispatched and failed by another app, spent for good, and 10 reserved: 40
+        // never fits, as freeing the 10 leaves 110; 20 fits once they are freed.
+        let spent_and_reserved = || {
+            (
+                vec![entry(1, "70", None), entry(2, "10", None)],
+                vec![
+                    (1, evidence(ClaimState::Failed { by_owner: false }, false)),
+                    (2, evidence(ClaimState::Open, false)),
+                ],
+            )
+        };
+        let (entries, facts) = spent_and_reserved();
+        assert!(check(entries, facts, "40"));
+        let (entries, facts) = spent_and_reserved();
+        assert!(!check(entries, facts, "20"));
+        // 80 paid, 50 released and 10 reserved: the released 50 frees nothing more, so 25
+        // never fits (80 + 25), and 15 does once the 10 are freed.
+        let paid_released_reserved = || {
+            (
+                vec![
+                    entry(1, "80", Some(EntryOutcome::Done)),
+                    entry(2, "50", None),
+                    entry(3, "10", None),
+                ],
+                vec![
+                    (2, evidence(ClaimState::Failed { by_owner: false }, true)),
+                    (3, evidence(ClaimState::Open, false)),
+                ],
+            )
+        };
+        let (entries, facts) = paid_released_reserved();
+        assert!(check(entries, facts, "25"));
+        let (entries, facts) = paid_released_reserved();
+        assert!(!check(entries, facts, "15"));
+    }
 
     #[test]
     fn test_spend_pending_conflict_check_waits_and_stops_stay_final() {

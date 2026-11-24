@@ -532,9 +532,6 @@ fn every_refusal_kind() -> Vec<RefusalKind> {
             reason: HeldForUserKind::Unresolved,
         },
         RefusalKind::HeldForUser {
-            reason: HeldForUserKind::FloorUnreadable,
-        },
-        RefusalKind::HeldForUser {
             reason: HeldForUserKind::PendingProposalsFull,
         },
         RefusalKind::HeldForUser {
@@ -930,6 +927,7 @@ fn every_not_now_kind() -> Vec<NotNowKind> {
         R::RecordsNotListed,
         R::ScopeKeysAwaited,
         R::ValueAwaitsKey,
+        R::FloorUnreadable,
         R::FloorRaiseWaiting,
         R::NoServiceTime,
         R::ReadAgain,
@@ -948,6 +946,7 @@ fn every_not_now_kind() -> Vec<NotNowKind> {
             | R::RecordsNotListed
             | R::ScopeKeysAwaited
             | R::ValueAwaitsKey
+            | R::FloorUnreadable
             | R::FloorRaiseWaiting
             | R::NoServiceTime
             | R::ReadAgain
@@ -986,7 +985,6 @@ fn every_recovery_kind() -> Vec<RecoveryNeededKind> {
             | HeldForUserKind::ReloadRequired
             | HeldForUserKind::SwitchClient
             | HeldForUserKind::Unresolved
-            | HeldForUserKind::FloorUnreadable
             | HeldForUserKind::PendingProposalsFull
             | HeldForUserKind::AllowanceLedgerFull
             | HeldForUserKind::AnswerOutcomeUnknown
@@ -1225,8 +1223,8 @@ fn test_wallet_errors_sdk_refusals_take_the_table_code_through_the_conversion() 
         ),
         (Refusal::Usage("bad".into()), "not_sent", "usage"),
         (
-            Refusal::HeldForUser(paykit_sdk::HeldForUserReason::FloorUnreadable),
-            "needs_user",
+            Refusal::NotNow(paykit_sdk::NotNowReason::FloorUnreadable),
+            "retry_later",
             "floor_unreadable",
         ),
     ] {

@@ -4291,12 +4291,6 @@ impl Paykit {
     /// which a read of the lists clears, and [`crate::Refusal::HeldForUser`] while the copy
     /// holds `pubky`, which the user unblocking it clears.
     pub(crate) async fn require_sends_allowed(&self, pubky: &[u8; 32]) -> crate::error::Result<()> {
-        if !self.deny_copy_known().await? {
-            return Err(
-                crate::error::Refusal::NotNow(crate::NotNowReason::ReadAgain(DENY_COPY_UNKNOWN))
-                    .into(),
-            );
-        }
         match self.deny_decides(pubky).await? {
             // A copy that can't tell: an own block or unblock settled since, or a block in a
             // copy due for a read. A read of the lists judges it; no block for the user to
@@ -4314,9 +4308,10 @@ impl Paykit {
     }
 
     /// Whether the copy of the deny list decides `pubky` blocked: `Some(true)` only from a
-    /// copy read at most [`LISTS_REFRESH_MS`] ago with no own block or unblock of `pubky`
-    /// that counts no more ([`Paykit::own_change`]); `None` while the copy can't tell, not
-    /// known, an own change settled since, or a block in a copy due for a read; `Some(false)`
+    /// copy read at most [`LISTS_REFRESH_MS`] ago, with no deny change the client told since
+    /// and no own block or unblock of `pubky` that counts no more ([`Paykit::own_change`]);
+    /// `None` while the copy can't tell, not known, an own change settled since, or a block
+    /// in a copy due for a read or overtaken by a deny change told; `Some(false)`
     /// when the copy doesn't hold `pubky` (Paykit spec 8.1). A definite block is never told
     /// from stale state.
     pub(crate) async fn deny_decides(
@@ -4337,11 +4332,14 @@ impl Paykit {
         if !self.denied_as_last_read(pubky).await? {
             return Ok(Some(false));
         }
+        // A block only from a fresh copy that no deny change the client told since has
+        // overtaken (Paykit spec 8.1, "Messages already queued").
         let fresh = self
             .lists_read_at()
             .await?
             .is_some_and(|read| lists_read_is_fresh(read, self.now()));
-        Ok(fresh.then_some(true))
+        let told = self.local_get::<u64>(key::LISTS_TOLD).await?.is_some();
+        Ok((fresh && !told).then_some(true))
     }
 
     /// Whether the copy of the deny list is known ([`Paykit::sends_held`]): always at an app

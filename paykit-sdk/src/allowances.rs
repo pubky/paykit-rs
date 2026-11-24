@@ -285,7 +285,7 @@ pub(crate) enum ConsentEnd {
 }
 
 /// Where this app's consent to execute an Allowance stands ([`Paykit::consent_state`]).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ConsentState {
     /// On the consent list and confirmed since any restore or `missed` item: the executor
     /// may pay under it.
@@ -310,7 +310,7 @@ pub(crate) enum ConsentState {
     },
     /// Not held for now, and why: a `missed` item's mark the next receive turns into
     /// [`ConsentState::ConfirmAgain`], or a record not held as it must be yet.
-    Waiting(&'static str),
+    Waiting(Refusal),
 }
 
 /// Why consent waits while a `missed` item's mark is kept.
@@ -1934,13 +1934,9 @@ impl Paykit {
             self.require_payer_choice(execution.as_ref())?;
         }
         Box::pin(self.require_sends_allowed(&to)).await?;
-        // A proposal that doesn't read keeps the count unknown until it is answered,
-        // withdrawn or discarded: shown, not waited on.
-        let count = count.ok_or(Refusal::HeldForUser(
-            crate::HeldForUserReason::RecordUnreadable(
-                "the current pending proposals have not been read",
-            ),
-        ))?;
+        // Unknown as `pending_count` says why: records not listed or not verified yet, a
+        // wait, or a proposal that doesn't read, shown.
+        let count = count?;
         if count >= pending::LIMIT {
             return Err(
                 Refusal::HeldForUser(crate::HeldForUserReason::PendingProposalsFull).into(),
@@ -2824,13 +2820,22 @@ impl Paykit {
             return Ok(ConsentState::Removed(reason));
         }
         if Box::pin(self.consents_unconfirmed()).await? {
-            return Ok(ConsentState::Waiting(WAITS_FOR_MISSED));
+            // Only the next receive marks it: a wait.
+            return Ok(ConsentState::Waiting(Refusal::NotNow(
+                crate::NotNowReason::ReadAgain(WAITS_FOR_MISSED),
+            )));
         }
+        // Not read yet: a read brings it.
         let Some(shared) = Box::pin(self.app.shared_record(record)).await? else {
-            return Ok(ConsentState::Waiting(WAITS_FOR_RECORD));
+            return Ok(ConsentState::Waiting(Refusal::NotNow(
+                crate::NotNowReason::ReadAgain(WAITS_FOR_RECORD),
+            )));
         };
+        // Flagged: it lasts until a write the app takes replaces it, so it is shown.
         if shared.flagged {
-            return Ok(ConsentState::Waiting(WAITS_FOR_RECORD));
+            return Ok(ConsentState::Waiting(Refusal::HeldForUser(
+                crate::HeldForUserReason::AllowanceExecutionHeld(WAITS_FOR_RECORD),
+            )));
         }
         let shown = match Box::pin(self.held_allowance(record)).await? {
             Some(held) if held.end.is_some() => {
@@ -2843,12 +2848,20 @@ impl Paykit {
                 return Ok(ConsentState::Removed(ConsentEnd::Rejected))
             }
             Some(held) => {
+                // A conflict check that may never settle: shown.
                 if self.unresolved_for_allowance(record, &held).await? {
-                    return Ok(ConsentState::Waiting(WAITS_FOR_RECORD));
+                    return Ok(ConsentState::Waiting(Refusal::HeldForUser(
+                        crate::HeldForUserReason::AllowanceExecutionHeld(WAITS_FOR_RECORD),
+                    )));
                 }
                 held
             }
-            None => return Ok(ConsentState::Waiting(WAITS_FOR_RECORD)),
+            // Not read as the Allowance yet: a read brings it.
+            None => {
+                return Ok(ConsentState::Waiting(Refusal::NotNow(
+                    crate::NotNowReason::ReadAgain(WAITS_FOR_RECORD),
+                )))
+            }
         };
         let own_granted = shown
             .current_grant(&self.identity())

@@ -2039,7 +2039,9 @@ async fn test_blocked_return_own_unblock_waits_for_an_unreadable_floor() {
     wallet.block(&w.bob_id()).await.unwrap();
     assert!(matches!(
         wallet.unblock(&w.bob_id()).await.unwrap_err().refusal(),
-        Some(paykit_sdk::Refusal::HeldForUser(_))
+        Some(paykit_sdk::Refusal::NotNow(
+            paykit_sdk::NotNowReason::FloorUnreadable
+        ))
     ));
     assert!(wallet
         .app_mut()
@@ -6269,8 +6271,8 @@ async fn test_blocked_return_kept_floor_batch_holds_an_open_restore_verdict() {
     assert!(
         matches!(
             refused.refusal(),
-            Some(paykit_sdk::Refusal::HeldForUser(
-                paykit_sdk::HeldForUserReason::FloorUnreadable
+            Some(paykit_sdk::Refusal::NotNow(
+                paykit_sdk::NotNowReason::FloorUnreadable
             ))
         ),
         "{refused:?}"

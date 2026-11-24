@@ -124,23 +124,36 @@ impl Paykit {
         report: Option<&pubky_switch_client::app::ReceiveReport>,
         peer: &[u8; 32],
         outgoing: bool,
-    ) -> Result<Option<usize>> {
+    ) -> Result<std::result::Result<usize, Refusal>> {
+        // Not listed yet: a receive lists the records.
+        let unlisted = || Refusal::NotNow(crate::NotNowReason::RecordsNotListed);
         let Some(report) = report else {
-            return Ok(None);
+            return Ok(Err(unlisted()));
         };
         let family = crate::activity::family(Collection::AllowanceProposals);
         let Some(current) = self.app.current_collection(&family, report).await? else {
-            return Ok(None);
+            return Ok(Err(unlisted()));
         };
+        // Members not verified yet, which a decision on every value waits for.
         if !current.uncertain_keys.is_empty() {
-            return Ok(None);
+            return Ok(Err(Refusal::NotNow(crate::NotNowReason::ReadAgain(
+                "the current pending proposals have not been read",
+            ))));
         }
         let mut count = 0;
         for held in current.live {
             let proposal = match self.selected_pending(&held) {
                 Ok((proposal, _)) => proposal,
                 Err(error @ PaykitError::Client(_)) => return Err(error),
-                Err(_) => return Ok(None),
+                // A proposal that doesn't read keeps the count unknown until it is answered,
+                // withdrawn or discarded: shown, not waited on.
+                Err(_) => {
+                    return Ok(Err(Refusal::HeldForUser(
+                        crate::HeldForUserReason::RecordUnreadable(
+                            "a pending proposal to this counterparty doesn't read",
+                        ),
+                    )))
+                }
             };
             if proposal.counterparty() == peer
                 && (proposal.proposal().sender() == self.identity()) == outgoing
@@ -148,7 +161,7 @@ impl Paykit {
                 count += 1;
             }
         }
-        Ok(Some(count))
+        Ok(Ok(count))
     }
 
     pub(super) async fn absent_record(&mut self, target: &RecordTarget) -> Result<()> {
@@ -1103,7 +1116,7 @@ impl Paykit {
         if held.pending_source.is_some() {
             return Ok(Some(Placed::Waits));
         }
-        let Some(count) = self.pending_count(report, &peer, false).await? else {
+        let Ok(count) = self.pending_count(report, &peer, false).await? else {
             return Ok(Some(Placed::Waits));
         };
         if count >= LIMIT {

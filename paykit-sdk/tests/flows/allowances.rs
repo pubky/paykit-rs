@@ -14114,7 +14114,10 @@ async fn test_pending_capacity_waits_for_the_key_of_an_earlier_proposal() {
         .propose_executable_allowance(w.bob_id(), terms(), UserConfirmed::new())
         .await
         .unwrap_err();
-    assert!(matches!(refusal.refusal(), Some(Refusal::HeldForUser(_))));
+    assert!(matches!(
+        refusal.refusal(),
+        Some(Refusal::NotNow(paykit_sdk::NotNowReason::ReadAgain(_)))
+    ));
     assert!(wallet
         .app()
         .queued_messages("paykit")

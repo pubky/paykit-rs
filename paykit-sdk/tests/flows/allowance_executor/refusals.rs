@@ -1145,10 +1145,10 @@ async fn test_allowance_refusals_missed_mark_waits_with_its_reason() {
         )
         .await
         .unwrap();
-    let waits =
-        paykit_sdk::Refusal::HeldForUser(paykit_sdk::HeldForUserReason::AllowanceExecutionHeld(
-            "a missed item holds every Allowance until the next receive marks it for confirmation",
-        ));
+    // Only the next receive marks it: a wait.
+    let waits = paykit_sdk::Refusal::NotNow(paykit_sdk::NotNowReason::ReadAgain(
+        "a missed item holds every Allowance until the next receive marks it for confirmation",
+    ));
     assert_eq!(
         refusal_of(Box::pin(payer.resume_allowance_executor(&key)).await),
         waits
