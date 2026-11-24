@@ -123,10 +123,13 @@ pub enum NoticeKind {
     /// A block floor raise this wallet owes was tried and isn't written, with no divergence
     /// hold: the floor doesn't read, or the switch refuses the write for now (Paykit wire 5.6,
     /// Raising). Until it is, an unblocked sender's one-time requests wait and it is asked
-    /// nothing, and while a widening's raise waits no one is asked to re-send; it is tried again
-    /// at each receive. Raised once per load while it stands, and again after a reopen when a
-    /// receive leaves it unwritten; removed when the raise is written or the divergence hold
-    /// stands, which its own notice tells. It names no attempt, message or counterparty.
+    /// nothing, and while a widening's raise waits no one is asked to re-send. It is tried again
+    /// at the next receive, and from its second unwritten try in a row after a wait of one
+    /// minute, doubling to ten; a change to the floor record, the floor becoming readable or a
+    /// new raise owed ends the wait. Raised once per load while it stands, and again after a
+    /// reopen when a receive leaves it unwritten; removed when the raise is written or the
+    /// divergence hold stands, which its own notice tells. It names no attempt, message or
+    /// counterparty.
     FloorRaiseWaiting,
     /// Automatic one-time payments for the identity are held for good after a provider
     /// loss, and each request can still be paid by hand (Paykit spec 8.1, Paykit wire 5.6,

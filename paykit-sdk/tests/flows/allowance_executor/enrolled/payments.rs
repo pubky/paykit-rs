@@ -455,9 +455,12 @@ async fn restore_after_first_payment(
     assert!(Box::pin(payer.resume_allowance_executor(key))
         .await
         .is_err());
-    Box::pin(payer.confirm_allowance_executor(key, UserConfirmed::new()))
-        .await
-        .expect("reconfirm the grant with its reconciled paid ledger");
+    Box::pin(payer.confirm_allowance_executor(
+        &payer.allowance(key).await.unwrap().hold,
+        UserConfirmed::new(),
+    ))
+    .await
+    .expect("reconfirm the grant with its reconciled paid ledger");
     world.advance_ms(paykit_sdk::LISTS_REFRESH_MS + 1);
     Box::pin(finish_listing(&mut payer)).await;
     Box::pin(finish_listing(&mut payer)).await;

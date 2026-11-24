@@ -75,13 +75,12 @@ struct Inner {
     counter: u64,
     idempotent: bool,
     forgotten: Vec<AttemptId>,
+    lookups_failing: u64,
     calls: BTreeMap<AttemptId, u64>,
     call_amounts: BTreeMap<AttemptId, Vec<PaymentAmount>>,
     declaration: Option<RailDeclaration>,
     endpoints: Option<Vec<PaymentEndpointIdentifier>>,
     choice: Option<Choice>,
-    max_fee: Option<paykit_lib::Decimal>,
-    next_fees: VecDeque<Option<paykit_lib::Decimal>>,
     selections: Vec<(Vec<PaymentEndpointCandidate>, Option<PaymentAmount>)>,
     fraction_digits: BTreeMap<PaymentEndpointIdentifier, Option<u32>>,
     proof_checks: Vec<ProofCheck>,
@@ -192,17 +191,6 @@ impl FakeRail {
             + 'static,
     ) {
         self.lock().choice = Some(Arc::new(choose));
-    }
-
-    /// Report `max_fee` as the largest fee of every transfer from now on, instead of none.
-    pub fn set_max_fee(&self, max_fee: Option<paykit_lib::Decimal>) {
-        self.lock().max_fee = max_fee;
-    }
-
-    /// Report `fees` as the largest fee of the next transfers, one each, in order, then the
-    /// one [`FakeRail::set_max_fee`] set: a fee estimate that changes between calls.
-    pub fn next_max_fees(&self, fees: Vec<Option<paykit_lib::Decimal>>) {
-        self.lock().next_fees.extend(fees);
     }
 
     /// Every set of candidates [`Rail::select_endpoints`] was handed, with its amount, in
@@ -318,6 +306,12 @@ impl FakeRail {
     /// history would. The payment itself stands.
     pub fn forget_history(&self, key: &AttemptId) {
         self.lock().forgotten.push(*key);
+    }
+
+    /// The next `n` lookups of a payment's outcome fail as the method's history being
+    /// unreachable for now ([`RailError::Unavailable`]).
+    pub fn fail_next_lookups(&self, n: u64) {
+        self.lock().lookups_failing = n;
     }
 
     /// Finish a payment left in flight: paid or failed.
@@ -484,18 +478,12 @@ impl Rail for FakeRail {
         payload: &PaymentEndpointPayload,
         amount: &PaymentAmount,
     ) -> Transfer {
-        let fee = {
-            let mut inner = self.lock();
-            let max_fee = inner.max_fee.clone();
-            inner.next_fees.pop_front().unwrap_or(max_fee)
-        };
         let next = self.lock().next_transfer_amounts.pop_front();
         Transfer::new(
             next.or_else(|| self.lock().transfer_amount.clone())
                 .unwrap_or_else(|| {
                     Self::fixed_amount(payload.as_str(), amount).unwrap_or(Some(amount.clone()))
                 }),
-            fee,
         )
     }
 
@@ -575,7 +563,16 @@ impl Rail for FakeRail {
         &self,
         idempotency_key: AttemptId,
     ) -> BoxFuture<'_, Result<Option<RailOutcome>, RailError>> {
-        let inner = self.lock();
+        let mut inner = self.lock();
+        if inner.lookups_failing > 0 {
+            inner.lookups_failing -= 1;
+            drop(inner);
+            return Box::pin(async {
+                Err(RailError::Unavailable(
+                    "the method's history can't be read now".into(),
+                ))
+            });
+        }
         let keeps_history = inner.declaration.is_none_or(|d| d.history);
         let answer = if !keeps_history || inner.forgotten.contains(&idempotency_key) {
             None

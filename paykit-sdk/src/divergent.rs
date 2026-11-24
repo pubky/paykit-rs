@@ -1232,6 +1232,40 @@ impl Paykit {
         responses_of(&self.identity(), values.into_iter().map(|(_, value)| value))
     }
 
+    /// The Private Payment Lists of `payee`'s apps kept over their records until the user
+    /// confirms them (`dw/`, the list role), as `(app, list version, record)`: each names a
+    /// `payment_lists` record of that app the list request must judge ([`Paykit::pause_at`]),
+    /// though the record may not read. A kept list that doesn't read, or is kept under
+    /// another record than its app's, is left out: placing it reports it (Paykit spec 6).
+    pub(crate) async fn lists_kept_over(
+        &self,
+        payee: &[u8; 32],
+    ) -> Result<Vec<([u8; 16], paykit_lib::ListVersion, [u8; 32])>> {
+        let own = self.identity();
+        let mut kept = Vec::new();
+        for (_, value) in self
+            .local_scan_readable::<DivergentWrite>(key::DIVERGENT_WRITES)
+            .await?
+        {
+            if value.role != WriteRole::List {
+                continue;
+            }
+            let Ok(stored) = value.message.stored(&own) else {
+                continue;
+            };
+            let app_id = stored.message().from.app_id;
+            if stored.sender() != *payee
+                || self.app.record_key(&list_target(payee, &app_id))? != value.record
+            {
+                continue;
+            }
+            if let Some(version) = crate::receive::list_version(&stored) {
+                kept.push((app_id, version, value.record));
+            }
+        }
+        Ok(kept)
+    }
+
     /// The mark at `record`, read bound ([`state::Stored`]) and checked against the record
     /// held there, `view` ([`Marked::of`]), before anything is decided on it.
     async fn marked(&self, record: &[u8; 32], view: Option<&View>) -> Result<Marked> {
@@ -1638,8 +1672,18 @@ impl Paykit {
             // The record's mark is judged by the one check below (`Paykit::pause_at`): one
             // that doesn't point to its record is paused.
             let held = self.app.shared_record(&record).await?;
-            if role != WriteRole::List && crate::records::activity_base_changed(held.as_ref()) {
-                if crate::stored::past_window(accepted_at, self.service_time()) {
+            // Over a disputed record, a divergent delete among them, the message is kept, never
+            // written, and given up at its 30 days with the host's notice; over a delete while
+            // the copy may lack records, it waits, never given up meanwhile (Paykit spec 8.1,
+            // "Records not listed yet"). A later write that ends the dispute lets it be placed.
+            if role != WriteRole::List
+                && held.as_ref().is_some_and(crate::records::content_disputed)
+            {
+                let unlisted = held
+                    .as_ref()
+                    .is_some_and(|held| held.content == RecordContent::Deleted)
+                    && self.side_unlisted(role.side()).await?;
+                if !unlisted && crate::stored::past_window(accepted_at, self.service_time()) {
                     self.give_up_divergent(&kept_key, &stored).await?;
                 }
                 continue;

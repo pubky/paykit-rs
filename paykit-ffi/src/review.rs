@@ -109,8 +109,6 @@ pub enum RefusalKind {
         requested: Amount,
         /// The exact transfer the payment method proposes, if known.
         amount: Option<Amount>,
-        /// The method's maximum fee, if known.
-        max_fee: Option<String>,
     },
     /// This payment requires authorization of the original rate, destination and resulting amount.
     PricedByRate {
@@ -172,16 +170,27 @@ pub enum RefusalKind {
     /// A labelled selling app sends every request under one of its labels, and only under a label
     /// it holds (Paykit spec 3.1, 8.1).
     Label,
-    /// The request was rejected by this identity (Paykit spec 8.1).
+    /// The request was rejected by this identity (Paykit spec 8.1), or the Allowance by either
+    /// side (Paykit spec 8.3): nothing more is done under it.
     Rejected,
     /// The request was cancelled by either side (Paykit spec 8.1).
     Cancelled,
-    /// The Allowance has ended, by either side or by its proposal's withdrawal, or this app keeps
-    /// the counterparty's end as its stop: nothing more is done under it (Paykit spec 8.3).
+    /// The Allowance has ended, by either side, by its proposal's withdrawal or when its terms
+    /// expire, or this app keeps the counterparty's end as its stop: nothing more is done under
+    /// it, and no later call changes that (Paykit spec 8.3).
     AllowanceEnded,
     /// The Allowance is conflicted: a second, different proposal or response came, so nothing is
     /// answered, ended, granted or paid under it, for good (Paykit spec 8.3, "Conflicted").
     AllowanceConflicted,
+    /// The user must confirm this Allowance again before this app pays under it, after a missed
+    /// item, a restore until it is judged clean or the user confirms, or a provider loss, for one
+    /// the user confirmed before the loss. Show the Allowance and,
+    /// once the user confirms, call `confirm_allowance_executor` (Paykit spec 8.3). No Allowance
+    /// payment, resume or confirm call is bound yet, so hosts don't receive it today.
+    AllowanceConfirmationNeeded {
+        /// The 32-byte record key of the Allowance to confirm.
+        record: Vec<u8>,
+    },
     /// A payee activity record lost credit history to a delete.
     CreditHistoryLost,
     /// The obligation is paid: its claim is SETTLED, or its record holds the proof of a payment
@@ -209,9 +218,18 @@ pub enum RefusalKind {
     NotSubscribed,
     /// Automatic payment must wait for the period. Paying early requires explicit confirmation.
     PeriodNotStarted,
-    /// The occurrence carries a manual-only mark or is funded under an Allowance.
+    /// Not paid by this call's automatic payer: a manual-only mark leaves it for the user; a
+    /// Billing Period funded under an Allowance, asked of the wallet's own policy, is left for
+    /// that Allowance's executor; one funded under none, asked of an executor, is left for the
+    /// wallet's own policy or the user.
     ManualOnly,
-    /// The subscription or service time does not authorize automatic payment.
+    /// Not paid automatically, for good: the subscription or service time doesn't authorize
+    /// automatic payment (Paykit spec 8.2), or the request or Billing Period doesn't qualify
+    /// under its Allowance: outside its terms, or its lifetime limit used up with nothing
+    /// reserved or to release, the Allowance the payment was reserved under expired before
+    /// its first dispatch, or it was set up before a provider loss and never granted here:
+    /// end it and set up a new one (Paykit spec 8.3); or, after a provider loss, the request
+    /// is one-time, under the shared post-loss hold (Paykit spec 8.1). The user may still pay it by hand.
     NotAutomatic,
     /// All retained period slots may have an open attempt.
     AttemptedPeriodsFull,
@@ -297,7 +315,6 @@ impl PaymentRefusal {
                 payload_hash: q.payload_hash.into(),
                 requested: (&q.amount).into(),
                 amount: q.transfer.amount.as_ref().map(Into::into),
-                max_fee: q.transfer.max_fee.as_ref().map(|v| v.as_str().into()),
             },
             Refusal::PricedByRate { payment: p } => D::PricedByRate {
                 request: p.request.into(),
@@ -339,6 +356,9 @@ impl PaymentRefusal {
             Refusal::Cancelled => D::Cancelled,
             Refusal::AllowanceEnded => D::AllowanceEnded,
             Refusal::AllowanceConflicted => D::AllowanceConflicted,
+            Refusal::AllowanceConfirmationNeeded { hold } => D::AllowanceConfirmationNeeded {
+                record: hold.record().into(),
+            },
             Refusal::CreditHistoryLost => D::CreditHistoryLost,
             Refusal::AlreadyPaid => D::AlreadyPaid,
             Refusal::BeingHandledByOtherWallet => D::BeingHandledByOtherWallet,

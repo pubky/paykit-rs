@@ -45,7 +45,7 @@ impl Paykit {
     ///
     /// # Errors
     ///
-    /// The first read's failure, or the Switch client's refusal without `conversation.add`.
+    /// The first read's failure, or the Switch client's refusal without `reply.add`.
     pub async fn allow_connect(&mut self, payee: &[u8; 32]) -> Result<()> {
         // A delivery operation for the whole call (Paykit spec 8.1).
         let _delivery = self.delivery_operation();

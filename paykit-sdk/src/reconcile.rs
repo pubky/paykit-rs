@@ -524,6 +524,8 @@ impl Paykit {
                 let mut found: std::collections::BTreeMap<_, (Destination, Carrier)> =
                     std::collections::BTreeMap::new();
                 for list in self.lists_of(&obligation.payee).await? {
+                    // A value over a delete seen names nothing (Paykit spec 6; wire 5):
+                    // `lists_of` gives only the lists the gate admits.
                     if required.is_some_and(|app| app != list.app_id) {
                         continue;
                     }
@@ -953,6 +955,10 @@ impl Paykit {
                 &request_hash,
             ));
             let parent_key = self.activity_key(&parent)?;
+            // The `done` is conditioned on the parent request's record too: paused after a
+            // view showed it divergent, it waits for the user's confirmation of that record
+            // as well (Paykit spec 6).
+            Box::pin(self.refuse_while_paused(&[parent_key])).await?;
             let base = self.activity_write_base(&parent_key).await?;
             let request = self.read_activity(&parent, base.as_ref());
             let proof = record.proof.as_ref().map(|stored| stored.body());

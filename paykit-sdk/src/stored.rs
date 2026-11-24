@@ -56,9 +56,11 @@
 //! gone, is not taken, and stays for the host. So once [`Paykit::receive`] has returned,
 //! the host may acknowledge for Paykit up to the last event its report showed
 //! (`App::ack_events_for`), and app-wide (`App::ack_events`) only once every other protocol
-//! each event is for has handled it. The SDK also acknowledges for Paykit, in order, the
-//! events it has taken up to the first one it hasn't, so they don't pile up for a host that
-//! acknowledges only its own: housekeeping, which decides nothing.
+//! each event is for has handled it. The SDK also acknowledges for Paykit each event it has
+//! taken, one by one (`App::ack_event_with`), so they don't pile up for a host that
+//! acknowledges only its own: housekeeping, which decides nothing. An event it doesn't take,
+//! such as `AppEvent::ListsUnverified`, which the host shows the user, stays for the host,
+//! and never holds back the acknowledgement of a later one Paykit took.
 
 use paykit_lib::derive::natural_key;
 use paykit_lib::records::{ActivityRecord, StoredMessage};
@@ -370,14 +372,14 @@ impl Paykit {
     }
 
     /// Take Paykit's duty events about stored entries the client hasn't had acknowledged,
-    /// from `events`, each at its first sight (module docs, "Taken at first sight"); acknowledge,
-    /// in order, those taken up to the first that isn't; drop the marks of events
-    /// acknowledged. Only Paykit's own local state is written: the kept messages are written
-    /// into their records by [`Paykit::place_stored`].
+    /// from `events`, each at its first sight (module docs, "Taken at first sight");
+    /// acknowledge each one taken, by itself, so one left to the host holds back none of
+    /// them; drop the marks of events acknowledged. Only Paykit's own local state is
+    /// written: the kept messages are written into their records by
+    /// [`Paykit::place_stored`].
     pub(crate) async fn take_stored_events(&mut self, events: &[AppEvent]) -> Result<()> {
         let mut listed = std::collections::BTreeSet::new();
-        let mut prefix = true;
-        let mut through = None;
+        let mut acknowledged = Vec::new();
         for event in events {
             if !self.app.event_is_for(event, crate::protocol::BACKUP_NAME) {
                 continue;
@@ -391,15 +393,12 @@ impl Paykit {
                 None => self.take_stored_event(event, &mark).await?,
             };
             listed.insert(mark);
-            prefix &= taken;
-            if prefix {
-                through = Some(id);
+            if taken {
+                acknowledged.push(id);
             }
         }
-        if let Some(id) = through {
-            self.app
-                .ack_events_for(crate::protocol::BACKUP_NAME, id)
-                .await?;
+        for id in acknowledged {
+            self.ack_taken(id).await?;
         }
         let mut gone = Tx::default();
         for (rest, _) in self.local_scan::<bool>(key::TAKEN).await? {
@@ -411,12 +410,38 @@ impl Paykit {
         self.local_commit(gone).await
     }
 
+    /// Acknowledge for Paykit the duty event `id`, which it took, by itself (Switch spec 8.2).
+    /// One acknowledged already, as by a commit whose outcome was unknown, is no longer owed
+    /// to Paykit, and nothing is left to do; one still owed that the client refuses to
+    /// acknowledge is the call's error.
+    async fn ack_taken(&mut self, id: pubky_switch_client::app::EventId) -> Result<()> {
+        match self
+            .app
+            .ack_event_with(crate::protocol::BACKUP_NAME, id, &[])
+            .await
+        {
+            Ok(()) => Ok(()),
+            Err(AppError::Refused(ClientRefusal::Usage(_)))
+                if !self.app.pending_duty_events().await?.iter().any(|duty| {
+                    duty.event.id() == Some(id)
+                        && duty
+                            .owners
+                            .iter()
+                            .any(|owner| owner == crate::protocol::BACKUP_NAME)
+                }) =>
+            {
+                Ok(())
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
     /// Take now the client's report of the first delivery of `msg_id` ending, undelivered
     /// or unknown, as the next receive would ([`Paykit::take_stored_events`]). A host can
     /// change or withdraw its list again after native delivery finished and before its next
     /// receive: the previous issue's outcome is recorded while its ID still identifies that
     /// recipient's reservation. A stop ended past its 30 days tells the host at once. Its
-    /// duty keeps its ordinary ack order. Whether it was taken.
+    /// duty is acknowledged at the next receive, as any Paykit takes. Whether it was taken.
     pub(crate) async fn take_delivery_duty(&mut self, msg_id: &str) -> Result<bool> {
         for duty in self.app.pending_duty_events().await? {
             if duty
@@ -821,6 +846,21 @@ impl Paykit {
         {
             return Ok(PeriodPlace::AwaitsWrite);
         }
+        // Over the request record or the period record seen divergent and not confirmed,
+        // whose upload may hold a stop or other details, a write that adds no stop waits for
+        // the user's confirmation, nothing decided on the writes held, the period's window
+        // included (Paykit spec 6). The order among the messages kept over a record is
+        // `place_note`'s (`Paykit::divergent_write_waits`).
+        if !crate::divergent::adds_stop(stored) {
+            for over in [target, &into] {
+                if Box::pin(self.pause_seen(&self.activity_key(over)?))
+                    .await?
+                    .write_waits()
+                {
+                    return Ok(PeriodPlace::AwaitsWrite);
+                }
+            }
+        }
         if matches!(stored.body(), Body::PaymentPeriodDetails(_)) {
             let stopped = self.kept_stop(target).await?;
             let period = self.held_activity(&into).await?;
@@ -1067,6 +1107,7 @@ impl Paykit {
         if crate::records::activity_base_changed(held.as_ref()) {
             return Ok(Placed::Not);
         }
+        let disputed = held.as_ref().is_some_and(crate::records::content_disputed);
         let content = held.map(|record| record.content);
         // Absent or deleted while the copy of its side may lack records: the copy decides
         // nothing yet (Paykit spec 8.1, "Records not listed yet"), whatever key the record's
@@ -1076,6 +1117,13 @@ impl Paykit {
             && self.side_unlisted(record_side(target)).await?
         {
             return Ok(Placed::Waits);
+        }
+        // Over a divergent delete, or a divergent value the app can't read, whose upload may
+        // hold what the current write lacks, such as a cancellation, the record is never
+        // opened again: the message isn't written, and is given up at its 30 days with the
+        // host's notice, confirmed or not (`content_disputed`).
+        if disputed {
+            return Ok(Placed::Not);
         }
         // Over a divergent record its user hasn't confirmed, only a stop is written, and while
         // messages kept over it before this one wait to be written, they go first: the

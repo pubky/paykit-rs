@@ -16,7 +16,7 @@
 //! let terms = protocols.terms(&["paykit_pay".into(), "paykit_contacts".into()]).unwrap();
 //! assert_eq!(
 //!     terms.permission_names(),
-//!     ["claims.read", "claims.write", "lists.read", "conversation.add"]
+//!     ["claims.read", "claims.write", "lists.read", "reply.add"]
 //! );
 //! ```
 //!
@@ -111,7 +111,7 @@ mod tests {
             Ok(())
         }
         fn permissions(&self, _: &[&str]) -> Vec<Permission> {
-            vec![Permission::ConversationAdd, Permission::ListsRead]
+            vec![Permission::ReplyAdd, Permission::ListsRead]
         }
         fn grant_paths(&self, _: &[u8; 16], _: &[&str]) -> Vec<GrantPath> {
             vec![GrantPath {
@@ -260,7 +260,7 @@ mod tests {
         let protocols = Protocols::new(vec![Arc::new(PaykitProtocol), Arc::new(Chat)]).unwrap();
         let scopes = ["paykit_contacts", "chat"];
         let terms = terms(&protocols, &scopes);
-        assert_eq!(terms.permission_names(), ["lists.read", "conversation.add"]);
+        assert_eq!(terms.permission_names(), ["lists.read", "reply.add"]);
         assert_eq!(terms.keyed, names(&scopes));
         check_certificate(&certificate(&scopes, &terms)).unwrap();
     }

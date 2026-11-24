@@ -1,6 +1,7 @@
 //! An enrolled shop for exercising the native host clients on the local Switch harness.
 use crate::{
-    HostRail, PaymentMethod, RequestId, RuntimeTimer, WalletError, WalletHost, WalletStore,
+    Amount, EndpointSupport, HostRail, MethodDeclaration, PaymentMethod, RequestId, RuntimeTimer,
+    WalletError, WalletHost, WalletStore,
 };
 use paykit_lib::{
     Asset, Decimal, PaymentAmount, PaymentEndpointIdentifier, PaymentEndpointPayload,
@@ -50,7 +51,7 @@ impl Transport for CheckoutService {
 pub struct CheckoutFixture {
     world: Mutex<Option<World>>,
     host: Arc<WalletHost>,
-    method: Arc<dyn PaymentMethod>,
+    method: Method,
     signer: Mutex<Signer>,
     seller: Mutex<Paykit>,
     buyer: [u8; 32],
@@ -60,14 +61,14 @@ pub struct CheckoutFixture {
 impl CheckoutFixture {
     async fn open(
         store: Arc<dyn WalletStore>,
-        method: Arc<dyn PaymentMethod>,
+        method: Method,
     ) -> Result<Arc<Self>, Box<dyn Error>> {
         let world = crate::fixture_service::start()?;
         let buyer = world.identity("buyer")?.public();
         let owner = world.identity("shop")?;
         let signer = Box::pin(signer::serving(&world, "buyer")).await?;
         let mut issuer = Box::pin(signer::serving(&world, "shop")).await?;
-        let rail = Arc::new(device_rail(method.clone())?);
+        let rail = Arc::new(device_rail(&method));
         let host = Arc::new(WalletHost {
             clock: world.clock().clone(),
             transport: Arc::new(CheckoutService(world.transport())),
@@ -138,14 +139,21 @@ async fn harness<T: Send + 'static>(
 const TEST_PAY_LIMIT: Duration = Duration::from_secs(2);
 
 /// Each test device keeps its own record of payments in flight, as separate devices do.
-fn device_rail(method: Arc<dyn PaymentMethod>) -> Result<HostRail, WalletError> {
-    Ok(HostRail::new(
-        method,
-        vec![PaymentEndpointIdentifier::new("btc-lightning-bolt11")
-            .map_err(|_| WalletError::invalid("test endpoint"))?],
+fn device_rail(method: &Method) -> HostRail {
+    HostRail::new(
+        method.method.clone(),
+        method.declaration.clone(),
+        method.endpoints.clone(),
     )
     .with_pay_limit(TEST_PAY_LIMIT)
-    .with_own_flights())
+    .with_own_flights()
+}
+
+/// The host's payment method and the data it declares with it.
+struct Method {
+    method: Arc<dyn PaymentMethod>,
+    declaration: MethodDeclaration,
+    endpoints: Vec<(PaymentEndpointIdentifier, Option<u32>)>,
 }
 
 fn invoice() -> paykit_lib::Result<RequestDraft> {
@@ -162,12 +170,20 @@ fn invoice() -> paykit_lib::Result<RequestDraft> {
     ))
 }
 
-/// Enroll a local shop and use the supplied foreign store and method on the buyer's wallet.
+/// Enroll a local shop and use the supplied foreign store and method on the buyer's wallet,
+/// with the declaration and endpoints the host would give `WalletHost`.
 #[uniffi::export]
 pub async fn enrolled_test_checkout(
     store: Arc<dyn WalletStore>,
     method: Arc<dyn PaymentMethod>,
+    declaration: MethodDeclaration,
+    endpoints: Vec<EndpointSupport>,
 ) -> Result<Arc<CheckoutFixture>, WalletError> {
+    let method = Method {
+        method,
+        declaration,
+        endpoints: crate::environment::supported_endpoints(endpoints)?,
+    };
     crate::runtime::run(async move {
         harness(async move || {
             CheckoutFixture::open(store, method)
@@ -193,9 +209,7 @@ impl CheckoutFixture {
             home: self.host.home.clone(),
             writer: self.host.writer.clone(),
             // Another device: the host's calls in progress on this one are not its own.
-            rail: Arc::new(
-                device_rail(self.method.clone()).expect("the checkout method declares history"),
-            ),
+            rail: Arc::new(device_rail(&self.method)),
             timer: self.host.timer.clone(),
             store,
         })
@@ -422,4 +436,69 @@ impl CheckoutFixture {
         })
         .await
     }
+}
+
+/// What the bindings make of a method's synchronous answers, for the host tests.
+#[derive(uniffi::Record)]
+pub struct MethodAnswers {
+    /// The candidate IDs selected; `None` when `select_endpoints` threw.
+    pub selected: Option<Vec<u32>>,
+    /// The code the wallet reports for a thrown `select_endpoints`.
+    pub selection_failure: Option<String>,
+    /// The transfer amount read; `None` when `transfer` threw or can't tell.
+    pub transfer_amount: Option<Amount>,
+    /// The settlement ID read; `None` when `settlement_id` threw or found none.
+    pub settlement_id: Option<Vec<u8>>,
+}
+
+/// Call `method`'s synchronous callbacks as Paykit does for the test checkout's endpoint,
+/// with `proof_json` as the proof.
+#[uniffi::export]
+pub fn test_method_answers(
+    method: Arc<dyn PaymentMethod>,
+    declaration: MethodDeclaration,
+    endpoints: Vec<EndpointSupport>,
+    proof_json: Vec<u8>,
+) -> Result<MethodAnswers, WalletError> {
+    use paykit_sdk::{CandidateId, PaymentEndpointCandidate, Rail};
+    let rail = HostRail::new(
+        method,
+        declaration,
+        crate::environment::supported_endpoints(endpoints)?,
+    );
+    let invalid = |_| WalletError::invalid("test checkout endpoint");
+    let endpoint = PaymentEndpointIdentifier::new("btc-lightning-bolt11").map_err(invalid)?;
+    let payload = PaymentEndpointPayload::new("lnbc1checkout").map_err(invalid)?;
+    let amount = PaymentAmount {
+        asset: Asset::new("btc").map_err(invalid)?,
+        value: Decimal::new("7").map_err(invalid)?,
+    };
+    let candidate =
+        PaymentEndpointCandidate::new(CandidateId::new(1), endpoint.clone(), payload.clone());
+    let proof = serde_json::from_slice(&proof_json).map_err(|_| WalletError::invalid("proof"))?;
+    let selection = rail.select_endpoints(&[candidate], Some(&amount));
+    Ok(MethodAnswers {
+        selected: selection
+            .as_ref()
+            .ok()
+            .map(|s| s.payable.iter().map(|id| id.get()).collect()),
+        selection_failure: selection.err().and_then(|error| {
+            WalletError::from(paykit_sdk::PaykitError::Rail(error))
+                .failure()
+                .map(|failure| failure.code.clone())
+        }),
+        transfer_amount: rail
+            .transfer(&endpoint, &payload, &amount)
+            .amount
+            .as_ref()
+            .map(Amount::from),
+        settlement_id: rail.settlement_id(&endpoint, &proof),
+    })
+}
+
+/// A wallet error whose SDK refusal quotes `text`, as one quoting the switch's own message
+/// does, for the host tests to check that none of it leaves the bindings.
+#[uniffi::export]
+pub fn test_outside_text_error(text: String) -> Result<(), WalletError> {
+    Err(paykit_sdk::PaykitError::Refused(paykit_sdk::Refusal::SwitchUnavailable(text)).into())
 }

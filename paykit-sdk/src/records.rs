@@ -347,8 +347,33 @@ impl KeptMessage {
     }
 }
 
+/// Whether the record's current content is disputed, so nothing Paykit reads there shows what
+/// the record holds until a later write settles it (Switch spec 12.6):
+/// - a recovery upload left the app's accepted contents and its next write at different
+///   signed operations of the same version (`different_write_at_held_version`);
+/// - or the client reports another write at the record's version, divergent (Switch wire
+///   7.4.14, as an honest lost service's recovery leaves it), over a delete or a value the
+///   app can't read. Such a record shows the user nothing to confirm, so it is held as the
+///   first case is. A divergent value it can read is shown instead, and paused until the
+///   user confirms it (Paykit spec 6, [`crate::divergent`]).
+///
+/// The checks that keep or protect a message over the record ask this: a cancellation's
+/// protection, a receipt kept over a delete, a restore's reading of its history. Kept so,
+/// a message is still given up with the host's notice once it is 30 days old. The checks
+/// that decide on the record, a credit, an answer or a write, take its pause instead,
+/// which the user's confirmation ends ([`activity_base_changed`]).
+pub(crate) fn content_disputed(record: &SharedRecord) -> bool {
+    record.different_write_at_held_version
+        || (record.divergent
+            && !matches!(
+                record.content,
+                pubky_switch_client::app::RecordContent::Value(_)
+            ))
+}
+
 /// A recovery upload can leave the app's accepted contents and its next write at
-/// different signed operations of the same version (Switch spec 12.6).
+/// different signed operations of the same version (Switch spec 12.6). A record seen
+/// divergent is paused instead, for the user's confirmation ([`crate::divergent`]).
 pub(crate) fn activity_base_changed(held: Option<&SharedRecord>) -> bool {
     held.is_some_and(|record| record.different_write_at_held_version)
 }
@@ -422,16 +447,21 @@ impl Paykit {
         #[cfg(feature = "test-support")]
         self.activity_binds
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let mut certs = self.certificates();
-        bind_activity_with(
-            value,
-            &self.identity(),
+        let own = self.identity();
+        // The memo is held only while the record is read: the binding after it calls the
+        // host's rail, which may call this handle again.
+        let record = {
+            let mut certs = self.certificates();
+            ActivityRecord::read_with(value, &own, side, &mut certs.memo).ok()?
+        };
+        bind_read(
+            record,
+            &own,
             side,
             label,
             &held.key,
             |t| self.app.record_key(t).ok(),
             &|endpoint, proof| self.rail.settlement_id(endpoint, proof),
-            Some(&mut certs.memo),
         )
     }
 
@@ -549,8 +579,41 @@ impl Paykit {
             .collect())
     }
 
+    /// The `lgone/` entry of the `payment_lists` record at `record_key`, if this app saw it
+    /// deleted or read a value there naming a delete ([`crate::state::LostListRecord`]).
+    pub(crate) async fn list_record_lost(
+        &self,
+        record_key: &[u8; 32],
+    ) -> Result<Option<crate::state::LostListRecord>> {
+        self.local_get::<crate::state::LostListRecord>(&crate::state::key::list_record_lost(
+            record_key,
+        ))
+        .await
+    }
+
+    /// Whether `destination`, an attempt's to `payee`, is an endpoint of a Private Payment
+    /// List whose key the gate closes ([`list_key_open`]): such an attempt is never
+    /// dispatched, first or repeat, by hand or automatically. What the payment method shows
+    /// of it, its history or a receipt, still settles it (Paykit spec 6; wire 5).
+    pub(crate) async fn list_destination_held(
+        &self,
+        payee: &[u8; 32],
+        destination: &crate::journal::Destination,
+    ) -> Result<bool> {
+        if destination.source()? != paykit_lib::records::DestinationSource::List {
+            return Ok(false);
+        }
+        let record_key = self
+            .app
+            .record_key(&list_target(payee, &destination.app_id))?;
+        Ok(!list_key_open(
+            self.list_record_lost(&record_key).await?.as_ref(),
+        ))
+    }
+
     /// As [`Paykit::lists_of`], each with the version of the write whose content it is: the
-    /// write the app took, never one it refused (Switch spec 8.2).
+    /// write the app took, never one it refused (Switch spec 8.2). Only a list the gate
+    /// admits ([`usable_list`]).
     pub(crate) async fn lists_read_of(
         &self,
         payee: &[u8; 32],
@@ -561,8 +624,10 @@ impl Paykit {
             let Some(value) = record.content.value() else {
                 continue;
             };
-            if let Some(list) = bind_list(value, &own, &record.key, |t| self.app.record_key(t).ok())
-            {
+            let lost = self.list_record_lost(&record.key).await?;
+            if let Some(list) = usable_list(value, &own, &record.key, lost.as_ref(), |t| {
+                self.app.record_key(t).ok()
+            }) {
                 if &list.payee == payee {
                     out.push((list, record.version));
                 }
@@ -753,28 +818,20 @@ pub(crate) fn bind_activity(
     record_key: impl Fn(&RecordTarget) -> Option<[u8; 32]>,
     settlement: Settlement<'_>,
 ) -> Option<ActivityRecord> {
-    bind_activity_with(value, own, side, label, key, record_key, settlement, None)
+    let record = ActivityRecord::read(value, own, side).ok()?;
+    bind_read(record, own, side, label, key, record_key, settlement)
 }
 
-/// [`bind_activity`], with the stored messages' certificates verified through `certs`
-/// ([`CertificateMemo`]) when given: every other check runs in full.
-// The binding's inputs, named as `bind_activity` names them, and the memo.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn bind_activity_with(
-    value: &[u8],
+/// The binding of [`bind_activity`] for `record`, read already from the value held at `key`.
+fn bind_read(
+    record: ActivityRecord,
     own: &[u8; 32],
     side: ActivitySide,
     label: Option<&Label>,
     key: &[u8; 32],
     record_key: impl Fn(&RecordTarget) -> Option<[u8; 32]>,
     settlement: Settlement<'_>,
-    certs: Option<&mut CertificateMemo>,
 ) -> Option<ActivityRecord> {
-    let record = match certs {
-        Some(certs) => ActivityRecord::read_with(value, own, side, certs),
-        None => ActivityRecord::read(value, own, side),
-    }
-    .ok()?;
     record.check_label(label).ok()?;
     let natural = record.natural_key_with(own, settlement).ok()?;
     let target = RecordTarget::new(
@@ -815,7 +872,10 @@ pub(crate) fn refuse_unless_may_send(
 }
 
 /// Bind a `payment_lists` value held at `key` (Paykit wire 5.4): `key` is the one derived
-/// from its `payee` and `app_id`.
+/// from its `payee` and `app_id`. A value carrying `lost_to_delete`, a put-back from an older
+/// copy, binds as none: no endpoint of its list is paid automatically (Paykit spec 6, wire
+/// 5), and this revision has no path by hand, so it reads as a record that doesn't read,
+/// never written over and never paid from.
 pub(crate) fn bind_list(
     value: &[u8],
     own: &[u8; 32],
@@ -823,7 +883,45 @@ pub(crate) fn bind_list(
     record_key: impl Fn(&RecordTarget) -> Option<[u8; 32]>,
 ) -> Option<PaymentListRecord> {
     let record = PaymentListRecord::read(value, own).ok()?;
+    if record.lost_to_delete.is_some() {
+        return None;
+    }
     (record_key(&list_target(&record.payee, &record.app_id))? == *key).then_some(record)
+}
+
+/// The gate every use of a `payment_lists` key passes: none once this app saw the record
+/// deleted, or read a value there naming a delete (`lost`, [`crate::state::LostListRecord`]).
+/// No value at the key is then taken as a list, placed or written over, and no attempt to
+/// one of its endpoints is dispatched, whatever the value's version or marks: the current
+/// Switch proves no record's lineage after a delete, so every later authorization of the
+/// record, and every endpoint use that depends on it, is withheld (Paykit spec 6, "Visible
+/// deletion without a copy"; wire 5, "Incomplete protected-record contract"). The payee is
+/// still paid through a request's own destination and its public endpoints.
+///
+/// Where each use passes it:
+/// - a new selection, and the reconstruction of an attempt's destination from its
+///   single-use mark ([`Paykit::lists_read_of`]);
+/// - every dispatch, first or repeat, by hand or automatic, a resumed attempt's included
+///   ([`Paykit::list_destination_held`], from `Paykit::dispatch_held`);
+/// - a list received, taken into the record or held (`receive::list_effect`);
+/// - a held list placed (`Paykit::place_held_list`).
+pub(crate) fn list_key_open(lost: Option<&crate::state::LostListRecord>) -> bool {
+    lost.is_none()
+}
+
+/// The list a `payment_lists` value read at `key` gives, if the gate ([`list_key_open`])
+/// admits the key and the value binds there ([`bind_list`]).
+pub(crate) fn usable_list(
+    value: &[u8],
+    own: &[u8; 32],
+    key: &[u8; 32],
+    lost: Option<&crate::state::LostListRecord>,
+    record_key: impl Fn(&RecordTarget) -> Option<[u8; 32]>,
+) -> Option<PaymentListRecord> {
+    if !list_key_open(lost) {
+        return None;
+    }
+    bind_list(value, own, key, record_key)
 }
 
 /// The client's target of the `payment_lists` record of a payee app.
@@ -849,6 +947,73 @@ mod extension_tests {
     use crate::testkit::{object, Party, NOW};
     use pubky_switch_core::message::Sender;
     use serde_json::json;
+
+    /// The stored value of `plaintext` from `sender`'s app, as a record holds it.
+    fn stored_value(
+        sender: &Party,
+        plaintext: &pubky_switch_core::message::MessagePlaintext,
+    ) -> serde_json::Value {
+        use pubky_switch_core::enc::{b64, pubky_id};
+        json!({
+            "sender": pubky_id(&sender.id()),
+            "cert": { "body": sender.cert.signed().body, "sig": sender.cert.signed().sig },
+            "plaintext": {
+                "sender_app": b64(&plaintext.sender_app_id()),
+                "signature": b64(&plaintext.signature()),
+                "json": b64(plaintext.json()),
+            },
+            "accepted_at": null,
+        })
+    }
+
+    #[test]
+    fn test_records_certificate_memo_hit_runs_every_other_check() {
+        // With the sender's certificate already verified, a stored message still fails for
+        // an expired `accepted_at`, a signature that doesn't verify and a kind its sender
+        // may not send (Paykit wire 5.2), as it does without the memo.
+        let alice = Party::new("alice", "wallet", &["paykit_pay", "paykit_contacts"]);
+        let bob = Party::new(
+            "bob",
+            "shop",
+            &["paykit_request", "paykit_settlements", "paykit_contacts"],
+        );
+        let signed = |kind: &str, body: serde_json::Value| {
+            Message::new(
+                kind,
+                Sender::of_app(bob.id(), &bob.keys),
+                alice.id(),
+                NOW,
+                vec![],
+                object(body),
+            )
+            .unwrap()
+            .sign(&bob.keys)
+            .unwrap()
+        };
+        let request = json!({
+            "amount": { "asset": "btc", "value": "1" },
+            "payment_reference": "invoice-7",
+            "proposal_expires_at": null
+        });
+        let good = stored_value(&bob, &signed("paykit.payment_request", request.clone()));
+        let mut memo = CertificateMemo::default();
+        StoredMessage::read_with(&good, &alice.id(), &mut memo).unwrap();
+        assert_eq!(memo.verifications(), 1);
+
+        let mut expired = good.clone();
+        expired["accepted_at"] = json!("2100-01-01T00:00:00Z");
+        let plaintext = signed("paykit.payment_request", request);
+        let mut signature = plaintext.signature();
+        signature[0] ^= 1;
+        let mut tampered = good.clone();
+        tampered["plaintext"]["signature"] = json!(pubky_switch_core::enc::b64(&signature));
+        let not_its_kind = stored_value(&bob, &signed("paykit.payment_proof", json!({})));
+        for bad in [expired, tampered, not_its_kind] {
+            assert!(StoredMessage::read(&bad, &alice.id()).is_err());
+            assert!(StoredMessage::read_with(&bad, &alice.id(), &mut memo).is_err());
+        }
+        assert_eq!(memo.verifications(), 1, "each was a hit");
+    }
 
     #[test]
     fn test_extension_signature_covers_sender_app_kind_refs_and_body_for_the_recipient() {

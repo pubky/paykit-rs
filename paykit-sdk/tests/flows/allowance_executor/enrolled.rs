@@ -12,6 +12,7 @@ use pubky_switch_harness::{parties::Asking, Backend, World};
 use pubky_switch_signer::{Protocols, Signer};
 
 mod payments;
+mod refusals;
 mod sibling;
 
 use super::{applied_put, terms, AllowanceRole, AllowanceStatus, Condition, Ledger};
@@ -524,11 +525,12 @@ async fn grant_without_original_application(world: &World) -> TestResult {
     assert!(Box::pin(payer.resume_allowance_executor(&keys[0]))
         .await
         .is_err());
-    assert!(
-        Box::pin(payer.confirm_allowance_executor(&keys[0], UserConfirmed::new()))
-            .await
-            .is_err()
-    );
+    assert!(Box::pin(payer.confirm_allowance_executor(
+        &payer.allowance(&keys[0]).await.unwrap().hold,
+        UserConfirmed::new()
+    ))
+    .await
+    .is_err());
     assert_eq!(Box::pin(original_bytes(&payer, &keys[0])).await?, prepared);
     assert!(payer
         .app()
@@ -675,7 +677,13 @@ async fn grant_after_original_application(world: &World) -> TestResult {
             assert!(restored.allowance(&keys[0]).await?.consented);
         } else {
             assert!(!view.consented, "incomplete backup has no grant consent");
-            assert!(resumed.is_err());
+            // Confirming can't lift it: the original approval isn't on this device.
+            assert!(!view.confirmation_needed, "{view:?}");
+            assert!(
+                matches!(resumed.as_ref().unwrap_err().refusal(), Some(paykit_sdk::Refusal::NotNow(reason))
+                if reason == "this app's grant is held, but its consent isn't on this device"),
+                "{resumed:?}"
+            );
             assert_eq!(local, prepared);
             assert!(!restored
                 .app()
@@ -683,13 +691,15 @@ async fn grant_after_original_application(world: &World) -> TestResult {
                 .await?
                 .ops
                 .contains(&originals[0]));
-            let refusal =
-                Box::pin(restored.confirm_allowance_executor(&keys[0], UserConfirmed::new()))
-                    .await
-                    .unwrap_err();
+            let refusal = Box::pin(restored.confirm_allowance_executor(
+                &restored.allowance(&keys[0]).await.unwrap().hold,
+                UserConfirmed::new(),
+            ))
+            .await
+            .unwrap_err();
             assert!(
                 matches!(refusal.refusal(), Some(paykit_sdk::Refusal::NotNow(reason))
-                if reason.contains("original Allowance grant and ledger")),
+                if reason == "this app's grant is held, but its consent isn't on this device"),
                 "{refusal}"
             );
             assert!(Box::pin(restored.reconcile_allowance(&keys[0]))

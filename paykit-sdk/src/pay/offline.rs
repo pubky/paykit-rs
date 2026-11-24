@@ -12,7 +12,7 @@ impl Paykit {
         carrier: Carrier,
         options: &PayOptions,
     ) -> Result<PayOutcome> {
-        self.own_identity_confirmed(true).await?;
+        self.own_identity_confirmed(true).await??;
         if self.app.follow_provider().await? != ProviderStatus::Current {
             return Err(
                 Refusal::NotNow("follow the payer's current switch before paying".into()).into(),
@@ -67,7 +67,7 @@ impl Paykit {
         if let Some(answer) = self.take_kept_lookup(&entry.payee).await?? {
             *peer = answer;
         }
-        let read = self.local_get::<u64>(key::LISTS_READ).await?;
+        let read = self.lists_read_at().await?;
         let copy = self.local_get::<Vec<[u8; 32]>>(key::DENIED).await?;
         let mark = self
             .local_get::<state::OwnBlockMark>(&key::own_block(&entry.payee))
@@ -79,7 +79,7 @@ impl Paykit {
         let lookup_answered = self.inspect_ready_lookup(&entry.payee, |_| ()).is_some();
         self.require_pay()?;
         self.transfer_holds(entry, peer, false)??;
-        self.app.may_attempt(false).map_err(not_now)?;
+        self.app.may_attempt(false).map_err(held_back)?;
         let (now, own_fresh) = self.dispatch_time();
         let Some((_, denied)) = read
             .zip(copy)
