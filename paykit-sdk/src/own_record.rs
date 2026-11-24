@@ -618,9 +618,10 @@ pub(crate) fn upkeep_outcome(
 ///
 /// The publisher's own: the Switch client refusing the record's update as one it can't
 /// sign (its `Usage` refusal), a list of what the payment method pays that the record can't
-/// carry among them (Switch wire 6.1); an edit the client keeps pending for that refusal; the
-/// delivery to the own switch failing on the way or answered with an error that isn't a
-/// wallet-wide stop (Switch spec 4.2); and an expiry policy this version doesn't know.
+/// carry among them (Switch wire 6.1); an edit the client keeps pending for that refusal; a
+/// call to the own switch for the upkeep, the service time read before signing or the
+/// delivery, failing on the way or answered with an error that isn't a wallet-wide stop
+/// (Switch spec 4.2); and an expiry policy this version doesn't know.
 /// Everything else ends the receive: a wallet-wide stop ([`crate::pay::stops_resume`]); the
 /// answers that the app's account or generation is no longer where the app reads it, a
 /// `not_found` for an account the switch doesn't host, `moved` and `stale_generation`
@@ -656,8 +657,8 @@ pub(crate) fn own_record_left_owed(error: &PaykitError) -> Option<&'static str> 
         ),
         AppError::Switch(switch) if switch.is_not_hosted() => None,
         AppError::Transport(_) | AppError::Switch(_) => Some(
-            "the app record's delivery to the own switch failed; the client sends it again at \
-             a later read (Switch spec 4.2)",
+            "the app record's upkeep couldn't complete with the own switch; it is tried again at \
+             a later receive (Switch spec 4.2)",
         ),
         _ => None,
     }
