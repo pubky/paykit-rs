@@ -183,19 +183,16 @@ pub struct AllowanceDispatch {
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Transfer {
-    /// The amount and asset it would transfer; `None` when it can't tell before paying.
+    /// The amount and asset it would transfer; `None` when it can't tell before paying. The
+    /// fee is the payment method's, which bounds it: Paykit configures, reports and checks
+    /// none (Paykit spec 7.2 step 1).
     pub amount: Option<PaymentAmount>,
-    /// The largest fee it may charge on top, in the same asset, that the payee can influence
-    /// through the destination it chose; `None` for none.
-    pub max_fee: Option<paykit_lib::Decimal>,
 }
 
 impl Transfer {
-    /// What the method would transfer: `amount`, `None` when it can't tell before paying,
-    /// and `max_fee`, the largest fee on top that the payee can influence through the
-    /// destination it chose, `None` for none.
-    pub fn new(amount: Option<PaymentAmount>, max_fee: Option<paykit_lib::Decimal>) -> Self {
-        Self { amount, max_fee }
+    /// What the method would transfer: `amount`, `None` when it can't tell before paying.
+    pub fn new(amount: Option<PaymentAmount>) -> Self {
+        Self { amount }
     }
 }
 

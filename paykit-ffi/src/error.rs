@@ -80,8 +80,10 @@ pub enum WalletError {
         /// What failed.
         failure: Arc<WalletFailure>,
     },
-    /// Nothing took effect: the call was refused before anything was written or applied, and
-    /// is safe to make again once its cause is fixed.
+    /// No payment was made and no message went out: the call is safe to make again once its
+    /// cause is fixed. An attempt's own writes may have happened: an `attempt_failed` stores
+    /// its attempt, closed as failed, and may mark a single-use endpoint used, which a retry
+    /// then leaves out.
     #[error("not sent: {}", failure.code)]
     NotSent {
         /// What failed.
@@ -236,7 +238,7 @@ impl Category {
             Category::NeedsUser => "the user must see this and decide",
             Category::RetryLater => "a later call can succeed",
             Category::OutcomeUnknown => "the call may have taken effect",
-            Category::NotSent => "nothing took effect",
+            Category::NotSent => "no payment or message went out",
             Category::Permanent => "the answer is final",
             Category::Recovery => "the wallet stopped for a recovery",
         }
@@ -313,6 +315,8 @@ pub(crate) fn refusal_category(kind: &crate::RefusalKind) -> (Category, &'static
         K::NotSubscribed => (NeedsUser, "not_subscribed"),
         // No wait lifts it, only the shared post-loss hold standing too; the user pays by hand.
         K::FloorHeld => (NeedsUser, "floor_held"),
+        // Confirmed with `confirm_allowance_executor` once the user has seen the Allowance.
+        K::AllowanceConfirmationNeeded { .. } => (NeedsUser, "allowance_confirmation_needed"),
         // The SDK gives its reason as text only, and the reasons span every case, from a wait
         // to an alarm: shown to the user, it is never retried by itself.
         K::NotNow => (NeedsUser, "not_now"),

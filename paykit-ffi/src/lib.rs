@@ -36,7 +36,7 @@ mod runtime;
 mod store;
 mod switch_refusal;
 mod wallet;
-// Empty until its group of wallet calls is bound; the allow goes with the first export.
+// A group's module may export nothing yet; the allow stays, so binding a group never edits this file.
 #[allow(unused_imports)]
 pub use allowances::*;
 #[cfg(feature = "test-wallet")]
@@ -45,28 +45,28 @@ pub use enrollment::*;
 pub use environment::*;
 pub use error::*;
 pub use events::*;
-// Empty until its group of wallet calls is bound; the allow goes with the first export.
+// A group's module may export nothing yet; the allow stays, so binding a group never edits this file.
 #[allow(unused_imports)]
 pub use executor::*;
-// Empty until its group of wallet calls is bound; the allow goes with the first export.
+// A group's module may export nothing yet; the allow stays, so binding a group never edits this file.
 #[allow(unused_imports)]
 pub use extensions::*;
-// Empty until its group of wallet calls is bound; the allow goes with the first export.
+// A group's module may export nothing yet; the allow stays, so binding a group never edits this file.
 #[allow(unused_imports)]
 pub use lists::*;
 pub use method::*;
 pub use notices::*;
-// Empty until its group of wallet calls is bound; the allow goes with the first export.
+// A group's module may export nothing yet; the allow stays, so binding a group never edits this file.
 #[allow(unused_imports)]
 pub use payee::*;
-// Empty until its group of wallet calls is bound; the allow goes with the first export.
+// A group's module may export nothing yet; the allow stays, so binding a group never edits this file.
 #[allow(unused_imports)]
 pub use payer::*;
 pub use payments::*;
-// Empty until its group of wallet calls is bound; the allow goes with the first export.
+// A group's module may export nothing yet; the allow stays, so binding a group never edits this file.
 #[allow(unused_imports)]
 pub use periods::*;
-// Empty until its group of wallet calls is bound; the allow goes with the first export.
+// A group's module may export nothing yet; the allow stays, so binding a group never edits this file.
 #[allow(unused_imports)]
 pub use public::*;
 pub use receive::*;

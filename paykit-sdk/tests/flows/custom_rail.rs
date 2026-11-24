@@ -30,8 +30,6 @@ struct LedgerRail {
     fake: Arc<FakeRail>,
     last: Mutex<Option<Map<String, Value>>>,
     supplies_id: bool,
-    /// The most the ledger may charge on top of a payment.
-    fee: Option<paykit_lib::Decimal>,
     /// Whether its proofs read `{ "type": "bitcoin-txid", "txid": "L-<entry>" }`: the
     /// spelling of another method, and not a valid one there.
     lookalike: bool,
@@ -124,10 +122,7 @@ impl Rail for LedgerRail {
         payload: &PaymentEndpointPayload,
         amount: &PaymentAmount,
     ) -> Transfer {
-        Transfer::new(
-            self.fake.transfer(endpoint_id, payload, amount).amount,
-            self.fee.clone(),
-        )
+        Transfer::new(self.fake.transfer(endpoint_id, payload, amount).amount)
     }
 
     fn fraction_digits(&self, endpoint_id: &PaymentEndpointIdentifier) -> Option<u32> {
@@ -256,7 +251,6 @@ async fn test_custom_rail_proof_credited_once_per_settlement() {
         supplies_id: true,
         lookalike: false,
         outputs: Mutex::new(None),
-        fee: None,
     });
     let mut wallet = joined(
         &w,
@@ -358,7 +352,6 @@ async fn test_custom_rail_two_payments_the_method_names_apart_are_both_credited(
         fake: Arc::clone(&w.rail),
         last: Mutex::new(None),
         supplies_id: true,
-        fee: None,
         lookalike: false,
         outputs: Mutex::new(Some(std::collections::BTreeMap::new())),
     });
@@ -458,7 +451,6 @@ async fn test_custom_rail_unrequested_proof_without_a_rail_is_dropped_with_its_r
         fake: Arc::clone(&w.rail),
         last: Mutex::new(None),
         supplies_id: true,
-        fee: None,
         lookalike: false,
         outputs: Mutex::new(None),
     });
@@ -517,7 +509,6 @@ async fn test_custom_rail_requested_proof_spelled_like_another_method_credited_b
         fake: w.rail.clone(),
         last: Mutex::new(None),
         supplies_id: true,
-        fee: None,
         lookalike: true,
         outputs: Mutex::new(None),
     });
@@ -611,119 +602,6 @@ fn test_custom_rail_paykit_reads_no_proof_itself() {
     }
 }
 
-/// Alice's wallet and bob's shop on `rail`, the wallet holding the shop's list, and the
-/// outcome of paying the list's reusable endpoint.
-async fn pay_through(w: &World, rail: &Arc<LedgerRail>) -> paykit_sdk::Result<PayOutcome> {
-    pay_through_with(w, rail, PaykitConfig::default()).await
-}
-
-/// [`pay_through`], the wallet with `config`.
-async fn pay_through_with(
-    w: &World,
-    rail: &Arc<LedgerRail>,
-    config: PaykitConfig,
-) -> paykit_sdk::Result<PayOutcome> {
-    let mut wallet = joined_with(
-        w,
-        &w.alice,
-        "wallet",
-        AppScopes::new().pay().build().unwrap(),
-        rail,
-        config,
-    )
-    .await;
-    wallet.app_mut().invite(&w.bob_id()).await.unwrap();
-    let mut shop = joined(
-        w,
-        &w.bob,
-        "shop",
-        AppScopes::new().request().build().unwrap(),
-        rail,
-    )
-    .await;
-    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 1))
-        .await;
-    wallet.receive(None).await.unwrap();
-    wallet
-        .pay_without_request(
-            UnrequestedPayment::new(w.bob_id(), btc("0.0015")).with_options(
-                PayOptions::default().with_endpoint(endpoint("btc-lightning-bolt12")),
-            ),
-        )
-        .await
-        .outcome
-}
-
-#[tokio::test]
-async fn test_custom_rail_any_fee_paid_with_no_cap() {
-    // With no fee cap, the default, Paykit makes no check of the fee (Paykit spec 7.2 step
-    // 1): a method that charges nothing pays, and so does one that may charge something.
-    for fee in ["0", "0.00000001"] {
-        let w = World::new();
-        let rail = Arc::new(LedgerRail {
-            fake: Arc::clone(&w.rail),
-            last: Mutex::new(None),
-            supplies_id: true,
-            lookalike: false,
-            outputs: Mutex::new(None),
-            fee: Some(paykit_lib::Decimal::parse(fee).unwrap()),
-        });
-        let outcome = pay_through(&w, &rail).await.unwrap();
-        assert!(
-            matches!(outcome, PayOutcome::Paid { .. }),
-            "{fee}: {outcome:?}"
-        );
-    }
-}
-
-#[tokio::test]
-async fn test_custom_rail_fee_cap_is_per_asset() {
-    // A fee of 0.00000010 BTC: paid under a BTC cap at least that, refused under one below
-    // it, and paid under a cap of another asset only, which leaves BTC uncapped.
-    let fee = || Some(paykit_lib::Decimal::parse("0.0000001").unwrap());
-    let btc = || paykit_lib::Asset::new("btc").unwrap();
-    let cap = |value: &str| paykit_lib::Decimal::parse(value).unwrap();
-    for (config, pays) in [
-        (
-            PaykitConfig::default().with_fee_cap(btc(), cap("0.0000001")),
-            true,
-        ),
-        (
-            PaykitConfig::default().with_fee_cap(btc(), cap("0.00000009")),
-            false,
-        ),
-        (
-            PaykitConfig::default().with_fee_cap(paykit_lib::Asset::new("usd").unwrap(), cap("1")),
-            true,
-        ),
-    ] {
-        let w = World::new();
-        let rail = Arc::new(LedgerRail {
-            fake: Arc::clone(&w.rail),
-            last: Mutex::new(None),
-            supplies_id: true,
-            lookalike: false,
-            outputs: Mutex::new(None),
-            fee: fee(),
-        });
-        let outcome = pay_through_with(&w, &rail, config).await;
-        if pays {
-            assert!(
-                matches!(outcome, Ok(PayOutcome::Paid { .. })),
-                "{outcome:?}"
-            );
-        } else {
-            assert!(
-                matches!(
-                    outcome.as_ref().map_err(|e| e.refusal()),
-                    Err(Some(paykit_sdk::Refusal::Transfer { .. }))
-                ),
-                "{outcome:?}"
-            );
-        }
-    }
-}
-
 #[tokio::test]
 async fn test_payee_deletion_a_restored_custom_receipt_waits_for_its_payment_method() {
     use paykit_lib::collections::Collection;
@@ -735,7 +613,6 @@ async fn test_payee_deletion_a_restored_custom_receipt_waits_for_its_payment_met
         supplies_id: true,
         lookalike: false,
         outputs: Mutex::new(None),
-        fee: None,
     });
     let mut wallet = joined(
         &w,
@@ -844,7 +721,6 @@ async fn test_custom_rail_requested_proof_without_a_settlement_id_keeps_its_own_
         supplies_id: false,
         lookalike: false,
         outputs: Mutex::new(None),
-        fee: None,
     });
     let mut buyer = joined(
         &w,

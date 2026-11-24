@@ -1235,15 +1235,17 @@ async fn test_allowances_withdrawal_crossing_the_acceptance_ends_it_on_both_side
         Some(Refusal::NotFound)
     ));
     assert!(shop.allowances().await.unwrap().is_empty());
-    let refused = Box::pin(crate::allowance_executor::attempt_after_withdrawal(
+    let (grant, refused) = Box::pin(crate::allowance_executor::attempt_after_withdrawal(
         &w,
         &mut wallet,
         &mut shop,
         &mine,
     ))
     .await;
-    assert!(
-        matches!(refused.refusal(), Some(Refusal::NotNow(reason)) if reason.contains("accepted executor grant")),
+    assert_eq!(grant.refusal(), Some(&Refusal::AllowanceEnded), "{grant:?}");
+    assert_eq!(
+        refused.refusal(),
+        Some(&Refusal::AllowanceEnded),
         "{refused:?}"
     );
     let ledger = wallet
@@ -1274,13 +1276,14 @@ async fn test_allowances_withdrawal_read_before_approval_leaves_the_ledger_unope
         .await
         .unwrap_err();
     assert_eq!(refused.refusal(), Some(&Refusal::NotFound));
-    let payment = Box::pin(crate::allowance_executor::attempt_after_withdrawal(
+    let (grant, payment) = Box::pin(crate::allowance_executor::attempt_after_withdrawal(
         &w,
         &mut wallet,
         &mut shop,
         &mine,
     ))
     .await;
+    assert_eq!(grant.refusal(), Some(&Refusal::NotFound), "{grant:?}");
     assert_eq!(payment.refusal(), Some(&Refusal::NotFound));
     assert!(wallet.app().shared_record(&mine).await.unwrap().is_none());
     assert!(wallet

@@ -49,7 +49,7 @@ impl PaymentMethod for Stalled {
         _: String,
         amount: Amount,
     ) -> Result<Arc<MethodTransfer>, MethodError> {
-        Ok(MethodTransfer::new(Some(amount), None).unwrap())
+        Ok(MethodTransfer::new(Some(amount)).unwrap())
     }
     async fn pay(&self, _: MethodPayment) -> Result<MethodOutcome, MethodError> {
         std::future::pending().await

@@ -11,12 +11,12 @@
 //! Recurring requests' Billing Periods have theirs (`periods.rs`); Allowances and publishing
 //! Private Payment Lists add their own the same way.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use paykit_lib::derive::request_obligation_blinded;
 use paykit_lib::scopes::{acts_as_payee, check_certificate};
-use paykit_lib::{Asset, Decimal, Label};
+use paykit_lib::Label;
 use pubky_switch_client::app::{
     App, AppBackup, AppConfig, AppEnv, AppError, AppEvent, HeldCursor, HomeserverReader,
     IdentityRefresh, JoinRequest, ProtocolSet, ReceiveReport,
@@ -87,15 +87,6 @@ pub struct PaykitConfig {
     /// at the floor that leaves only the pre-dispatch budget, less the clock tolerance, so
     /// an app that wants later repeats sets a larger value.
     pub orphan_after_s: Option<u64>,
-    /// The largest fee the payee can influence through its destination that the app pays
-    /// without asking, per asset, in whole units of the asset the payment method transfers,
-    /// which its fee is in (Paykit spec 7.2 step 1). A fee above an asset's cap makes the destination unusable for automatic
-    /// payment and needs the user's choice by hand. With no cap for an asset, the default,
-    /// Paykit makes no check of the fee and asks nothing for it: the fee is left to the
-    /// payment method, whose own limit, if any, is the only bound on it, an Allowance
-    /// executor's payments included. Set a cap when the payment method enforces no fee limit
-    /// of its own, or for a tighter bound on unattended payments.
-    pub fee_caps: BTreeMap<Asset, Decimal>,
     /// The label a payee app sends its requests under (Paykit spec 3.1, 8.1). An app holding
     /// only labelled selling scopes needs one unless it holds exactly one label.
     pub selling_label: Option<Label>,
@@ -126,16 +117,6 @@ impl PaykitConfig {
     #[must_use]
     pub fn with_orphan_after_s(mut self, orphan_after_s: u64) -> Self {
         self.orphan_after_s = Some(orphan_after_s);
-        self
-    }
-
-    /// The largest fee the payee can influence through its destination that the app pays
-    /// without asking when the payment method transfers `asset` (Paykit spec 7.2 step 1),
-    /// replacing any cap set for that asset before. Without a cap for an asset, Paykit makes no check of the
-    /// fee ([`PaykitConfig::fee_caps`]).
-    #[must_use]
-    pub fn with_fee_cap(mut self, asset: Asset, fee_cap: Decimal) -> Self {
-        self.fee_caps.insert(asset, fee_cap);
         self
     }
 
@@ -182,7 +163,6 @@ impl Default for PaykitConfig {
         Self {
             app: AppConfig::default(),
             orphan_after_s: None,
-            fee_caps: BTreeMap::new(),
             selling_label: None,
             resend_budget: DEFAULT_RESEND_BUDGET,
             extension_kinds: Vec::new(),
@@ -247,10 +227,12 @@ pub struct ReceiveSummary {
     /// delivery. This service observation does not authorize a payment or replace the
     /// signed request and its seller-scope checks.
     ///
-    /// The read is bounded. While `report.more` is set, it stopped on one of its per-call
-    /// budgets, such as its feed pages, with more to read now, and the host calls
-    /// [`Paykit::receive`] again without waiting, until a summary has it unset: nothing it
-    /// left is lost or reordered.
+    /// The read is bounded. `report.more` says it stopped on one of its per-call budgets,
+    /// such as its feed pages or the kept batches it sends again, with more to do now;
+    /// nothing it left is lost or reordered. The host handles the summary's events, then,
+    /// while `report.more` is set and `report.stopped` is not, calls [`Paykit::receive`]
+    /// again without waiting. With `report.stopped` set it inspects the reported event
+    /// instead: reading again does nothing until that is dealt with.
     pub report: ReceiveReport,
     /// The `msg_id`s of the messages received, each with its effect committed with the
     /// cursor move (Switch spec 8.2).
@@ -403,6 +385,16 @@ pub struct Paykit {
     /// Whether the lists were read since this handle's last receive or flush began: a raise
     /// owed asks for no second read before the next one ([`Paykit::raise_owed`]).
     pub(crate) lists_read_this_pass: bool,
+    /// Whether the read of the lists in progress already left a raise unwritten: one read
+    /// counts one try, however many raises it leaves unwritten ([`crate::floor::RaiseRetry`]).
+    pub(crate) raise_tried_in_read: bool,
+    /// The latest device time this handle's retry check saw since its last unwritten try, so
+    /// a clock put back, part of the way included, ends a wait ([`crate::floor::RaiseRetry`]).
+    pub(crate) raise_clock_seen: std::sync::atomic::AtomicU64,
+    /// When this handle last left a raise unwritten, on its monotonic clock: none since it
+    /// started means every wait is over, the time waited not being known; with it, a clock set
+    /// back between checks can't hide time ([`crate::floor::RaiseRetry`]).
+    pub(crate) raise_tried_at: std::sync::Mutex<Option<std::time::Instant>>,
     /// How many activity records this handle bound ([`Paykit::activity_binds`]).
     #[cfg(feature = "test-support")]
     pub(crate) activity_binds: std::sync::atomic::AtomicU64,
@@ -478,6 +470,9 @@ impl Paykit {
             identity_told: Vec::new(),
             raise_unwritten: false,
             lists_read_this_pass: false,
+            raise_tried_in_read: false,
+            raise_clock_seen: std::sync::atomic::AtomicU64::new(0),
+            raise_tried_at: std::sync::Mutex::new(None),
             #[cfg(feature = "test-support")]
             activity_binds: std::sync::atomic::AtomicU64::new(0),
             certificates: std::sync::Mutex::default(),
@@ -491,6 +486,16 @@ impl Paykit {
     pub fn activity_binds(&self) -> u64 {
         self.activity_binds
             .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Move this handle's last unwritten floor raise try `ms` back on its monotonic clock, as
+    /// if that much had passed since it without a receive. For tests of the retry wait, whose
+    /// monotonic count no test clock drives.
+    #[cfg(feature = "test-support")]
+    pub fn age_raise_try(&self, ms: u64) {
+        if let Ok(mut at) = self.raise_tried_at.lock() {
+            *at = at.and_then(|at| at.checked_sub(std::time::Duration::from_millis(ms)));
+        }
     }
 
     /// Join from an approval (Switch spec 12.1), as a Paykit App: the client's join, with
@@ -783,7 +788,9 @@ impl Paykit {
     /// anything is written but a store failure: `InvalidData` for a backup whose certificate
     /// Paykit refuses (Paykit wire 3.1), one without Paykit's layer or one another protocol
     /// made, or a journal with a malformed entry or two open entries for one obligation that
-    /// no earlier restore left; a store failure.
+    /// no earlier restore left; for a restore in place, state of the installation's it keeps
+    /// that doesn't verify, where a restore into an empty store, which reads none of it, is
+    /// the way to recover; a store failure.
     pub async fn restore(
         env: AppEnv,
         config: PaykitConfig,
@@ -847,6 +854,9 @@ impl Paykit {
         // as the hold (`crate::floor`), whatever the receive that met it got to, under a
         // refused certificate too: it is this app's own state.
         Box::pin(self.keep_held_floor()).await?;
+        // So does the loss marker of a list record the client holds, read before the receive
+        // that would keep it (`Paykit::place_held_lists`).
+        Box::pin(self.keep_list_loss_markers()).await?;
         Ok(PaykitBackup {
             app: self.app.backup_layered().await?,
         })

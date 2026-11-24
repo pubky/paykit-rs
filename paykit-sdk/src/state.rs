@@ -51,8 +51,9 @@
 //! | `ml` | set by a `missed` item: the shared records aren't listed by Paykit since, so a record's absence means nothing yet; cleared by Paykit's next listing (`hold.rs`); never restored | |
 //! | `lp/<recipient>/<generation>/<message hash>` | outstanding original publication batch IDs, kept atomically before submission and retained across restore | yes |
 //! | `lres/<recipient>` | the applied list, its publisher and original signed message, its first delivery outcome (open, undelivered or unknown) and any kept confirmation of another version, prior offers' latest possible expiry, and the interval of an outstanding withdrawal | yes |
-//! | `lh/<record key>` | a Private Payment List held because its `payment_lists` record doesn't read: never written over it, which could drop its single-use marks, until the record reads again with them, or reads absent and was never seen lost (`lgone/`); deleted once the record holds the list | |
-//! | `lgone/<record key>` | set in the commit in which this app sees the `payment_lists` record deleted, or holds a list over it while it doesn't read: a later absence of it, as after a forgotten delete or a restore, keeps a list held there; never cleared, and a restore keeps the installation's own as well as the backup's | yes |
+//! | `lh/<record key>` | a Private Payment List held because its `payment_lists` record doesn't read or bind, or was seen deleted (`lgone/`): never written over it, which could drop its single-use marks, until the record reads and binds, never created over an absent key; deleted once the record holds the list | |
+//! | `lgone/<record key>` | set in the commit in which this app sees the `payment_lists` record deleted, or reads a value there carrying `lost_to_delete` (`LostListRecord`): no later value or absence of it places a list held there; never cleared, and a restore keeps the union of the installation's and the backup's | yes |
+//! | `lur/<record key>` | set once a list was held over the `payment_lists` record because it didn't read or bind: a later absence keeps the list held, as what that value held stays unknown; cleared only by a delete seen (`lgone/`), which holds the list anyway, and a restore keeps the union of the installation's and the backup's | yes |
 //! | `kc/<record key>/<certificate hash>/<feed generation>` | a payee's cancellation of a request, kept until it is placed in the payer's request record | |
 //! | `peer/<pubky>` | a counterparty with Paykit activity, and when | |
 //! | `sv` | the highest service time the app verified, as the receive step and a flush last saw it, for the delivery hook's window of a held message, which judges by it, by the device clock only while none is kept; written also before every delivery Paykit starts. The client's own window for a message it queues again from signed plaintext, which ends a held answer released from its record, takes the later of the device clock and the service time instead, so under a fast device clock such an answer can be given up while a queued stop still goes (`send_holds.rs`, Paykit spec 8.1); never restored, a restore's first read writing it again | |
@@ -73,6 +74,7 @@
 //! | `fg` | the flagged senders as the app last read them, at most `MAX_FLAGGED_COPY`; absent while not known, which holds the asks of block marks (`marks.rs`); never restored | |
 //! | `bf` | the raise of the identity's block floor this app owes: the latest of the latest times of the block marks gone for the bound or their own expiry, and of a restore's first read of the lists; written to the shared `block_floor` record before the block marks ask and with any ask, and deleted in that batch; applied as a floor meanwhile (`crate::floor`) | yes |
 //! | `fk` | what this app keeps of the identity's block floor: the highest floor it has seen and whether it has seen the record divergent, the durable divergence hold; both only grow, and an in-place restore keeps the higher of the backup's and the installation's (`crate::floor::FloorKept`, Paykit wire 5.6) | yes |
+//! | `rr` | the block floor raises this app owes, tried and left unwritten for a cause other than the divergence hold: how many such tries in a row (`tries`) and the last one's time on this device's clock (`tried_at_ms`); each raise owed then, named apart from its time (`tried`: the unblocks' raise as one, each widening by its hold or restore, window and floor); the floor record held then, named by its state and the exact write the next write builds on (`floor`); and which parts the floor needs to read were there (`ready`: the scope keys, the listing, an open value). The wait is derived from the tries. Only a hint: one that doesn't read is taken as none (`crate::floor::RaiseRetry`, Paykit wire 5.6, Raising); never restored | |
 //! | `fo/<record key>` | a request record a read opened without `manual_only`, checked against the block floor once the read is done and marked if dated before it (`crate::floor`); never restored | |
 //! | `bk/<pubky>` | this app's block or unblock of `pubky` not yet shown by the list (`OwnBlockMark`): a block from before the switch is asked, an unblock only with the batch the client keeps; a block counts until a read of the list shows it, and is written again at a receive while the client neither keeps nor applied its batch, a restored one too, since the kept batch stays with the device that kept it; an unblock counts for payments and held sends only while the client still keeps its batch, never for the spam rule, and isn't restored (Paykit spec 8.1) | |
 //! | `ra/<sender>` | signed recovery requests for dropped replies, their first-delivery outcomes and any unresolved original missing from a restore | |
@@ -249,6 +251,28 @@ impl Paykit {
         })
     }
 
+    /// [`Paykit::local_scan`], leaving out a value that doesn't read or bind to its key: for
+    /// a scan that gathers hints across counterparties, where one entry's damage must not
+    /// stop the action for another.
+    pub(crate) async fn local_scan_readable<T: BoundRead>(
+        &self,
+        prefix: &str,
+    ) -> Result<Vec<(String, T)>> {
+        let held = self
+            .app
+            .protocol_scan(crate::protocol::BACKUP_NAME, prefix.as_bytes())
+            .await?;
+        self.binding(|binder| {
+            Ok(held
+                .iter()
+                .filter_map(|(key, value)| {
+                    let rest = rest_of(key, prefix.as_bytes())?;
+                    bound(key, value, binder).ok().map(|v| (rest, v))
+                })
+                .collect())
+        })
+    }
+
     pub(crate) async fn publication_batches(
         &self,
         recipient: &[u8; 32],
@@ -297,6 +321,16 @@ impl Paykit {
     }
 
     /// Delete one record and commit it.
+    /// Whether a value is kept at `key`, unread: for one that only paces work and is
+    /// deleted whether or not it reads.
+    pub(crate) async fn local_holds(&self, key: &str) -> Result<bool> {
+        Ok(self
+            .app
+            .protocol_get(crate::protocol::BACKUP_NAME, key.as_bytes())
+            .await?
+            .is_some())
+    }
+
     pub(crate) async fn local_delete(&mut self, key: &str) -> Result<()> {
         let mut tx = Tx::default();
         tx.delete(key);
@@ -561,6 +595,18 @@ impl Stored for crate::floor::FloorKept {
     }
 }
 
+impl sealed::Sealed for crate::floor::RaiseRetry {}
+
+impl Stored for crate::floor::RaiseRetry {
+    fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
+        if matches!(family, StateKey::RaiseRetry) && self.reads() {
+            Ok(())
+        } else {
+            corrupt()
+        }
+    }
+}
+
 impl sealed::Sealed for crate::floor::PendingUnblocks {}
 
 impl Stored for crate::floor::PendingUnblocks {
@@ -714,6 +760,95 @@ impl Stored for OwnBlockMark {
     }
 }
 
+/// That this app saw a `payment_lists` record deleted, or read a value at its key carrying
+/// `lost_to_delete` (`lgone/<record key>`; Paykit spec 6, "Visible deletion without a
+/// copy"; Paykit wire 5, "A visible delete without a copy" and "Incomplete
+/// protected-record contract"): the newest such version, and the delete's item hash. While
+/// it is kept, no value at that key is taken, and no list of that payee app is used, for
+/// any list version and whatever marks a value holds: a later authorization over a delete
+/// needs the Switch's lineage proof and its Paykit mapping, which this revision lacks, so
+/// wire 5 withholds it. An absence of the record keeps its list held too.
+///
+/// It is never removed: removing it would let a later absence of the record, or a value
+/// without the marks the delete took, read as a record never deleted, since no backup
+/// carries the client's own mark of what it saw, nor does a fresh store hold it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LostListRecord {
+    /// The record version of the newest delete seen, or of a write naming one: a report of
+    /// it again, or of an older one, as a covering read or a restore's listing gives,
+    /// changes nothing.
+    deleted: [u64; 2],
+    /// That delete's item hash, as the client reports a delete it verified (Switch wire
+    /// 6.6), which tells two deletes at one version apart, as a recovery can upload them
+    /// (Paykit spec 6); `None` when no report gave it, or two deletes at the version were
+    /// seen. Only an exact match is the same delete: any other at its version is merged.
+    #[serde(deserialize_with = "Option::deserialize")]
+    item: Option<[u8; 32]>,
+}
+
+impl LostListRecord {
+    /// The delete at record version `deleted`, of item hash `item` if the report gave it,
+    /// or a value carrying `lost_to_delete` written at that version: it names a delete that
+    /// lost content, which this app may never have seen (Paykit spec 6; wire 5).
+    pub(crate) fn over(
+        deleted: pubky_switch_core::ops::RecordVersion,
+        item: Option<[u8; 32]>,
+    ) -> Self {
+        Self {
+            deleted: [deleted.generation, deleted.version],
+            item,
+        }
+    }
+
+    /// Whether the newest delete kept is the one at `version`, known by its item hash: one
+    /// kept without it can't be told from another delete at that version.
+    pub(crate) fn deleted_at(&self, version: pubky_switch_core::ops::RecordVersion) -> bool {
+        self.deleted == [version.generation, version.version] && self.item.is_some()
+    }
+
+    /// The entry after `seen`, a delete seen now, is kept with it: the same delete, by its
+    /// item hash, or an older one, reported again changes nothing; a newer one, or another
+    /// at the same version, is merged in.
+    pub(crate) fn then(self, seen: Self) -> Self {
+        match seen.deleted.cmp(&self.deleted) {
+            std::cmp::Ordering::Less => self,
+            std::cmp::Ordering::Equal if self.item.is_some() && self.item == seen.item => self,
+            _ => self.merge(seen),
+        }
+    }
+
+    /// Both kept, as after a restore: the newer version, with its item hash, and none for
+    /// two different deletes at one version.
+    pub(crate) fn merge(self, other: Self) -> Self {
+        let item = match self.deleted.cmp(&other.deleted) {
+            std::cmp::Ordering::Greater => self.item,
+            std::cmp::Ordering::Less => other.item,
+            std::cmp::Ordering::Equal => self.item.filter(|_| self.item == other.item),
+        };
+        Self {
+            deleted: std::cmp::max(self.deleted, other.deleted),
+            item,
+        }
+    }
+}
+
+impl sealed::Sealed for LostListRecord {}
+
+/// Its delete's version is one a delete has: a write's, of a generation of at least 1
+/// (Switch wire 1.7, 3.3, 6.3).
+impl Stored for LostListRecord {
+    fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
+        const MAX_INT: u64 = (1 << 53) - 1;
+        let [generation, seq] = self.deleted;
+        let valid = (1..=MAX_INT).contains(&seq) && (1..=MAX_INT).contains(&generation);
+        match family {
+            StateKey::ListRecordLost(_) if valid => Ok(()),
+            _ => corrupt(),
+        }
+    }
+}
+
 impl sealed::Sealed for bool {}
 
 /// A mark, which every writer sets `true`.
@@ -733,7 +868,7 @@ impl Stored for bool {
             | StateKey::RestoreApproval(_)
             | StateKey::NotPaidBeforeLoss(_)
             | StateKey::FloorOpened(_)
-            | StateKey::ListRecordLost(_)
+            | StateKey::ListRecordUnread(_)
             | StateKey::Taken(_)
                 if *self =>
             {
@@ -1872,6 +2007,8 @@ pub(crate) mod key {
     /// The newest provider loss this app recorded, by the generation recovered at
     /// (`crate::loss`, the shared post-loss hold).
     pub(crate) const LOSS_RECORDED: &str = "rl";
+    /// A floor raise tried and left unwritten (`crate::floor::RaiseRetry`).
+    pub(crate) const RAISE_RETRY: &str = "rr";
     pub(crate) const NOT_PAID_BEFORE_LOSS: &str = "pn/";
     /// A `missed` item's hold whose end isn't known yet (`Paykit::bound_missed_hold`).
     pub(crate) const MISSED_END_UNKNOWN: &str = "mu";
@@ -1890,6 +2027,7 @@ pub(crate) mod key {
     pub(crate) const SERVICE_TIME: &str = "sv";
     pub(crate) const HELD_LISTS: &str = "lh/";
     pub(crate) const LISTS_LOST: &str = "lgone/";
+    pub(crate) const LISTS_UNREAD: &str = "lur/";
     pub(crate) const RECORDS_UNLISTED: &str = "nl";
     pub(crate) const MISSED_UNLISTED: &str = "ml";
     pub(crate) const MISSED_CONSENTS: &str = "mc";
@@ -2279,11 +2417,17 @@ pub(crate) mod key {
         format!("{HELD_LISTS}{}", b64(record_key))
     }
 
-    /// Set once this app has seen the `payment_lists` record at `record_key` deleted or
-    /// unreadable, and never cleared: a later absence of it says nothing of the marks it
-    /// held.
+    /// Set once this app has seen the `payment_lists` record at `record_key` deleted
+    /// ([`LostListRecord`]), and never cleared.
     pub(crate) fn list_record_lost(record_key: &[u8; 32]) -> String {
         format!("{LISTS_LOST}{}", b64(record_key))
+    }
+
+    /// Set while a list is held over the `payment_lists` record at `record_key` because
+    /// the record didn't read or bind, so a later absence keeps the list held; cleared by a
+    /// value that reads and binds, or by a delete seen ([`list_record_lost`]).
+    pub(crate) fn list_record_unread(record_key: &[u8; 32]) -> String {
+        format!("{LISTS_UNREAD}{}", b64(record_key))
     }
 
     /// This app's block or unblock of `pubky` not yet shown by a read of the lists
@@ -2498,8 +2642,10 @@ pub(crate) enum StateKey {
     ServiceTime,
     /// `lh/<record key>`: a list held over a record that didn't read.
     HeldList([u8; 32]),
-    /// `lgone/<record key>`: a `payment_lists` record seen deleted or unreadable.
+    /// `lgone/<record key>`: a `payment_lists` record seen deleted ([`LostListRecord`]).
     ListRecordLost([u8; 32]),
+    /// `lur/<record key>`: a `payment_lists` record a list is held over that didn't read.
+    ListRecordUnread([u8; 32]),
     /// `side/<msg_id>`: the side of a message the app sent.
     Side(String),
     /// `ex/<msg_id>`: why an acceptance the app sent may go while sends are held.
@@ -2568,6 +2714,8 @@ pub(crate) enum StateKey {
     IdentityNotice(crate::notices::NoticeKind),
     /// `rl`: the newest provider loss this app recorded.
     LossRecorded,
+    /// `rr`: a floor raise tried and left unwritten.
+    RaiseRetry,
     /// The local identifier of an unanswered floor write.
     FloorBatch,
     /// `fo/<record key>`: a request record a read opened without `manual_only`, to check
@@ -2719,6 +2867,7 @@ impl StateKey {
             "mh" => Self::MissedHold,
             "pl" => Self::LossBoundary,
             "rl" => Self::LossRecorded,
+            "rr" => Self::RaiseRetry,
             "mu" => Self::MissedEndUnknown,
             "nl" => Self::RecordsUnlisted,
             "ml" => Self::MissedUnlisted,
@@ -2853,6 +3002,7 @@ impl StateKey {
                     "fo" => Self::FloorOpened(b64_32(rest)?),
                     "lh" => Self::HeldList(b64_32(rest)?),
                     "lgone" => Self::ListRecordLost(b64_32(rest)?),
+                    "lur" => Self::ListRecordUnread(b64_32(rest)?),
                     "side" => Self::Side(msg_id(rest)?),
                     "ex" => Self::SendExemption(msg_id(rest)?),
                     "qs" => Self::QueuedStop(msg_id(rest)?),
@@ -3509,6 +3659,91 @@ mod tests {
     }
 
     #[test]
+    fn test_state_lost_list_record_bound_to_a_delete_version() {
+        let at = key::list_record_lost(&[1; 32]);
+        let lost = serde_json::json!({ "deleted": [1, 4], "item": null });
+        assert!(reads::<LostListRecord>(&at, lost.clone()));
+        assert!(reads::<LostListRecord>(
+            &at,
+            serde_json::json!({ "deleted": [1, 4], "item": vec![6u8; 32] })
+        ));
+        // A delete's version is a write's: never `{0, 0}`, a version or a generation 0, or
+        // past the integers.
+        for deleted in [
+            serde_json::json!([0, 0]),
+            serde_json::json!([1, 0]),
+            serde_json::json!([0, 5]),
+            serde_json::json!([1, 9_007_199_254_740_992u64]),
+        ] {
+            let at_version = serde_json::json!({ "deleted": deleted, "item": null });
+            assert!(!reads::<LostListRecord>(&at, at_version));
+        }
+        // Every member is written, no other is, and a bare mark is no value of this family.
+        assert!(!reads::<LostListRecord>(
+            &at,
+            serde_json::json!({ "deleted": [1, 4] })
+        ));
+        assert!(!reads::<LostListRecord>(
+            &at,
+            serde_json::json!({ "deleted": [1, 4], "item": null, "copy": null })
+        ));
+        assert!(!reads::<bool>(&at, serde_json::json!(true)));
+        assert!(!reads::<LostListRecord>(&key::held_list(&[1; 32]), lost));
+    }
+
+    /// The entry for a delete at version `deleted` of generation 1, with item hash `item`.
+    fn lost_at(deleted: u64, item: Option<u8>) -> LostListRecord {
+        LostListRecord {
+            deleted: [1, deleted],
+            item: item.map(|byte| [byte; 32]),
+        }
+    }
+
+    #[test]
+    fn test_state_lost_list_record_keeps_the_newest_delete() {
+        // A restore keeps the newer delete, whichever side holds it.
+        assert_eq!(
+            lost_at(4, Some(1)).merge(lost_at(6, Some(2))),
+            lost_at(6, Some(2))
+        );
+        assert_eq!(
+            lost_at(6, Some(2)).merge(lost_at(4, Some(1))),
+            lost_at(6, Some(2))
+        );
+        // A delete reported again by its item, or an older one, changes nothing; a newer
+        // one is kept.
+        assert_eq!(
+            lost_at(6, Some(2)).then(lost_at(6, Some(2))),
+            lost_at(6, Some(2))
+        );
+        assert_eq!(
+            lost_at(6, Some(2)).then(lost_at(5, None)),
+            lost_at(6, Some(2))
+        );
+        assert_eq!(lost_at(6, Some(2)).then(lost_at(7, None)), lost_at(7, None));
+        let at = key::list_record_lost(&[1; 32]);
+        let value = serde_json::to_value(lost_at(7, None)).expect("a lost record serializes");
+        assert!(reads::<LostListRecord>(&at, value));
+    }
+
+    #[test]
+    fn test_state_lost_list_record_tells_deletes_at_one_version_apart_by_item() {
+        let one = lost_at(4, Some(1));
+        // Another delete at the same version, as a recovery can upload, or one whose item
+        // isn't known, is merged: the entry no longer names one delete (Paykit spec 6).
+        for other in [lost_at(4, Some(2)), lost_at(4, None)] {
+            assert_eq!(one.clone().then(other), lost_at(4, None));
+        }
+        // Only a delete known by its item is the one a later report may name again.
+        let version = pubky_switch_core::ops::RecordVersion {
+            generation: 1,
+            version: 4,
+        };
+        assert!(one.deleted_at(version));
+        assert!(!lost_at(4, None).deleted_at(version));
+    }
+
+    #[test]
     fn test_state_marks_bound_to_their_sender_with_times_not_crossed() {
         let mark = |sender: u8, earliest: u64, latest: u64| {
             serde_json::json!({
@@ -3983,6 +4218,10 @@ mod tests {
                 key::list_record_lost(&pubky),
                 StateKey::ListRecordLost(pubky),
             ),
+            (
+                key::list_record_unread(&pubky),
+                StateKey::ListRecordUnread(pubky),
+            ),
             (key::side(id), StateKey::Side(id.into())),
             (key::send_exemption(id), StateKey::SendExemption(id.into())),
             (key::queued_stop(id), StateKey::QueuedStop(id.into())),
@@ -4088,6 +4327,7 @@ mod tests {
                 StateKey::IdentityNotice(crate::notices::NoticeKind::AutomaticPaymentsHeld),
             ),
             (key::LOSS_RECORDED.into(), StateKey::LossRecorded),
+            (key::RAISE_RETRY.into(), StateKey::RaiseRetry),
             (key::BLOCK_FLOOR.into(), StateKey::BlockFloor),
             (key::FLOOR_BATCH.into(), StateKey::FloorBatch),
             (key::floor_opened(&pubky), StateKey::FloorOpened(pubky)),

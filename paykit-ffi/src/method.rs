@@ -158,22 +158,16 @@ pub struct MethodTransfer(Transfer);
 
 #[uniffi::export]
 impl MethodTransfer {
-    /// Validate the exact amount and maximum fee the payment method would submit. The fee
-    /// is the largest the payee can influence through the destination it chose. The SDK
-    /// checks it only against a fee cap, and these bindings set none: the payment method's
-    /// own limit, if it has one, is the only bound on the fee (Paykit spec 7.2 step 1).
+    /// Validate the exact amount the payment method would submit. The fee is the payment
+    /// method's, which must bound it: the SDK configures, reports and checks none (Paykit
+    /// spec 7.2 step 1).
     #[uniffi::constructor]
-    pub fn new(amount: Option<Amount>, max_fee: Option<String>) -> Result<Arc<Self>, MethodError> {
+    pub fn new(amount: Option<Amount>) -> Result<Arc<Self>, MethodError> {
         let amount = amount
             .map(PaymentAmount::try_from)
             .transpose()
             .map_err(invalid_answer)?;
-        let fee = max_fee
-            .as_deref()
-            .map(Decimal::new)
-            .transpose()
-            .map_err(invalid_answer)?;
-        Ok(Arc::new(Self(Transfer::new(amount, fee))))
+        Ok(Arc::new(Self(Transfer::new(amount))))
     }
 }
 
@@ -277,9 +271,9 @@ pub trait PaymentMethod: Send + Sync {
         candidates: Vec<EndpointCandidate>,
         amount: Option<Amount>,
     ) -> Result<SelectedEndpoints, MethodError>;
-    /// Describe the proposed transfer and fee bound before authorizing payment.
-    /// A failure reads as a transfer the method can't quantify, which the user is asked to
-    /// confirm.
+    /// Describe the amount the method would transfer before authorizing payment. Its fee is
+    /// the method's own to bound. A failure reads as a transfer the method can't quantify,
+    /// which the user is asked to confirm.
     fn transfer(
         &self,
         endpoint: String,
@@ -310,13 +304,16 @@ pub trait PaymentMethod: Send + Sync {
     /// method defines to name one settlement, the same for every proof of it, read from the
     /// endpoint and the proof alone and deterministic. Paykit defines none and reads no
     /// proof; whether one transaction carries several payments, named apart, is the
-    /// method's rule. A method serving several endpoints whose proofs can carry the same
-    /// inner value names their settlements apart by the endpoint. Null for a proof that names
-    /// none: a payment without a request isn't credited by it. A failure reads as none, and
-    /// that is not retried: a proof of a payment that names no request is then dropped for
-    /// good (the payee's feed moves past it, and a resend of it is dropped as already
-    /// processed), and a requested proof skips the duplicate checks and asks the user whether
-    /// it is credited already. So never fail for a fault that may pass.
+    /// method's rule. The endpoint lets a method name apart settlements that are distinct,
+    /// such as those of several endpoints whose proofs can carry the same inner value. A
+    /// method for which one transaction is one settlement returns the same ID for every proof
+    /// of it, whatever the endpoint (Paykit wire 1.5): naming it apart would give one
+    /// settlement two marks. Null for a proof that names none: a payment without a request
+    /// isn't credited by it. A failure reads as none, and that is not retried: a proof of a
+    /// payment that names no request is then dropped for good (the payee's feed moves past
+    /// it, and a resend of it is dropped as already processed), and a requested proof skips
+    /// the duplicate checks and asks the user whether it is credited already. So never fail
+    /// for a fault that may pass.
     fn settlement_id(
         &self,
         endpoint: String,
@@ -456,7 +453,7 @@ impl Rail for HostRail {
         });
         match answer {
             Ok(transfer) => transfer.0.clone(),
-            Err(_) => Transfer::new(None, None),
+            Err(_) => Transfer::new(None),
         }
     }
 

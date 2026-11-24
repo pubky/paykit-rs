@@ -855,9 +855,10 @@ async fn test_stored_refused_list_held_notes_its_sender() {
 }
 
 #[tokio::test]
-async fn test_stored_refused_first_list_placed_once_a_write_lands() {
-    // The first list's record write is refused, so no record exists: the list is held only
-    // until a later write lands, never kept from its own payee for good.
+async fn test_stored_refused_first_list_stays_held_over_the_absent_key() {
+    // The first list's record write is refused, so no record exists: the list stays held,
+    // as no held list is created over an absent key, which can be a delete the service
+    // forgot (Paykit spec 6; wire 5, "Incomplete protected-record contract").
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
@@ -869,20 +870,14 @@ async fn test_stored_refused_first_list_placed_once_a_write_lands() {
     for _ in 0..2 {
         wallet.receive(None).await.unwrap();
     }
-    assert!(wallet.held_lists().await.unwrap().is_empty());
-    let paid = wallet
-        .pay_without_request(
-            paykit_sdk::UnrequestedPayment::new(w.bob_id(), btc("0.0015")).with_options(
-                PayOptions::default().with_endpoint(endpoint("btc-lightning-bolt12")),
-            ),
-        )
-        .await
-        .outcome
-        .unwrap();
-    assert!(
-        matches!(paid, paykit_sdk::PayOutcome::Paid { .. }),
-        "{paid:?}"
-    );
+    assert_eq!(wallet.held_lists().await.unwrap().len(), 1);
+    let payment = || {
+        paykit_sdk::UnrequestedPayment::new(w.bob_id(), btc("0.0015"))
+            .with_options(PayOptions::default().with_endpoint(endpoint("btc-lightning-bolt12")))
+    };
+    let held = wallet.pay_without_request(payment()).await.outcome;
+    assert!(held.is_err(), "{held:?}");
+    assert!(w.rail.all_executions().is_empty());
 }
 
 #[tokio::test]

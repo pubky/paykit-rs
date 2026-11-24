@@ -110,12 +110,12 @@ pub struct PayOptions {
     /// A Billing Period with incomplete pre-loss payment history stays held.
     pub may_be_paid_confirmed: Option<PaymentDoubt>,
     /// The transfer the user was shown and chose to pay anyway, as a refusal for another
-    /// amount, or a fee above the app's cap, gave it ([`Refusal::Transfer`]; Paykit spec 7.2
+    /// amount gave it ([`Refusal::Transfer`]; Paykit spec 7.2
     /// step 1). It lets only that destination, with that same transfer, be paid: one chosen
     /// or quoted differently since is refused again with what it would transfer now.
     ///
     /// Consent is needed only for what the user didn't ask for. A destination whose
-    /// transfer passes the check, the amount asked for with no fee beyond the cap, is paid
+    /// transfer passes the check, the amount asked for, is paid
     /// without it, on a call carrying a confirmation too: the user asked for that payment
     /// when they called pay, as in v0.1, where the wallet paid the target it resolved. The
     /// confirmed quote is then not used.
@@ -180,7 +180,7 @@ impl PayOptions {
     }
 
     /// The transfer the user was shown and chose to pay anyway, as a refusal for another
-    /// amount, or a fee above the app's cap, gave it ([`Refusal::Transfer`]; Paykit spec 7.2
+    /// amount gave it ([`Refusal::Transfer`]; Paykit spec 7.2
     /// step 1). Only that destination, with that same transfer, is paid.
     #[must_use]
     pub fn with_transfer_confirmed(mut self, quote: TransferQuote) -> Self {
@@ -361,13 +361,8 @@ pub struct TransferQuote {
     /// amount chosen for a payment without a request. `transfer.amount` separately names
     /// what the method would actually transfer, if known.
     pub amount: PaymentAmount,
-    /// What the method said it would transfer: its amount and largest fee.
+    /// What the method said it would transfer: its amount.
     pub transfer: Transfer,
-    /// The fee cap the transfer was judged under, `None` for none: the cap the app
-    /// configures for the asset transferred, or, at the final payment check, the one the
-    /// attempt was journaled with. A confirmation binds a fee only under the cap it was
-    /// shown with: one given under another cap, or none, is asked again.
-    pub fee_cap: Option<paykit_lib::Decimal>,
 }
 
 /// The payment outcome or error and any payee apps whose public endpoints the call
@@ -749,55 +744,20 @@ struct Ordered {
     error: Option<RailError>,
 }
 
-/// Why the transfer check refuses `transfer` for `amount` (Paykit spec 7.2 step 1), under
-/// the fee cap `cap`: another amount or asset, or one the method can't tell, or a fee above
-/// the cap. With no cap Paykit makes no check of the fee: it is left to the payment method,
-/// whose own limit, if any, is the only bound on it. The fee is in the transfer's asset,
-/// which is the payment's (checked first). `None` when it passes.
-fn transfer_refused(
-    transfer: &Transfer,
-    amount: &PaymentAmount,
-    cap: Option<&paykit_lib::Decimal>,
-) -> Option<&'static str> {
-    if transfer.amount.as_ref() != Some(amount) {
-        return Some(
-            "the destination transfers another amount or asset, or one the method can't tell",
-        );
-    }
-    fee_above_cap(transfer, cap).then_some("a fee above the app's cap")
-}
-
-/// Whether `transfer`'s largest fee is above the fee cap `cap` (Paykit spec 7.2 step 1):
-/// never with no cap.
-fn fee_above_cap(transfer: &Transfer, cap: Option<&paykit_lib::Decimal>) -> bool {
-    transfer
-        .max_fee
-        .as_ref()
-        .filter(|fee| !fee.is_zero())
-        .zip(cap)
-        .is_some_and(|(fee, cap)| fee > cap)
-}
-
-/// Whether the user's choice of `transfer` binds its largest fee (Paykit spec 7.2 step 1):
-/// a fee above the cap `cap`, and any fee of a transfer whose amount the method can't
-/// tell, whose asset, and so the cap its fee is judged by, Paykit can't know. Otherwise,
-/// with no cap or within it, a confirmation given for another reason doesn't bind the fee.
-fn binds_fee(transfer: &Transfer, cap: Option<&paykit_lib::Decimal>) -> bool {
-    transfer.amount.is_none() || fee_above_cap(transfer, cap)
+/// Why the transfer check refuses `transfer` for `amount` (Paykit spec 7.2 step 1): another
+/// amount or asset, or one the method can't tell. Paykit makes no check of the fee: it is
+/// the payment method's. `None` when it passes.
+fn transfer_refused(transfer: &Transfer, amount: &PaymentAmount) -> Option<&'static str> {
+    (transfer.amount.as_ref() != Some(amount)).then_some(
+        "the destination transfers another amount or asset, or one the method can't tell",
+    )
 }
 
 /// Whether `quote`, the transfer the method reports now, is the one the user confirmed,
-/// `confirmed` (Paykit spec 7.2 step 1): the same destination, amount, transfer amount and
-/// fee cap, and the same largest fee when the choice binds it ([`binds_fee`]). Amounts and
-/// fees compare as values, whatever their spelling (Paykit wire 1.2).
+/// `confirmed` (Paykit spec 7.2 step 1): the same destination, amount and transfer amount.
+/// Amounts compare as values, whatever their spelling (Paykit wire 1.2).
 fn confirms(confirmed: &TransferQuote, quote: &TransferQuote) -> bool {
-    let feeless = |q: &TransferQuote| TransferQuote {
-        transfer: Transfer::new(q.transfer.amount.clone(), None),
-        ..q.clone()
-    };
-    feeless(confirmed) == feeless(quote)
-        && (!binds_fee(&quote.transfer, quote.fee_cap.as_ref())
-            || confirmed.transfer.max_fee == quote.transfer.max_fee)
+    confirmed == quote
 }
 
 /// A fixed rate lasts as long as its request. A period rate needs both clocks.
@@ -1308,6 +1268,19 @@ impl Paykit {
     /// or current request cannot authorize the transfer, including when the payment
     /// would exceed a limit. Method, Switch and storage failures follow the ordinary
     /// payment request flow.
+    ///
+    /// Where the Allowance itself stops it, the refusal says whether that is for good:
+    /// [`Refusal::AllowanceEnded`] (ended, or its terms expired), [`Refusal::AllowanceConflicted`],
+    /// [`Refusal::Rejected`], [`Refusal::Usage`] (this app isn't its executor, or the request
+    /// is another counterparty's) and [`Refusal::NotAutomatic`] (outside its terms, its
+    /// lifetime limit used up with nothing reserved or to release, set up before a provider
+    /// loss and never granted here, or a one-time request after a provider loss) stop
+    /// automatic payment for good; [`Refusal::ScopeMissing`] stops it
+    /// until the signer renews this app's certificate with the scope;
+    /// [`Refusal::AllowanceConfirmationNeeded`] waits for the
+    /// user ([`Paykit::confirm_allowance_executor`]); [`Refusal::NotNow`] waits for a later
+    /// read or answer, such as an unblock of the counterparty, except after a provider loss
+    /// once the user confirmed again, which this version doesn't lift (its reason says so).
     pub async fn pay_under_allowance(
         &mut self,
         request: &RequestRef,
@@ -1433,6 +1406,11 @@ impl Paykit {
             return Err(self.past_deadline(&target, None).await?);
         }
         let allowance = if let Some(key) = allowance {
+            // An occurrence marked manual-only is never paid automatically, whatever else
+            // holds (Paykit spec 8.3, "Manual only").
+            if record.manual_only {
+                return Err(Refusal::ManualOnly.into());
+            }
             let reservation = Box::pin(self.allowance_reservation(&key, &request.payee)).await?;
             reservation.request(&record, claim.as_ref(), None)?;
             if blocked
@@ -2230,19 +2208,103 @@ impl Paykit {
                 .choose(payee, gathered, pricing, options, Some(&identity))?
                 .ok_or_else(|| unsupported("the payee's public endpoints"));
         }
-        let read = self.lists_read_of(payee).await?;
+        let mut read = Vec::new();
+        for (list, version) in self.lists_read_of(payee).await? {
+            // Over a `payment_lists` record seen deleted, no list is paid from: it waits
+            // (Paykit spec 6; wire 5, "Incomplete protected-record contract").
+            if self.list_admitted(&list).await? {
+                read.push((list, version));
+            }
+        }
         // The version of each record's write selected from: every attempt on a list endpoint
         // is conditioned on it, never on a write the app refused (Switch spec 8.2).
         let versions: Vec<([u8; 16], RecordVersion)> =
             read.iter().map(|(l, v)| (l.app_id, *v)).collect();
         let mut lists: Vec<PaymentListRecord> = read.into_iter().map(|(l, _)| l).collect();
         lists.retain(|l| app.is_none_or(|a| a == l.app_id));
-        // The pair installed of each app's list, whether or not it may be paid: a request
-        // naming the app names it (Paykit wire 4.14).
-        let installed: Vec<([u8; 16], ListVersion)> = lists
+        // A list held over its record, as when the record didn't read when it came, replaces
+        // the record's list once placed (Paykit wire 5.4), by the test placement uses. Every
+        // list of the payee's held is taken, also over a record that doesn't read: the pair
+        // of each app's list held over its record where it is newer (`held_over`), and of
+        // each app whose record holds no readable list (`held_only`), never paid to.
+        let own = self.identity();
+        let mut held_over: Vec<([u8; 16], ListVersion)> = Vec::new();
+        let mut held_only: Vec<([u8; 16], ListVersion)> = Vec::new();
+        // The apps whose list record is paused: never asked for a newer list, by name or by
+        // a request naming no app, which they could answer (Paykit spec 8.4, wire 4.14).
+        let mut paused_apps: Vec<[u8; 16]> = Vec::new();
+        // Each list held over a paused record that holds no readable list, with its record:
+        // judged against the payee's identity.json below, like a readable list, before its
+        // pause counts.
+        let mut paused_held: Vec<([u8; 16], ListVersion, [u8; 32])> = Vec::new();
+        // A held list that doesn't read, or is kept under another record's key, gives no
+        // hint here and stops nothing: placing it reports it (Paykit wire 5.4).
+        for (rest, kept) in self
+            .local_scan_readable::<KeptMessage>(key::HELD_LISTS)
+            .await?
+        {
+            let Ok(stored) = kept.stored(&own) else {
+                continue;
+            };
+            let app_id = stored.message().from.app_id;
+            if stored.sender() != *payee || app.is_some_and(|a| a != app_id) {
+                continue;
+            }
+            let record = self.app.record_key(&list_target(payee, &app_id))?;
+            if format!("{}{rest}", key::HELD_LISTS) != key::held_list(&record) {
+                continue;
+            }
+            let Some(version) = crate::receive::list_version(&stored) else {
+                continue;
+            };
+            match lists.iter().find(|l| l.app_id == app_id) {
+                Some(list) => {
+                    if crate::receive::next_list_record(Some(list.clone()), &stored).is_some() {
+                        held_over.push((app_id, version));
+                    }
+                }
+                None if Box::pin(self.pause_at(&record)).await?.blocks_by_hand() => {
+                    paused_held.push((app_id, version, record));
+                }
+                None => held_only.push((app_id, version)),
+            }
+        }
+        // A list kept over its record until the user confirms it, as one that came after
+        // the record was paused, names that record too (Paykit spec 6): its app is judged
+        // as one whose list is held over a paused record. A readable record's pause is
+        // judged with its list below.
+        for (app_id, version, record) in self.lists_kept_over(payee).await? {
+            if app.is_some_and(|a| a != app_id)
+                || lists.iter().any(|l| l.app_id == app_id)
+                || held_only.iter().any(|(a, _)| *a == app_id)
+            {
+                continue;
+            }
+            // Held over the same paused record too: the newer pair is the one asked for.
+            if let Some(held) = paused_held.iter_mut().find(|(a, _, _)| *a == app_id) {
+                held.1 = held.1.max(version);
+                continue;
+            }
+            if Box::pin(self.pause_at(&record)).await?.blocks_by_hand() {
+                paused_held.push((app_id, version, record));
+            }
+        }
+        // The newest pair the wallet holds of each app's list, installed or held over its
+        // record, whether or not it may be paid: a request naming the app names it, and
+        // every way of asking takes it from here (Paykit wire 4.14).
+        let newest = |app_id: [u8; 16], installed: ListVersion| {
+            held_over
+                .iter()
+                .find(|(app, _)| *app == app_id)
+                .map_or(installed, |(_, held)| (*held).max(installed))
+        };
+        let mut installed: Vec<([u8; 16], ListVersion)> = lists
             .iter()
-            .filter_map(|l| crate::receive::list_version(&l.list).map(|v| (l.app_id, v)))
+            .filter_map(|l| {
+                crate::receive::list_version(&l.list).map(|v| (l.app_id, newest(l.app_id, v)))
+            })
             .collect();
+        installed.extend(held_only.iter().copied());
         // Only a current app's list counts (Paykit spec 8.4, 7.2): a removed app's list, of
         // whatever version it chose, would shadow the current apps' and then be refused by
         // the destination check. The payee's `identity.json` is the copy that check takes,
@@ -2252,7 +2314,7 @@ impl Paykit {
         // so it plays no part, paused or not, and only a list that would otherwise be usable
         // pauses the payment (Paykit spec 8.4). A read that fails is the payment's refusal:
         // without it, no list is taken as a current app's, nor as a removed app's.
-        let identity = if lists.is_empty() {
+        let identity = if lists.is_empty() && held_only.is_empty() && paused_held.is_empty() {
             None
         } else {
             match self
@@ -2282,12 +2344,33 @@ impl Paykit {
                 match crate::receive::list_version(&l.list) {
                     Some(v) if v.generation() <= identity.doc.generation() => true,
                     Some(v) => {
-                        ahead.push((l.app_id, v));
+                        ahead.push((l.app_id, newest(l.app_id, v)));
                         false
                     }
                     None => false,
                 }
             });
+        }
+        // A list held over a paused record is judged the same: of an app that copy doesn't
+        // count, it plays no part; of a higher generation, its pause counts for nothing, and
+        // its app is asked naming the pair held. Only then does its pause stop the payment
+        // and every request its app could answer (Paykit spec 8.4; wire 4.13, 4.14).
+        let mut paused_held_records: Vec<[u8; 32]> = Vec::new();
+        if let Some(identity) = &identity {
+            for (app_id, version, record) in paused_held {
+                if identity.doc.listed_cert(&app_id).is_none()
+                    || identity.doc.lists_removed(&app_id)
+                {
+                    continue;
+                }
+                if version.generation() > identity.doc.generation() {
+                    installed.push((app_id, version));
+                    ahead.push((app_id, version));
+                    continue;
+                }
+                paused_apps.push(app_id);
+                paused_held_records.push(record);
+            }
         }
         // A list whose record is divergent, or was seen so, may be stale: the upload may hold
         // a newer one, withdrawing or replacing a destination. None of its endpoints,
@@ -2295,17 +2378,33 @@ impl Paykit {
         // other list to pay, the payment is refused naming those records. The certificate the
         // held list was signed under decides nothing here: the upload's list may be signed
         // under the one its current app is listed with now.
+        //
+        // A list held over its record, as when the record didn't read when it came, replaces
+        // the record's list once placed: until then that payee app's list isn't paid to, so
+        // nothing goes to a list a later one, a withdrawal included, replaces (Paykit wire
+        // 5.4). A hold the record already holds, placed and not yet cleared, stops nothing:
+        // the test is the one placement takes. A divergent record is named first: its held
+        // list is placed only once the user confirms it. The pair each app is asked for is
+        // the newest it holds, resolved above.
         let mut paused_lists = Vec::new();
         let mut usable = Vec::with_capacity(lists.len());
+        // The apps whose list a newer one held over its record replaces: not paid to, and
+        // asked naming the held pair.
+        let mut replaced: Vec<([u8; 16], ListVersion)> = Vec::new();
         for list in lists {
             let record = self
                 .app
                 .record_key(&list_target(&list.payee, &list.app_id))?;
             if Box::pin(self.pause_at(&record)).await?.blocks_by_hand() {
                 paused_lists.push(record);
-            } else {
-                usable.push(list);
+                paused_apps.push(list.app_id);
+                continue;
             }
+            if let Some(pair) = held_over.iter().find(|(app, _)| *app == list.app_id) {
+                replaced.push(*pair);
+                continue;
+            }
+            usable.push(list);
         }
         let mut lists = usable;
         // Of the lists not paused, only one the destination check takes counts: the
@@ -2400,7 +2499,41 @@ impl Paykit {
                 ));
             }
         }
+        // A list held over a record that doesn't read is asked for by its pair, if its app
+        // still counts in the payee's identity.json.
+        let current = |app_id: &[u8; 16]| {
+            identity.as_ref().is_none_or(|identity| {
+                identity.doc.listed_cert(app_id).is_some() && !identity.doc.lists_removed(app_id)
+            })
+        };
+        for pair in replaced
+            .into_iter()
+            .chain(held_only.into_iter().filter(|(app, _)| current(app)))
+        {
+            if !held.iter().any(|(app, _)| *app == pair.0) {
+                held.push(pair);
+            }
+        }
         held.extend(ahead);
+        // A current app of the payee's whose list the wallet holds none of that counts, or
+        // whose installed list the destination check refuses: a request naming it, with no
+        // pair, asks it too, beside the ones naming a pair, so a list that can be paid may
+        // come (Paykit spec 8.4, wire 4.14).
+        let others: Vec<[u8; 16]> = match (&identity, app) {
+            (Some(identity), None) if !held.is_empty() || !paused_apps.is_empty() => identity
+                .doc
+                .body()
+                .apps
+                .iter()
+                .map(|listed| listed.app_id)
+                .filter(|app_id| {
+                    !identity.doc.lists_removed(app_id)
+                        && !held.iter().any(|(a, _)| a == app_id)
+                        && !paused_apps.contains(app_id)
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
         // Endpoints the conversion terms leave unusable refuse the payment for that, unless a
         // list has expired or is used up: a newer list may serve then, and the payee is asked
         // for it as below.
@@ -2434,7 +2567,8 @@ impl Paykit {
         // list.
         if !paused_lists.is_empty() {
             if !options.quote_only && !held.is_empty() && !unsupported_only && !unusable {
-                self.ask_for_lists(payee, app, &held, &installed).await?;
+                self.ask_for_lists(payee, app, &held, &installed, &[], &paused_apps)
+                    .await?;
             }
             Box::pin(self.refuse_while_paused(&paused_lists)).await?;
         }
@@ -2461,7 +2595,17 @@ impl Paykit {
             ))
             .into());
         }
-        self.ask_for_lists(payee, app, &held, &installed).await?;
+        // With nothing to ask but a paused app, as a payment naming one, the payment waits for
+        // the user's confirmation of its record, not for a list (Paykit spec 8.4).
+        let asks_nothing = match app {
+            Some(app) => paused_apps.contains(&app),
+            None => held.is_empty() && others.is_empty() && !paused_apps.is_empty(),
+        };
+        if asks_nothing {
+            Box::pin(self.refuse_while_paused(&paused_held_records)).await?;
+        }
+        self.ask_for_lists(payee, app, &held, &installed, &others, &paused_apps)
+            .await?;
         Err(Refusal::WaitingForList {
             device_clock_behind,
         }
@@ -2731,8 +2875,11 @@ impl Paykit {
     /// Paykit spec 8.4, "No usable list": ask the payee for its current list, with a
     /// `paykit.private_payment_list_request` naming the version held (Paykit wire 4.14). With
     /// `app`, of that app, naming the pair `installed` holds of it whether or not that list
-    /// may be paid; without, of each app in `held`, or one request naming no app when none
-    /// is. A request already asked of the same app at the same held version is
+    /// may be paid; without, of each app in `held`, and of each app in `others`, a current
+    /// app of the payee's with no list held that counts, naming the pair `installed` holds of
+    /// it if any, or one request naming no app when none is held. An app in `paused`, whose
+    /// record is paused, is never asked, and while one is, no request names no app (Paykit
+    /// spec 8.4, wire 4.14). A request already asked of the same app at the same held version is
     /// outstanding, and not asked again, until a day has passed: the payee can't be forced to
     /// answer, and a request it dropped is asked once more after that, so a payer waits at
     /// most a day for one more chance. The request is queued before its mark is kept: a crash
@@ -2743,13 +2890,26 @@ impl Paykit {
         app: Option<[u8; 16]>,
         held: &[([u8; 16], ListVersion)],
         installed: &[([u8; 16], ListVersion)],
+        others: &[[u8; 16]],
+        paused: &[[u8; 16]],
     ) -> Result<()> {
         self.refuse_while_sends_held(payee).await?;
         let held_of = |app: [u8; 16]| installed.iter().find(|(a, _)| *a == app).map(|(_, v)| *v);
         let asks: Vec<(Option<[u8; 16]>, Option<ListVersion>)> = match app {
+            // An app whose record is paused is never asked (Paykit spec 8.4).
+            Some(app) if paused.contains(&app) => Vec::new(),
             Some(app) => vec![(Some(app), held_of(app))],
+            // A request naming no app would reach a paused app too: the others are named.
+            None if held.is_empty() && !paused.is_empty() => others
+                .iter()
+                .map(|app| (Some(*app), held_of(*app)))
+                .collect(),
             None if held.is_empty() => vec![(None, None)],
-            None => held.iter().map(|(app, v)| (Some(*app), Some(*v))).collect(),
+            None => held
+                .iter()
+                .map(|(app, v)| (Some(*app), Some(*v)))
+                .chain(others.iter().map(|app| (Some(*app), held_of(*app))))
+                .collect(),
         };
         let now = self.now();
         for (app_id, held_version) in asks {
@@ -2793,7 +2953,7 @@ impl Paykit {
     }
 
     /// The transfer check (Paykit spec 7.2 step 1): the method transfers exactly the amount
-    /// paid, and any fee the payee can influence is within the app's cap. A transfer that
+    /// paid; the fee is the payment method's (Paykit spec 7.2 step 1). A transfer that
     /// passes is what the user asked for when they called pay, and is paid with no other
     /// consent. A destination failing it is paid only on the user's explicit choice of
     /// exactly what it would transfer: the method is asked again, and the destination and
@@ -2814,12 +2974,10 @@ impl Paykit {
         let endpoint_id = destination.endpoint_id()?;
         let payload = destination.payload()?;
         let transfer = self.rail.transfer(&endpoint_id, &payload, amount);
-        let cap = self.fee_cap(&transfer);
-        let kept_cap = cap.map(|cap| cap.as_str().to_owned());
-        let reason = transfer_refused(&transfer, amount, cap)
+        let reason = transfer_refused(&transfer, amount)
             .or_else(|| by_hand.then_some(conversion::BY_HAND_ONLY));
         let Some(reason) = reason else {
-            return Ok(TransferBound::Asked { cap: kept_cap });
+            return Ok(TransferBound::Asked {});
         };
         let quote = TransferQuote {
             payee: *payee,
@@ -2828,25 +2986,12 @@ impl Paykit {
             payload_hash: pubky_switch_core::enc::hash(payload.as_str().as_bytes()),
             amount: amount.clone(),
             transfer,
-            fee_cap: cap.cloned(),
         };
         if confirmed.is_some_and(|confirmed| confirms(confirmed, &quote))
             && (price.is_none() || quote.transfer.amount.as_ref() == Some(amount))
         {
-            // The fee is bound only when the user's choice binds it.
-            let max_fee = binds_fee(&quote.transfer, cap)
-                .then(|| {
-                    quote
-                        .transfer
-                        .max_fee
-                        .as_ref()
-                        .map(|f| f.as_str().to_owned())
-                })
-                .flatten();
             return Ok(TransferBound::Confirmed {
-                cap: kept_cap,
                 amount: quote.transfer.amount.as_ref().map(KeptAmount::of),
-                max_fee,
             });
         }
         Err(Refusal::Transfer {
@@ -2856,20 +3001,12 @@ impl Paykit {
         .into())
     }
 
-    /// The fee cap the app configures for the asset the method transfers (Paykit spec 7.2
-    /// step 1): its fee is in that asset. None for a transfer whose amount the method can't
-    /// tell, whose fee a confirmation then always binds ([`binds_fee`]).
-    fn fee_cap(&self, transfer: &Transfer) -> Option<&paykit_lib::Decimal> {
-        let transferred = transfer.amount.as_ref()?;
-        self.config.fee_caps.get(&transferred.asset)
-    }
-
     /// The transfer check again, at the final payment check just before the call, a
     /// repeat's included (Paykit spec 7.2 step 1): the method's transfer now of the amount
     /// paid, the one its host authorized for a payment priced by a rate, must still be
-    /// within the bound the attempt was journaled with, so a fee estimate that grew, or an
-    /// amount that changed, since the attempt was planned is never paid. A transfer that is
-    /// what the user asked for, within the cap at planning, passes; a confirmed one passes
+    /// within the bound the attempt was journaled with, so an amount that changed since the
+    /// attempt was planned is never paid. A transfer that is what the user asked for
+    /// passes; a confirmed one passes
     /// also when it is the one confirmed. For a payment permitted only by hand,
     /// [`Paykit::amount_holds`] requires the original selection and the transfer must
     /// match its confirmation. `Err` inside holds the refusal.
@@ -2887,34 +3024,18 @@ impl Paykit {
         let payload = entry.destination.payload()?;
         let amount = entry.call_amount()?;
         let transfer = self.rail.transfer(&endpoint_id, &payload, &amount);
-        let parse = |cap: &Option<String>| {
-            cap.as_deref()
-                .map(paykit_lib::Decimal::parse)
-                .transpose()
-                .map_err(|_| PaykitError::corrupt())
+        let confirmed = match &entry.transfer_bound {
+            Some(TransferBound::Confirmed { amount }) => Some(amount),
+            Some(TransferBound::Asked {}) | None => None,
         };
-        let (cap, confirmed) = match &entry.transfer_bound {
-            Some(TransferBound::Asked { cap }) => (parse(cap)?, None),
-            Some(TransferBound::Confirmed {
-                cap,
-                amount,
-                max_fee,
-            }) => (parse(cap)?, Some((amount, max_fee))),
-            None => (self.fee_cap(&transfer).cloned(), None),
-        };
-        let reason = transfer_refused(&transfer, &amount, cap.as_ref())
+        let reason = transfer_refused(&transfer, &amount)
             .or_else(|| by_hand.then_some(conversion::BY_HAND_ONLY));
-        // A fee the user's choice binds passes only when it is the one the user chose; with
-        // no cap, or within it, the fee is what the method reports at the call (Paykit spec
-        // 7.2 step 1). Amounts and fees compare as values, whatever their spelling (Paykit
-        // wire 1.2).
+        // Amounts compare as values, whatever their spelling (Paykit wire 1.2).
         let as_confirmed = match confirmed {
-            Some((kept_amount, max_fee)) => {
+            Some(kept_amount) => {
                 let kept_amount = kept_amount.as_ref().map(KeptAmount::amount).transpose()?;
-                let max_fee = parse(max_fee)?;
                 (entry.price.is_none() || transfer.amount.as_ref() == Some(&amount))
                     && transfer.amount == kept_amount
-                    && (!binds_fee(&transfer, cap.as_ref()) || transfer.max_fee == max_fee)
             }
             None => false,
         };
@@ -2936,7 +3057,6 @@ impl Paykit {
                 payload_hash: pubky_switch_core::enc::hash(payload.as_str().as_bytes()),
                 amount,
                 transfer,
-                fee_cap: cap,
             }),
         }))
     }
@@ -2987,7 +3107,6 @@ impl Paykit {
                     TransferQuote {
                         payee: entry.payee,
                         app_id: entry.destination.app_id,
-                        fee_cap: self.fee_cap(&transfer).cloned(),
                         transfer,
                         endpoint_id,
                         payload_hash: pubky_switch_core::enc::hash(payload.as_str().as_bytes()),
@@ -5082,8 +5201,15 @@ impl Paykit {
         };
         let public = entry.destination.source()? == DestinationSource::Public;
         let now = self.now();
+        // Paid only while the payee app records kept still use the record selected, judged
+        // at this check (Paykit spec 4): otherwise the record is read again.
+        let still_used = match entry.kept_carrier(&self.identity())? {
+            Carrier::Record(record) => self.seen_still_uses(&entry.payee, &record).await?,
+            _ => true,
+        };
         let recheck_records = public
             && (answered.is_some()
+                || !still_used
                 || !self
                     .last_public_read
                     .as_ref()
