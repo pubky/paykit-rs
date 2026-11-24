@@ -739,7 +739,8 @@ async fn test_mixed_protocols_member_expiry_repair_survives_reload_and_final_wit
         // The event is taken, then upkeep cannot sign the capabilities. Reload in the gap.
         w.rail
             .set_endpoint_identifiers(crate::own_record::oversized_capabilities());
-        assert!(second.receive(None).await.is_err());
+        let summary = second.receive(None).await.unwrap();
+        assert!(summary.app_record_owed.is_some(), "{summary:?}");
         assert_eq!(
             !second.own_public_endpoints().unwrap().is_empty(),
             publishing
