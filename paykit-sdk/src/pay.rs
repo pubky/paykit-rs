@@ -5250,9 +5250,12 @@ impl Paykit {
                 .filter(|(_, answered)| answered.rail_proof.is_some())
                 .map(|(attempt_id, _)| *attempt_id)
                 .collect();
-            if let Some(disagreement) = resume_disagreement(&before, &after, &paid_in_call, &out) {
-                panic!("resume_payments: {disagreement}");
-            }
+            let disagreement = resume_disagreement(&before, &after, &paid_in_call, &out);
+            assert!(
+                disagreement.is_none(),
+                "resume_payments: {}",
+                disagreement.unwrap_or_default()
+            );
         }
         self.prune_journal().await?;
         Ok(out)
@@ -6880,7 +6883,7 @@ mod tests {
             user_resolved: None,
         };
         let one = |was: &EntryFacts, now: &EntryFacts, turns: &Turns| {
-            let out = resume_outcomes(&[was.clone()], &[now.clone()], turns);
+            let out = resume_outcomes(std::slice::from_ref(was), std::slice::from_ref(now), turns);
             assert!(out.len() <= 1, "{out:?}");
             out.into_iter().next()
         };
