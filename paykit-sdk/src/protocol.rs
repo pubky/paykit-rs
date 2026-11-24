@@ -2205,7 +2205,7 @@ impl Protocol for PaykitProtocol {
     }
 
     /// A gap in the deny list's history (Switch spec 8.3), taken as a change, with its list
-    /// kept for the receive ([`Paykit::take_learned_lists`]).
+    /// kept for the receive (`Paykit::take_learned_lists`).
     fn deny_list_gap(&self, gap: &DenyListGap) -> Result<Vec<LocalWrite>, StoreFailure> {
         self.delivery.learned(gap.list_read.then_some(&gap.denied));
         Ok(vec![local_write(key::LISTS_TOLD, &u64::MAX)?])
