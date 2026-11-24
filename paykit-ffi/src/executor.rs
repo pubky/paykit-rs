@@ -1,1 +1,139 @@
 //! Payments under an Allowance for Kotlin and Swift: the executor, reservations and the ledger (Paykit spec 8.3).
+
+use crate::{
+    fixed, AllowanceHold, NativeWallet, PaymentResult, RequestId, SwitchAlarm, WalletError,
+};
+use paykit_lib::AttemptId;
+use paykit_sdk::UserConfirmed;
+use std::sync::Arc;
+
+/// An unresolved reservation whose failure another app reported (Paykit spec 8.3).
+#[derive(uniffi::Record)]
+pub struct ReservedByOtherApp {
+    /// The exact attempt on the Allowance ledger, in base64url (Paykit wire 1.3).
+    pub attempt_id: String,
+    /// The reserved transfer amount in the Allowance's asset (Paykit wire 5.5).
+    pub value: String,
+}
+
+impl From<paykit_sdk::ReservedByOtherApp> for ReservedByOtherApp {
+    fn from(entry: paykit_sdk::ReservedByOtherApp) -> Self {
+        Self {
+            attempt_id: entry.attempt_id.to_text(),
+            value: entry.value.as_str().into(),
+        }
+    }
+}
+
+fn confirmed(user_confirmed: bool) -> Result<UserConfirmed, WalletError> {
+    user_confirmed
+        .then(UserConfirmed::new)
+        .ok_or_else(|| WalletError::invalid("user_confirmed"))
+}
+
+#[uniffi::export]
+impl NativeWallet {
+    /// Pay an eligible one-time request under this app's accepted Allowance. The current
+    /// grant, ledger, terms and complete payment-method history must authorize it. A missing
+    /// payment lookup fails before journaling. The result carries the payment outcome or
+    /// refusal. The opening claim, reservation and request association share one batch
+    /// (Paykit spec 8.3).
+    pub async fn pay_under_allowance(
+        &self,
+        id: RequestId,
+        allowance: Vec<u8>,
+    ) -> Result<PaymentResult, WalletError> {
+        let request = id.try_into()?;
+        let allowance = fixed(allowance, "allowance")?;
+        let rail = self.rail();
+        self.with_wallet(move |app| {
+            Box::pin(async move {
+                if !rail.has_lookup() {
+                    return Err(WalletError::PaymentMethodWithoutLookup);
+                }
+                Ok(app.pay_under_allowance(&request, &allowance).await.into())
+            })
+        })
+        .await
+    }
+
+    /// Complete this app's previously authorized first grant and record consent once it
+    /// applies. Retry after a lost reply, including after reopening. A repeated call checks
+    /// the current grant and ledger. A later consent hold requires confirmation (Paykit spec 8.3).
+    pub async fn resume_allowance_executor(&self, record: Vec<u8>) -> Result<(), WalletError> {
+        let record = fixed(record, "record")?;
+        self.with_wallet(move |app| {
+            Box::pin(async move { Ok(app.resume_allowance_executor(&record).await?) })
+        })
+        .await
+    }
+
+    /// Renew this app's previously approved execution after the user confirms the displayed
+    /// counterparty, terms and executor under this exact hold. A newer hold requires fresh
+    /// confirmation. If the ledger cannot yet be verified, retry with the same confirmed hold.
+    /// Regranting after provider loss leaves spending held (Paykit spec 8.3).
+    pub async fn confirm_allowance_executor(
+        &self,
+        hold: Arc<AllowanceHold>,
+        user_confirmed: bool,
+    ) -> Result<(), WalletError> {
+        let consent = confirmed(user_confirmed)?;
+        self.with_wallet(move |app| {
+            Box::pin(async move { Ok(app.confirm_allowance_executor(&hold.0, consent).await?) })
+        })
+        .await
+    }
+
+    /// List reservations whose failure another app reported, after verifying the grant,
+    /// ledger and complete wallet history. Show the exact attempt and amount before asking
+    /// the user to release it (Paykit spec 8.3).
+    pub async fn reserved_by_other_apps(
+        &self,
+        record: Vec<u8>,
+    ) -> Result<Vec<ReservedByOtherApp>, WalletError> {
+        let record = fixed(record, "record")?;
+        self.with_wallet(move |app| {
+            Box::pin(async move {
+                Ok(app
+                    .reserved_by_other_apps(&record)
+                    .await?
+                    .into_iter()
+                    .map(Into::into)
+                    .collect())
+            })
+        })
+        .await
+    }
+
+    /// Release the displayed reservation after the user confirms. Another app must have
+    /// reported the failed claim, and this executor's original installation must have
+    /// recorded that the attempt ended before dispatch. If the Switch reply was lost, the
+    /// failure carries the pending batch ID (Paykit spec 8.3).
+    pub async fn release_allowance_attempt(
+        &self,
+        record: Vec<u8>,
+        attempt_id: String,
+        user_confirmed: bool,
+    ) -> Result<(), WalletError> {
+        let consent = confirmed(user_confirmed)?;
+        let record = fixed(record, "record")?;
+        let attempt =
+            AttemptId::parse(&attempt_id).map_err(|_| WalletError::invalid("attempt_id"))?;
+        self.with_wallet(move |app| {
+            Box::pin(async move {
+                Ok(app
+                    .release_allowance_attempt(&record, attempt, consent)
+                    .await?)
+            })
+        })
+        .await
+    }
+
+    /// Return the Switch alarm that stopped this wallet after an Allowance ledger rollback.
+    /// It survives reopening. Show its reason until the signer resolves the provider move
+    /// or loss (Paykit spec 8.3, Switch spec 10.1).
+    pub async fn ledger_alarm(&self) -> Result<Option<SwitchAlarm>, WalletError> {
+        self.with_wallet(|app| Box::pin(async move { Ok(app.ledger_alarm().map(Into::into)) }))
+            .await
+    }
+}
