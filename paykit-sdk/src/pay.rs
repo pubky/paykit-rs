@@ -1064,39 +1064,78 @@ const METHOD_FAILED: &str = "the payment method reported a failure";
 /// The reason of a failed outcome written for an attempt no payment started for.
 const NO_PAYMENT_STARTED: &str = "Paykit spec 7.2: no payment started";
 
-/// The outcome the journal holds as written for an entry a resume's step left open in stage
-/// `left_in` (Paykit spec 7.2 steps 3 and 4), `None` while it isn't written:
+/// What the journal holds as written for an entry a resume's step left open.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WrittenAs {
+    /// The paid outcome, with the method's proof.
+    Paid,
+    /// The failure the method reported.
+    MethodFailed,
+    /// The failure of an attempt no payment started for.
+    NoPaymentStarted,
+}
+
+/// The journal's facts an entry's written outcome is read from ([`written_as`]).
+#[derive(Clone, Copy)]
+struct JournalFacts {
+    stage: Stage,
+    proof: bool,
+    failed_by_method: bool,
+    user_paid: bool,
+    restored: bool,
+}
+
+/// What the journal holds as written for an entry a resume's step left open in stage
+/// `left_in` (Paykit spec 7.2 steps 3 and 4), `None` while the journal doesn't say:
 /// - with the method's proof, once the entry is finished or owes only its acceptance: paid;
-/// - without it, once the entry is finished: the failure its step was writing, the method's
-///   for an entry left at the method's failure, "no payment started" for one left before
-///   the method's call.
+/// - without it, once the entry is finished: the method's failure when the journal holds
+///   that the method reported one; "no payment started" for an entry of this installation
+///   left before the method's call.
 ///
-/// An entry left in another stage is reported as the step left it: the journal can't say
-/// which outcome a write from that stage carried.
+/// Never a failure for an entry the user resolved as paid, nor for one that came back from
+/// a backup and was left before the method's call: its payment may have been made
+/// (Paykit spec 7.2, 8.4). An entry left in another stage is reported as the step left it.
+fn written_as(held: JournalFacts, left_in: Stage) -> Option<WrittenAs> {
+    if held.proof {
+        return matches!(held.stage, Stage::Finished | Stage::AcceptanceOwed)
+            .then_some(WrittenAs::Paid);
+    }
+    if held.stage != Stage::Finished || held.user_paid {
+        return None;
+    }
+    if held.failed_by_method {
+        return Some(WrittenAs::MethodFailed);
+    }
+    (matches!(left_in, Stage::Recorded | Stage::Attempted) && !held.restored)
+        .then_some(WrittenAs::NoPaymentStarted)
+}
+
+/// [`written_as`] as the outcome a resume reports for the attempt.
 fn written_outcome(
     attempt_id: AttemptId,
     entry: &JournalEntry,
     left_in: Stage,
 ) -> Option<PayOutcome> {
-    if entry.rail_proof.is_some() {
-        return matches!(entry.stage, Stage::Finished | Stage::AcceptanceOwed).then(|| {
-            PayOutcome::Paid {
-                attempt_id,
-                proof_msg_id: entry.proof_msg_id.clone(),
-            }
-        });
-    }
-    if entry.stage != Stage::Finished {
-        return None;
-    }
-    let reason = match left_in {
-        Stage::RailFailed => METHOD_FAILED,
-        Stage::Recorded | Stage::Attempted => NO_PAYMENT_STARTED,
-        _ => return None,
+    let held = JournalFacts {
+        stage: entry.stage,
+        proof: entry.rail_proof.is_some(),
+        failed_by_method: entry.failed_by_method,
+        user_paid: entry.user_paid,
+        restored: entry.restored,
     };
-    Some(PayOutcome::Failed {
-        attempt_id,
-        reason: reason.into(),
+    Some(match written_as(held, left_in)? {
+        WrittenAs::Paid => PayOutcome::Paid {
+            attempt_id,
+            proof_msg_id: entry.proof_msg_id.clone(),
+        },
+        WrittenAs::MethodFailed => PayOutcome::Failed {
+            attempt_id,
+            reason: METHOD_FAILED.into(),
+        },
+        WrittenAs::NoPaymentStarted => PayOutcome::Failed {
+            attempt_id,
+            reason: NO_PAYMENT_STARTED.into(),
+        },
     })
 }
 
@@ -4915,8 +4954,11 @@ impl Paykit {
         // - an acceptance owed for a written outcome is placed once its entry is finished;
         // - an outcome reported for an entry left open is written once the journal holds it
         //   ([`written_outcome`]), and the entry is reported with it.
-        // Every other failure stands, an entry no longer in the journal included.
+        // Every other failure stands, an entry no longer in the journal included. An entry
+        // reported again later in the call, as when the method's history showed it paid
+        // after all, keeps that later outcome only.
         let mut unresolved = None;
+        let mut repeated = Vec::new();
         for (error, claim, left) in left_behind {
             let entry = match claim {
                 Some((attempt_id, obligation)) => {
@@ -4926,22 +4968,41 @@ impl Paykit {
             };
             let over = match (entry, left) {
                 (Some(entry), Left::Acceptance) => entry.stage == Stage::Finished,
-                (Some(entry), Left::Outcome(index, left_in)) => match out.get_mut(index) {
-                    Some(outcome) => match written_outcome(outcome.attempt_id(), &entry, left_in) {
-                        Some(written) => {
+                (Some(entry), Left::Outcome(index, left_in)) => {
+                    let attempt_id = out
+                        .get(index)
+                        .ok_or_else(PaykitError::corrupt)?
+                        .attempt_id();
+                    if out
+                        .iter()
+                        .skip(index.saturating_add(1))
+                        .any(|later| later.attempt_id() == attempt_id)
+                    {
+                        repeated.push(index);
+                    }
+                    match (
+                        written_outcome(attempt_id, &entry, left_in),
+                        out.get_mut(index),
+                    ) {
+                        (Some(written), Some(outcome)) => {
                             *outcome = written;
                             true
                         }
-                        None => false,
-                    },
-                    None => false,
-                },
+                        _ => false,
+                    }
+                }
                 (Some(_), Left::Nothing) | (None, _) => false,
             };
             if !over {
                 if let Some(error) = error {
                     unresolved.get_or_insert(error);
                 }
+            }
+        }
+        // Entries are visited in order, so these places rise: removed from the last down.
+        for index in repeated.into_iter().rev() {
+            if index < out.len() {
+                out.remove(index);
             }
         }
         // A call that returns an error carries no outcome, so nothing is pruned then:
@@ -6418,6 +6479,75 @@ struct SharedState {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn test_resume_written_outcome_follows_the_journal() {
+        use super::{written_as, JournalFacts, WrittenAs};
+        use crate::journal::Stage;
+        let held = |stage, proof| JournalFacts {
+            stage,
+            proof,
+            failed_by_method: false,
+            user_paid: false,
+            restored: false,
+        };
+        // Paid only once the outcome's batch moved the entry on.
+        assert_eq!(
+            written_as(held(Stage::Finished, true), Stage::RailPaid),
+            Some(WrittenAs::Paid)
+        );
+        assert_eq!(
+            written_as(held(Stage::AcceptanceOwed, true), Stage::RailPaid),
+            Some(WrittenAs::Paid)
+        );
+        assert_eq!(
+            written_as(held(Stage::RailPaid, true), Stage::RailPaid),
+            None
+        );
+        // A failure only when the journal holds one was written.
+        let method_failed = JournalFacts {
+            failed_by_method: true,
+            ..held(Stage::Finished, false)
+        };
+        assert_eq!(
+            written_as(method_failed, Stage::RailFailed),
+            Some(WrittenAs::MethodFailed)
+        );
+        assert_eq!(
+            written_as(held(Stage::Finished, false), Stage::Recorded),
+            Some(WrittenAs::NoPaymentStarted)
+        );
+        assert_eq!(
+            written_as(held(Stage::RailFailed, false), Stage::RailFailed),
+            None
+        );
+        assert_eq!(
+            written_as(held(Stage::Finished, false), Stage::Paying),
+            None
+        );
+    }
+
+    #[test]
+    fn test_resume_written_outcome_never_fails_a_payment_that_may_be_made() {
+        use super::{written_as, JournalFacts};
+        use crate::journal::Stage;
+        // Resolved as paid by the user: finished without a proof, and no failure.
+        let user_paid = JournalFacts {
+            stage: Stage::Finished,
+            proof: false,
+            failed_by_method: false,
+            user_paid: true,
+            restored: true,
+        };
+        assert_eq!(written_as(user_paid, Stage::Recorded), None);
+        // Back from a backup and left before the method's call: it may have dispatched.
+        let restored = JournalFacts {
+            user_paid: false,
+            ..user_paid
+        };
+        assert_eq!(written_as(restored, Stage::Recorded), None);
+        assert_eq!(written_as(restored, Stage::Attempted), None);
+    }
+
     use pubky_switch_client::error::{ClientError, StoreError, TransportError};
 
     use super::*;
