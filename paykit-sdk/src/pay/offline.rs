@@ -67,7 +67,7 @@ impl Paykit {
         if let Some(answer) = self.take_kept_lookup(&entry.payee).await?? {
             *peer = answer;
         }
-        let read = self.local_get::<u64>(key::LISTS_READ).await?;
+        let read = self.lists_read_at().await?;
         let copy = self.local_get::<Vec<[u8; 32]>>(key::DENIED).await?;
         let mark = self
             .local_get::<state::OwnBlockMark>(&key::own_block(&entry.payee))

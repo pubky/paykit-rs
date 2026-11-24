@@ -2803,13 +2803,47 @@ pub(crate) enum LossLists {
 /// loss's list step: the read time goes then, so no copy is taken as fresh. A read at the list
 /// step holds the loss's owed deny entries, and stays right once they land
 /// ([`Paykit::loss_lists`]).
-fn put_lists_read(tx: &mut Tx, loss: LossLists, read_at: u64) -> crate::error::Result<()> {
+fn put_lists_read(
+    tx: &mut Tx,
+    loss: LossLists,
+    read_at: u64,
+    recovery_from: Option<u64>,
+) -> crate::error::Result<()> {
     if loss != LossLists::Before {
-        tx.put(key::LISTS_READ, &read_at)?;
+        tx.put(key::LISTS_READ, &read_at)?
+            .put(key::LISTS_READ_UNDER, &loss_stamp(recovery_from))?;
     } else {
         tx.delete(key::LISTS_READ);
     }
     Ok(())
+}
+
+/// The stamp of the provider loss the identity's current `identity.json` names
+/// (`recovery_from`): its lost generation plus one, or 0 for none.
+fn loss_stamp(recovery_from: Option<u64>) -> u64 {
+    recovery_from.map_or(0, |lost| lost.saturating_add(1))
+}
+
+/// The time the lists were last read, if that read counts: one made under the provider loss
+/// the identity's current `identity.json` names, `recovery_from`, if any. A read from before
+/// a loss is never taken as fresh once the loss is seen, at any of its steps, since the new
+/// service may hold, and the client owe, deny entries that read lacks (Switch wire 7.4.14,
+/// "Lists"); the next read is made at the list step or after it ([`Paykit::loss_lists`]).
+pub(crate) fn lists_read_counts(
+    read: Option<u64>,
+    under: Option<u64>,
+    recovery_from: Option<u64>,
+) -> Option<u64> {
+    read.filter(|_| under == Some(loss_stamp(recovery_from)))
+}
+
+/// [`lists_read_counts`] as a delivery's hook reads it.
+pub(crate) fn delivery_lists_read(
+    delivery: &pubky_switch_client::app::DeliveryView<'_>,
+) -> crate::error::Result<Option<u64>> {
+    let read = state::delivery_get::<u64>(delivery, key::LISTS_READ)?;
+    let under = state::delivery_get::<u64>(delivery, key::LISTS_READ_UNDER)?;
+    Ok(lists_read_counts(read, under, delivery.recovery_from()))
 }
 
 pub(crate) fn lists_read_is_fresh(read: u64, now: u64) -> bool {
@@ -3250,10 +3284,16 @@ impl Paykit {
         let now = self.now();
         // Before a provider loss's list step no copy is fresh, and a read only adds to it
         // ([`Paykit::loss_lists`]).
-        if self.loss_lists().await? == LossLists::Before {
+        if !self.lists_read_adds().await? {
+            return Ok(());
+        }
+        let last = self.lists_read_at().await?;
+        // A read time that no longer counts, from before the identity's current provider loss,
+        // goes at once, so no check that a read time is held, the receive step's included,
+        // takes it for a read whether or not the next read succeeds.
+        if last.is_none() {
             self.local_delete(key::LISTS_READ).await?;
         }
-        let last = self.local_get::<u64>(key::LISTS_READ).await?;
         // A raise owed that can be written goes at the next receive, whatever the copy's age,
         // with one read of the lists in a pass.
         if last.is_some_and(|read| lists_read_is_fresh(read, now))
@@ -3296,7 +3336,7 @@ impl Paykit {
             return Ok(false);
         }
         let now = self.now();
-        if self.floor_write_is_kept().await? {
+        if self.floor_write_is_kept().await? || !self.lists_read_adds().await? {
             return Ok(false);
         }
         match self.allow_list_with_owed_denies().await {
@@ -3464,11 +3504,11 @@ impl Paykit {
                 Err(error) => return Err(error),
             }
             let mut read = Tx::default();
-            put_lists_read(&mut read, loss, read_at)?;
+            put_lists_read(&mut read, loss, read_at, self.recovery_from())?;
             self.put_service_time(&mut read).await?;
             self.local_commit(read).await?;
         } else {
-            put_lists_read(&mut tx, loss, read_at)?;
+            put_lists_read(&mut tx, loss, read_at, self.recovery_from())?;
             tx.put(key::DENIED, &deny)?;
             put_flagged(&mut tx, &lists.flagged)?;
             self.put_service_time(&mut tx).await?;
@@ -3562,7 +3602,7 @@ impl Paykit {
                 return self.denied(pubky).await;
             }
         }
-        let read = self.local_get::<u64>(key::LISTS_READ).await?;
+        let read = self.lists_read_at().await?;
         let copy = self.local_get::<Vec<[u8; 32]>>(key::DENIED).await?;
         let now = self.now();
         let settled = self.loss_lists().await? != LossLists::Before;
@@ -3647,6 +3687,33 @@ impl Paykit {
             Box::pin(self.apply_floor_before_unblock()).await?;
         }
         self.list_own(pubky, false).await
+    }
+
+    /// The provider loss the identity's current `identity.json` names (`recovery_from`).
+    fn recovery_from(&self) -> Option<u64> {
+        self.app.own_identity().body().recovery_from
+    }
+
+    /// The time the lists were last read, if that read counts ([`lists_read_counts`]).
+    pub(crate) async fn lists_read_at(&self) -> crate::error::Result<Option<u64>> {
+        let read = self.local_get::<u64>(key::LISTS_READ).await?;
+        let under = self.local_get::<u64>(key::LISTS_READ_UNDER).await?;
+        Ok(lists_read_counts(read, under, self.recovery_from()))
+    }
+
+    /// Whether a read of the lists can add to the copy now. Before a provider loss's list step
+    /// no copy is fresh ([`Paykit::loss_lists`]), and with no copy kept there is nothing to
+    /// add to: the copy stays unknown, so every reader waits for a read, and the receive goes
+    /// on to the recovery's upload rather than stopping at a read that can't be taken.
+    async fn lists_read_adds(&mut self) -> crate::error::Result<bool> {
+        if self.loss_lists().await? != LossLists::Before {
+            return Ok(true);
+        }
+        self.local_delete(key::LISTS_READ).await?;
+        Ok(self
+            .local_get::<Vec<[u8; 32]>>(key::DENIED)
+            .await?
+            .is_some())
     }
 
     /// Where a provider loss's list upload stands (Switch spec 12.6, Switch wire 7.4.14,
@@ -3910,7 +3977,7 @@ impl Paykit {
             return Ok(true);
         }
         let fresh = self
-            .local_get::<u64>(key::LISTS_READ)
+            .lists_read_at()
             .await?
             .is_some_and(|read| lists_read_is_fresh(read, self.now()));
         if !fresh
@@ -3955,7 +4022,7 @@ impl Paykit {
         if !reads_lists(self.app.cert().scopes()) {
             return Ok(true);
         }
-        Ok(self.local_get::<u64>(key::LISTS_READ).await?.is_some())
+        Ok(self.lists_read_at().await?.is_some())
     }
 
     /// Whether the copy of the deny list kept from the last read holds `pubky`, at an app

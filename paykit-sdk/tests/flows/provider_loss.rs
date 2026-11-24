@@ -4299,3 +4299,102 @@ async fn test_provider_loss_followed_through_the_client_reads_the_lists_again() 
         .unwrap()
         .is_none());
 }
+
+#[tokio::test]
+async fn test_provider_loss_upload_goes_on_with_no_deny_list_copy() {
+    // An app that keeps no copy of the deny list, its recovery stopped at the evidence
+    // upload: its reads of the lists leave the copy unknown rather than stop the receive, so
+    // the next receive uploads once the service answers, and the recovery goes on.
+    use pubky_switch_client::store::WriteBatch;
+    let w = World::new();
+    let base = store();
+    let mut wallet = w.wallet_on("wallet", Arc::clone(&base)).await;
+    wallet.receive(None).await.unwrap();
+    let next = declare_loss(&w);
+    next.fail_next(pubky_switch_client::testing::Fault::Unreachable {
+        path: "/recovery/upload".into(),
+        after: 0,
+    });
+    wallet.app_mut().refresh_identity().await.unwrap();
+    let _ = wallet.receive(None).await;
+    assert_eq!(
+        recovery_step(&wallet).await,
+        pubky_switch_client::app::RecoveryStep::Upload
+    );
+    // Paykit's copy of the deny list goes, as for an app that never kept one.
+    let ns = pubky_switch_client::store::client_namespace(&wallet.app_id());
+    let copy = base
+        .scan(&ns, b"p/paykit", None, 10_000)
+        .unwrap()
+        .into_iter()
+        .map(|(key, _)| key)
+        .find(|key| key.len() == b"p/paykit".len() + 3 && key.ends_with(b"dl"))
+        .unwrap();
+    let mut batch = WriteBatch::new();
+    batch.delete(&ns, copy).unwrap();
+    base.commit(batch).unwrap();
+    assert!(wallet
+        .app()
+        .protocol_get("paykit", b"dl")
+        .await
+        .unwrap()
+        .is_none());
+    wallet.receive(None).await.unwrap();
+    assert!(recovery_step(&wallet).await > pubky_switch_client::app::RecoveryStep::Upload);
+}
+
+#[tokio::test]
+async fn test_provider_loss_read_before_the_loss_isnt_fresh_at_the_list_step() {
+    // The shop's lists were read before the loss, minutes before; then its client blocked
+    // carol, which the shop's copy doesn't hold yet. The first receive after the loss stops
+    // at the list step, carol's entry not fitting the new service's deny list. That read from
+    // before the loss doesn't count as fresh: a request to carol isn't sent (Switch wire
+    // 7.4.14, "Lists"; Paykit spec 8.1).
+    use paykit_sdk::AppScopes;
+    let w = World::new();
+    let carol_id = w.carol.identity().public();
+    let mut buyer = w
+        .join(&w.carol, "buyer", AppScopes::new().pay().build().unwrap())
+        .await;
+    buyer.app_mut().invite(&w.alice_id()).await.unwrap();
+    let mut shop = w
+        .join(
+            &w.alice,
+            "shop",
+            AppScopes::new()
+                .request()
+                .manage_contacts()
+                .build()
+                .unwrap(),
+        )
+        .await;
+    shop.receive(None).await.unwrap();
+    shop.app_mut().deny(&carol_id).await.unwrap();
+    assert!(shop
+        .app_mut()
+        .allow_list()
+        .await
+        .unwrap()
+        .deny
+        .contains(&carol_id));
+    let next = declare_loss(&w);
+    for _ in 0..64 {
+        next.fail_next(pubky_switch_client::testing::Fault::Error {
+            path: "/recovery/upload".into(),
+            code: pubky_switch_core::http::ErrorCode::QuotaExceeded,
+            current: serde_json::json!({ "limit": "deny", "over": 1 }),
+        });
+    }
+    shop.app_mut().refresh_identity().await.unwrap();
+    let _ = shop.receive(None).await;
+    assert_eq!(
+        recovery_step(&shop).await,
+        pubky_switch_client::app::RecoveryStep::Lists
+    );
+    let entries = w.carol.switch().entries_from(&w.alice_id());
+    let _ = shop
+        .send_request(carol_id, draft("1", w.clock.now_ms()))
+        .await;
+    let _ = shop.flush().await;
+    assert_eq!(w.carol.switch().entries_from(&w.alice_id()), entries);
+}

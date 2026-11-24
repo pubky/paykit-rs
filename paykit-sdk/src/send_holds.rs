@@ -90,7 +90,7 @@ pub(crate) enum DenyDecision {
 }
 
 pub(crate) fn deny_decision(delivery: &DeliveryView<'_>) -> Result<DenyDecision> {
-    let read = state::delivery_get::<u64>(delivery, key::LISTS_READ)?;
+    let read = receive::delivery_lists_read(delivery)?;
     if !read.is_some_and(|at| receive::lists_read_is_fresh(at, delivery.now_ms())) {
         return Ok(DenyDecision::Unknown);
     }
@@ -576,7 +576,7 @@ impl Paykit {
         // A time observed spares the read only while the copy of the lists is fresh: a due
         // copy is read before a governed send all the same (Paykit spec 8.1).
         let fresh = self
-            .local_get::<u64>(key::LISTS_READ)
+            .lists_read_at()
             .await?
             .is_some_and(|at| receive::lists_read_is_fresh(at, self.now()));
         if (self.protocol.delivery.observed().is_some() && fresh)
