@@ -12,9 +12,11 @@ internal suspend fun checkPublic(fixture: CheckoutFixture, wallet: NativeWallet)
             publish()
             error("payer published a public Payment Endpoint")
         } catch (error: WalletException.NeedsUser) {
-            check(error.failure.code() == "scope_missing")
-            checkNotNull(error.failure.refusal()).use {
-                check((it.kind() as RefusalKind.ScopeMissing).scope == "paykit_request")
+            error.failure.use { failure ->
+                check(failure.code() == "scope_missing")
+                checkNotNull(failure.refusal()).use {
+                    check((it.kind() as RefusalKind.ScopeMissing).scope == "paykit_request")
+                }
             }
         }
     }

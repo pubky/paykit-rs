@@ -29,6 +29,9 @@ fn endpoint(identifier: &str, payload: &str) -> PublicEndpoint {
     }
 }
 
+// The test wallet is enrolled to pay only, so its writes of public endpoints are refused for
+// the selling scope. A successful publication needs a wallet enrolled with that scope, which
+// the choice of scopes at enrolment brings.
 async fn public_endpoints(world: &World) -> TestResult {
     let root = tempfile::tempdir()?;
     let account = Arc::new(Account::open(root.path(), world.clock().clone()));
@@ -349,5 +352,61 @@ fn test_message_delivery_preserves_fields_without_failure_text() {
         ),
     ] {
         assert_eq!(M::from(delivery), expected);
+    }
+}
+
+#[test]
+fn test_delivery_and_transport_codes_name_each_known_answer() {
+    use paykit_sdk::MessageDelivery as D;
+    // Each failure text the outbox keeps maps to a code; nothing of the text crosses.
+    for (text, code) in [
+        ("the batch carrying it was dropped", "batch_dropped"),
+        ("not sealed", "not_sealed"),
+        ("timed out", "timeout"),
+        (
+            "the batch carrying it was refused: 413 too_large: private details",
+            "too_large",
+        ),
+        ("403 not_admitted", "not_admitted"),
+        ("500 not_admitted", "unknown"),
+    ] {
+        let delivery = MessageDelivery::from(D::Queued {
+            tries: 1,
+            last_error: Some(text.into()),
+        });
+        assert_eq!(
+            delivery,
+            MessageDelivery::Queued {
+                tries: 1,
+                last_error: Some(code.into()),
+            },
+            "{text}"
+        );
+    }
+    // Each transport failure of an owed publication is named by its kind alone.
+    for (error, code) in [
+        (
+            TransportError::FirstSendUnavailable,
+            "first_send_unavailable",
+        ),
+        (TransportError::FirstSendExpired, "first_send_expired"),
+        (TransportError::Refused("private".into()), "refused"),
+        (TransportError::Connect("private host".into()), "connect"),
+        (TransportError::Timeout, "timeout"),
+        (TransportError::TooLarge(9), "too_large"),
+        (
+            TransportError::InvalidRequest("private".into()),
+            "invalid_request",
+        ),
+        (
+            TransportError::UnreadableSignedHeader { status: 502 },
+            "unreadable_signed_header",
+        ),
+        (TransportError::Other("private".into()), "other"),
+    ] {
+        assert_eq!(
+            PublicationState::from(Publication::Owed { error }),
+            PublicationState::Owed { error: code.into() }
+        );
     }
 }
