@@ -141,6 +141,6 @@ jobs:
           }
           dependencies { testImplementation("com.synonym:paykit-android:" + providers.gradleProperty("version").get()) }
           GRADLE
-          gradle --no-daemon compileReleaseUnitTestKotlin
+          gradle --no-daemon compileDebugUnitTestKotlin
           compiled=$(find build -name WalletBindingsCompileKt.class -print -quit)
           test -s "$compiled" || { echo "Missing compiled Kotlin consumer" >&2; exit 1; }

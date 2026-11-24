@@ -39,7 +39,7 @@ for abi in "${abis[@]}"; do
     cp "$work/jniLibs/$abi/libpaykit.so" "$main/jniLibs/$abi/"
 done
 
-gradle -p "$android" --no-daemon :lib:assembleRelease :lib:compileReleaseUnitTestKotlin
+gradle -p "$android" --no-daemon :lib:assembleRelease :lib:compileDebugUnitTestKotlin
 aar="$android/lib/build/outputs/aar/lib-release.aar"
 require_file "$aar"
 for abi in "${abis[@]}"; do unzip -tq "$aar" "jni/$abi/libpaykit.so"; done

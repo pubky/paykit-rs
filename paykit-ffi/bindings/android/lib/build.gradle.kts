@@ -20,7 +20,9 @@ android {
         minSdk = 28
         consumerProguardFiles("consumer-rules.pro")
     }
-    sourceSets.getByName("main").kotlin.srcDir("src/main/generated/kotlin")
+    sourceSets {
+        getByName("main").kotlin.directories.add("src/main/generated/kotlin")
+    }
     buildTypes.getByName("release") {
         proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
     }
@@ -34,7 +36,7 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
 }
 
-val checkBindings by tasks.registering {
+val checkBindings = tasks.register("checkBindings") {
     val main = layout.projectDirectory.dir("src/main")
     doLast {
         val libraries = listOf("arm64-v8a", "armeabi-v7a", "x86_64").map { "jniLibs/$it/libpaykit.so" }

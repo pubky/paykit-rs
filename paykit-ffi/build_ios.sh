@@ -21,7 +21,8 @@ mkdir "$work/simulator"
 simulator="$work/simulator/libpaykit.a"
 xcrun lipo -create "$CARGO_TARGET_DIR/aarch64-apple-ios-sim/release/libpaykit.a" \
     "$CARGO_TARGET_DIR/x86_64-apple-ios/release/libpaykit.a" -output "$simulator"
-xcrun lipo "$simulator" -verify_arch arm64 x86_64
+archs=$(xcrun lipo -archs "$simulator" | tr ' ' '\n' | LC_ALL=C sort | xargs)
+[[ $archs == "arm64 x86_64" ]] || fail "Simulator library has architectures: $archs"
 "$ffi/package-apple.sh" "$work/generated" "$CARGO_TARGET_DIR/aarch64-apple-ios/release/libpaykit.a" \
     "$simulator" "$work/package"
 framework=PaykitFFI.xcframework
