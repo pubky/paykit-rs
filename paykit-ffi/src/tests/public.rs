@@ -191,7 +191,7 @@ async fn cancel_received_request(
     let sent = Box::pin(seller.send_request(buyer, draft)).await?;
     let request = sent.request.ok_or("missing signed request")?;
     while Box::pin(payer.receive()).await?.more {}
-    seller.app_mut().remove_conversation(&buyer).await?;
+    seller.app_mut().remove_reply(&buyer).await?;
     let msg_id = payer.cancel_request(request.into(), None).await?;
     assert!(matches!(
         payer.message_delivery(msg_id.clone()).await?,
