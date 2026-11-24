@@ -769,16 +769,7 @@ impl Paykit {
             &dispatched,
         ))
         .await?;
-        let mut counting = facts.signed.clone();
-        for entry in &ledger.entries {
-            if let Some(fact) = counting.get_mut(&entry.attempt_id) {
-                if entry.outcome.is_none()
-                    && fact.claim == Some(ClaimState::Failed { by_owner: false })
-                {
-                    fact.never_dispatched = false;
-                }
-            }
-        }
+        let counting = facts.signed.clone();
         let mut retired = if ledger.count == 0 {
             HashMap::new()
         } else {

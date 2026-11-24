@@ -131,13 +131,13 @@ fn reconciled_usage(
             }
             match &dispatch.outcome {
                 RailOutcome::Failed
-                    if claim.is_some_and(|claim| {
-                        matches!(claim.state, ClaimState::Failed { by_owner: true })
-                    }) => {}
+                    if claim
+                        .is_some_and(|claim| matches!(claim.state, ClaimState::Failed { .. })) => {}
                 RailOutcome::Paid(_) => unclassified.push(dispatch),
                 _ => return None,
             }
-            // The ledger already counts this failure in full. Its method history cannot release it.
+            // The ledger already releases this failure, whichever own app recorded it on the
+            // claim (Paykit spec 8.3, `failed` releases); the method's history agrees.
             continue;
         }
         evidence.get_mut(&id)?.paid |= matches!(dispatch.outcome, RailOutcome::Paid(_));

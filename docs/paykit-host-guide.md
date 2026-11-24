@@ -255,7 +255,7 @@ current store.
 | `Stage::Abandoned` | The journal entry ended before the attempt was written or money could move. |
 | `Resolution::Done` | The user confirms the attempt was paid. |
 | `Resolution::Unknown` | The user leaves the attempt unresolved. A later attempt carries possible-duplicate risk. |
-| `Resolution::Failed` | The user confirms the attempt definitively did not pay. |
+| `Resolution::Failed` | The user or the wallet confirms the attempt definitively did not pay: the money did not move and can't settle later. Under an Allowance it gives the attempt's reservation back. A timeout, a missing receipt or an unreadable history is no such confirmation. |
 | `MessageDelivery::Kept` | Track the existing batch. Let a read or write retry its signed bytes. |
 | `MessageDelivery::Queued` | Keep the same message ID while the outbox retries. |
 | `MessageDelivery::WaitingForAdmission` | Tell the user the recipient needs to admit this identity. |
@@ -343,15 +343,18 @@ wallet and after a reconciliation error. The Switch client stops new payment
 attempts, including manual payments. Direct the user to the signer to move to
 another provider or declare provider loss (Switch spec 10.1).
 
-Call `Paykit::reserved_by_other_apps` with the permanent Allowance handle.
-For each returned attempt, show its ID and transfer amount in the Allowance's
-asset. If the user selects that attempt and confirms the release, pass its ID
-and `UserConfirmed` to `Paykit::release_allowance_attempt`. The wallet
-checks the current grant and failure and its own durable evidence that the
-attempt ended before dispatch. A restored journal cannot establish that.
-If the call returns a kept batch ID, show the release as pending. Receive or
-resume and read the verified usage again before showing a change in capacity.
-A later signed paid outcome still spends the amount (Paykit spec 8.3).
+Under an Allowance, a failed attempt gives its reservation back, amount and
+count, whichever of the user's apps recorded the failure (Paykit spec 8.3,
+`failed` releases): the payment method answering that it failed, or the
+wallet's confirmation of an attempt it can't resolve otherwise
+(`resolve_attempt` with `Resolution::Failed`, `resolve_confirmed_attempt` in
+the bindings). The wallet decides, so confirm a
+failure only when this exact attempt did not move money and can't settle
+later. A timeout, a missing receipt or a history that can't be read leaves the
+attempt unresolved, and it stays counted. Receive or resume and read the
+verified usage again before showing the capacity back. If the payment turns
+out to have gone through, a later paid outcome or proof counts it spent again,
+once, which can take the Allowance past a limit by at most that payment.
 
 To pay an eligible one-time request, call `Paykit::pay_under_allowance`
 with the same permanent Allowance handle. The wallet reserves the transfer
@@ -650,7 +653,7 @@ The method declares `payment_time_tolerance_ms` with its declaration. The payee 
 | `Refusal::Subscribed` | Show that the recurring request is already accepted. |
 | `Refusal::NotSubscribed` | Wait until the payer accepts the recurring request. |
 | `Refusal::ManualOnly` | Not this automatic payer's to pay. An occurrence marked to be paid by hand only: no wallet's policy and no Allowance's executor pays it; leave it for the user. From `pay_period_automatically`, a Billing Period funded under an Allowance: leave it for that Allowance's executor (`pay_period_under_allowance`). From `pay_period_under_allowance`, a Billing Period funded under no Allowance: leave it for the wallet's own policy or the user. |
-| `Refusal::NotAutomatic` | Show why this payment can't be made automatically: the window or dated subscription, or, under an Allowance, a request outside its terms, a lifetime limit used up with nothing reserved or to release, or an Allowance that expired after the payment was reserved and before its first dispatch. An Allowance set up before a provider loss and never granted here gets its own reason: it can't be granted now, so the user ends it and sets up a new one. After a provider loss, a one-time request is not paid automatically under any Allowance: the shared post-loss hold holds it for good (Paykit spec 8.1). It is final for automatic payment; the user may still pay by hand. |
+| `Refusal::NotAutomatic` | Show why this payment can't be made automatically: the window or dated subscription, or, under an Allowance, a request outside its terms, a lifetime limit used up with nothing reserved that could come back, or an Allowance that expired after the payment was reserved and before its first dispatch. An Allowance set up before a provider loss and never granted here gets its own reason: it can't be granted now, so the user ends it and sets up a new one. After a provider loss, a one-time request is not paid automatically under any Allowance: the shared post-loss hold holds it for good (Paykit spec 8.1). It is final for automatic payment; the user may still pay by hand. |
 | `Refusal::PeriodNotStarted` | Show when this Billing Period starts. If the payer chooses to pay early, call `pay_period` for that period with `PayOptions::with_early_payment_confirmed`. After a payer-provider loss, an older subscription may already have paid this period early. Keep it pending while that history is incomplete. |
 | `Refusal::AttemptedPeriodsFull` | Wait for an existing period attempt to finish or reconcile its outcome before starting another. |
 | `Refusal::Destination` | Show the failed destination check and refresh when the payee has a usable endpoint. When its text says the device clock is behind, the destination expired by the service's time: tell the user the device clock is behind. |

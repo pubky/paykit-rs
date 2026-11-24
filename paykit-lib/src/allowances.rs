@@ -585,8 +585,8 @@ fn period_limit_json(limit: &PeriodLimit) -> Value {
 pub enum EntryOutcome {
     /// `done`: final.
     Done,
-    /// `failed`: written only when the attempt's owner failed it or the user released the
-    /// amount; a later `done` may replace it.
+    /// `failed`: written from a claim that shows the attempt failed, whichever own app wrote
+    /// it; it releases the reservation, and a later `done` may replace it.
     Failed,
 }
 
@@ -1386,8 +1386,9 @@ pub fn compact(terms: &AllowanceTerms, ledger: &Ledger, now: u64) -> Result<Opti
 /// Copy verified outcomes into the executor's ledger (Paykit spec 8.3, Paykit wire 5.5).
 /// The caller binds each claim or payer proof to the reservation. For this write, `paid`
 /// means the payer record holds a verified proof for this attempt and Allowance.
-/// An owner-written failure can fill an unset outcome. A paid claim or proof takes
-/// precedence and moves a compacted failed attempt into the paid totals exactly once.
+/// A failure on the claim, whichever own app wrote it, can fill an unset outcome. A paid
+/// claim or proof takes precedence and moves a compacted failed attempt into the paid totals
+/// exactly once.
 /// Returns `None` if the evidence makes no change.
 ///
 /// # Errors
@@ -1408,7 +1409,7 @@ pub fn record_outcomes(
         let outcome = if entry.outcome != Some(EntryOutcome::Done) && paid(fact) {
             EntryOutcome::Done
         } else if entry.outcome.is_none()
-            && fact.claim == Some(ClaimState::Failed { by_owner: true })
+            && matches!(fact.claim, Some(ClaimState::Failed { .. }))
         {
             EntryOutcome::Failed
         } else {
@@ -1635,9 +1636,8 @@ fn larger(a: &Decimal, b: &Decimal) -> Decimal {
 /// service time the batch landed at, and the entry already counts the attempt from then on:
 /// it counts while `t < at + 60 s + L` in a rolling limit, past the attempt's own `t < e + L`
 /// for any `e` before `at + 60 s`, and the window is cut at the next boundary of any anchored
-/// limit, so `e` lies in the entry's period. A `failed` outcome `kept` holds stays, as the
-/// attempt's owner or the user wrote it, and a `totals.failed` item counts in the lifetime
-/// amount only, whatever its time.
+/// limit, so `e` lies in the entry's period. A `failed` outcome `kept` holds stays, and a
+/// `totals.failed` item counts nothing, whatever its time, until a later `done` counts it.
 ///
 /// The merge may count an attempt twice, never less: an entry `shown` lists that `kept`
 /// compacted into `spent` and `count` is added again, as nothing in the inputs tells it
@@ -2411,7 +2411,7 @@ mod tests {
     }
 
     #[test]
-    fn test_record_outcomes_copies_paid_and_owner_failed_attempts_once() {
+    fn test_record_outcomes_copies_paid_and_failed_attempts_once() {
         let terms = AllowanceTerms::from_json(&terms()).unwrap();
         let mut held = ledger(vec![
             entry(1, "0.01", "2026-03-01T00:00:00.000Z", None),
@@ -2451,7 +2451,7 @@ mod tests {
                 Some(EntryOutcome::Done),
                 Some(EntryOutcome::Failed),
                 Some(EntryOutcome::Done),
-                None
+                Some(EntryOutcome::Failed)
             ]
         );
         assert!(next.failed.is_empty());

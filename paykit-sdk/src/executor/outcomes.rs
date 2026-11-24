@@ -414,16 +414,23 @@ impl Paykit {
             }) else {
                 continue;
             };
-            let state = match outcome {
-                EntryOutcome::Done => ClaimState::Done,
-                EntryOutcome::Failed => ClaimState::Failed { by_owner: true },
+            // A failure copied from the claim may be any own app's (Paykit spec 8.3, `failed`
+            // releases): either writer's verified claim confirms it.
+            let states: &[ClaimState] = match outcome {
+                EntryOutcome::Done => &[ClaimState::Done],
+                EntryOutcome::Failed => &[
+                    ClaimState::Failed { by_owner: true },
+                    ClaimState::Failed { by_owner: false },
+                ],
             };
-            if results.confirms(
-                id,
-                ReservationClaim { obligation, state },
-                opened,
-                Some(current),
-            ) {
+            if let Some(&state) = states.iter().find(|&&state| {
+                results.confirms(
+                    id,
+                    ReservationClaim { obligation, state },
+                    opened,
+                    Some(current),
+                )
+            }) {
                 facts.insert(id, AttemptEvidence::from(state));
                 payments.remove(&id);
             }
