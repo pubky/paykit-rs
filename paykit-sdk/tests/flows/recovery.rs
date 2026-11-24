@@ -339,13 +339,14 @@ async fn test_recovery_repeat_refused_without_a_fresh_own_identity() {
             Arc::new(TestClock::new(w.clock.now_ms())),
         )
         .await;
-    let refused = wallet.resume_payments().await.unwrap_err();
+    // The repeat is refused for that entry alone, which is left pending for the next resume.
+    let resumed = wallet.resume_payments().await.unwrap();
     assert!(
         matches!(
-            refused.refusal(),
-            Some(paykit_sdk::Refusal::IdentityUnavailable(_))
+            resumed.as_slice(),
+            [paykit_sdk::PayOutcome::Pending { attempt_id: left, .. }] if *left == attempt_id
         ),
-        "{refused:?}"
+        "{resumed:?}"
     );
     assert_eq!(w.rail.pay_calls(&attempt_id), 1);
     assert_eq!(wallet.payments().await.unwrap()[0].stage, Stage::Paying);
@@ -419,13 +420,14 @@ async fn test_recovery_slow_failed_own_identity_read_refuses_the_repeat() {
         .confirmed_at()
         .is_some());
     homeserver.then(w.alice_id(), 61_000, true);
-    let refused = wallet.resume_payments().await.unwrap_err();
+    // The repeat is refused for that entry alone, which is left pending for the next resume.
+    let resumed = wallet.resume_payments().await.unwrap();
     assert!(
         matches!(
-            refused.refusal(),
-            Some(paykit_sdk::Refusal::IdentityUnavailable(_))
+            resumed.as_slice(),
+            [paykit_sdk::PayOutcome::Pending { attempt_id: left, .. }] if *left == attempt_id
         ),
-        "{refused:?}"
+        "{resumed:?}"
     );
     assert_eq!(w.rail.pay_calls(&attempt_id), 1);
 }
@@ -974,87 +976,6 @@ async fn test_recovery_repeat_of_a_request_cancelled_since_withheld_and_paid_onc
 }
 
 #[tokio::test]
-async fn test_recovery_repeat_with_a_fee_grown_since_the_first_dispatch_not_made() {
-    // Planned under a cap of 1, the payment is in flight with no fee, and the method keeps
-    // no history; it now charges a fee of 5. The repeat would transfer more than the first
-    // dispatch was allowed to: it isn't made, and the attempt stays "may be paid".
-    let w = World::new();
-    let base = store();
-    let (attempt_id, app_id) = in_flight_with(
-        &w,
-        &base,
-        crate::common::btc_fee_cap(crate::common::day_window(), "1"),
-    )
-    .await;
-    w.rail.set_declaration(idempotent_without_history());
-    w.rail
-        .set_max_fee(Some(paykit_lib::Decimal::new("5").unwrap()));
-    let mut wallet = w
-        .load_on_clock(
-            &w.alice,
-            Arc::clone(&base),
-            app_id,
-            Arc::new(TestClock::new(w.clock.now_ms())),
-        )
-        .await;
-    let resumed = wallet.resume_payments().await.unwrap();
-    assert!(
-        matches!(resumed.as_slice(), [PayOutcome::Uncertain { .. }]),
-        "{resumed:?}"
-    );
-    assert_eq!(w.rail.pay_calls(&attempt_id), 1);
-    assert_eq!(wallet.payments().await.unwrap()[0].stage, Stage::Paying);
-}
-
-/// A payment planned under `planned`, in flight with no fee, repeated by a wallet opened under
-/// `reopened` once the method, which keeps no history, charges a fee of 5. Returns how many
-/// calls the method got.
-async fn repeat_with_grown_fee(
-    planned: paykit_sdk::PaykitConfig,
-    reopened: paykit_sdk::PaykitConfig,
-) -> u64 {
-    let w = World::new();
-    let base = store();
-    let (attempt_id, app_id) = in_flight_with(&w, &base, planned).await;
-    w.rail.set_declaration(idempotent_without_history());
-    w.rail
-        .set_max_fee(Some(paykit_lib::Decimal::new("5").unwrap()));
-    let mut wallet = w
-        .load_with(
-            &w.alice,
-            Arc::clone(&base),
-            app_id,
-            Arc::clone(&w.clock),
-            reopened,
-        )
-        .await;
-    wallet.resume_payments().await.unwrap();
-    w.rail.pay_calls(&attempt_id)
-}
-
-#[tokio::test]
-async fn test_recovery_repeat_fee_judged_by_the_cap_the_attempt_was_journaled_with() {
-    // The cap at planning decides the repeat, whatever the app's cap is now (Paykit spec 7.2
-    // step 1). Planned under a cap of 1 and reopened with none, the fee of 5 is above the
-    // journaled cap: no repeat. Planned with no cap and reopened under a cap of 1, the
-    // attempt was journaled with no fee check: the repeat is made.
-    let day = crate::common::day_window;
-    let capped = || crate::common::btc_fee_cap(day(), "1");
-    assert_eq!(repeat_with_grown_fee(capped(), day()).await, 1);
-    assert_eq!(repeat_with_grown_fee(day(), capped()).await, 2);
-}
-
-#[tokio::test]
-async fn test_recovery_repeat_with_no_cap_pays_a_grown_fee() {
-    // With no fee cap, nothing bounds the fee between planning and dispatch, a repeat's
-    // included: the fee is what the method reports at the call (Paykit spec 7.2 step 1).
-    assert_eq!(
-        repeat_with_grown_fee(crate::common::day_window(), crate::common::day_window()).await,
-        2
-    );
-}
-
-#[tokio::test]
 async fn test_recovery_repeat_withheld_by_a_kept_stop_it_couldnt_place() {
     // As above, but the wallet couldn't place bob's cancellation in the record, at its read
     // or at the resume: the cancellation it keeps withholds the repeat all the same.
@@ -1195,4 +1116,65 @@ async fn test_recovery_repeat_over_a_newer_request_record_refused_withheld() {
         "{resumed:?}"
     );
     assert_eq!(w.rail.pay_calls(&attempt_id), 1);
+}
+
+#[tokio::test]
+async fn test_recovery_repeat_ends_the_resume_at_a_store_failure_in_its_identity_read() {
+    // Two payments in flight on an idempotent method without a history: a resume repeats
+    // each, and reads the own identity.json again before the repeat. A newer one is
+    // published, so the first repeat's read commits it, and that one commit fails. A store
+    // failure stops the wallet as a whole: the resume returns it, and the later payment is
+    // neither repeated nor written.
+    use pubky_switch_client::store::{Fault, FaultStore};
+    let w = World::new();
+    w.rail.set_declaration(idempotent_without_history());
+    let faulty = Arc::new(FaultStore::new(store(), Fault::None));
+    let base = Arc::clone(&faulty) as Arc<dyn pubky_switch_client::store::StateStore>;
+    let mut wallet = w
+        .wallet_with("wallet", Arc::clone(&base), crate::common::day_window())
+        .await;
+    let mut shop = w.shop().await;
+    let requests = [
+        request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await,
+        request_from(&mut shop, w.alice_id(), draft("2", w.clock.now_ms())).await,
+    ];
+    wallet.receive(None).await.unwrap();
+    for request in &requests {
+        w.rail.next(Behaviour::Hang);
+        let outcome = wallet
+            .pay_request(request, PayOptions::default())
+            .await
+            .outcome
+            .unwrap();
+        assert!(matches!(outcome, PayOutcome::Pending { .. }), "{outcome:?}");
+    }
+    let order = wallet.payments().await.unwrap();
+    assert!(order.iter().all(|p| p.stage == Stage::Paying));
+    let later = order[1].attempt_id;
+    let doc = w.alice.sign_next(|_| {}).unwrap();
+    w.alice.switch().deliver_identity(&doc).unwrap();
+    // Past the 60 s of the last confirmation, a repeat reads the own identity.json again.
+    w.clock.advance_ms(61_000);
+    // The first commit of the own identity copy fails.
+    let own = format!("ident/{}/", pubky_switch_core::enc::pubky_id(&w.alice_id()));
+    faulty.fail_put_once(own.as_bytes());
+    let resumed = wallet.resume_payments().await;
+    assert!(
+        matches!(
+            &resumed,
+            Err(paykit_sdk::PaykitError::Client(
+                pubky_switch_client::app::AppError::Store(_)
+            ))
+        ),
+        "{resumed:?}"
+    );
+    assert_eq!(w.rail.pay_calls(&later), 1);
+    let later = wallet
+        .payments()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|p| p.attempt_id == later)
+        .unwrap();
+    assert_eq!(later.stage, Stage::Paying);
 }

@@ -1,6 +1,8 @@
 //! Reserve a one-time payment under the current executor grant (Paykit spec 8.3).
 
-use paykit_lib::allowances::{check_limits, EntryOutcome, Ledger, LedgerEntry};
+use paykit_lib::allowances::{
+    check_limits, EntryOutcome, Ledger, LedgerEntry, LimitKind, TermsRefusal,
+};
 use paykit_lib::kinds::Kind;
 use paykit_lib::records::ActivityRecord;
 use paykit_lib::{AllowanceId, PaymentEndpointIdentifier};
@@ -16,7 +18,7 @@ use super::ledger::reserved_ledger;
 use super::restore::{LedgerRead, ReconciledLedger};
 use super::ExecutorHistory;
 use crate::allowances::{
-    allowance_target, bind_at, named_allowance, Consent, ConsentEnd, ConsentEntry,
+    allowance_target, bind_at, named_allowance, Consent, ConsentEnd, ConsentEntry, ConsentState,
 };
 use crate::journal::JournalEntry;
 use crate::marks::{DropMark, MarkFamily};
@@ -24,7 +26,7 @@ use crate::pay::Dispatch;
 use crate::records::KeptMessage;
 use crate::state::key;
 use crate::stored::BoundNote;
-use crate::{AllowanceRole, AllowanceStatus, Paykit, Refusal, Result};
+use crate::{AllowanceRole, AllowanceStatus, AllowanceView, Paykit, Refusal, Result};
 
 /// The original grant the atomic opening claim and ledger write were conditioned on.
 /// The permanent key is derived from the entry's payee and this exact Allowance ID.
@@ -79,6 +81,179 @@ fn held(why: &str) -> crate::PaykitError {
     Refusal::NotNow(why.into()).into()
 }
 
+/// A refusal no later read changes for this request: it may still be paid by hand.
+fn not_automatic(why: &str) -> crate::PaykitError {
+    Refusal::NotAutomatic(why.into()).into()
+}
+
+/// Where an Allowance stands for a payment by this app as its executor (Paykit spec 8.3,
+/// "Executor", "Ends reach the executor"): the one classification the payment paths, the
+/// executor's grant paths and [`crate::AllowanceView::confirmation_needed`] follow.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Standing {
+    /// Nothing in the Allowance's own state stops this app paying under it.
+    Payable,
+    /// Accepted, and this app hasn't taken up its execution yet
+    /// ([`Paykit::resume_allowance_executor`]).
+    NotTakenUp,
+    /// The user must confirm it again, which [`Paykit::confirm_allowance_executor`] lifts.
+    Confirm,
+    /// A later read, answer or the user's own action may change it.
+    Temporary(&'static str),
+    /// Nothing later changes it.
+    Final(Refusal),
+}
+
+impl Standing {
+    /// The refusal a payment under the Allowance `hold` names gets, if any.
+    pub(crate) fn refusal(self, hold: &crate::AllowanceHold) -> Option<Refusal> {
+        match self {
+            Self::Payable => None,
+            Self::NotTakenUp => Some(Refusal::NotNow(
+                "this app hasn't taken up the Allowance's execution".into(),
+            )),
+            Self::Confirm => Some(Refusal::AllowanceConfirmationNeeded { hold: hold.clone() }),
+            Self::Temporary(why) => Some(Refusal::NotNow(why.into())),
+            Self::Final(refusal) => Some(refusal),
+        }
+    }
+}
+
+/// Where the Allowance `view` shows stands for `app`, given its consent to execute it. In
+/// this order: the Allowance's status, then whether this identity pays under it and this
+/// app may execute it, its consent removed, its executor and its expiry, then the
+/// counterparty's block and the knowledge of the deny list, and only then the user's
+/// confirmation, so the user is asked only when confirming lifts the refusal.
+pub(crate) fn standing(app: &Paykit, view: &AllowanceView, consent: ConsentState) -> Standing {
+    if let Some(standing) = status_standing(view.status) {
+        return standing;
+    }
+    if view.role != Some(AllowanceRole::Allower) {
+        return Standing::Final(Refusal::Usage(
+            "this identity doesn't pay under this Allowance".into(),
+        ));
+    }
+    if !app.holds("paykit_allowance_execute") {
+        return Standing::Final(Refusal::ScopeMissing("paykit_allowance_execute".into()));
+    }
+    if let ConsentState::Removed(reason) = consent {
+        return Standing::Final(removed_refusal(reason));
+    }
+    let own = match view.executor_app_id {
+        Some(executor) if executor == app.app_id() => true,
+        Some(_) => {
+            return Standing::Final(Refusal::Usage("another app executes this Allowance".into()))
+        }
+        None => false,
+    };
+    // An Allowance that expired at its terms' `expires_at` has ended (Paykit spec 8.3).
+    let expired = view
+        .terms
+        .as_ref()
+        .and_then(|terms| terms.expires_at.as_ref())
+        .zip(app.service_time())
+        .is_some_and(|(at, now)| now >= at.ms());
+    if expired {
+        return Standing::Final(Refusal::AllowanceEnded);
+    }
+    // After a provider loss an Allowance set up in an earlier generation and never granted
+    // here can't be granted now (Paykit spec 8.3, Acceptance): it pays nothing automatically.
+    if view.granted_before_loss && !own {
+        return Standing::Final(Refusal::NotAutomatic(SET_UP_BEFORE_LOSS.into()));
+    }
+    // Blocking pauses what is open with the counterparty and revokes nothing (Paykit spec
+    // 8.1): unblocking ends the pause.
+    match view.blocked {
+        Some(false) => {}
+        Some(true) => return Standing::Temporary("the counterparty is blocked"),
+        None => return Standing::Temporary("the deny list isn't known"),
+    }
+    // One this app executes, last confirmed before the loss, waits for the user's
+    // confirmation again, which writes its grant at the current generation; that grant
+    // establishes no complete usage authority, so its usage waits for a repair (Paykit spec
+    // 8.3, "After provider loss"). Neither lifts the shared hold on one-time payments.
+    // A known wait comes first: confirming wouldn't lift it.
+    if let ConsentState::Waiting(why) = consent {
+        return Standing::Temporary(why);
+    }
+    // The regrant is a write over the record: while that waits for the user's confirmation
+    // of the record, or for the messages kept over it, so does the Allowance's (Paykit spec 6).
+    if view.granted_before_loss {
+        return match view.record_write_waits {
+            true => Standing::Temporary(WAITS_FOR_RECORD_WRITE),
+            false => Standing::Confirm,
+        };
+    }
+    // The regrant written, a newer hold asks the user again first; then its usage waits.
+    if view.regranted_after_loss {
+        return match consent {
+            ConsentState::ConfirmAgain => Standing::Confirm,
+            _ => Standing::Temporary(NEEDS_REPAIR_AFTER_LOSS),
+        };
+    }
+    match (consent, own) {
+        (ConsentState::Held, true) => Standing::Payable,
+        // Asked again only where this app holds a grant it can stand on: confirming lifts
+        // nothing on a record whose executor doesn't verify.
+        (ConsentState::ConfirmAgain, true) => Standing::Confirm,
+        (ConsentState::ConfirmAgain, false) => Standing::NotTakenUp,
+        // The grant path lands the kept batch: the host calls again.
+        (ConsentState::GrantKept, _) => {
+            Standing::Temporary("the executor grant's write waits to be sent again")
+        }
+        // Applied here: resuming writes the consent the user approved under this hold, and
+        // without that approval the user confirms it.
+        (ConsentState::Unconsented { approved: false }, _) => Standing::Confirm,
+        (
+            ConsentState::Held | ConsentState::Unrecorded | ConsentState::Unconsented { .. },
+            false,
+        )
+        | (ConsentState::Unconsented { approved: true }, true) => Standing::NotTakenUp,
+        // The grant came from a backup taken before this device's consent was written.
+        (ConsentState::Unrecorded, true) => {
+            Standing::Temporary("this app's grant is held, but its consent isn't on this device")
+        }
+        (ConsentState::Waiting(why), _) => Standing::Temporary(why),
+        (ConsentState::Removed(reason), _) => Standing::Final(removed_refusal(reason)),
+    }
+}
+
+/// Where an Allowance stands by its status alone: `None` for an accepted one, which the
+/// rest of [`standing`] decides.
+fn status_standing(status: AllowanceStatus) -> Option<Standing> {
+    Some(match status {
+        AllowanceStatus::Accepted => return None,
+        AllowanceStatus::Ended => Standing::Final(Refusal::AllowanceEnded),
+        AllowanceStatus::Conflicted => Standing::Final(Refusal::AllowanceConflicted),
+        AllowanceStatus::Rejected => Standing::Final(Refusal::Rejected),
+        AllowanceStatus::AwaitingConflictCheck => {
+            Standing::Temporary("the Allowance waits for its conflict check")
+        }
+        _ => Standing::Temporary("the Allowance isn't accepted yet"),
+    })
+}
+
+/// Why an Allowance set up before a provider loss, and never granted here, pays nothing
+/// automatically.
+pub(crate) const SET_UP_BEFORE_LOSS: &str = "the Allowance was set up before a provider loss and never granted here, so it can't be granted now: the user can end it and set up a new one";
+
+/// Why an Allowance last confirmed before a provider loss waits before asking the user.
+pub(crate) const WAITS_FOR_RECORD_WRITE: &str = "the Allowance record is divergent or has messages to write first: the user confirms the record as shown, a newer write ends it, or the next receive writes the messages";
+
+/// Why an Allowance whose grant was written again after a provider loss doesn't pay yet.
+pub(crate) const NEEDS_REPAIR_AFTER_LOSS: &str = "after a provider loss this version doesn't resume automatic payments under the Allowance, whose usage needs a repair it doesn't make: the user ends it and sets up a new one";
+
+/// The refusal for an Allowance taken off this app's consent list for `reason`: final, as no
+/// later read puts it back (Paykit spec 8.3, "Executor", "Ends reach the executor").
+pub(super) fn removed_refusal(reason: ConsentEnd) -> Refusal {
+    match reason {
+        ConsentEnd::Ended => Refusal::AllowanceEnded,
+        ConsentEnd::Conflicted => Refusal::AllowanceConflicted,
+        ConsentEnd::Rejected => Refusal::Rejected,
+        ConsentEnd::HandedOff => Refusal::Usage("another app executes this Allowance".into()),
+    }
+}
+
 /// Entries and compacted failures retain the same obligation and attempt identity.
 pub(super) fn accounts_for_attempt(
     ledger: &Ledger,
@@ -103,16 +278,20 @@ impl AllowanceReservation {
         period_start: Option<u64>,
     ) -> Result<()> {
         let (_, request) = crate::requests::request_of(record).ok_or(Refusal::NotFound)?;
+        if record.manual_only {
+            return Err(Refusal::ManualOnly.into());
+        }
         if (request.conversion.is_some() && !request.is_recurring())
             || request.amount.asset != self.checked.terms.asset
-            || record.manual_only
             || period_start
                 .map_or(record.allowance_id.as_ref(), |start| {
                     record.allowance_for(start)
                 })
                 .is_some_and(|id| id != &self.id)
         {
-            return Err(held("the request does not qualify under this Allowance"));
+            return Err(not_automatic(
+                "the request does not qualify under this Allowance",
+            ));
         }
         if let Some(claim) = claim {
             let ledger = &self.checked.ledger;
@@ -138,20 +317,24 @@ impl AllowanceReservation {
         self.request(record, None, None)?;
         let (stored, body) = crate::requests::request_of(record).ok_or(Refusal::NotFound)?;
         let terms = &self.checked.terms;
+        if self.expired() {
+            return Err(Refusal::AllowanceEnded.into());
+        }
         if terms
             .active_from
             .as_ref()
             .is_some_and(|t| self.checked.at < t.ms())
-            || terms
-                .expires_at
-                .as_ref()
-                .is_some_and(|t| self.checked.at >= t.ms())
-            || terms
-                .per_payment_amount
-                .as_ref()
-                .is_some_and(|r| body.amount.value < r.minimum || body.amount.value > r.maximum)
         {
-            return Err(held("the subscription is outside the Allowance's terms"));
+            return Err(held("the Allowance's terms aren't active yet"));
+        }
+        if terms
+            .per_payment_amount
+            .as_ref()
+            .is_some_and(|r| body.amount.value < r.minimum || body.amount.value > r.maximum)
+        {
+            return Err(not_automatic(
+                "the subscription is outside the Allowance's terms",
+            ));
         }
         if let Some(ids) = self.endpoints() {
             let pricing = crate::pay::Pricing::of_request(
@@ -175,6 +358,16 @@ impl AllowanceReservation {
             .await?;
         }
         Ok(())
+    }
+
+    /// Whether the Allowance's terms expired at the service time this check read: it then
+    /// has ended (Paykit spec 8.3).
+    fn expired(&self) -> bool {
+        self.checked
+            .terms
+            .expires_at
+            .as_ref()
+            .is_some_and(|t| self.checked.at >= t.ms())
     }
 
     pub(crate) fn active_window(&self) -> Option<Condition> {
@@ -201,6 +394,7 @@ impl AllowanceReservation {
         entry: &mut JournalEntry,
         batch: OpBatch,
     ) -> Result<OpBatch> {
+        let expired = self.expired();
         let mut checked = self.checked;
         let amount = entry
             .paid_amount()?
@@ -209,9 +403,43 @@ impl AllowanceReservation {
         checked
             .terms
             .check_payment(&amount, &endpoint, checked.at)
-            .map_err(|_| held("the transfer does not satisfy the Allowance terms"))?;
-        check_limits(&checked.terms, &checked.usage, &amount.value)
-            .map_err(|limit| held(&format!("the {} limit has no room", limit.as_str())))?;
+            .map_err(|refused| match refused {
+                TermsRefusal::NotActive if expired => Refusal::AllowanceEnded.into(),
+                TermsRefusal::NotActive => held("the Allowance's terms aren't active yet"),
+                _ => not_automatic("the transfer does not satisfy the Allowance terms"),
+            })?;
+        check_limits(&checked.terms, &checked.usage, &amount.value).map_err(|limit| {
+            let why = format!("the {} limit has no room", limit.as_str());
+            // The per-payment range never makes room for this payment, nor the lifetime limit
+            // once nothing is reserved; a reservation's release, a later period and a repair
+            // of usage of other terms do.
+            // Releasing every releasable attempt would make room for this payment.
+            let release_fits = || {
+                let Some(cap) = &checked.terms.lifetime_amount_limit else {
+                    return false;
+                };
+                checked.facts.releasable().is_some_and(|freed| {
+                    checked
+                        .usage
+                        .lifetime()
+                        .scaled()
+                        .saturating_sub(freed)
+                        .checked_add(amount.value.scaled())
+                        .is_some_and(|sum| sum <= cap.scaled())
+                })
+            };
+            match limit {
+                LimitKind::PerPayment => not_automatic(&why),
+                // Room another app's failed attempt holds comes back once the user releases
+                // it, when that makes room for this payment, and room a reserved entry holds
+                // once it is released.
+                LimitKind::Lifetime if release_fits() => held(
+                    "the lifetime limit has no room while another app's failed attempt holds it: the user can release that attempt (reserved_by_other_apps)",
+                ),
+                LimitKind::Lifetime if checked.usage.reserved() == 0 => not_automatic(&why),
+                _ => held(&why),
+            }
+        })?;
         checked.ledger = reserved_ledger(
             &checked.terms,
             checked.ledger,
@@ -369,6 +597,11 @@ impl Paykit {
         checked.stage(self, batch, Vec::new(), false).await
     }
 
+    /// The checks before a payment under the Allowance at `record` to `payee` starts (Paykit
+    /// spec 8.3, "Executor"): first where the Allowance stands ([`standing`]), which refuses
+    /// for good, for the user's confirmation, or for now; then a request of another
+    /// counterparty, for good ([`Refusal::Usage`]); then what a later read or answer changes
+    /// ([`Refusal::NotNow`]).
     pub(crate) async fn allowance_reservation(
         &mut self,
         record: &[u8; 32],
@@ -377,27 +610,30 @@ impl Paykit {
         let stopped =
             || held("the accepted executor grant, ledger or wallet history is unavailable");
         let view = self.allowance(record).await?;
-        if !self.holds("paykit_allowance_execute")
-            || view.counterparty != *payee
-            || view.role != Some(AllowanceRole::Allower)
-            || view.status != AllowanceStatus::Accepted
-            || view.executor_app_id != Some(self.app_id())
-            || !view.consented
-            || view.blocked != Some(false)
-            || self.pause_at(record).await?.blocks_automatic()
-            || self
-                .executor_replies_pending(record, payee, &view.allowance_id, false)
-                .await?
+        let consent = Box::pin(self.consent_state(record)).await?;
+        if let Some(refusal) = standing(self, &view, consent).refusal(&view.hold) {
+            return Err(refusal.into());
+        }
+        if view.counterparty != *payee {
+            return Err(Refusal::Usage(
+                "the request's payee isn't this Allowance's counterparty".into(),
+            )
+            .into());
+        }
+        if self
+            .executor_replies_pending(record, payee, &view.allowance_id, false)
+            .await?
         {
-            return Err(stopped());
+            return Err(held("a reply to the Allowance waits to be written"));
         }
         let target = ledger_target(payee, &view.allowance_id);
-        if self
-            .pause_at(&self.app.record_key(&target)?)
-            .await?
-            .blocks_automatic()
+        if self.pause_at(record).await?.blocks_automatic()
+            || self
+                .pause_at(&self.app.record_key(&target)?)
+                .await?
+                .blocks_automatic()
         {
-            return Err(stopped());
+            return Err(held("the Allowance's records are paused or divergent"));
         }
         let checked = self
             .executor_base(record, LedgerRead::Inventory)
@@ -425,8 +661,12 @@ impl Paykit {
         let target = allowance_target(&entry.payee, &id);
         let key = self.app.record_key(&target)?;
         let ledger_key = self.app.record_key(&ledger_target(&entry.payee, &id))?;
-        let Ok((checked, _)) = self.current_executor_record(&target).await else {
-            return Ok(true);
+        let (checked, _) = match self.current_executor_record(&target).await {
+            Ok(read) => read,
+            Err(error) => {
+                crate::pay::unless_stop(error)?;
+                return Ok(true);
+            }
         };
         let repeat = matches!(kind, Dispatch::Repeat { .. });
         if repeat {
@@ -450,7 +690,9 @@ impl Paykit {
             };
             let consent = self.local_get::<ConsentEntry>(&key::consent(&key)).await?;
             if original.grant.revision != under.revision()
-                || checked.revision.generation != under.revision().generation
+                // The record moves on only to a later write: a later generation of the same
+                // history continues the sequence (Pubky Switch spec, Section 12.5).
+                || checked.revision.generation < under.revision().generation
                 || (checked.revision != under.revision()
                     && checked.revision.seq <= under.revision().seq)
                 || original.record.check_later_write(&record).is_err()
@@ -540,5 +782,54 @@ impl Paykit {
             }
         }
         Ok(false)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_spend_pending_conflict_check_waits_and_stops_stay_final() {
+        use crate::allowances::shown_status;
+        // An accepted Allowance whose record could still establish a conflict waits for
+        // the check, with its own reason, not as one not accepted yet.
+        assert_eq!(
+            status_standing(shown_status(AllowanceStatus::Accepted, true)),
+            Some(Standing::Temporary(
+                "the Allowance waits for its conflict check"
+            ))
+        );
+        assert_eq!(
+            status_standing(shown_status(AllowanceStatus::Accepted, false)),
+            None
+        );
+        // An ended, rejected or conflicted record stays final with conflict evidence still
+        // unresolved (Paykit spec 8.3).
+        for (status, refusal) in [
+            (AllowanceStatus::Ended, Refusal::AllowanceEnded),
+            (AllowanceStatus::Rejected, Refusal::Rejected),
+            (AllowanceStatus::Conflicted, Refusal::AllowanceConflicted),
+        ] {
+            assert_eq!(
+                status_standing(shown_status(status, true)),
+                Some(Standing::Final(refusal))
+            );
+        }
+    }
+
+    #[test]
+    fn test_spend_removed_consent_refuses_as_its_end() {
+        // A removal refuses as the status path refuses the same end (Paykit spec 8.3).
+        assert_eq!(removed_refusal(ConsentEnd::Ended), Refusal::AllowanceEnded);
+        assert_eq!(
+            removed_refusal(ConsentEnd::Conflicted),
+            Refusal::AllowanceConflicted
+        );
+        assert_eq!(removed_refusal(ConsentEnd::Rejected), Refusal::Rejected);
+        assert!(matches!(
+            removed_refusal(ConsentEnd::HandedOff),
+            Refusal::Usage(_)
+        ));
     }
 }

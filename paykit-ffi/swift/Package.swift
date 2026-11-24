@@ -2,12 +2,12 @@
 import PackageDescription
 
 let package = Package(
-    name: "PaykitV2",
+    name: "Paykit",
     platforms: [.iOS(.v15)],
-    products: [.library(name: "PaykitV2", targets: ["PaykitV2"])],
+    products: [.library(name: "Paykit", targets: ["Paykit"])],
     targets: [
-        .binaryTarget(name: "PaykitV2FFI", path: "PaykitV2FFI.xcframework"),
-        .target(name: "PaykitV2", dependencies: ["PaykitV2FFI"])
+        .binaryTarget(name: "PaykitFFI", path: "PaykitFFI.xcframework"),
+        .target(name: "Paykit", dependencies: ["PaykitFFI"])
     ],
     swiftLanguageVersions: [.v5]
 )

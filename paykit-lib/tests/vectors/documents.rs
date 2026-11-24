@@ -239,12 +239,12 @@ Paykit verifier requires every permission of paykit_permissions, and, when the c
 holds no other protocol's scope, permissions exactly that list. accepted are certificates \
 Paykit's verifiers take: paykit_request, with the paykit_settlements and paykit_contacts it \
 requires, beside chat, with lists.read, which paykit_contacts needs, lists.manage, which \
-chat brings and none of those Paykit scopes needs, and conversation.add, which paykit_request \
+chat brings and none of those Paykit scopes needs, and reply.add, which paykit_request \
 needs; and chat alone with lists.read, a valid certificate \
 that holds no Paykit scope, whose Paykit messages recipients drop at check 8 (messages.json \
 multi_protocol_senders). refused are certificates they refuse: paykit_request beside chat \
-with lists.read and lists.manage, without conversation.add; paykit_request alone, with paykit_settlements and without the \
-paykit_contacts it requires, with lists.read beside conversation.add; and paykit_request \
+with lists.read and lists.manage, without reply.add; paykit_request alone, with paykit_settlements and without the \
+paykit_contacts it requires, with lists.read beside reply.add; and paykit_request \
 beside paykit_ext:cap, an extension scope whose prefix doesn't start with paykit-; the first \
 and the last hold the scopes paykit_request requires, so that only the rule named refuses \
 them. reason is paykit-lib's wording at a \
@@ -280,14 +280,14 @@ type CertCase = (
 
 const LISTS_READ: Permission = Permission::ListsRead;
 const LISTS_MANAGE: Permission = Permission::ListsManage;
-const ADD: Permission = Permission::ConversationAdd;
+const ADD: Permission = Permission::ReplyAdd;
 
 /// The accepted cases of `multi_protocol_certificates`, whose certificates also present
 /// the messages of `multi_protocol_senders` (`messages.json`): request beside chat, then chat
 /// alone. Each holds a permission that only chat brings, one its Paykit scopes don't need.
 pub(crate) const MULTI_PROTOCOL_ACCEPTED: [CertCase; 2] = [
     (
-        "paykit_request and chat, with lists.read, lists.manage and conversation.add",
+        "paykit_request and chat, with lists.read, lists.manage and reply.add",
         "shop",
         &[
             "paykit_request",
@@ -307,7 +307,7 @@ pub(crate) const MULTI_PROTOCOL_ACCEPTED: [CertCase; 2] = [
 
 const MULTI_PROTOCOL_REFUSED: [CertCase; 3] = [
     (
-        "paykit_request and chat without conversation.add",
+        "paykit_request and chat without reply.add",
         "shop",
         &[
             "paykit_request",
@@ -318,7 +318,7 @@ const MULTI_PROTOCOL_REFUSED: [CertCase; 3] = [
         &[LISTS_READ, LISTS_MANAGE],
     ),
     (
-        "paykit_request only, with lists.read beside conversation.add",
+        "paykit_request only, with lists.read beside reply.add",
         "shop",
         &["paykit_request", "paykit_settlements"],
         &[LISTS_READ, ADD],
@@ -873,7 +873,7 @@ const CERTIFICATE_REJECTIONS: [CertCase; 2] = [
         ],
     ),
     (
-        "missing: conversation.add, which paykit_pay needs",
+        "missing: reply.add, which paykit_pay needs",
         "wallet",
         &["paykit_pay", "paykit_contacts", "paykit_manage_contacts"],
         &[
@@ -886,7 +886,7 @@ const CERTIFICATE_REJECTIONS: [CertCase; 2] = [
 ];
 
 /// The cases of `labelled_scope_rejections`: their names, scopes and the reason every
-/// verifier gives, in the prototype's wording.
+/// verifier gives, in paykit-lib's wording.
 const LABELLED_SCOPE_REJECTIONS: [(&str, &[&str], &str); 5] = [
     (
         "a label of 33 characters",

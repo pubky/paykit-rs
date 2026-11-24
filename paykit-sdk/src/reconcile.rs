@@ -275,7 +275,7 @@ impl Paykit {
                 None,
                 &held.key,
                 |t| self.app.record_key(t).ok(),
-                &|p| self.rail.settlement_id(p),
+                &|endpoint, proof| self.rail.settlement_id(endpoint, proof),
             ) {
                 out.push(record);
             }
@@ -295,6 +295,8 @@ impl Paykit {
     /// pass needs the keys to read every obligation. [`Paykit::resume_payments`] can still
     /// finish payments already dispatched. Client and rail errors propagate to the caller.
     pub async fn reconcile(&mut self) -> Result<ReconcileReport> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         // The call's future goes on the heap, as `receive`'s does: it nests deep.
         Box::pin(self.reconcile_inner()).await
     }
@@ -522,7 +524,10 @@ impl Paykit {
                 let mut found: std::collections::BTreeMap<_, (Destination, Carrier)> =
                     std::collections::BTreeMap::new();
                 for list in self.lists_of(&obligation.payee).await? {
-                    if required.is_some_and(|app| app != list.app_id) {
+                    // A value over a delete seen names nothing (Paykit spec 6; wire 5).
+                    if required.is_some_and(|app| app != list.app_id)
+                        || !self.list_admitted(&list).await?
+                    {
                         continue;
                     }
                     let Body::PrivatePaymentList(listed) = list.list.body() else {
@@ -678,6 +683,8 @@ impl Paykit {
         resolution: Resolution,
         _confirmed: UserConfirmed,
     ) -> Result<()> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         // The call's future goes on the heap, as `receive`'s does: it nests deep.
         Box::pin(self.resolve_attempt_inner(obligation, attempt, resolution, _confirmed)).await
     }
@@ -949,6 +956,10 @@ impl Paykit {
                 &request_hash,
             ));
             let parent_key = self.activity_key(&parent)?;
+            // The `done` is conditioned on the parent request's record too: paused after a
+            // view showed it divergent, it waits for the user's confirmation of that record
+            // as well (Paykit spec 6).
+            Box::pin(self.refuse_while_paused(&[parent_key])).await?;
             let base = self.activity_write_base(&parent_key).await?;
             let request = self.read_activity(&parent, base.as_ref());
             let proof = record.proof.as_ref().map(|stored| stored.body());
@@ -986,6 +997,8 @@ impl Paykit {
     /// The client's errors, such as the restore question still open; nothing ends while the
     /// asks can't be queued.
     pub async fn end_reconcile(&mut self, confirmed: UserConfirmed) -> Result<()> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         self.refresh_own()?;
         Box::pin(self.first_read_before_writing()).await?;
         self.refresh_own()?;

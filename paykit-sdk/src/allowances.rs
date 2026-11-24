@@ -151,6 +151,30 @@ pub struct AllowanceView {
     /// without a clean verdict requires confirmation through
     /// [`Paykit::confirm_allowance_executor`] (Paykit spec 8.3).
     pub consented: bool,
+    /// The user must confirm this Allowance again before this app pays under it, after a
+    /// `missed` item, or a restore until it is judged clean or the user confirms: true
+    /// exactly when the Allowance's own state refuses a payment under it with
+    /// [`crate::Refusal::AllowanceConfirmationNeeded`], which
+    /// [`Paykit::confirm_allowance_executor`] lifts. So the host can ask the user from the
+    /// list, without attempting a payment. A payment can still be refused first for the
+    /// request's own state, such as a request held after the same restore.
+    pub confirmation_needed: bool,
+    /// The Allowance with the hold in force when this view was read: the user's
+    /// confirmation is given for it ([`Paykit::confirm_allowance_executor`]). Every view
+    /// carries one, unlike [`crate::RequestView::held`]: the user's first take-up of an
+    /// Allowance is confirmed under it too, with `confirmation_needed` false. Where
+    /// `confirmation_needed` is true, the host shows the Allowance before passing it back.
+    pub hold: crate::AllowanceHold,
+    /// Whether the Allowance's grant, or its proposal before a grant, is of a generation a
+    /// provider loss ended (Paykit spec 8.3, "After provider loss").
+    pub(crate) granted_before_loss: bool,
+    /// Whether its executor wrote its grant again after a provider loss, which pauses it
+    /// until its usage is repaired (Paykit spec 8.3, "After provider loss").
+    pub(crate) regranted_after_loss: bool,
+    /// Whether a write over its record waits, divergent and not confirmed by the user, or
+    /// behind messages kept over it (Paykit spec 6): the regrant after a provider loss waits
+    /// with it.
+    pub(crate) record_write_waits: bool,
     /// Whether the counterparty is on the identity's deny list, as the app last read it
     /// (Paykit spec 8.1, "Blocked counterparties"): nothing new from it is taken, its
     /// requests are paused and nothing is sent to it, so the host shows the Allowance as
@@ -258,6 +282,41 @@ pub(crate) enum ConsentEnd {
     /// It is conflicted.
     Conflicted,
 }
+
+/// Where this app's consent to execute an Allowance stands ([`Paykit::consent_state`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ConsentState {
+    /// On the consent list and confirmed since any restore or `missed` item: the executor
+    /// may pay under it.
+    Held,
+    /// On the list, but to be confirmed by the user again, after a restore that isn't clean
+    /// or a `missed` item ([`Paykit::confirm_allowance_executor`]).
+    ConfirmAgain,
+    /// Removed for good, and why.
+    Removed(ConsentEnd),
+    /// This app holds no consent entry for it, and no first grant of its own: before its
+    /// first grant, or after a restore of a backup taken before it.
+    Unrecorded,
+    /// This app's first grant is kept by the client to send again, its answer lost: the
+    /// grant path lands it first ([`Paykit::resume_allowance_executor`]).
+    GrantKept,
+    /// This app's first grant applied and its consent isn't written yet. With the user's
+    /// approval under the current hold (`approved`), resuming writes it; without, the user
+    /// confirms it ([`Paykit::confirm_allowance_executor`]).
+    Unconsented {
+        /// Whether the user approved execution under the current hold.
+        approved: bool,
+    },
+    /// Not held for now, and why: a `missed` item's mark the next receive turns into
+    /// [`ConsentState::ConfirmAgain`], or a record not held as it must be yet.
+    Waiting(&'static str),
+}
+
+/// Why consent waits while a `missed` item's mark is kept.
+const WAITS_FOR_MISSED: &str =
+    "a missed item holds every Allowance until the next receive marks it for confirmation";
+/// Why consent waits while the Allowance record isn't held as it must be.
+const WAITS_FOR_RECORD: &str = "the Allowance record isn't held as executing it needs yet";
 
 /// The executor app an `executor_notice` is wrapped to (`en/<msg_id>`), kept with the batch
 /// that queues it; it names its message, so it is taken only for that one.
@@ -430,6 +489,16 @@ pub(crate) fn may_deliver_end(
         return Ok(true);
     }
     crate::protocol::may_deliver_to_contact(delivery)
+}
+
+/// Whether `delivery` is the original delivery of an `allowance_end` the user initiated,
+/// by the durable origin kept for exactly that signed end (Paykit spec 3.1, 8.3).
+pub(crate) fn user_end(delivery: &pubky_switch_client::app::DeliveryView<'_>) -> Result<bool> {
+    let message = delivery.message();
+    let origin = state::delivery_get::<EndOrigin>(delivery, &key::end_origin(&message.msg_id))?;
+    Ok(origin.is_some_and(|origin| {
+        origin.cause == EndCause::User && origin.matches(message, delivery.hash())
+    }) && delivery.origin() == pubky_switch_client::app::DeliveryOrigin::Original)
 }
 
 /// The client's target of the `allowances` record of `counterparty`'s Allowance
@@ -1027,7 +1096,7 @@ fn put_placed(
     // kept to place (`pr/`).
     if !reflects(&record, &stored.message().msg_id) {
         if let Some(held) = cx.record(target)? {
-            if crate::divergent::step_write_waits(cx, &held, stored, seq, &|_| None)? {
+            if crate::divergent::step_write_waits(cx, &held, stored, seq, &|_, _| None)? {
                 return match stored.body() {
                     Body::AllowanceProposal(_) => stored_entry(cx, stored, position, None),
                     _ => keep_answer(cx, target, stored, position, false, None),
@@ -1576,6 +1645,26 @@ fn stale(kept: &StoredMessage, service: Option<u64>) -> Result<bool> {
     Ok(crate::stored::past_window(at, service))
 }
 
+/// Whether `status` is a stop: an end, a rejection or a conflict, final whatever the record
+/// could still establish (Paykit spec 8.3).
+fn stopped(status: AllowanceStatus) -> bool {
+    matches!(
+        status,
+        AllowanceStatus::Conflicted | AllowanceStatus::Ended | AllowanceStatus::Rejected
+    )
+}
+
+/// The status a view shows for `status` while the record could still establish a conflict
+/// (`unresolved`): an Allowance that hasn't stopped waits for the conflict check, and a stop
+/// stays what it is.
+pub(crate) fn shown_status(status: AllowanceStatus, unresolved: bool) -> AllowanceStatus {
+    if unresolved && !stopped(status) {
+        AllowanceStatus::AwaitingConflictCheck
+    } else {
+        status
+    }
+}
+
 impl Paykit {
     pub(crate) fn require_allowance(&self) -> Result<()> {
         if self.holds("paykit_allowance") {
@@ -1591,7 +1680,7 @@ impl Paykit {
         if !self.holds("paykit_allowance") || !receive::reads_lists(self.app.cert().scopes()) {
             return Ok(false);
         }
-        let read = self.local_get::<u64>(key::LISTS_READ).await?;
+        let read = self.lists_read_at().await?;
         if !read.is_some_and(|at| receive::lists_read_is_fresh(at, self.now()))
             || self
                 .local_get::<Vec<[u8; 32]>>(key::DENIED)
@@ -1674,6 +1763,7 @@ impl Paykit {
         peer: &[u8; 32],
         id: &AllowanceId,
         deletion: pubky_switch_core::shared::ApplicationRef,
+        deletion_write: &crate::executor::OwnWrite,
     ) -> Result<Option<pubky_switch_core::ops::Condition>> {
         use pubky_switch_client::app::{KeptReason, RecordRead};
         use pubky_switch_core::ops::{Condition, RecordVersion};
@@ -1688,7 +1778,12 @@ impl Paykit {
             return Ok(None);
         }
         let read = self.app.read_record_fresh(&target).await?;
-        if !matches!(delivery::current(&target, &key, &read, true), Some(None)) {
+        // Read with no copy held after an orderly change, the deletion is shown by this
+        // app's own retained write (`OwnWrite`).
+        let own_deletion = matches!(&read, RecordRead::Fresh(r)
+            if replies::qualified_as(r, &target, &key, deletion_write)
+                && r.content == pubky_switch_client::app::RecordContent::Deleted);
+        if !own_deletion && !matches!(delivery::current(&target, &key, &read, true), Some(None)) {
             return Ok(None);
         }
         match read {
@@ -1709,7 +1804,7 @@ impl Paykit {
                 Ok(applied
                     .is_some_and(|current| {
                         current.application == deletion
-                            && replies::qualified_at(&current.record, &target, &key)
+                            && replies::qualified_as(&current.record, &target, &key, deletion_write)
                             && current.record.content
                                 == pubky_switch_client::app::RecordContent::Deleted
                     })
@@ -1781,6 +1876,8 @@ impl Paykit {
         role: AllowanceRole,
         terms: AllowanceTerms,
     ) -> Result<SentAllowance> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         Box::pin(self.propose_allowance_with_consent(to, role, terms, None)).await
     }
 
@@ -1796,6 +1893,8 @@ impl Paykit {
         terms: AllowanceTerms,
         confirmed: crate::UserConfirmed,
     ) -> Result<SentAllowance> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         Box::pin(self.propose_allowance_with_consent(
             to,
             AllowanceRole::Allower,
@@ -1978,7 +2077,7 @@ impl Paykit {
             Box::pin(self.queue_stored_again(end)).await?;
             Box::pin(self.local_delete(&mark)).await?;
         }
-        // The reply placement phase can create a proved withdrawal. Deliver it
+        // The reply placement step can create a proved withdrawal. Deliver it
         // here, after that read and its conditional write have finished.
         for queued in self
             .app
@@ -2080,6 +2179,8 @@ impl Paykit {
     /// accepted. A seller accepts using this method. The payer uses [`Self::accept_executable_allowance`].
     /// Both approval and contacts scopes are required to send the signed reply.
     pub async fn accept_allowance(&mut self, record: &[u8; 32]) -> Result<String> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         self.accept_allowance_with_consent(record, None).await
     }
 
@@ -2095,6 +2196,8 @@ impl Paykit {
         record: &[u8; 32],
         confirmed: crate::UserConfirmed,
     ) -> Result<String> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         Box::pin(self.accept_allowance_with_consent(record, Some(confirmed))).await
     }
 
@@ -2122,6 +2225,8 @@ impl Paykit {
     /// changed; [`Refusal::Usage`] for a proposal this identity sent or one answered already;
     /// as [`Paykit::propose_allowance`]. Never [`Refusal::Divergent`].
     pub async fn reject_allowance(&mut self, record: &[u8; 32]) -> Result<String> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         Box::pin(self.answer_allowance(record, Kind::AllowanceRejection, None)).await
     }
 
@@ -2144,6 +2249,8 @@ impl Paykit {
     /// 8.1, "Blocked counterparties"); [`Refusal::Usage`] for a proposal to this identity not
     /// yet answered, which is rejected instead; as [`Paykit::propose_allowance`].
     pub async fn end_allowance(&mut self, record: &[u8; 32]) -> Result<String> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         Box::pin(self.answer_allowance(record, Kind::AllowanceEnd, None)).await
     }
 
@@ -2259,6 +2366,45 @@ impl Paykit {
     /// that isn't queued with it is refused before anything is sent ([`stores_unqueued`]),
     /// but for a crossing end owed while sends to the counterparty are held, `owed`, whose
     /// mark goes in the same batch.
+    /// A write of `value` over the Allowance record at `target`, with `conditions`, built on
+    /// the version the service holds the record's current write at. After a recovery upload
+    /// that can be lower than the version this app holds for the same write, and the
+    /// compare-and-swap is on the service's version (Pubky Switch wire 6.3, 7.6): the write
+    /// keeps the client's `record_current` on that exact write and takes the installed
+    /// version as its `expected_version`.
+    pub(crate) async fn allowance_record_op(
+        &mut self,
+        target: &RecordTarget,
+        value: &[u8],
+        conditions: Vec<pubky_switch_core::ops::Condition>,
+    ) -> Result<(
+        Vec<pubky_switch_core::ops::Condition>,
+        pubky_switch_core::ops::OpKind,
+    )> {
+        use pubky_switch_core::ops::{Condition, OpKind};
+        let (conditions, mut kind) = self.app.record_op(target, Some(value), conditions).await?;
+        if let OpKind::RecordPut(put) = &mut kind {
+            // Only a write the client conditions on an exact earlier write can be over an
+            // upload; any other builds on the version as held, with no read first.
+            let names_a_write = conditions.iter().any(|condition| {
+                matches!(condition, Condition::RecordCurrent { key, deleted: false, .. }
+                    if *key == put.key)
+            });
+            if names_a_write {
+                if let Some(current) = self.app.read_record_application(target).await? {
+                    let names_it = conditions.iter().any(|condition| {
+                        matches!(condition, Condition::RecordCurrent { key, revision, deleted: false }
+                            if *key == put.key && *revision == current.application)
+                    });
+                    if names_it && put.expected_version == current.record.version {
+                        put.expected_version = current.installed_version;
+                    }
+                }
+            }
+        }
+        Ok((conditions, kind))
+    }
+
     async fn submit_with_record(
         &mut self,
         target: &RecordTarget,
@@ -2284,10 +2430,8 @@ impl Paykit {
         ) {
             return Err(PaykitError::corrupt());
         }
-        let write = self
-            .app
-            .record_op(target, Some(&next.to_json()?), Vec::new())
-            .await?;
+        let write =
+            Box::pin(self.allowance_record_op(target, &next.to_json()?, Vec::new())).await?;
         let mut batch = OpBatch::for_protocol(crate::protocol::BACKUP_NAME)
             .entry(write)
             .locals(locals);
@@ -2468,6 +2612,11 @@ impl Paykit {
             status: AllowanceStatus::Conflicted,
             executor_app_id: None,
             consented: false,
+            confirmation_needed: false,
+            granted_before_loss: false,
+            regranted_after_loss: false,
+            record_write_waits: false,
+            hold: self.allowance_hold(record).await?,
             blocked: Box::pin(self.blocked_as_known(&stored.sender())).await?,
         }))
     }
@@ -2482,18 +2631,60 @@ impl Paykit {
             Box::pin(self.allowance_stopped(&record)).await?,
             Box::pin(self.conflict_kept(&record)).await?,
         );
-        let status = if status != AllowanceStatus::Conflicted
-            && self.unresolved_for_allowance(&record, held).await?
-        {
-            AllowanceStatus::AwaitingConflictCheck
-        } else {
-            status
-        };
+        let unresolved = !stopped(status) && self.unresolved_for_allowance(&record, held).await?;
+        let status = shown_status(status, unresolved);
         let mut view = Box::pin(self.proposal_view(record, &held.proposal, status)).await?;
         view.executor_app_id = held
             .current_grant(&self.identity())
             .map(|(grant, _)| grant.app_id);
-        view.consented = Box::pin(self.consents(&record)).await?;
+        // The generation the user last confirmed it in: its grant's, or before a grant its
+        // proposal's. One a provider loss ended pays nothing automatically (Paykit spec 8.3).
+        // A record whose last grant entry doesn't verify reads as neither: only one with no
+        // grant at all is judged by its proposal.
+        let confirmed = match held.current_grant(&self.identity()) {
+            Some((grant, _)) => Some(grant.confirmed_generation),
+            None if held.grants.is_empty() => match held.proposal.body() {
+                Body::AllowanceProposal(proposal) => Some(proposal.allower_generation),
+                _ => None,
+            },
+            None => None,
+        };
+        view.granted_before_loss = confirmed
+            .zip(self.app.own_identity().body().recovery_from)
+            .is_some_and(|(confirmed, lost)| confirmed <= lost);
+        // Its grant written again after the loss, by the same app that held it before:
+        // that establishes no complete usage authority (Paykit spec 8.3).
+        view.regranted_after_loss = match (
+            held.current_grant(&self.identity()),
+            self.app.own_identity().body().recovery_from,
+        ) {
+            // The entry just before the current one, whose app executed up to it, is the
+            // same app's, last confirmed before the loss.
+            (Some((grant, _)), Some(lost)) => {
+                held.grants.iter().rev().nth(1).is_some_and(|before| {
+                    grant.confirmed_generation > lost
+                        && grant.confirmed_generation <= self.app.own_identity().generation()
+                        && before.grant.app_id == grant.app_id
+                        && before.grant.confirmed_generation <= lost
+                        && held
+                            .grants
+                            .last()
+                            .and_then(|last| held.executor_at(&self.identity(), last.built_on).ok())
+                            .flatten()
+                            == Some(grant.app_id)
+                })
+            }
+            _ => false,
+        };
+        view.record_write_waits = Box::pin(self.pause_seen(&record))
+            .await?
+            .adds_no_stop_waits();
+        let consent = Box::pin(self.consent_state(&record)).await?;
+        view.consented = consent == ConsentState::Held;
+        view.confirmation_needed = matches!(
+            crate::executor::standing(self, &view, consent),
+            crate::executor::Standing::Confirm
+        );
         Ok(view)
     }
 
@@ -2528,6 +2719,11 @@ impl Paykit {
             status,
             executor_app_id: None,
             consented: false,
+            confirmation_needed: false,
+            granted_before_loss: false,
+            regranted_after_loss: false,
+            record_write_waits: false,
+            hold: self.allowance_hold(&record).await?,
             blocked: Box::pin(self.blocked_as_known(&counterparty)).await?,
         })
     }
@@ -2594,39 +2790,126 @@ impl Paykit {
     /// 8.2; Paykit spec 8.3, "Executor", "Ending"): the user's confirmation of such a write
     /// comes with the executor, so until then it pays nothing.
     pub(crate) async fn consents(&self, record: &[u8; 32]) -> Result<bool> {
-        if Box::pin(self.consents_unconfirmed()).await?
-            || Box::pin(self.allowance_stopped(record)).await?
-            || Box::pin(self.conflict_kept(record)).await?
+        Ok(Box::pin(self.consent_state(record)).await? == ConsentState::Held)
+    }
+
+    /// Where this app's consent to execute the Allowance at `record` stands, by the rules of
+    /// [`Paykit::consents`], which holds it only at [`ConsentState::Held`]. The other states
+    /// tell why it doesn't: one the user can lift, one a later read can, or one that is final.
+    pub(crate) async fn consent_state(&self, record: &[u8; 32]) -> Result<ConsentState> {
+        // A stop, a kept conflict and a removal this app recorded are final, whatever the
+        // record shows now or a `missed` item's mark holds.
+        if Box::pin(self.allowance_stopped(record)).await? {
+            return Ok(ConsentState::Removed(ConsentEnd::Ended));
+        }
+        if Box::pin(self.conflict_kept(record)).await? {
+            return Ok(ConsentState::Removed(ConsentEnd::Conflicted));
+        }
+        if let Some(ConsentEntry {
+            consent: Consent::Removed { reason },
+            ..
+        }) = self
+            .local_get::<ConsentEntry>(&key::consent(record))
+            .await?
         {
-            return Ok(false);
+            return Ok(ConsentState::Removed(reason));
+        }
+        if Box::pin(self.consents_unconfirmed()).await? {
+            return Ok(ConsentState::Waiting(WAITS_FOR_MISSED));
         }
         let Some(shared) = Box::pin(self.app.shared_record(record)).await? else {
-            return Ok(false);
+            return Ok(ConsentState::Waiting(WAITS_FOR_RECORD));
         };
         if shared.flagged {
-            return Ok(false);
+            return Ok(ConsentState::Waiting(WAITS_FOR_RECORD));
         }
-        match Box::pin(self.held_allowance(record)).await? {
-            Some(held) if held.end.is_none() && !rejected(&held) && held.conflicted.is_none() => {
-                if self.unresolved_for_allowance(record, &held).await? {
-                    return Ok(false);
-                }
+        let shown = match Box::pin(self.held_allowance(record)).await? {
+            Some(held) if held.end.is_some() => {
+                return Ok(ConsentState::Removed(ConsentEnd::Ended))
             }
-            _ => return Ok(false),
-        }
+            Some(held) if held.conflicted.is_some() => {
+                return Ok(ConsentState::Removed(ConsentEnd::Conflicted))
+            }
+            Some(held) if rejected(&held) => {
+                return Ok(ConsentState::Removed(ConsentEnd::Rejected))
+            }
+            Some(held) => {
+                if self.unresolved_for_allowance(record, &held).await? {
+                    return Ok(ConsentState::Waiting(WAITS_FOR_RECORD));
+                }
+                held
+            }
+            None => return Ok(ConsentState::Waiting(WAITS_FOR_RECORD)),
+        };
+        let own_granted = shown
+            .current_grant(&self.identity())
+            .is_some_and(|(grant, _)| grant.app_id == self.app_id());
         let Some(held) = self
             .local_get::<ConsentEntry>(&key::consent(record))
             .await?
         else {
-            return Ok(false);
+            return Box::pin(self.unconsented_state(record, own_granted)).await;
         };
         if Box::pin(self.rejection_kept(record, &held.counterparty)).await? {
-            return Ok(false);
+            return Ok(ConsentState::Removed(ConsentEnd::Rejected));
         }
-        Ok(held.consent
-            == Consent::Held {
+        Ok(match held.consent {
+            Consent::Held {
                 confirm_again: false,
-            })
+            } => ConsentState::Held,
+            Consent::Held {
+                confirm_again: true,
+            } => ConsentState::ConfirmAgain,
+            Consent::Removed { reason } => ConsentState::Removed(reason),
+        })
+    }
+
+    /// Where this app's consent stands with no consent entry kept: its first grant kept to
+    /// send again; applied, its consent waiting for resume or the user; or no grant of its
+    /// own. The grant's batch writes its history (`xc/`) only as it applies, and leaves its
+    /// ID at `gb/` until then.
+    async fn unconsented_state(
+        &self,
+        record: &[u8; 32],
+        own_granted: bool,
+    ) -> Result<ConsentState> {
+        if let Some(id) = self
+            .local_get::<[u8; 16]>(&key::grant_batch(record))
+            .await?
+        {
+            if matches!(
+                self.app.kept_batch(id).await?,
+                Some(pubky_switch_client::app::KeptBatchStatus::Kept { .. })
+            ) {
+                return Ok(ConsentState::GrantKept);
+            }
+        }
+        let approved = self.execution_approved(record).await?;
+        if self
+            .local_get::<crate::executor::ExecutorHistory>(&key::executor_checkpoint(record))
+            .await?
+            .is_none()
+        {
+            // No grant history here. One the user approved here for automatic execution, not
+            // granted yet, whose approval a restore or a `missed` item took since, waits for
+            // the user's confirmation, which grants it. One the record shows granted by this
+            // app, after the backup this app was restored from, isn't: no confirmation lands
+            // a grant this installation has no history of.
+            let approved_here = self
+                .local_get::<OriginalAllowance>(&key::original_allowance(record))
+                .await?
+                .filter(OriginalAllowance::opened)
+                .map(|original| original.approved_for_execution())
+                .transpose()?
+                .flatten()
+                .is_some();
+            return Ok(if approved_here && !approved && !own_granted {
+                ConsentState::Unconsented { approved: false }
+            } else {
+                ConsentState::Unrecorded
+            });
+        }
+        Ok(ConsentState::Unconsented { approved })
     }
 
     /// Whether this app keeps a rejection from `counterparty` of the Allowance at `record`

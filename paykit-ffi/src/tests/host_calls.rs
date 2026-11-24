@@ -11,23 +11,28 @@ use std::{
 };
 
 /// A host whose asynchronous calls never answer.
-struct Stalled {
-    history: bool,
+struct Stalled;
+
+/// What the stalled host declares for its method.
+fn declared(history: bool) -> MethodDeclaration {
+    MethodDeclaration {
+        idempotent: true,
+        idempotency_retention_ms: None,
+        history,
+        history_retention_ms: None,
+        history_survives_restore: true,
+        longest_completion_ms: 1000,
+        payment_time_tolerance_ms: 0,
+    }
+}
+
+/// A rail over the stalled host.
+fn stalled_rail() -> HostRail {
+    HostRail::new(Arc::new(Stalled), declared(true), Vec::new())
 }
 
 #[async_trait::async_trait]
 impl PaymentMethod for Stalled {
-    fn declaration(&self) -> MethodDeclaration {
-        MethodDeclaration {
-            idempotent: true,
-            idempotency_retention_ms: None,
-            history: self.history,
-            history_retention_ms: None,
-            history_survives_restore: true,
-            longest_completion_ms: 1000,
-            payment_time_tolerance_ms: 0,
-        }
-    }
     fn select_endpoints(
         &self,
         _: Vec<EndpointCandidate>,
@@ -38,11 +43,13 @@ impl PaymentMethod for Stalled {
             failures: Vec::new(),
         })
     }
-    fn transfer(&self, _: String, _: String, amount: Amount) -> Arc<MethodTransfer> {
-        MethodTransfer::new(Some(amount), None).unwrap()
-    }
-    fn fraction_digits(&self, _: String) -> Option<u32> {
-        None
+    fn transfer(
+        &self,
+        _: String,
+        _: String,
+        amount: Amount,
+    ) -> Result<Arc<MethodTransfer>, MethodError> {
+        Ok(MethodTransfer::new(Some(amount)).unwrap())
     }
     async fn pay(&self, _: MethodPayment) -> Result<MethodOutcome, MethodError> {
         std::future::pending().await
@@ -59,8 +66,8 @@ impl PaymentMethod for Stalled {
     async fn verify(&self, _: MethodProof) -> Result<Option<u64>, MethodError> {
         std::future::pending().await
     }
-    fn settlement_id(&self, _: Vec<u8>) -> Option<Vec<u8>> {
-        None
+    fn settlement_id(&self, _: String, _: Vec<u8>) -> Result<Option<Vec<u8>>, MethodError> {
+        Ok(None)
     }
 }
 
@@ -80,8 +87,9 @@ impl WalletHomeserver for Stalled {
 fn stalled_host(root: &std::path::Path, history: bool) -> Arc<WalletHost> {
     WalletHost::new(
         Arc::new(DeviceStore::open(root)),
-        Arc::new(Stalled { history }),
-        Arc::new(Stalled { history }),
+        Arc::new(Stalled),
+        Arc::new(Stalled),
+        declared(history),
         Vec::new(),
     )
     .unwrap()
@@ -102,7 +110,7 @@ async fn within<T>(call: impl Future<Output = T>) -> T {
 
 #[tokio::test(start_paused = true)]
 async fn test_host_calls_lookup_past_its_limit_is_not_now() {
-    let rail = HostRail::new(Arc::new(Stalled { history: true }), Vec::new());
+    let rail = stalled_rail();
     let attempt = AttemptId::from_bytes([3; 16]);
     assert!(matches!(
         within(rail.payment(attempt)).await,
@@ -156,7 +164,7 @@ async fn kept_after_limit(app: Option<[u8; 16]>, answer: MethodOutcome) -> Optio
     let limit = std::time::Duration::from_secs(1);
     let (answered, pay) = tokio::sync::oneshot::channel::<MethodOutcome>();
     let pay = async move {
-        pay.await.map_err(|_| MethodError::Unavailable {
+        pay.await.map_err(|_| MethodError::Unknown {
             reason: "gone".into(),
         })
     };
@@ -194,8 +202,8 @@ async fn test_host_calls_late_answer_kept_only_when_definitive_and_readable() {
 
 #[tokio::test(start_paused = true)]
 async fn test_host_calls_payments_in_flight_are_shared_by_every_host() {
-    let first = HostRail::new(Arc::new(Stalled { history: true }), Vec::new());
-    let second = HostRail::new(Arc::new(Stalled { history: true }), Vec::new());
+    let first = stalled_rail();
+    let second = stalled_rail();
     let attempt = AttemptId::from_bytes([6; 16]).to_text();
     let never = std::future::pending::<Result<MethodOutcome, MethodError>>();
     let limit = std::time::Duration::from_secs(1);

@@ -171,29 +171,15 @@ impl Destination {
 /// the rule the final payment check holds the method's transfer to again, just before each
 /// call, a repeat's included, so no call transfers more than the first was allowed to.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum TransferBound {
-    /// What the user asked for: exactly the amount paid, with a fee at most `cap`, the app's
-    /// cap for the asset at planning, or any fee with no cap.
-    Asked {
-        /// The cap, as a decimal; `None` for none.
-        cap: Option<String>,
-    },
+    /// What the user asked for: exactly the amount paid.
+    Asked {},
     /// The selected transfer the user confirmed: its amount remains bound for every
-    /// dispatch, and its largest fee when the confirmation binds it: one above the cap, or
-    /// any fee of a transfer whose amount the method couldn't tell, whose asset, and so the
-    /// cap of its fee, is unknown.
+    /// dispatch.
     Confirmed {
-        /// The cap of the asset transferred at planning; `None` for none, or for an asset
-        /// the method couldn't tell.
-        cap: Option<String>,
         /// The amount confirmed; `None` for one the method couldn't tell.
         amount: Option<KeptAmount>,
-        /// The largest fee the confirmation binds, as a decimal. `None` when it binds no fee
-        /// (a known transfer's fee within its cap, or with no cap for its asset), and for a
-        /// transfer the method couldn't tell that was shown with no fee, which binds it to
-        /// none.
-        max_fee: Option<String>,
     },
 }
 
@@ -422,7 +408,7 @@ pub(crate) struct JournalEntry {
     pub(crate) record_held: bool,
     /// The transfer the attempt may make, as its planning allowed it. `None` only in an
     /// entry a reconcile rebuilt from its claim (`restored`), which is never dispatched
-    /// again: its repeat would be held to the app's cap now.
+    /// again.
     pub(crate) transfer_bound: Option<TransferBound>,
     /// The price its user confirmed, for a payment priced by a rate: the rate `paid` was
     /// computed by, and `amount` stays the request's. `None` for a payment no rate prices,
@@ -1079,6 +1065,11 @@ pub struct PaymentView {
     pub stage: Stage,
     /// The entry came back from a backup.
     pub restored: bool,
+    /// Whether the payment method reported this payment made: the journal holds its proof.
+    /// At `Finished` it tells a payment made, its outcome written, from one written failed.
+    /// After a call returned a wallet-wide stop, it is how the host learns of a payment made
+    /// in that call, as the call's error carries no outcome (Paykit spec 7.2).
+    pub paid_by_method: bool,
     /// Paid by the method, its outcome waits: the payer's activity record holds a value that
     /// doesn't read, so `done` and the proof aren't written, and the attempt stays open
     /// (Paykit spec 7.2 step 3). It settles once the record reads again, at
@@ -1113,6 +1104,7 @@ impl JournalEntry {
             endpoint_id: self.destination.endpoint_id()?,
             stage: self.stage,
             restored: self.restored,
+            paid_by_method: self.rail_proof.is_some(),
             record_held: self.record_held,
             receipt: None,
         })
@@ -1140,6 +1132,23 @@ pub(crate) fn dispatched(stage: Stage, restored: bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_journal_transfer_bound_refuses_a_fee_from_earlier_builds() {
+        let read = |v: serde_json::Value| serde_json::from_value::<TransferBound>(v);
+        assert_eq!(
+            read(serde_json::json!({ "kind": "asked" })).unwrap(),
+            TransferBound::Asked {}
+        );
+        assert!(read(serde_json::json!({ "kind": "confirmed", "amount": null })).is_ok());
+        // A cap or a fee is no member of the bound: an entry holding one is refused.
+        for earlier in [
+            serde_json::json!({ "kind": "asked", "cap": null }),
+            serde_json::json!({ "kind": "confirmed", "cap": "1", "amount": null, "max_fee": null }),
+        ] {
+            assert!(read(earlier).is_err());
+        }
+    }
 
     #[test]
     fn test_journal_dispatched_only_at_paying_or_restored_before_an_outcome() {

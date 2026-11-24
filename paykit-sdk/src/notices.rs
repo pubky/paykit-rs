@@ -55,7 +55,8 @@ pub enum NoticeKind {
     ///
     /// Also a rejection or payer's cancellation this app recorded while sends to the payee
     /// were held ([`Paykit::reject_request`], [`Paykit::cancel_request`]) whose replay window
-    /// of 30 days from its signing passed before they weren't: it was never sent, and never
+    /// of 30 days from its signing passed before they weren't, or one queued and never
+    /// tried that was still in the outbox past that window: it was never sent, and never
     /// will be. Its request record still holds it, so no own app pays or accepts the
     /// request; the payee wasn't told. `counterparty` is then the payee, and `msg_id` the
     /// answer's. The same notice tells of such an answer whose request record, read and not
@@ -71,8 +72,10 @@ pub enum NoticeKind {
     AllowanceAcceptanceBeforeLoss,
     /// The seller confirmed the end of this wallet's withdrawn pre-loss proposal.
     AllowanceWithdrawalConfirmed,
-    /// An original outgoing message found after restore may have reached its recipient.
-    /// Reconcile its outcome with the counterparty. Acknowledging it records that the host
+    /// An original outgoing message found after restore may have reached its recipient. So
+    /// may a rejection or payer's cancellation tried before it was held, whose outbox copy
+    /// was ended past its 30 days (Paykit spec 8.1). Reconcile its outcome with the
+    /// counterparty. Acknowledging it records that the host
     /// has seen it, without authorizing delivery or a replacement (Paykit spec 7.2).
     PossiblyDelivered,
     /// The client gave up a counterparty's current Private Payment List, and its delivery
@@ -114,10 +117,13 @@ pub enum NoticeKind {
     /// A block floor raise this wallet owes was tried and isn't written, with no divergence
     /// hold: the floor doesn't read, or the switch refuses the write for now (Paykit wire 5.6,
     /// Raising). Until it is, an unblocked sender's one-time requests wait and it is asked
-    /// nothing, and while a widening's raise waits no one is asked to re-send; it is tried again
-    /// at each receive. Raised
-    /// once while it stands, and removed when the raise is written; it names no attempt,
-    /// message or counterparty.
+    /// nothing, and while a widening's raise waits no one is asked to re-send. It is tried again
+    /// at the next receive, and from its second unwritten try in a row after a wait of one
+    /// minute, doubling to ten; a change to the floor record, the floor becoming readable or a
+    /// new raise owed ends the wait. Raised once per load while it stands, and again after a
+    /// reopen when a receive leaves it unwritten; removed when the raise is written or the
+    /// divergence hold stands, which its own notice tells. It names no attempt, message or
+    /// counterparty.
     FloorRaiseWaiting,
     /// Automatic one-time payments for the identity are held for good after a provider
     /// loss, and each request can still be paid by hand (Paykit spec 8.1, Paykit wire 5.6,
@@ -392,8 +398,8 @@ pub(crate) enum GivenUpOrigin {
     /// The original proposing app cannot open a budget from this pre-loss proposal.
     AllowanceBeforeLoss,
     /// This app's own rejection or payer's cancellation, recorded while sends to the payee
-    /// were held (`ha/`), passed its replay window unsent, or was lost with a write of its
-    /// request record that holds neither it nor any stop.
+    /// were held (`ha/`) or held in the outbox (`qs/`), passed its replay window unsent, or
+    /// was lost with a write of its request record that holds neither it nor any stop.
     HeldAnswer,
     /// A received message whose entry was held unprocessed while the record it goes into
     /// couldn't be read, past its 30 days.
@@ -559,6 +565,12 @@ impl KeptNotice {
         at: u64,
     ) -> Self {
         Self::outgoing(NoticeKind::ListDeliveryUnknown, to, msg_id, hash, at)
+    }
+
+    /// The notice that the own message `msg_id` of hash `hash` to `to`, whose delivery ended,
+    /// may have reached it, raised at `at`.
+    pub(crate) fn delivery_unknown(to: &[u8; 32], msg_id: &str, hash: &[u8; 32], at: u64) -> Self {
+        Self::outgoing(NoticeKind::PossiblyDelivered, to, msg_id, hash, at)
     }
 
     fn possibly_delivered(stored: &paykit_lib::records::StoredMessage, at: u64) -> Self {
@@ -873,6 +885,16 @@ impl Paykit {
         if self.app.delivery(&message.msg_id).await?.is_some() {
             return Ok(());
         }
+        // So does a held send this installation gave up and told the host of: an in-place
+        // restore keeps the notice it was told with, given up or possibly delivered (Paykit
+        // spec 8.1, "Undelivered messages").
+        if self
+            .local_get::<crate::send_holds::QueuedStop>(&key::queued_stop(&message.msg_id))
+            .await?
+            .is_some_and(|stop| stop.told)
+        {
+            return Ok(());
+        }
         let key = key::restored_delivery(&message.to, &message.msg_id, &stored.hash());
         if self.kept_notice(&key).await?.is_none() {
             self.local_put(
@@ -928,6 +950,8 @@ impl Paykit {
     ///
     /// [`Refusal::NotFound`] for an ID no notice has; a store failure.
     pub async fn acknowledge_notice(&mut self, id: &str) -> Result<()> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         let key = format!("{}{id}", key::NOTICES);
         if !matches!(
             StateKey::parse(key.as_bytes()),
@@ -964,6 +988,12 @@ impl Paykit {
         // notice, for the host to acknowledge again.
         if let Some(stored) = &kept.stored {
             self.forget_stored(stored, &kept).await?;
+        }
+        // An identity-wide notice acknowledged stays told for this load, as one shown is.
+        if let Some(StateKey::IdentityNotice(kind)) = StateKey::parse(key.as_bytes()) {
+            if !self.identity_told.contains(&kind) {
+                self.identity_told.push(kind);
+            }
         }
         if !held && kept.settlement.is_none() && !kept.kind.names_outgoing_message() {
             return self.local_delete(&key).await;

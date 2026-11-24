@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use paykit_lib::allowances::{record_outcomes, AttemptEvidence, ClaimState, EntryOutcome, Ledger};
 use paykit_lib::records::{ActivityRecord, RecordBinding};
 use paykit_lib::{Asset, AttemptId, Body, Decimal};
-use pubky_switch_client::app::{AppError, OpBatch, RecordRead, UserConfirmed};
+use pubky_switch_client::app::{OpBatch, RecordRead, UserConfirmed};
 use pubky_switch_core::ops::Condition;
 
 use super::evidence::AppliedRecord;
@@ -30,6 +30,33 @@ pub(super) struct LedgerFacts {
     other_failures: Vec<ReservedByOtherApp>,
 }
 
+impl LedgerFacts {
+    /// Whether an attempt another app reported failed still holds room the user can give
+    /// back ([`Paykit::release_allowance_attempt`]).
+    /// The amount, scaled, the user could give back by releasing every attempt another app
+    /// reported failed that is releasable by the evidence the release itself requires:
+    /// never paid, ended before dispatch on this installation, failed by another app, and
+    /// with the record write the release is conditioned on. `None` when there is none.
+    pub(super) fn releasable(&self) -> Option<u128> {
+        self.other_failures
+            .iter()
+            .filter(|failure| {
+                self.release_records.contains_key(&failure.attempt_id)
+                    && self.signed.get(&failure.attempt_id).is_some_and(|fact| {
+                        !fact.paid
+                            && fact.never_dispatched
+                            && fact.claim == Some(ClaimState::Failed { by_owner: false })
+                    })
+            })
+            .try_fold(None, |freed: Option<u128>, failure| {
+                Some(Some(
+                    freed.unwrap_or(0).checked_add(failure.value.scaled())?,
+                ))
+            })
+            .flatten()
+    }
+}
+
 impl Paykit {
     /// Reservations whose failure another app reported (Paykit spec 8.3). Display the
     /// amount and exact attempt when asking the user to release a reservation.
@@ -42,6 +69,8 @@ impl Paykit {
         &mut self,
         record: &[u8; 32],
     ) -> Result<Vec<ReservedByOtherApp>> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         if !self.holds("paykit_allowance_execute") {
             return Err(Refusal::ScopeMissing("paykit_allowance_execute".into()).into());
         }
@@ -65,6 +94,8 @@ impl Paykit {
         attempt_id: AttemptId,
         _confirmed: UserConfirmed,
     ) -> Result<()> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         self.refresh_own()?;
         Box::pin(self.first_read_before_writing()).await?;
         self.refresh_own()?;
@@ -202,9 +233,9 @@ impl Paykit {
                 Ok(())
             }
             .await;
-            if matches!(&result, Err(crate::PaykitError::Client(e)) if matches!(e.unkept(), AppError::Store(_) | AppError::Alarm(_)))
-            {
-                return result;
+            let result: Result<()> = result;
+            if let Err(error) = result {
+                crate::pay::unless_stop(error)?;
             }
         }
         Ok(())
@@ -266,8 +297,9 @@ impl Paykit {
                 continue;
             }
             let target = ActivityTarget::payer(
-                activity
-                    .natural_key_with(&self.identity(), &|proof| self.rail.settlement_id(proof))?,
+                activity.natural_key_with(&self.identity(), &|endpoint, proof| {
+                    self.rail.settlement_id(endpoint, proof)
+                })?,
             );
             let record = target.record_target();
             let RecordRead::Fresh(fresh) = self.app.read_record_fresh(&record).await? else {
@@ -284,8 +316,9 @@ impl Paykit {
                 let dated = held.ops.iter().any(|op| {
                     AppliedRecord::retained(&self.app, &record, op).is_some_and(|write| {
                         write.dates_payment_proof(&self.app, proof)
+                            // The sequence continues across an orderly generation change.
                             && before.is_none_or(|limit| {
-                                write.revision.generation == limit.revision.generation
+                                write.revision.generation <= limit.revision.generation
                                     && write.revision.seq < limit.revision.seq
                                     && write.at_ms <= limit.at_ms
                             })

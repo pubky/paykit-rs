@@ -134,9 +134,9 @@ jobs:
             if [ "$variant" = checkout ]; then features=bindgen,test-wallet; fi
             cargo build --locked --release -p paykit-ffi --features "$features" --lib --bin paykit-bindgen
             mkdir -p "$OUT/$variant/lib"
-            cp target/release/libpaykit_v2.so "$OUT/$variant/lib/"
+            cp target/release/libpaykit.so "$OUT/$variant/lib/"
             paykit-ffi/generate-bindings.sh target/release/paykit-bindgen \
-              "$OUT/$variant/lib/libpaykit_v2.so" "$OUT/$variant"
+              "$OUT/$variant/lib/libpaykit.so" "$OUT/$variant"
           done
           cargo build --locked --release -p paykit-ffi --example wallet-test-issuer
       - name: Run the wallet consumer
@@ -201,9 +201,9 @@ jobs:
             if [ "$variant" = checkout ]; then features=bindgen,test-wallet; fi
             cargo build --locked --release -p paykit-ffi --features "$features" --lib --bin paykit-bindgen
             mkdir -p "$OUT/$variant/lib"
-            cp target/release/libpaykit_v2.dylib "$OUT/$variant/lib/"
+            cp target/release/libpaykit.dylib "$OUT/$variant/lib/"
             paykit-ffi/generate-bindings.sh target/release/paykit-bindgen \
-              "$OUT/$variant/lib/libpaykit_v2.dylib" "$OUT/$variant"
+              "$OUT/$variant/lib/libpaykit.dylib" "$OUT/$variant"
           done
           cargo build --locked --release -p paykit-ffi --example wallet-test-issuer
       - name: Build the Swift consumers
@@ -213,16 +213,19 @@ jobs:
             sources=(paykit-ffi/tests/hosts/WalletConsumer.swift)
             flags=()
             if [ "$variant" = checkout ]; then
-              sources+=(paykit-ffi/tests/hosts/CheckoutConsumer.swift)
+              sources+=(paykit-ffi/tests/hosts/CheckoutConsumer.swift paykit-ffi/tests/hosts/ConsumerWallet.swift)
+              for group in Inbox Payer Payee Lists Public Periods Allowance Executor; do
+                sources+=("paykit-ffi/tests/hosts/${group}Consumer.swift")
+              done
               flags=(-D PAYKIT_CHECKOUT_TEST)
             fi
-            swiftc -swift-version 5 -I "$dir/swift" -Xcc "-fmodule-map-file=$dir/swift/PaykitV2FFI.modulemap" \
-              -emit-library -emit-module -module-name PaykitV2 "$dir"/swift/*.swift \
-              -emit-module-path "$dir/PaykitV2.swiftmodule" -o "$dir/libPaykitV2.dylib" \
-              -L "$dir/lib" -lpaykit_v2
+            swiftc -swift-version 5 -I "$dir/swift" -Xcc "-fmodule-map-file=$dir/swift/PaykitFFI.modulemap" \
+              -emit-library -emit-module -module-name Paykit "$dir"/swift/*.swift \
+              -emit-module-path "$dir/Paykit.swiftmodule" -o "$dir/libPaykitSwift.dylib" \
+              -L "$dir/lib" -lpaykit
             swiftc -swift-version 6 -parse-as-library "${flags[@]}" -I "$dir" -I "$dir/swift" \
-              -Xcc "-fmodule-map-file=$dir/swift/PaykitV2FFI.modulemap" "${sources[@]}" \
-              -L "$dir" -lPaykitV2 -L "$dir/lib" -lpaykit_v2 -o "$dir/consumer"
+              -Xcc "-fmodule-map-file=$dir/swift/PaykitFFI.modulemap" "${sources[@]}" \
+              -L "$dir" -lPaykitSwift -L "$dir/lib" -lpaykit -o "$dir/consumer"
           done
       - name: Run the wallet consumer
         run: |
@@ -239,8 +242,8 @@ jobs:
           for target in aarch64-apple-ios aarch64-apple-ios-sim; do
             cargo build --locked --release -p paykit-ffi --features test-wallet --lib --target "$target"
           done
-          paykit-ffi/package-apple.sh "$OUT/checkout" target/aarch64-apple-ios/release/libpaykit_v2.a \
-            target/aarch64-apple-ios-sim/release/libpaykit_v2.a "$OUT/apple"
+          paykit-ffi/package-apple.sh "$OUT/checkout" target/aarch64-apple-ios/release/libpaykit.a \
+            target/aarch64-apple-ios-sim/release/libpaykit.a "$OUT/apple"
       # A checkout from the main actor, on the runtime's 4 MiB threads.
       - name: Run the wallet on an iOS simulator
         working-directory: paykit-ffi/tests

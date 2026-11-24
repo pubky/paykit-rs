@@ -121,7 +121,7 @@ async fn held_after_loss(world: &World) -> TestResult {
 
     // A wallet that joins after the loss follows no loss and holds none recorded: the newest
     // own `identity.json` it verified, whose `recovery_from` stays set, holds it alone.
-    let mut laptop = Box::pin(payer.join(
+    let mut laptop = Box::pin(payer.join_unlisted(
         world,
         "laptop",
         AppScopes::new().pay().build()?,
@@ -130,6 +130,15 @@ async fn held_after_loss(world: &World) -> TestResult {
         &rail,
     ))
     .await?;
+    let told = Box::pin(laptop.notices()).await?;
+    assert_eq!(
+        told.iter()
+            .filter(|notice| notice.kind == NoticeKind::AutomaticPaymentsHeld)
+            .count(),
+        1,
+        "told at the join: {told:?}"
+    );
+    Box::pin(super::finish_listing(&mut laptop)).await?;
     for _ in 0..2 {
         Box::pin(laptop.receive(None)).await?;
     }

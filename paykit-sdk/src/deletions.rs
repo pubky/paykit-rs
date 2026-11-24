@@ -176,10 +176,10 @@ fn payee_natural_key(
         else {
             return Err(PaykitError::corrupt());
         };
-        return Ok(settlement(&proof.proof)
+        return Ok(settlement(&proof.payment_endpoint_identifier, &proof.proof)
             .map(|id| natural_key::payee_payment_record(&proof.payment_endpoint_identifier, &id)));
     }
-    Ok(Some(activity.natural_key(own)?))
+    Ok(Some(activity.natural_key_with(own, settlement)?))
 }
 
 /// A signed receipt and the material needed to check its original occurrence.
@@ -253,7 +253,9 @@ impl ReceiptEvidence {
             } => {
                 let target = ActivityTarget::payee(natural_key.clone(), label.as_ref());
                 record_key(&target.record_target())? == *record
-                    && (unrequested || activity.natural_key(own)? == *natural_key)
+                    // A record bound to a request or period is keyed by it, never by a
+                    // settlement, so no reader is needed for it.
+                    && (unrequested || activity.natural_key_with(own, &|_, _| None)? == *natural_key)
             }
             ReceiptSource::Pending(keys) => {
                 unrequested && (1..=MAX_RECEIPT_SOURCES).contains(&keys.len())
@@ -748,7 +750,7 @@ impl Paykit {
         let was_pending = evidence.source.bound().is_none();
         let (decision, activity) = evidence.resolve(
             &self.identity(),
-            &|p| self.rail.settlement_id(p),
+            &|endpoint, proof| self.rail.settlement_id(endpoint, proof),
             |t| Ok(self.app.record_key(t)?),
             false,
         )?;
@@ -767,7 +769,7 @@ impl Paykit {
                 label.as_ref(),
                 key,
                 |t| self.app.record_key(t).ok(),
-                &|p| self.rail.settlement_id(p),
+                &|endpoint, proof| self.rail.settlement_id(endpoint, proof),
             )
         };
         let parent =
@@ -793,7 +795,7 @@ impl Paykit {
         other.receipt.is_some()
             && other.proof.as_ref().is_some_and(|p| {
                 matches!(p.body(), paykit_lib::Body::PaymentProof(proof)
-                if self.rail.settlement_id(&proof.proof).as_deref() == Some(settlement))
+                if self.rail.settlement_id(&proof.payment_endpoint_identifier, &proof.proof).as_deref() == Some(settlement))
             })
     }
 
@@ -839,6 +841,8 @@ impl Paykit {
     ///
     /// A local store failure.
     pub async fn retained_payee_receipts(&mut self) -> Result<Vec<RetainedPayeeReceipt>> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         let mut by_receipt = std::collections::BTreeMap::<_, Vec<_>>::new();
         for (_, d) in self
             .local_scan::<PayeeDeletion>(key::PAYEE_DELETIONS)
@@ -915,6 +919,8 @@ impl Paykit {
     ///
     /// A store failure or a notice that is no longer the one shown.
     pub async fn acknowledge_payee_deletion(&mut self, notice: &PayeeDeletionNotice) -> Result<()> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         let key = deletion_key(
             &notice.record,
             notice.generation,

@@ -38,21 +38,28 @@ impl WalletHomeserver for Home {
             .map_err(|_| HomeserverError::Unavailable)
     }
 }
-fn host(world: &World, root: &Path, account: Arc<Account>) -> Arc<WalletHost> {
+/// How long the test wallets wait for the host's `pay`, and for a payment lookup.
+const PAY_LIMIT: std::time::Duration = std::time::Duration::from_millis(300);
+const LOOKUP_LIMIT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// A wallet host on `root`, paying through `account`, on `world`'s service.
+pub(super) fn host(world: &World, root: &Path, account: Arc<Account>) -> Arc<WalletHost> {
     let host = WalletHost::new(
         Arc::new(DeviceStore::open(root)),
         Arc::new(Home(world.files().clone())),
         account.clone(),
-        vec!["btc-lightning-bolt11".into()],
+        Account::declaration(true),
+        vec![EndpointSupport {
+            identifier: "btc-lightning-bolt11".into(),
+            fraction_digits: Some(8),
+        }],
     )
     .unwrap();
     let mut host = Arc::into_inner(host).unwrap();
-    let rail = HostRail::new(
-        account,
-        vec![PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap()],
-    )
-    .with_pay_limit(std::time::Duration::from_millis(300))
-    .with_lookup_limit(std::time::Duration::from_secs(2));
+    let rail = account
+        .rail()
+        .with_pay_limit(PAY_LIMIT)
+        .with_lookup_limit(LOOKUP_LIMIT);
     host.rail = Arc::new(rail);
     let env = world.app_env(Arc::new(MemoryStore::new()));
     host.clock = env.clock;
@@ -60,7 +67,8 @@ fn host(world: &World, root: &Path, account: Arc<Account>) -> Arc<WalletHost> {
     Arc::new(host)
 }
 
-async fn enrolled_payer(
+/// A payer wallet enrolled through the test signer, its host, App ID and signer.
+pub(super) async fn enrolled_payer(
     world: &World,
     root: &Path,
     account: Arc<Account>,
@@ -177,6 +185,11 @@ async fn connect_after_earlier_batch(
     world.lose_answer("POST", "/ops");
     let first = app.allow_connect(&shop).await.unwrap_err();
     let first_id = first.kept_batch().ok_or("missing original batch")?;
+    // The answer was lost after the batch was sent: it may have applied.
+    assert!(matches!(
+        WalletError::from(first),
+        WalletError::OutcomeUnknown { failure } if failure.kept_batch.as_deref() == Some(first_id.as_slice())
+    ));
     let other = world.identity("other-shop")?.public();
     world.unreachable("POST", "/ops");
     let held = app.allow_connect(&other).await.unwrap_err();
@@ -202,19 +215,18 @@ async fn connect_after_earlier_batch(
         ),
     };
     assert!(
-        matches!(WalletError::from(service_reply), WalletError::Operation {
-        kept_batch: None, service_code: Some(code), switch_refusal: Some(_), ..
-    } if code == "unavailable")
+        matches!(WalletError::from(service_reply), WalletError::RetryLater { failure }
+        if failure.kept_batch.is_none() && failure.switch_refusal.is_some()
+            && failure.service_code.as_deref() == Some("unavailable"))
     );
-    let WalletError::Operation {
-        kept_batch: None,
-        service_code: None,
-        switch_refusal: Some(rule),
-        ..
-    } = held.into()
-    else {
+    let WalletError::RetryLater { failure } = held.into() else {
         return Err("transport failure lost the earlier batch".into());
     };
+    assert!(failure.kept_batch.is_none() && failure.service_code.is_none());
+    let rule = failure
+        .switch_refusal
+        .clone()
+        .ok_or("transport failure lost the earlier batch")?;
     assert!(matches!(rule.kind(), SwitchRefusalKind::KeptBatchesAhead {
         batch_id, kept_since_ms: Some(start), answer_until_ms: Some(end), kept: 1,
     } if batch_id == first_id && start == since && end == until && start < end));
@@ -252,7 +264,7 @@ async fn payment(
     root: &Path,
     host: &WalletHost,
     payer: Arc<NativeWallet>,
-    account: &Account,
+    account: &Arc<Account>,
     app_id: Vec<u8>,
 ) -> TestResult {
     let shop = world.identity("shop")?;
@@ -358,7 +370,7 @@ async fn payment(
     };
     let refused = Box::pin(payer.pay_request(missing, PaymentOptions::default())).await?;
     assert!(
-        matches!(refused.decision, PaymentDecision::Error { error: WalletError::Refused { refusal } } if matches!(refusal.kind(), RefusalKind::NotFound))
+        matches!(refused.decision, PaymentDecision::Error { error: WalletError::Permanent { failure } } if failure.refusal.as_ref().is_some_and(|r| matches!(r.kind(), RefusalKind::NotFound)))
     );
     assert!(refused.public_failures.is_empty());
     assert_eq!(account.count(), 0);
@@ -496,10 +508,54 @@ async fn payment(
     let reopened = host.load(app_id).await?;
     let refused = Box::pin(reopened.pay_request(other.into(), PaymentOptions::default())).await?;
     assert!(
-        matches!(refused.decision, PaymentDecision::Error { error: WalletError::Refused { refusal } } if matches!(refusal.kind(), RefusalKind::Cancelled))
+        matches!(refused.decision, PaymentDecision::Error { error: WalletError::Permanent { failure } } if failure.refusal.as_ref().is_some_and(|r| matches!(r.kind(), RefusalKind::Cancelled)))
     );
     assert_eq!(account.count(), 3);
     assert_eq!(account.calls.load(Ordering::SeqCst), 3);
+    Box::pin(alarmed_checkout(&mut seller, buyer, reopened)).await?;
+    assert_eq!(account.calls.load(Ordering::SeqCst), 3);
+    Ok(())
+}
+
+/// A wallet that stopped on an alarm reports the recovery for a payment, not a wait.
+async fn alarmed_checkout(
+    seller: &mut Paykit,
+    buyer: [u8; 32],
+    wallet: Arc<NativeWallet>,
+) -> TestResult {
+    let draft = RequestDraft::new(
+        PaymentAmount {
+            asset: Asset::new("btc")?,
+            value: Decimal::new("3")?,
+        },
+        PaymentReference::new("alarmed")?,
+        RequestDestination::Endpoints(BTreeMap::from([(
+            PaymentEndpointIdentifier::new("btc-lightning-bolt11")?,
+            PaymentEndpointPayload::new("lnbc1alarmed")?,
+        )])),
+    );
+    let request: RequestId = Box::pin(seller.send_request(buyer, draft))
+        .await?
+        .request
+        .ok_or("missing alarmed checkout")?
+        .into();
+    for _ in 0..8 {
+        if !Box::pin(wallet.receive()).await?.more {
+            break;
+        }
+    }
+    wallet
+        .lend(async |app| {
+            app.app_mut()
+                .raise_rollback("paykit", "test rollback")
+                .await
+        })
+        .await??;
+    let refused = Box::pin(wallet.pay_request(request, PaymentOptions::default())).await?;
+    assert!(
+        matches!(&refused.decision, PaymentDecision::Error { error: WalletError::Recovery { failure } } if failure.code == "stopped"),
+        "the alarm did not come as a recovery"
+    );
     Ok(())
 }
 
@@ -511,7 +567,7 @@ async fn later_checkout(
     root: &Path,
     host: &WalletHost,
     wallet: Arc<NativeWallet>,
-    account: &Account,
+    account: &Arc<Account>,
     app_id: &[u8],
 ) -> TestResult<Arc<NativeWallet>> {
     let buyer = wallet
@@ -544,9 +600,23 @@ async fn later_checkout(
     let calls = account.calls.load(Ordering::SeqCst);
     // A method that can't look a payment up refuses paying, and only paying: the wallet
     // still opens.
-    account.history.store(false, Ordering::SeqCst);
+    // A method whose guarantees change is given to a new host.
+    let without_history = WalletHost {
+        clock: host.clock.clone(),
+        transport: host.transport.clone(),
+        home: host.home.clone(),
+        writer: host.writer.clone(),
+        store: host.store.clone(),
+        rail: Arc::new(
+            account
+                .rail_without_history()
+                .with_pay_limit(PAY_LIMIT)
+                .with_lookup_limit(LOOKUP_LIMIT),
+        ),
+        timer: host.timer.clone(),
+    };
     wallet.shutdown().await?;
-    let wallet = host.load(app_id.to_vec()).await?;
+    let wallet = without_history.load(app_id.to_vec()).await?;
     let refused = Box::pin(wallet.pay_request(later.clone(), PaymentOptions::default())).await;
     assert!(matches!(
         refused,
@@ -569,7 +639,8 @@ async fn later_checkout(
     wallet.backup().await?;
     Box::pin(wallet.receive()).await?;
     wallet.payments().await?;
-    account.history.store(true, Ordering::SeqCst);
+    wallet.shutdown().await?;
+    let wallet = host.load(app_id.to_vec()).await?;
     account.park.store(true, Ordering::SeqCst);
     {
         let mut paying = Box::pin(wallet.pay_request(later, PaymentOptions::default()));
@@ -577,6 +648,14 @@ async fn later_checkout(
             _ = account.entered.notified() => {},
             _ = &mut paying => return Err("payment did not reach the parked method".into()),
         }
+        // Past its limit the host's `pay` may still be paying: an open payment, not an error.
+        let waited: PaymentResult = paying.await?;
+        assert!(matches!(
+            waited.decision,
+            PaymentDecision::Outcome {
+                outcome: PaymentOutcome::Pending { .. }
+            }
+        ));
     }
     // The wallet stops waiting at its limit and closes while the host's `pay` still runs.
     let open = wallet.payments().await?;
@@ -626,7 +705,7 @@ async fn lost_answer_checkout(
     seller: &mut Paykit,
     root: &Path,
     wallet: Arc<NativeWallet>,
-    account: &Account,
+    account: &Arc<Account>,
 ) -> TestResult {
     let buyer = wallet
         .identity()
@@ -765,7 +844,8 @@ async fn journey(world: &World) -> TestResult {
     assert_eq!(account.count(), 0);
     Box::pin(payment(world, root.path(), &env, reopened, &account, id)).await
 }
-fn run(backend: Backend, journey: impl AsyncFn(&World) -> TestResult + Send + 'static) {
+/// Run `journey` on a fresh `backend` world, on a thread with the wallet's stack size.
+pub(super) fn run(backend: Backend, journey: impl AsyncFn(&World) -> TestResult + Send + 'static) {
     let thread = std::thread::Builder::new()
         .stack_size(1_835_008)
         .spawn(move || {

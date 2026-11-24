@@ -10,8 +10,8 @@
 //! - **Asking**: entries the app can't read, `missed` items and a provider loss queue
 //!   `resend_request`s, which [`crate::Paykit::receive`] sends; the client bounds their times
 //!   (Paykit spec 9, "What an app asks for"). The marks of messages dropped before they were
-//!   taken ask on their own cadence (`marks.rs`). A `resend_request` adds no conversation
-//!   entry.
+//!   taken ask on their own cadence (`marks.rs`). A `resend_request` adds no reply
+//!   grant.
 
 use paykit_lib::bodies::ResendRequest;
 use paykit_lib::kinds::{holds_role, targets_app, Kind, Side, OPAQUE_MEMBERS};
@@ -117,6 +117,8 @@ impl Paykit {
         counterparty: [u8; 32],
         selection: ResendSelection,
     ) -> Result<String> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         self.refresh_own()?;
         Box::pin(self.first_read_before_writing()).await?;
         self.refresh_own()?;

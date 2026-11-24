@@ -2,9 +2,10 @@
 //!
 //! It pays a payload in memory, keyed by the idempotency key, and can be told to fail, hang
 //! or err for the next payment. It is idempotent on the key unless told otherwise, and keeps
-//! a history every device sees. Its proofs are `{ "type": "bitcoin-txid", "txid": ... }`,
-//! whose settlement ID Paykit wire 1.5 fixes, so a payee credits a payment without a request
-//! by it. A payload `...?amount=<value>` fixes the amount it transfers, as an invoice does.
+//! a history every device sees. Its proofs are `{ "rail": "fake", "tx": ... }`, of no real
+//! payment method, and it names their settlements itself ([`fake_settlement_id`]), as every
+//! rail does for its own proofs (Paykit wire 1.5), so a payee credits a payment without a
+//! request by it. A payload `...?amount=<value>` fixes the amount it transfers, as an invoice does.
 //!
 //! It pays the identifiers of [`FAKE_ENDPOINT_IDENTIFIERS`], in that order, unless told
 //! another order or another choice, and keeps every set of candidates it was handed.
@@ -43,8 +44,9 @@ pub const FAKE_PAYMENT_TIME_TOLERANCE_MS: u64 = 0;
 pub enum Behaviour {
     /// Paid at once.
     Succeed,
-    /// Paid as an output of this test transaction. Several payments may share its ID.
-    InTransaction([u8; 32]),
+    /// Paid in the settlement this names: several payments may share it, as the fake rail's
+    /// own rule, and are then one settlement (Paykit wire 1.5).
+    InSettlement([u8; 32]),
     /// Fails at once: no money moved.
     Fail,
     /// Stays in flight until [`FakeRail::settle`].
@@ -73,13 +75,12 @@ struct Inner {
     counter: u64,
     idempotent: bool,
     forgotten: Vec<AttemptId>,
+    lookups_failing: u64,
     calls: BTreeMap<AttemptId, u64>,
     call_amounts: BTreeMap<AttemptId, Vec<PaymentAmount>>,
     declaration: Option<RailDeclaration>,
     endpoints: Option<Vec<PaymentEndpointIdentifier>>,
     choice: Option<Choice>,
-    max_fee: Option<paykit_lib::Decimal>,
-    next_fees: VecDeque<Option<paykit_lib::Decimal>>,
     selections: Vec<(Vec<PaymentEndpointCandidate>, Option<PaymentAmount>)>,
     fraction_digits: BTreeMap<PaymentEndpointIdentifier, Option<u32>>,
     proof_checks: Vec<ProofCheck>,
@@ -190,17 +191,6 @@ impl FakeRail {
             + 'static,
     ) {
         self.lock().choice = Some(Arc::new(choose));
-    }
-
-    /// Report `max_fee` as the largest fee of every transfer from now on, instead of none.
-    pub fn set_max_fee(&self, max_fee: Option<paykit_lib::Decimal>) {
-        self.lock().max_fee = max_fee;
-    }
-
-    /// Report `fees` as the largest fee of the next transfers, one each, in order, then the
-    /// one [`FakeRail::set_max_fee`] set: a fee estimate that changes between calls.
-    pub fn next_max_fees(&self, fees: Vec<Option<paykit_lib::Decimal>>) {
-        self.lock().next_fees.extend(fees);
     }
 
     /// Every set of candidates [`Rail::select_endpoints`] was handed, with its amount, in
@@ -318,6 +308,12 @@ impl FakeRail {
         self.lock().forgotten.push(*key);
     }
 
+    /// The next `n` lookups of a payment's outcome fail as the method's history being
+    /// unreachable for now ([`RailError::Unavailable`]).
+    pub fn fail_next_lookups(&self, n: u64) {
+        self.lock().lookups_failing = n;
+    }
+
     /// Finish a payment left in flight: paid or failed.
     pub fn settle(&self, key: &AttemptId, paid: bool) {
         let now = self.now();
@@ -390,19 +386,37 @@ impl FakeRail {
 fn paid_outcome(key: &AttemptId, counter: u64, now: Option<u64>) -> RailOutcome {
     let digest =
         pubky_switch_core::enc::hash(&[key.to_bytes().as_slice(), &counter.to_be_bytes()].concat());
-    paid_in_transaction(&digest, now)
+    paid_in_settlement(&digest, now)
 }
 
-fn paid_in_transaction(transaction: &[u8; 32], now: Option<u64>) -> RailOutcome {
-    let txid: String = transaction.iter().map(|b| format!("{b:02x}")).collect();
+fn paid_in_settlement(settlement: &[u8; 32], now: Option<u64>) -> RailOutcome {
+    let tx: String = settlement.iter().map(|b| format!("{b:02x}")).collect();
     let mut proof = Map::new();
-    proof.insert("type".into(), Value::String("bitcoin-txid".into()));
-    proof.insert("txid".into(), Value::String(txid));
+    proof.insert("rail".into(), Value::String("fake".into()));
+    proof.insert("tx".into(), Value::String(tx));
     let paid = RailPaid::new(proof);
     RailOutcome::Paid(match now {
         Some(ms) => paid.with_paid_at_ms(ms),
         None => paid,
     })
+}
+
+/// Prefix of the fake rail's settlement IDs.
+pub const FAKE_SETTLEMENT_PREFIX: &str = "fake:";
+
+/// The settlement ID of a fake rail proof, `{ "rail": "fake", "tx": ... }` without a `type`:
+/// [`FAKE_SETTLEMENT_PREFIX`] followed by its `tx` text, `tx` not empty. `None` for any
+/// other proof. This is the fake rail's own rule, as a real method's is its own; Paykit reads
+/// no proof (Paykit wire 1.5).
+pub fn fake_settlement_id(proof: &Map<String, Value>) -> Option<Vec<u8>> {
+    // A `null` type reads as a missing one (Paykit wire, Conventions).
+    if proof.get("type").is_some_and(|t| !t.is_null())
+        || proof.get("rail").and_then(Value::as_str) != Some("fake")
+    {
+        return None;
+    }
+    let tx = proof.get("tx")?.as_str()?;
+    (!tx.is_empty()).then(|| [FAKE_SETTLEMENT_PREFIX.as_bytes(), tx.as_bytes()].concat())
 }
 
 /// The Payment Endpoint Identifiers the fake rail pays by default, in the order it tries
@@ -464,18 +478,12 @@ impl Rail for FakeRail {
         payload: &PaymentEndpointPayload,
         amount: &PaymentAmount,
     ) -> Transfer {
-        let fee = {
-            let mut inner = self.lock();
-            let max_fee = inner.max_fee.clone();
-            inner.next_fees.pop_front().unwrap_or(max_fee)
-        };
         let next = self.lock().next_transfer_amounts.pop_front();
         Transfer::new(
             next.or_else(|| self.lock().transfer_amount.clone())
                 .unwrap_or_else(|| {
                     Self::fixed_amount(payload.as_str(), amount).unwrap_or(Some(amount.clone()))
                 }),
-            fee,
         )
     }
 
@@ -519,7 +527,7 @@ impl Rail for FakeRail {
                         Behaviour::Succeed | Behaviour::LoseAnswer => {
                             paid_outcome(&key, counter, now)
                         }
-                        Behaviour::InTransaction(txid) => paid_in_transaction(&txid, now),
+                        Behaviour::InSettlement(settlement) => paid_in_settlement(&settlement, now),
                         // A refusal was answered above.
                         Behaviour::Fail | Behaviour::Refuse => RailOutcome::Failed,
                         Behaviour::Hang => RailOutcome::Pending,
@@ -555,7 +563,16 @@ impl Rail for FakeRail {
         &self,
         idempotency_key: AttemptId,
     ) -> BoxFuture<'_, Result<Option<RailOutcome>, RailError>> {
-        let inner = self.lock();
+        let mut inner = self.lock();
+        if inner.lookups_failing > 0 {
+            inner.lookups_failing -= 1;
+            drop(inner);
+            return Box::pin(async {
+                Err(RailError::Unavailable(
+                    "the method's history can't be read now".into(),
+                ))
+            });
+        }
         let keeps_history = inner.declaration.is_none_or(|d| d.history);
         let answer = if !keeps_history || inner.forgotten.contains(&idempotency_key) {
             None
@@ -618,6 +635,14 @@ impl Rail for FakeRail {
         });
         drop(inner);
         Box::pin(async move { Ok(answer) })
+    }
+
+    fn settlement_id(
+        &self,
+        _: &PaymentEndpointIdentifier,
+        proof: &Map<String, Value>,
+    ) -> Option<Vec<u8>> {
+        fake_settlement_id(proof)
     }
 }
 
@@ -693,6 +718,32 @@ mod tests {
         assert_eq!(rail.payment(key).await.unwrap(), None);
     }
 
+    #[test]
+    fn test_fake_rail_names_the_settlements_of_its_own_proofs_only() {
+        let proof = |value: Value| value.as_object().cloned().unwrap();
+        assert_eq!(
+            fake_settlement_id(&proof(serde_json::json!({ "rail": "fake", "tx": "t1" }))),
+            Some(b"fake:t1".to_vec())
+        );
+        // A null type reads as none.
+        assert_eq!(
+            fake_settlement_id(&proof(
+                serde_json::json!({ "type": null, "rail": "fake", "tx": "t1" })
+            )),
+            Some(b"fake:t1".to_vec())
+        );
+        for other in [
+            serde_json::json!({ "rail": "fake" }),
+            serde_json::json!({ "rail": "fake", "tx": "" }),
+            serde_json::json!({ "rail": "fake", "tx": 1 }),
+            serde_json::json!({ "rail": "other", "tx": "t1" }),
+            serde_json::json!({ "rail": "fake", "tx": "t1", "type": "another" }),
+            serde_json::json!({ "type": "example", "data": "t1" }),
+        ] {
+            assert_eq!(fake_settlement_id(&proof(other.clone())), None, "{other}");
+        }
+    }
+
     #[tokio::test]
     async fn test_fake_rail_verifies_only_the_proof_it_made() {
         let rail = FakeRail::new();
@@ -700,7 +751,8 @@ mod tests {
         else {
             panic!("paid");
         };
-        assert!(paykit_lib::derive::settlement_id(&proof).is_some());
+        let endpoint = PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap();
+        assert!(rail.settlement_id(&endpoint, &proof).is_some());
         let check = |proof: Map<String, Value>, value: &str| ProofCheck {
             endpoint_id: PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap(),
             payload: None,

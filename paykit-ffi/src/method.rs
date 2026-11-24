@@ -41,8 +41,9 @@ impl TryFrom<Amount> for PaymentAmount {
     }
 }
 
-/// What a payment method declares (Paykit spec 7.2, "What a payment method declares").
-#[derive(uniffi::Record)]
+/// What a payment method declares (Paykit spec 7.2, "What a payment method declares"), given
+/// once to `WalletHost`. A method whose guarantees change is given to a new `WalletHost`.
+#[derive(Clone, uniffi::Record)]
 pub struct MethodDeclaration {
     /// A repeat under the same idempotency key returns the payment made, while the method
     /// remembers the key.
@@ -70,6 +71,18 @@ pub struct MethodDeclaration {
     pub payment_time_tolerance_ms: u64,
 }
 
+/// A Payment Endpoint Identifier the method pays, and the fractional digits it supports for
+/// that endpoint's transfer amount.
+#[derive(Clone, uniffi::Record)]
+pub struct EndpointSupport {
+    /// The Payment Endpoint Identifier the method pays.
+    pub identifier: String,
+    /// The fractional digits the method supports for this endpoint, at most 18. Name them for
+    /// every endpoint the method pays: `None` makes a payment of a request to this endpoint
+    /// unusable, and a payee credits nothing paid to it.
+    pub fraction_digits: Option<u32>,
+}
+
 /// A Payment Endpoint a payment may take, handed to `Rail::select_endpoints`: its candidate
 /// ID, its Payment Endpoint Identifier and its payload.
 #[derive(uniffi::Record)]
@@ -82,23 +95,23 @@ pub struct EndpointCandidate {
     pub payload: String,
 }
 
-/// A failure of the payment method's call (Paykit spec 7.2). `RailError::Unavailable` is
-/// ambiguous: a payment may have been submitted, so it means nothing yet and the attempt
-/// stays open. `RailError::Refused` is authoritative: nothing was and nothing will be
+/// A failure of the payment method's call (Paykit spec 7.2). `Unknown` is ambiguous: a payment
+/// may have been submitted, so it means nothing yet and the attempt stays open; a thrown host
+/// error is read as `Unknown`. `NotSubmitted` is authoritative: nothing was and nothing will be
 /// submitted, so a first dispatch it answers is written `failed`, its journal entry is
 /// finished, and a replacement payment may follow.
 #[derive(Debug, Clone, uniffi::Error, thiserror::Error)]
 pub enum MethodError {
-    /// The method can't be reached now, or its call timed out: a payment may have been submitted,
-    /// and the SDK reads it as nothing yet.
-    #[error("payment method unavailable: {reason}")]
-    Unavailable {
+    /// The method can't tell now, can't be reached, or its call timed out: a payment may have
+    /// been submitted, and the SDK reads it as nothing yet.
+    #[error("payment method outcome unknown: {reason}")]
+    Unknown {
         /// The content-free explanation supplied by the payment method.
         reason: String,
     },
     /// Authoritative: nothing was and nothing will be submitted for this call.
-    #[error("payment method definitively refused submission: {reason}")]
-    Refused {
+    #[error("payment method submitted nothing: {reason}")]
+    NotSubmitted {
         /// The content-free explanation supplied by the payment method.
         reason: String,
     },
@@ -114,8 +127,8 @@ pub enum MethodError {
 impl From<MethodError> for RailError {
     fn from(v: MethodError) -> Self {
         match v {
-            MethodError::Unavailable { reason } => Self::Unavailable(reason),
-            MethodError::Refused { reason } => Self::Refused(reason),
+            MethodError::Unknown { reason } => Self::Unavailable(reason),
+            MethodError::NotSubmitted { reason } => Self::Refused(reason),
             MethodError::InvalidSelection { reason } => Self::InvalidSelection(reason),
         }
     }
@@ -145,27 +158,21 @@ pub struct MethodTransfer(Transfer);
 
 #[uniffi::export]
 impl MethodTransfer {
-    /// Validate the exact amount and maximum fee the payment method would submit. The fee
-    /// is the largest the payee can influence through the destination it chose. The SDK
-    /// checks it only against a fee cap, and these bindings set none: the payment method's
-    /// own limit, if it has one, is the only bound on the fee (Paykit spec 7.2 step 1).
+    /// Validate the exact amount the payment method would submit. The fee is the payment
+    /// method's, which must bound it: the SDK configures, reports and checks none (Paykit
+    /// spec 7.2 step 1).
     #[uniffi::constructor]
-    pub fn new(amount: Option<Amount>, max_fee: Option<String>) -> Result<Arc<Self>, MethodError> {
+    pub fn new(amount: Option<Amount>) -> Result<Arc<Self>, MethodError> {
         let amount = amount
             .map(PaymentAmount::try_from)
             .transpose()
             .map_err(invalid_answer)?;
-        let fee = max_fee
-            .as_deref()
-            .map(Decimal::new)
-            .transpose()
-            .map_err(invalid_answer)?;
-        Ok(Arc::new(Self(Transfer::new(amount, fee))))
+        Ok(Arc::new(Self(Transfer::new(amount))))
     }
 }
 
 fn invalid_answer(_: paykit_lib::Error) -> MethodError {
-    MethodError::Unavailable {
+    MethodError::Unknown {
         reason: "invalid amount or identifier from payment method".into(),
     }
 }
@@ -251,23 +258,28 @@ pub struct MethodProof {
 /// and a callback never calls the wallet it serves. `pay` runs as a task of its own: Paykit
 /// waits for it at most 30 seconds, then records the payment as possibly sent, and records
 /// `pay`'s answer by itself when it comes. A lookup is waited for at most 10 seconds. A
-/// timeout or unknown submission returns Unavailable. Refused means no submission took place
-/// or can follow. The synchronous calls answer at local speed, with no network.
+/// timeout or unknown submission returns `Unknown`. `NotSubmitted` means no submission took
+/// place or can follow. The synchronous calls answer at local speed, with no network. The
+/// method's declaration and the endpoints it pays are given to `WalletHost`, not asked here.
 #[uniffi::export(with_foreign)]
 #[async_trait::async_trait]
 pub trait PaymentMethod: Send + Sync {
-    /// Report the method's idempotency, history and maximum completion guarantees.
-    fn declaration(&self) -> MethodDeclaration;
-    /// Return payable candidate IDs and any per-candidate failures.
+    /// Return payable candidate IDs and any per-candidate failures. A failure pays none of
+    /// the candidates.
     fn select_endpoints(
         &self,
         candidates: Vec<EndpointCandidate>,
         amount: Option<Amount>,
     ) -> Result<SelectedEndpoints, MethodError>;
-    /// Describe the proposed transfer and fee bound before authorizing payment.
-    fn transfer(&self, endpoint: String, payload: String, amount: Amount) -> Arc<MethodTransfer>;
-    /// Return the supported fractional digits for this endpoint's transfer amount.
-    fn fraction_digits(&self, endpoint: String) -> Option<u32>;
+    /// Describe the amount the method would transfer before authorizing payment. Its fee is
+    /// the method's own to bound. A failure reads as a transfer the method can't quantify,
+    /// which the user is asked to confirm.
+    fn transfer(
+        &self,
+        endpoint: String,
+        payload: String,
+        amount: Amount,
+    ) -> Result<Arc<MethodTransfer>, MethodError>;
     /// Submit the selected endpoint payment under its original idempotency key.
     async fn pay(&self, payment: MethodPayment) -> Result<MethodOutcome, MethodError>;
     /// Look up the original attempt by its idempotency key without starting a transfer.
@@ -288,28 +300,51 @@ pub trait PaymentMethod: Send + Sync {
     /// the payee credits the request only when it lies within the request's times, so
     /// return the time the payment's evidence dates it, never a placeholder.
     async fn verify(&self, proof: MethodProof) -> Result<Option<u64>, MethodError>;
-    /// Extract the method-defined settlement ID for deduplication, when available.
-    fn settlement_id(&self, proof_json: Vec<u8>) -> Option<Vec<u8>>;
+    /// The settlement ID of a proof this method made, paid to `endpoint`: the bytes the
+    /// method defines to name one settlement, the same for every proof of it, read from the
+    /// endpoint and the proof alone and deterministic. Paykit defines none and reads no
+    /// proof; whether one transaction carries several payments, named apart, is the
+    /// method's rule. The endpoint lets a method name apart settlements that are distinct,
+    /// such as those of several endpoints whose proofs can carry the same inner value. A
+    /// method for which one transaction is one settlement returns the same ID for every proof
+    /// of it, whatever the endpoint (Paykit wire 1.5): naming it apart would give one
+    /// settlement two marks. Null for a proof that names none: a payment without a request
+    /// isn't credited by it. A failure reads as none, and that is not retried: a proof of a
+    /// payment that names no request is then dropped for good (the payee's feed moves past
+    /// it, and a resend of it is dropped as already processed), and a requested proof skips
+    /// the duplicate checks and asks the user whether it is credited already. So never fail
+    /// for a fault that may pass.
+    fn settlement_id(
+        &self,
+        endpoint: String,
+        proof_json: Vec<u8>,
+    ) -> Result<Option<Vec<u8>>, MethodError>;
 }
 
 pub(crate) struct HostRail {
     method: Arc<dyn PaymentMethod>,
+    declaration: MethodDeclaration,
     identifiers: Vec<PaymentEndpointIdentifier>,
+    fraction_digits: Vec<Option<u32>>,
     flights: crate::flights::Flights,
     pay_limit: std::time::Duration,
     lookup_limit: std::time::Duration,
 }
 
 impl HostRail {
-    /// Use the host's method for the given Payment Endpoint Identifiers, with the record of
-    /// payments in flight this process shares.
+    /// Use the host's method, as it declares itself, for the endpoints it supports, with the
+    /// record of payments in flight this process shares.
     pub(crate) fn new(
         method: Arc<dyn PaymentMethod>,
-        identifiers: Vec<PaymentEndpointIdentifier>,
+        declaration: MethodDeclaration,
+        endpoints: Vec<(PaymentEndpointIdentifier, Option<u32>)>,
     ) -> Self {
+        let (identifiers, fraction_digits) = endpoints.into_iter().unzip();
         Self {
             method,
+            declaration,
             identifiers,
+            fraction_digits,
             flights: crate::flights::Flights::process(),
             pay_limit: crate::runtime::PAY_LIMIT,
             lookup_limit: HOST_CALL_LIMIT,
@@ -345,7 +380,7 @@ impl HostRail {
     /// the wallet stopped waiting for could never be settled, so paying is refused; every
     /// other wallet call works with any declaration (Paykit spec 7.2).
     pub(crate) fn has_lookup(&self) -> bool {
-        in_callback(|| self.method.declaration()).history
+        self.declaration.history
     }
 }
 
@@ -363,7 +398,7 @@ async fn bounded<T>(
 
 impl Rail for HostRail {
     fn declaration(&self) -> RailDeclaration {
-        let d = in_callback(|| self.method.declaration());
+        let d = &self.declaration;
         let mut v = RailDeclaration::new(d.longest_completion_ms, d.payment_time_tolerance_ms)
             .with_idempotent(d.idempotent)
             .with_history(d.history)
@@ -412,16 +447,19 @@ impl Rail for HostRail {
         payload: &PaymentEndpointPayload,
         amount: &PaymentAmount,
     ) -> Transfer {
-        in_callback(|| {
+        let answer = in_callback(|| {
             self.method
                 .transfer(id.as_str().into(), payload.as_str().into(), amount.into())
-                .0
-                .clone()
-        })
+        });
+        match answer {
+            Ok(transfer) => transfer.0.clone(),
+            Err(_) => Transfer::new(None),
+        }
     }
 
     fn fraction_digits(&self, id: &PaymentEndpointIdentifier) -> Option<u32> {
-        in_callback(|| self.method.fraction_digits(id.as_str().into()))
+        let index = self.identifiers.iter().position(|known| known == id)?;
+        self.fraction_digits.get(index).copied().flatten()
     }
 
     fn pay(&self, p: RailPayment) -> BoxFuture<'_, Result<RailOutcome, RailError>> {
@@ -522,15 +560,24 @@ impl Rail for HostRail {
         })
     }
 
-    fn settlement_id(&self, proof: &Map<String, Value>) -> Option<Vec<u8>> {
+    fn settlement_id(
+        &self,
+        endpoint_id: &PaymentEndpointIdentifier,
+        proof: &Map<String, Value>,
+    ) -> Option<Vec<u8>> {
         let proof = serde_json::to_vec(proof).ok()?;
-        in_callback(|| self.method.settlement_id(proof))
+        in_callback(|| {
+            self.method
+                .settlement_id(endpoint_id.as_str().to_owned(), proof)
+        })
+        .ok()
+        .flatten()
     }
 }
 
 impl From<uniffi::UnexpectedUniFFICallbackError> for MethodError {
     fn from(_: uniffi::UnexpectedUniFFICallbackError) -> Self {
-        Self::Unavailable {
+        Self::Unknown {
             reason: "payment method callback interrupted".into(),
         }
     }

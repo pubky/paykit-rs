@@ -55,14 +55,19 @@ async fn test_restore_reconciles_a_payment_made_after_the_backup() {
         &PaykitBackup::from_bytes(&backup.to_bytes().unwrap()).unwrap(),
     )
     .await;
-    // Reconcile mode: no attempt before reconciliation.
+    // Reconcile mode: no attempt before reconciliation, as the client reports it.
     let refused = app
         .pay_request(&request, PayOptions::default())
         .await
         .outcome
         .unwrap_err();
     assert!(
-        matches!(refused.refusal(), Some(Refusal::NotNow(_))),
+        matches!(
+            refused,
+            paykit_sdk::PaykitError::Client(pubky_switch_client::app::AppError::Refused(
+                pubky_switch_client::app::Refusal::NotNow(_)
+            ))
+        ),
         "{refused:?}"
     );
 
@@ -1532,7 +1537,7 @@ async fn test_restore_layer_state_that_doesnt_verify_or_read_writes_nothing() {
         (
             "kept side under another message's key",
             format!("side/{other_uuid}"),
-            kept(serde_json::json!({ "msg_id": uuid, "side": "payer" })),
+            kept(serde_json::json!({ "msg_id": uuid, "side": "payer", "label": null })),
         ),
         (
             "missed time other than its key's",
@@ -1542,12 +1547,16 @@ async fn test_restore_layer_state_that_doesnt_verify_or_read_writes_nothing() {
         (
             "seen records holding a certificate",
             seen_key(shop1.app_id_bytes()),
-            kept(serde_json::json!({ "records": [request["cert"].clone()], "unkept_at": null })),
+            kept(
+                serde_json::json!({ "records": [request["cert"].clone()], "unkept_at": null, "dropped_at": null }),
+            ),
         ),
         (
             "seen records of another app",
             seen_key([9; 16]),
-            kept(serde_json::json!({ "records": [record_json.clone()], "unkept_at": null })),
+            kept(
+                serde_json::json!({ "records": [record_json.clone()], "unkept_at": null, "dropped_at": null }),
+            ),
         ),
         (
             "missed item time other than its key's",
@@ -1593,7 +1602,9 @@ async fn test_restore_layer_state_that_doesnt_verify_or_read_writes_nothing() {
     let mut state = layer.clone();
     state.push((
         seen_key(shop1.app_id_bytes()).into_bytes(),
-        kept(serde_json::json!({ "records": [record_json], "unkept_at": null })),
+        kept(
+            serde_json::json!({ "records": [record_json], "unkept_at": null, "dropped_at": null }),
+        ),
     ));
     // A queued answer bound to its key restores too.
     state.push((
@@ -1607,7 +1618,7 @@ async fn test_restore_layer_state_that_doesnt_verify_or_read_writes_nothing() {
     ));
     state.push((
         format!("side/{uuid}").into_bytes(),
-        kept(serde_json::json!({ "msg_id": uuid, "side": "payer" })),
+        kept(serde_json::json!({ "msg_id": uuid, "side": "payer", "label": null })),
     ));
     // A missed item holding the time its key names restores too.
     state.push((
@@ -4023,4 +4034,83 @@ async fn test_restore_repeat_withheld_once_the_user_says_an_earlier_dispatch_pai
     .unwrap();
     app.resume_payments().await.unwrap();
     assert_eq!(w.rail.pay_calls(&newer), 1);
+}
+
+#[tokio::test]
+async fn test_restore_older_in_place_keeps_a_kept_payee_cancellation() {
+    // The wallet is backed up holding bob's request. Bob then cancels it: the wallet keeps
+    // the cancellation as the stop, but its placement in the request record doesn't reach
+    // the switch, and the read is acknowledged, so the inbox no longer holds it. Restored in
+    // place from the older backup, the installation's stop stays: even once the user has
+    // seen the request may have been cancelled, it isn't paid (Paykit spec 8.1).
+    use pubky_switch_client::testing::Fault;
+    let w = World::new();
+    let storage = store();
+    let mut wallet = w.wallet_on("wallet", Arc::clone(&storage)).await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    let backup = wallet.backup().await.unwrap();
+    let app_id = wallet.app_id();
+    for _ in 0..4 {
+        w.alice.switch().fail_next(Fault::Unreachable {
+            path: "/ops".into(),
+            after: 0,
+        });
+    }
+    crate::one_time::cancel_to(&w, &[app_id], request.request_hash);
+    let _ = wallet.receive(None).await;
+    let key = crate::one_time::stop_key(&w, &wallet, request.request_hash);
+    assert!(wallet
+        .app()
+        .protocol_get("paykit", &key)
+        .await
+        .unwrap()
+        .is_some());
+    let mut flushed = wallet.app_mut().flush_cursor().await;
+    for _ in 0..4 {
+        if flushed.is_ok() {
+            break;
+        }
+        flushed = wallet.app_mut().flush_cursor().await;
+    }
+    flushed.unwrap();
+    drop(wallet);
+    let mut app = Paykit::restore(
+        w.env(&w.alice, storage),
+        PaykitConfig::default(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    // Before any read: the installation's kept cancellation stands.
+    assert!(app
+        .app()
+        .protocol_get("paykit", &key)
+        .await
+        .unwrap()
+        .is_some());
+    app.receive(None).await.unwrap();
+    app.reconcile().await.unwrap();
+    app.end_reconcile(UserConfirmed::new()).await.unwrap();
+    let options = crate::common::over_hold(&app, &request).await;
+    let paid = app.pay_request(&request, options).await.outcome;
+    assert!(
+        !matches!(paid, Ok(PayOutcome::Paid { .. })),
+        "paid a cancelled request: {paid:?}"
+    );
+    assert!(w.rail.all_executions().is_empty());
+    // The ordinary passes place the kept cancellation in the request record.
+    assert_eq!(
+        app.request(&request).await.unwrap().status,
+        RequestStatus::Cancelled
+    );
+    // The request stays cancelled; a new request of bob's is paid.
+    let next = request_from(&mut shop, w.alice_id(), draft("2", w.clock.now_ms())).await;
+    app.receive(None).await.unwrap();
+    let options = crate::common::over_hold(&app, &next).await;
+    let paid = app.pay_request(&next, options).await.outcome.unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
 }

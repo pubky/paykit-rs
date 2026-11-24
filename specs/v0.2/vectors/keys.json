@@ -13,7 +13,7 @@
         "claims.write",
         "lists.read",
         "lists.manage",
-        "conversation.add"
+        "reply.add"
       ],
       "scopes": [
         "paykit_pay",
@@ -36,7 +36,7 @@
         "claims.read",
         "claims.write",
         "lists.read",
-        "conversation.add"
+        "reply.add"
       ],
       "scopes": [
         "paykit_pay",
@@ -59,7 +59,7 @@
         "claims.read",
         "claims.write",
         "lists.read",
-        "conversation.add"
+        "reply.add"
       ],
       "scopes": [
         "paykit_pay",
@@ -82,7 +82,7 @@
       "permissions": [
         "claims.read",
         "lists.read",
-        "conversation.add"
+        "reply.add"
       ],
       "scopes": [
         "paykit_request",
@@ -104,7 +104,7 @@
       "name": "cap",
       "permissions": [
         "lists.read",
-        "conversation.add"
+        "reply.add"
       ],
       "scopes": [
         "paykit_request",
@@ -126,7 +126,7 @@
       "name": "hosted",
       "permissions": [
         "lists.read",
-        "conversation.add"
+        "reply.add"
       ],
       "scopes": [
         "paykit_request:shop1",

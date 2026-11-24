@@ -7,7 +7,7 @@
 //! lists and invite codes, the directory, peer copies of `identity.json` and the inbox. The
 //! identities admit each other as real apps do: a payer invites the payee it buys from (a
 //! conversation it starts, as at a checkout), and the first message an app sends a
-//! counterparty writes its conversation entry, so the counterparty's replies are admitted
+//! counterparty writes its reply grant, so the counterparty's replies are admitted
 //! (Paykit spec 1, Switch spec 7).
 
 use std::sync::Arc;
@@ -166,6 +166,9 @@ pub struct World {
     pub carol: TestSigner,
     pub router: Arc<Router>,
     pub rail: Arc<FakeRail>,
+    /// The values another own app wrote over records a provider loss then left divergent,
+    /// by record key, so a test can write one of them again as the record's successor.
+    pub competing: std::sync::Mutex<std::collections::BTreeMap<[u8; 32], Vec<u8>>>,
 }
 
 /// The host's timer in the tests: its sleep moves the test clock on and resolves at once.
@@ -225,6 +228,7 @@ impl World {
             carol,
             router,
             rail,
+            competing: Default::default(),
         }
     }
 
@@ -342,6 +346,15 @@ impl World {
         app
     }
 
+    /// A device clock of its own, at `ms`, for an app loaded with [`World::load_on_clock`]:
+    /// the way to model a device clock that is wrong. The world's clock is the switches'
+    /// service time, so moving it back makes every switch answer earlier than it did before,
+    /// which the client takes as the service's clock going backwards; a wrong device clock
+    /// moves this one instead.
+    pub fn device_clock(&self, ms: u64) -> Arc<TestClock> {
+        Arc::new(TestClock::new(ms))
+    }
+
     /// Load app `app_id` of `signer` from `store`, its device clock `clock` instead of the
     /// world's, which the switches keep.
     pub async fn load_on_clock(
@@ -441,14 +454,6 @@ impl World {
 /// budget, would have them orphaned by then.
 pub fn day_window() -> PaykitConfig {
     PaykitConfig::default().with_orphan_after_s(86_400)
-}
-
-/// `config` with a fee cap of `cap` btc (Paykit spec 7.2 step 1).
-pub fn btc_fee_cap(config: PaykitConfig, cap: &str) -> PaykitConfig {
-    config.with_fee_cap(
-        paykit_lib::Asset::new("btc").unwrap(),
-        paykit_lib::Decimal::parse(cap).unwrap(),
-    )
 }
 
 pub fn store() -> Arc<dyn StateStore> {

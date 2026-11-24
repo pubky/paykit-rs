@@ -265,7 +265,7 @@ pub enum MessageDelivery {
     /// "Waiting for them to admit you": the recipient's switch answered `403 not_admitted`,
     /// first at `since_ms` (app clock), as a payee's does to a payer it doesn't admit yet,
     /// or a payer's to a payee it hasn't invited. The message stays queued, and goes once
-    /// the recipient adds this identity as a contact or invites it (Switch spec 7), or is
+    /// the recipient keeps this identity as a peer or invites it (Switch spec 7), or is
     /// given up after [`pubky_switch_client::app::UNDELIVERABLE_MS`] (Switch spec 11).
     WaitingForAdmission {
         /// The first such answer, app clock, in Unix milliseconds.
@@ -724,6 +724,8 @@ impl Paykit {
     /// host that retries after one reads [`Paykit::payee_activity`] after its next write
     /// first.
     pub async fn send_request(&mut self, to: [u8; 32], draft: RequestDraft) -> Result<SentRequest> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         // The call's future goes on the heap, as `receive`'s does: it nests deep.
         Box::pin(self.send_request_inner(to, draft)).await
     }
@@ -880,7 +882,9 @@ impl Paykit {
             .bind_held(held, ActivitySide::Payee, label.as_ref())
             .ok_or(Refusal::NotFound)?;
         let target = ActivityTarget::payee(
-            bound.natural_key_with(&self.identity(), &|p| self.rail.settlement_id(p))?,
+            bound.natural_key_with(&self.identity(), &|endpoint, proof| {
+                self.rail.settlement_id(endpoint, proof)
+            })?,
             label.as_ref(),
         );
         Ok((target, bound))
@@ -960,9 +964,9 @@ impl Paykit {
     /// credited to another request, Billing Period or payment without a request of the same
     /// payer, that record holding a proof of the same settlement with its receipt, is `None`
     /// too. Its proof stays in its record and gets no receipt. The settlement is the one the
-    /// payment method names, such as the transaction ID of an on-chain payment, with no
-    /// output index, so one transaction pays one occurrence. A proof without a receipt, such
-    /// as late evidence, credits nothing.
+    /// payment method names ([`crate::Rail::settlement_id`]): whether one transaction can
+    /// pay two occurrences is the method's rule, not Paykit's. A proof without a receipt,
+    /// such as late evidence, credits nothing.
     ///
     /// # Errors
     ///
@@ -976,6 +980,8 @@ impl Paykit {
     /// tolerance, after its payment deadline, or outside the validity of the destination or
     /// rates it was paid by, unless the record holds its receipt already; the rail's errors.
     pub async fn verify_payment(&mut self, record: &[u8; 32]) -> Result<Option<u64>> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         // The call's future goes on the heap, as `receive`'s does: it nests deep.
         Box::pin(self.verify_payment_inner(record)).await
     }
@@ -1211,13 +1217,9 @@ impl Paykit {
             None => return Err(Refusal::NotFound.into()),
         };
         let (amount, payload, destination_expires, rate_window, deadline, not_before) = payment;
-        let settlement_id = self.rail.settlement_id(&proof.proof);
-        let typed = proof.proof.get("type").filter(|value| !value.is_null());
-        let known_method = typed.and_then(Value::as_str) == Some("bitcoin-txid")
-            || (typed.is_none() && proof.proof.get("rail").and_then(Value::as_str) == Some("fake"));
-        if known_method && paykit_lib::derive::settlement_id(&proof.proof).is_none() {
-            return Ok(None);
-        }
+        let settlement_id = self
+            .rail
+            .settlement_id(&proof.payment_endpoint_identifier, &proof.proof);
         let mut other_uncertain = false;
         if let Some(settlement) = settlement_id.as_ref().filter(|_| bound.receipt.is_none()) {
             if self
@@ -1445,7 +1447,7 @@ impl Paykit {
             .is_some_and(|stored| match stored.body() {
                 Body::PaymentProof(proof) => self
                     .rail
-                    .settlement_id(&proof.proof)
+                    .settlement_id(&proof.payment_endpoint_identifier, &proof.proof)
                     .is_some_and(|id| id != settlement),
                 _ => false,
             }))
@@ -1465,6 +1467,8 @@ impl Paykit {
     /// ([`crate::DivergentRecord::may_hold_credit`]), or the messages kept over it wait to
     /// be written.
     pub async fn confirm_payment(&mut self, record: &[u8; 32]) -> Result<Option<String>> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         self.confirm_payment_with(record, ReceiptDetails::new())
             .await
     }
@@ -1484,6 +1488,8 @@ impl Paykit {
         record: &[u8; 32],
         details: ReceiptDetails,
     ) -> Result<Option<String>> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         // The call's future goes on the heap, as `receive`'s does: it nests deep.
         Box::pin(self.confirm_payment_with_inner(record, details)).await
     }
@@ -1629,6 +1635,8 @@ impl Paykit {
         record: &[u8; 32],
         reason: Option<String>,
     ) -> Result<String> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         // The call's future goes on the heap, as `receive`'s does: it nests deep.
         Box::pin(self.cancel_sent_request_inner(record, reason)).await
     }
@@ -1670,6 +1678,7 @@ impl Paykit {
                 &KeptSide {
                     msg_id: signed.msg_id().to_owned(),
                     side: SideTag::Payee,
+                    label: target.label().map(|label| label.as_str().to_owned()),
                 },
             )?;
             match self
@@ -1912,7 +1921,9 @@ impl Paykit {
                 // A placement that fails now is tried again at the next run; the kept stop
                 // stands meanwhile, so it can't let a payment through.
                 placed.insert((cancellation.sender(), request));
-                let _ = self.place_kept_cancellation(&target).await;
+                if let Err(error) = self.place_kept_cancellation(&target).await {
+                    crate::pay::unless_stop(error)?;
+                }
                 continue;
             }
             let held = self.app.shared_record(&self.activity_key(&target)?).await?;
@@ -1996,12 +2007,12 @@ impl Paykit {
                 out.push(view);
             }
         }
-        let shown: std::collections::HashSet<([u8; 32], [u8; 32])> = out
+        let mut shown: std::collections::HashSet<([u8; 32], [u8; 32])> = out
             .iter()
             .map(|view| (view.request.payee, view.request.request_hash))
             .collect();
         for view in self.unrecorded_requests().await? {
-            if !shown.contains(&(view.request.payee, view.request.request_hash)) {
+            if shown.insert((view.request.payee, view.request.request_hash)) {
                 out.push(view);
             }
         }
@@ -2405,6 +2416,8 @@ impl Paykit {
         request: &RequestRef,
         reason: Option<String>,
     ) -> Result<String> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         self.refresh_own()?;
         Box::pin(self.first_read_before_writing()).await?;
         self.refresh_own()?;
@@ -2440,6 +2453,8 @@ impl Paykit {
         request: &RequestRef,
         reason: Option<String>,
     ) -> Result<String> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         self.refresh_own()?;
         Box::pin(self.first_read_before_writing()).await?;
         self.refresh_own()?;
@@ -2484,6 +2499,8 @@ impl Paykit {
     /// network, `429`, `503`) is no error: it is reported sent, [`MessageDelivery::Kept`], so
     /// the host doesn't accept again.
     pub async fn accept_subscription(&mut self, request: &RequestRef) -> Result<SentMessage> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         self.accept_subscription_with(request, AcceptOptions::default())
             .await
     }
@@ -2500,6 +2517,8 @@ impl Paykit {
         request: &RequestRef,
         options: AcceptOptions,
     ) -> Result<SentMessage> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         self.accept_subscription_as(request, options, None).await
     }
 
@@ -2516,6 +2535,8 @@ impl Paykit {
         request: &RequestRef,
         allowance: &[u8; 32],
     ) -> Result<SentMessage> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         self.accept_subscription_as(request, AcceptOptions::default(), Some(allowance))
             .await
     }
@@ -2551,22 +2572,23 @@ impl Paykit {
         // An answer goes to no counterparty whose sends are held (Paykit spec 8.1, "Blocked
         // counterparties"). A rejection or a payer's cancellation is still a stop: it is
         // recorded as when they aren't, and only its message waits ([`Paykit::record_held`]);
-        // a copy of the deny list not known is read first. An acceptance takes paying's gate
+        // a copy of the deny list past its refresh interval or not known is read first. An acceptance takes paying's gate
         // instead (Paykit spec 8.1, 8.2): the deny list as judged for a payment the user
         // starts, read first when the copy is older than 10 minutes or not known, a read that
         // fails being the call's error, so it never goes on a copy not known; to a blocked
         // payee it goes only on the user's confirmation, below. It is never held.
         let (blocked, held) = if allowance.is_some() {
             self.refuse_while_payer_pass_owed().await?;
-            self.app.may_attempt(true).map_err(crate::pay::not_now)?;
+            self.app.may_attempt(true).map_err(crate::pay::held_back)?;
             (self.denied(&request.payee).await?, false)
         } else if answer == Answer::Accept {
             (self.denied_for_user(&request.payee).await?, false)
         } else {
-            if !self.deny_copy_known().await? {
-                self.refresh_lists_when_due().await?;
-            }
-            (false, self.sends_held(&request.payee).await?)
+            // Judged on a fresh copy, as its delivery is: one past its refresh interval is
+            // read first, so a block another own app wrote holds the answer in its record,
+            // not the outbox, and so does a copy the read leaves stale or not known.
+            self.refresh_lists_when_due().await?;
+            (false, self.delivery_held(&request.payee).await?)
         };
         let (target, mut record) = self.payer_request(request).await?;
         let (_, body) = request_of(&record).ok_or(Refusal::NotFound)?;
@@ -2658,12 +2680,34 @@ impl Paykit {
             // The hold ends with the acceptance, and stays when it isn't recorded.
             tx.put(&end.confirmation(), &true)?;
         }
+        if answer == Answer::Accept && blocked {
+            // The user confirmed accepting this blocked payee's subscription: its original
+            // delivery may go while sends to the payee are held, written with the response
+            // and its queued message (Paykit spec 8.1, 8.2).
+            tx.put(
+                &key::send_exemption(signed.msg_id()),
+                &crate::send_holds::SendExemption::confirmed_while_blocked(
+                    signed.msg_id(),
+                    request.payee,
+                    request.request_hash,
+                ),
+            )?;
+        }
+        if answer != Answer::Accept && !held {
+            // A stop queued keeps what ends its outbox copy past its 30 days, in the commit
+            // that queues it (Paykit spec 8.1).
+            tx.put(
+                &key::queued_stop(signed.msg_id()),
+                &crate::send_holds::QueuedStop::signed(&signed, request.request_hash)?,
+            )?;
+        }
         if answer == Answer::Cancel {
             tx.put(
                 &key::side(signed.msg_id()),
                 &KeptSide {
                     msg_id: signed.msg_id().to_owned(),
                     side: SideTag::Payer,
+                    label: None,
                 },
             )?;
         }
@@ -2778,6 +2822,9 @@ impl Paykit {
         // An acceptance recorded and queued is sent whatever a try to deliver it now gives;
         // a rejection's or cancellation's failed try is the call's error, as before.
         if answer != Answer::Accept {
+            // Its delivery is judged on a fresh copy of the deny list, which the time spent
+            // recording it may have aged (Paykit spec 8.1, "Messages already queued").
+            self.refresh_lists_when_due().await?;
             self.send_message(&msg_id).await?;
         }
         Ok((msg_id.clone(), Some(self.delivered(&msg_id).await?)))

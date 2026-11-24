@@ -154,7 +154,7 @@
 - **Related terms**: Payment Method, Attempt, Payment Proof, Settlement ID
 
 ### Settlement ID
-- **Definition**: The bytes a payment method defines to name one settlement, the same in every proof of it, such as a Lightning payment hash or an on-chain transaction ID, in one spelling per proof type. It keys the payee's record of a payment without a request (Paykit spec 8.4, Paykit wire 1.5).
+- **Definition**: The bytes the payment method defines to name one settlement, the same in every proof of it. The payee's payment method works it out from the proof's `proof` object and the Payment Endpoint Identifier; Paykit defines no settlement ID and no proof format, and whether a method names a settlement by a whole transaction or by one part of it is the method's. It keys the payee's record of a payment without a request (Paykit spec 8.4, Paykit wire 1.5).
 - **Related terms**: Payment Proof, Payment without a request
 
 ### Payer
@@ -306,7 +306,7 @@ Paykit uses these as the Pubky Switch defines them. Each entry cites its Switch 
 | **Generation** | The counter of the switch named in `identity.json`; it increases on a move and after a provider loss. | Switch spec 12.6 |
 | **Scope** | A permission string in a certificate: a name, or a name and a sub-scope `name:<sub>`. The Switch knows no scope names; Paykit's are its Paykit scopes. | Switch spec 3.3 |
 | **Sub-scope** | The `<sub>` part of `name:<sub>`, with keys derived from its parent's. A labelled selling scope is one. | Switch spec 3.3, 3.5 |
-| **Switch permission** | One of `claims.read`, `claims.write`, `lists.read`, `lists.manage`, `conversation.add`, listed in a certificate's `permissions`. Paykit's permission table says which each Paykit scope needs. | Switch spec 3.2 |
+| **Switch permission** | One of `claims.read`, `claims.write`, `lists.read`, `lists.manage`, `reply.add`, listed in a certificate's `permissions`. Paykit's permission table says which each Paykit scope needs. | Switch spec 3.2 |
 | **Signing key** | An app's static Ed25519 key: it signs messages, requests, operations, its record and its receive key records. Not the identity key. | Switch spec 3.1 |
 | **Bundle key** | An app's static X25519 key, named in its certificate, to which the signer seals its key bundles. | Switch spec 3.5 |
 | **Receive key** | An app's current X25519 key for messages, with a number `n` and a kid; replaced by a fresh key about once a day. | Switch spec 3.6 |
@@ -333,11 +333,11 @@ Paykit uses these as the Pubky Switch defines them. Each entry cites its Switch 
 | **Cursor** | An app's position in the feed, `<generation>:<seq>`. | Switch wire 1.7 |
 | **Directory** | The switch's answer naming an identity's current apps for senders: their app records and receive key records. | Switch spec 8.1 |
 | **Delivery** | How a message reaches its recipient's inbox, with retries and re-sends; Paykit's re-send kind is its Resend request. | Switch spec 11 |
-| **Allowlist** | The contacts and conversation entries that admit senders. No unsolicited first contact by Pubky ID alone. | Switch spec 7 |
+| **Allowlist** | The kept peers and reply grants that admit senders, one row per peer with each reason held on its own. No unsolicited first contact by Pubky ID alone. | Switch spec 7 |
 | **Deny list** | The identities an identity has blocked at its switch. | Switch spec 7 |
-| **Contact** | An allowlist entry for a counterparty the user keeps. Not a v0.1 Public Contact Marker. | Switch spec 7 |
-| **Conversation entry** | An allowlist entry an app adds for a counterparty it writes to or invites. | Switch spec 7 |
-| **Invite** | A conversation entry added before any message, so the counterparty can write first, for example a shop at checkout. | Switch spec 7 |
+| **Kept peer** | A peer a managing app explicitly kept on the allowlist. Not a v0.1 Public Contact Marker. | Switch spec 7 |
+| **Reply grant** | The allowlist reason that lets a peer reply after an own app sent to it, invited it or accepted its connect request. | Switch spec 7 |
+| **Invite** | A reply grant added before any message, so the counterparty can write first, for example a shop at checkout. | Switch spec 7 |
 | **Invite code** | A random code an app registers and shows, as `pubky://<id>?switch=invite&code=<code>`, so that anyone who has it can write once. | Switch spec 7, Switch wire 1.7 |
 | **Connect request** | A content-free request from a stranger to be invited. | Switch spec 7 |
 
@@ -384,7 +384,7 @@ These terms must not be used for new Paykit v0.2 names:
 
 - **Encrypted Link**, **Encrypted Link Handshake**, **Linked Peer**, **Noise link**, **relinking** -> v0.2 has none; use **Envelope**, **Inbox** and **Counterparty**.
 - **pubky-noise**, **Noise key** -> use **Receive key** or **Bundle key**.
-- **Paykit App Registry**, **Noise Key Authorization**, **Public Contact Marker** -> removed in v0.2; use **`identity.json`**, **App record** and **Contact**.
+- **Paykit App Registry**, **Noise Key Authorization**, **Public Contact Marker** -> removed in v0.2; use **`identity.json`**, **App record** and **Kept peer**.
 - **Paykit Signer**, **`paykit-signer`**, **`pubky-switch-paykit`** -> these crates don't exist; identity management is **`pubky-switch-signer`**.
 - **Paykit Switch**, **Paykit identity**, **Paykit certificate**, **Paykit envelope** -> these are the Switch's: use **Pubky Switch**, **Identity**, **App certificate** and **Envelope**.
 - **Paykit Profile**, **Paykit Blob** -> removed in v0.2. Each app chooses how to display identities.
@@ -431,7 +431,7 @@ The Switch's terms, as Paykit uses them:
 - Scope, Sub-scope, Switch permission
 - Signing key, Bundle key, Receive key, Receive key record, kid, Shared Data Key, Data epoch, Key bundle, Naming key, Service key
 - Envelope, Message, Message ID, Sealed value, Inbox, Inbox entry, `seq`, Feed, Cursor, Directory, Delivery
-- Allowlist, Deny list, Contact, Conversation entry, Invite, Invite code, Connect request
+- Allowlist, Deny list, Kept peer, Reply grant, Invite, Invite code, Connect request
 - Obligation, Claim, Attempt, Step, Shared record, Collection, Policy, Record version, Natural key
 - Operation, Condition, Batch, Transition proof, Chain, Chain stub, Signed head
 - Approval, Enrollment, Revocation, Provider move, Freeze, Provider loss, Account erasure, Signer hand-over, Push relay, Handle, Push key

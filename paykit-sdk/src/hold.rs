@@ -123,6 +123,29 @@ impl HeldRequest {
     }
 }
 
+/// An Allowance as the user is shown it to confirm its automatic payment again
+/// ([`Refusal::AllowanceConfirmationNeeded`], [`crate::AllowanceView::hold`]; Paykit spec
+/// 8.3, "Ends reach the executor"): its record, and the hold in force when it was shown, set
+/// by the latest restore or `missed` item, if any. The user's confirmation carries it back
+/// ([`Paykit::confirm_allowance_executor`]) and counts only for that hold: once a newer
+/// restore or `missed` item has set another, the confirmation is refused with the hold in
+/// force now, and nothing is written, so the user is asked again. It also carries the
+/// provider loss the app had followed: a confirmation shown before a newer loss is refused
+/// the same way (Paykit spec 8.3, "After provider loss").
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AllowanceHold {
+    record: [u8; 32],
+    epoch: Option<HoldEpoch>,
+    loss: Option<u64>,
+}
+
+impl AllowanceHold {
+    /// The Allowance's record key.
+    pub fn record(&self) -> [u8; 32] {
+        self.record
+    }
+}
+
 /// The hold a restore set (`p/rh`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -611,6 +634,15 @@ impl Paykit {
         self.local_get::<HoldEpoch>(key::HOLD_EPOCH).await
     }
 
+    /// The Allowance at `record` with the hold in force now, as the user is shown it.
+    pub(crate) async fn allowance_hold(&self, record: &[u8; 32]) -> Result<AllowanceHold> {
+        Ok(AllowanceHold {
+            record: *record,
+            epoch: self.current_hold().await?,
+            loss: self.app.own_identity().body().recovery_from,
+        })
+    }
+
     /// Whether this app holds the user's approval of automatic execution of the Allowance
     /// at `record`, given under the current hold.
     pub(crate) async fn execution_approved(&self, record: &[u8; 32]) -> Result<bool> {
@@ -836,6 +868,8 @@ impl Paykit {
         held: &HeldRequest,
         _confirmed: pubky_switch_client::app::UserConfirmed,
     ) -> Result<()> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         self.refresh_own()?;
         let target = crate::activity::ActivityTarget::payer(
             paykit_lib::derive::natural_key::request_record(&request.payee, &request.request_hash),
@@ -1170,7 +1204,7 @@ impl Paykit {
                 let Some(label) = collection.policy_label(&record_held.policy) else {
                     continue;
                 };
-                if record_held.different_write_at_held_version {
+                if crate::records::content_disputed(&record_held) {
                     unread = true;
                     continue;
                 }
@@ -1185,7 +1219,7 @@ impl Paykit {
                         label.as_ref(),
                         &record_held.key,
                         |t| self.app.record_key(t).ok(),
-                        &|p| self.rail.settlement_id(p),
+                        &|endpoint, proof| self.rail.settlement_id(endpoint, proof),
                     )
                 });
                 // A record that doesn't open, read or bind shows nothing to send now: the
@@ -1238,14 +1272,28 @@ impl Paykit {
                         }
                         continue;
                     }
-                    if self.sends_held(&counterparty).await? {
+                    // Released only on the deny decision its delivery takes, so it is
+                    // never queued to wait as one not known (Paykit spec 8.1).
+                    if self.delivery_held(&counterparty).await? {
                         still_held.insert(msg_id.clone());
                         continue;
                     }
                     done.insert(msg_id.clone());
+                    // Kept before it is queued, so its outbox copy is never without it
+                    // ([`crate::send_holds::QueuedStop`]); the receive step drops it once no
+                    // copy is queued.
+                    if let Some(answer) = answer {
+                        self.local_put(
+                            &key::queued_stop(msg_id),
+                            &crate::send_holds::QueuedStop::stored(stored, answer.request_hash),
+                        )
+                        .await?;
+                    }
                     match self.app.queue_stored(stored.plaintext()).await {
                         Ok(msg_id) => {
-                            let _ = self.send_message(&msg_id).await;
+                            if let Err(error) = self.send_message(&msg_id).await {
+                                crate::pay::unless_stop(error)?;
+                            }
                         }
                         // Refused for good: nothing is queued; the pass doesn't ask again. A
                         // held answer never went, so the host is told.
@@ -1311,9 +1359,13 @@ impl Paykit {
                 }
                 continue;
             }
-            match Box::pin(self.answer_record(answer)).await? {
+            match Box::pin(self.answer_record(&answer.payee, &answer.request_hash, &answer.msg_id))
+                .await?
+            {
                 AnswerRecord::Undecided => {}
-                AnswerRecord::Gone | AnswerRecord::Covered => gone.push(answer.clone()),
+                AnswerRecord::Gone | AnswerRecord::Holds | AnswerRecord::Covered => {
+                    gone.push(answer.clone())
+                }
                 AnswerRecord::Lacks => {
                     if !answer.restored {
                         given_up.push(answer.clone());
@@ -1326,6 +1378,18 @@ impl Paykit {
         let at = self.service_time().unwrap_or(0);
         for answer in given_up {
             let notice = key::message_notice(&answer.payee, &answer.msg_id);
+            // Its queued-stop entry, kept before the client refused to queue it, is told in
+            // the same commit, so it stays while the notice does and an in-place restore
+            // keeps the notice with it (Paykit spec 8.1, [`crate::send_holds::QueuedStop`]).
+            let entry = key::queued_stop(&answer.msg_id);
+            // One never queued, lost from its record, gets one so.
+            let mut stop = self
+                .local_get::<crate::send_holds::QueuedStop>(&entry)
+                .await?
+                .unwrap_or_else(|| crate::send_holds::QueuedStop::never_queued(&answer));
+            stop.given_up = Some(crate::send_holds::GivenUp::Told);
+            stop.told = true;
+            tx.put(&entry, &stop)?;
             if self.kept_notice(&notice).await?.is_none() {
                 tx.put(
                     &notice,
@@ -1378,11 +1442,19 @@ impl Paykit {
         self.local_commit(tx).await
     }
 
-    /// What the request record a held answer was recorded in, which shows no message of it
-    /// to send now, says of the answer ([`AnswerRecord`]).
-    async fn answer_record(&mut self, answer: &HeldAnswer) -> Result<AnswerRecord> {
+    /// What the request record of `payee`'s request `request_hash`, which an answer
+    /// `msg_id` was recorded in, says of the answer ([`AnswerRecord`]): for one held in its
+    /// record, which shows no message of it to send now, and for one held in the outbox past
+    /// its window, whose host notice requires a record that holds it or lost it (Paykit spec
+    /// 8.1, "Undelivered messages").
+    pub(crate) async fn answer_record(
+        &mut self,
+        payee: &[u8; 32],
+        request_hash: &[u8; 32],
+        msg_id: &str,
+    ) -> Result<AnswerRecord> {
         let target = crate::activity::ActivityTarget::payer(
-            paykit_lib::derive::natural_key::request_record(&answer.payee, &answer.request_hash),
+            paykit_lib::derive::natural_key::request_record(payee, request_hash),
         );
         let key = self.activity_key(&target)?;
         let Some(held) = self.app.shared_record(&key).await? else {
@@ -1405,13 +1477,13 @@ impl Paykit {
         let Some(record) = self.held_activity(&target).await? else {
             return Ok(AnswerRecord::Undecided);
         };
-        Ok(
-            if record.reflects(&answer.msg_id) || rejected(&record) || cancelled(&record) {
-                AnswerRecord::Covered
-            } else {
-                AnswerRecord::Lacks
-            },
-        )
+        Ok(if record.reflects(msg_id) {
+            AnswerRecord::Holds
+        } else if rejected(&record) || cancelled(&record) {
+            AnswerRecord::Covered
+        } else {
+            AnswerRecord::Lacks
+        })
     }
 
     /// Queue `stored`, a message this app signed that a record stores, again with its signed
@@ -1424,7 +1496,9 @@ impl Paykit {
     ) -> Result<()> {
         match self.app.queue_stored(stored.plaintext()).await {
             Ok(msg_id) => {
-                let _ = self.send_message(&msg_id).await;
+                if let Err(error) = self.send_message(&msg_id).await {
+                    crate::pay::unless_stop(error)?;
+                }
                 Ok(())
             }
             // Refused for good, or not this app's own: nothing is queued and nothing is
@@ -1439,7 +1513,7 @@ impl Paykit {
     /// The time the client judges a message's replay window by: the later of the device
     /// clock and the highest service time verified (`App::queue_stored`). No counterparty
     /// sets either.
-    fn window_now(&self) -> u64 {
+    pub(crate) fn window_now(&self) -> u64 {
         self.now().max(self.service_time().unwrap_or(0))
     }
 
@@ -1487,9 +1561,15 @@ impl Paykit {
             paykit_lib::derive::natural_key::request_record(&self.identity(), &request_hash),
             label,
         );
-        if self
-            .activity_base_changed(&self.activity_key(&target)?)
+        let request_key = self.activity_key(&target)?;
+        if self.activity_base_changed(&request_key).await? {
+            return Ok(DetailsStop::Unknown);
+        }
+        // A request record seen divergent, not confirmed, whose upload may hold a rejection
+        // or a cancellation, can't show that no stop covers the details either (Paykit spec 6).
+        if Box::pin(self.pause_seen(&request_key))
             .await?
+            .adds_no_stop_waits()
         {
             return Ok(DetailsStop::Unknown);
         }
@@ -1757,15 +1837,19 @@ pub(crate) fn own_details<'a>(
 }
 
 /// What a request record says of a held answer it shows no message of to send now
-/// ([`Paykit::queue_own_again`]).
-enum AnswerRecord {
+/// ([`Paykit::queue_own_again`]), or of a stop whose outbox copy is past its window
+/// ([`Paykit::give_up_expired_stops`]).
+pub(crate) enum AnswerRecord {
     /// It can't be read now, or is paused as divergent and not confirmed since, a delete
     /// included: it may still hold the answer, which stays.
     Undecided,
     /// It is absent, or deleted and not paused: the request is gone, and the answer goes
     /// with nothing sent.
     Gone,
-    /// It holds the answer, or a stop that covers it: the answer goes with nothing sent.
+    /// It holds the answer: one held in its record goes with nothing sent, and one held in
+    /// the outbox past its window is given up with the host told.
+    Holds,
+    /// It holds another stop that covers the answer: the answer goes with nothing sent.
     Covered,
     /// It reads, isn't paused, and holds neither the answer nor any stop: the answer was lost
     /// with a write, and is given up with the host told, so the user may answer again.
