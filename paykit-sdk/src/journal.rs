@@ -1079,6 +1079,11 @@ pub struct PaymentView {
     pub stage: Stage,
     /// The entry came back from a backup.
     pub restored: bool,
+    /// Whether the payment method reported this payment made: the journal holds its proof.
+    /// At `Finished` it tells a payment made, its outcome written, from one written failed.
+    /// After a call returned a wallet-wide stop, it is how the host learns of a payment made
+    /// in that call, as the call's error carries no outcome (Paykit spec 7.2).
+    pub paid_by_method: bool,
     /// Paid by the method, its outcome waits: the payer's activity record holds a value that
     /// doesn't read, so `done` and the proof aren't written, and the attempt stays open
     /// (Paykit spec 7.2 step 3). It settles once the record reads again, at
@@ -1113,6 +1118,7 @@ impl JournalEntry {
             endpoint_id: self.destination.endpoint_id()?,
             stage: self.stage,
             restored: self.restored,
+            paid_by_method: self.rail_proof.is_some(),
             record_held: self.record_held,
             receipt: None,
         })

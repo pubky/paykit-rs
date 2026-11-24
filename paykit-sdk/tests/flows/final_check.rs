@@ -2079,10 +2079,9 @@ async fn test_acceptance_store_failure_leaves_the_made_payment_for_the_resume() 
         )
         .await;
     let attempt_id = paid_while_acceptances_fail(&store, &mut wallet, &request).await;
-    assert_eq!(
-        wallet.payments().await.unwrap()[0].stage,
-        paykit_sdk::Stage::RailPaid
-    );
+    let listed = wallet.payments().await.unwrap().remove(0);
+    assert_eq!(listed.stage, paykit_sdk::Stage::RailPaid);
+    assert!(listed.paid_by_method);
     assert_eq!(queued_acceptances(&store, &wallet).await, 0);
     drop(wallet);
     let mut wallet = w
@@ -2098,10 +2097,9 @@ async fn test_acceptance_store_failure_leaves_the_made_payment_for_the_resume() 
         matches!(resumed.as_slice(), [PayOutcome::Paid { attempt_id: paid, .. }] if *paid == attempt_id),
         "{resumed:?}"
     );
-    assert_eq!(
-        wallet.payments().await.unwrap()[0].stage,
-        paykit_sdk::Stage::Finished
-    );
+    let finished = wallet.payments().await.unwrap().remove(0);
+    assert_eq!(finished.stage, paykit_sdk::Stage::Finished);
+    assert!(finished.paid_by_method);
     assert_eq!(queued_acceptances(&store, &wallet).await, 1);
     wallet.resume_payments().await.unwrap();
     assert_eq!(queued_acceptances(&store, &wallet).await, 1);
@@ -3153,5 +3151,6 @@ async fn test_pay_whose_outcome_write_is_answered_not_current_returns_the_stop()
     );
     let payment = wallet.payments().await.unwrap().remove(0);
     assert_eq!(payment.stage, paykit_sdk::Stage::RailPaid);
+    assert!(payment.paid_by_method);
     assert_eq!(w.rail.pay_calls(&payment.attempt_id), 1);
 }
