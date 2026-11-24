@@ -4071,6 +4071,63 @@ fn test_payment_list_record_later_write_keeps_used_entries() {
 }
 
 #[test]
+fn test_payment_list_record_reads_and_writes_lost_to_delete() {
+    let keys = Keys::from_seeds();
+    let (held, _) = list_case(&keys, 0);
+    let alice = pubky(ALICE);
+    let hash = [7u8; 32];
+    let marked = PaymentListRecord {
+        lost_to_delete: Some(hash),
+        ..held.clone()
+    };
+    // Written as read, and read back: the marker survives a rewrite (Paykit wire 5).
+    let json = marked.to_json().unwrap();
+    let back = PaymentListRecord::read(&json, &alice).unwrap();
+    assert_eq!(back.lost_to_delete, Some(hash));
+    // Absent is the only value meaning no restriction, and a record without it writes none.
+    let plain = PaymentListRecord::read(&held.to_json().unwrap(), &alice).unwrap();
+    assert_eq!(plain.lost_to_delete, None);
+    let written: Value = serde_json::from_slice(&held.to_json().unwrap()).unwrap();
+    assert!(written.get("lost_to_delete").is_none());
+    // Deletion data that doesn't read makes the record invalid (Paykit wire 5).
+    let mut value: Value = serde_json::from_slice(&json).unwrap();
+    for bad in [
+        Value::Null,
+        Value::Bool(true),
+        Value::String("AA".into()),
+        Value::String(format!("{}=", pubky_switch_core::enc::b64(&hash))),
+    ] {
+        value["lost_to_delete"] = bad.clone();
+        let bytes = serde_json::to_vec(&value).unwrap();
+        assert!(
+            PaymentListRecord::read(&bytes, &alice).is_err(),
+            "{bad} read"
+        );
+    }
+}
+
+#[test]
+fn test_payment_list_record_later_write_keeps_lost_to_delete() {
+    let keys = Keys::from_seeds();
+    let (held, _) = list_case(&keys, 0);
+    let marked = PaymentListRecord {
+        lost_to_delete: Some([7; 32]),
+        ..held.clone()
+    };
+    // A later write that drops the marker is refused (Paykit wire 5).
+    let error = marked.check_later_write(&held).unwrap_err().to_string();
+    assert!(error.contains("drops lost_to_delete"), "{error}");
+    // One that keeps or changes it is taken ("Repeated deletes"), and one adding it too.
+    marked.check_later_write(&marked).unwrap();
+    let changed = PaymentListRecord {
+        lost_to_delete: Some([8; 32]),
+        ..held.clone()
+    };
+    marked.check_later_write(&changed).unwrap();
+    held.check_later_write(&marked).unwrap();
+}
+
+#[test]
 fn test_record_transitions_hold_records_built_in_code() {
     let keys = Keys::from_seeds();
     let b = bases(&keys);

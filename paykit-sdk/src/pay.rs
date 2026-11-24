@@ -2270,14 +2270,9 @@ impl Paykit {
                 .choose(payee, gathered, pricing, options, Some(&identity))?
                 .ok_or_else(|| unsupported("the payee's public endpoints"));
         }
-        let mut read = Vec::new();
-        for (list, version) in self.lists_read_of(payee).await? {
-            // Over a `payment_lists` record seen deleted, no list is paid from: it waits
-            // (Paykit spec 6; wire 5, "Incomplete protected-record contract").
-            if self.list_admitted(&list).await? {
-                read.push((list, version));
-            }
-        }
+        // Over a `payment_lists` record seen deleted, no list is paid from: it waits (Paykit
+        // spec 6; wire 5, "Incomplete protected-record contract"; `records::list_key_open`).
+        let read = self.lists_read_of(payee).await?;
         // The version of each record's write selected from: every attempt on a list endpoint
         // is conditioned on it, never on a write the app refused (Switch spec 8.2).
         let versions: Vec<([u8; 16], RecordVersion)> =
@@ -5111,6 +5106,14 @@ impl Paykit {
         if Box::pin(self.divergent_withholds(entry)).await? {
             return Ok(true);
         }
+        // Nor ever to a list destination over a record seen deleted (Paykit spec 6; wire 5):
+        // the attempt stays "may be paid" until the method's history or a receipt tells.
+        if self
+            .list_destination_held(&entry.payee, &entry.destination)
+            .await?
+        {
+            return Ok(true);
+        }
         // A Billing Period's request record is the one its payee cancels, beside the period
         // record the outcome writes (Paykit spec 8.2).
         let Some(natural) = entry.request_record()? else {
@@ -5306,6 +5309,15 @@ impl Paykit {
         kind: Dispatch,
     ) -> Result<bool> {
         if self.payment_base_changed(entry).await? {
+            return Ok(true);
+        }
+        // A saved list destination over a record seen deleted is never dispatched, a resumed
+        // attempt's included; the method's history and a receipt still settle it (Paykit
+        // spec 6; wire 5, "Incomplete protected-record contract").
+        if self
+            .list_destination_held(&entry.payee, &entry.destination)
+            .await?
+        {
             return Ok(true);
         }
         let crossing_payee = (entry.billing_period.is_some()

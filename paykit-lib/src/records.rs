@@ -593,6 +593,7 @@ static LIST_SHAPE: Shape = Shape {
         ("list", Member::Object(&STORED)),
         ("used", Member::Array(&USED)),
         ("msg_ids", Member::Leaf),
+        ("lost_to_delete", Member::Leaf),
     ],
 };
 
@@ -2461,6 +2462,11 @@ pub struct PaymentListRecord {
     pub used: Vec<UsedEndpoint>,
     /// The `msg_id`s the record reflects.
     pub msg_ids: Vec<String>,
+    /// The item hash (Switch wire 6.6) of the delete a write-back from an older copy
+    /// answered, if any (Paykit wire 5, `lost_to_delete`). A record carrying it is at its
+    /// least permissive state: its list is never paid automatically, and every single-use
+    /// endpoint of a list version at or below its list's counts as used (Paykit spec 6).
+    pub lost_to_delete: Option<[u8; 32]>,
     /// The members the writer doesn't know, kept as read (Paykit wire 5).
     pub unknown: UnknownMembers,
 }
@@ -2475,6 +2481,8 @@ struct ListOut<'a> {
     list: StoredOut,
     used: Vec<UsedOut>,
     msg_ids: &'a [String],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lost_to_delete: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -2510,12 +2518,20 @@ impl PaymentListRecord {
                 origin: origins.at(&format!("/used/{i}")),
             });
         }
+        // Only an absent member means no restriction: `null`, another type or a hash that
+        // doesn't decode makes the record invalid (Paykit wire 5, "Deletion data that
+        // doesn't read").
+        let lost_to_delete = obj
+            .has("lost_to_delete")
+            .then(|| obj.req_b64("lost_to_delete"))
+            .transpose()?;
         let record = Self {
             payee,
             app_id,
             list,
             used,
             msg_ids,
+            lost_to_delete,
             unknown,
         };
         record.check()?;
@@ -2548,8 +2564,9 @@ impl PaymentListRecord {
     /// 8.2): a reader that holds `self` ignores, and shows with its writer, a later write of
     /// the record whose list is older than the one it holds, or of the same `version` but
     /// another message, by hash; and one that drops a single-use endpoint it saw used, at any
-    /// version, which could then be paid twice. A later write holding the same list, its
-    /// `used` grown, or a list of a greater `version`, is taken.
+    /// version, which could then be paid twice; and one that drops a `lost_to_delete` it saw
+    /// (Paykit wire 5). A later write holding the same list, its `used` grown, or a list of a
+    /// greater `version`, is taken, and so is one that changes `lost_to_delete`.
     ///
     /// Security: a publishing app's versions only grow (Paykit wire 4.13), so two lists of one
     /// version with other content are an equivocation; neither replaces the one held.
@@ -2577,6 +2594,12 @@ impl PaymentListRecord {
         ensure(
             self.used.iter().all(|u| later.used.contains(u)),
             "Paykit wire 5.4: a later write drops a single-use endpoint seen used",
+        )?;
+        // A write that changes the marker is taken: a put-back answering a later delete names
+        // that delete (Paykit wire 5, "Repeated deletes").
+        ensure(
+            self.lost_to_delete.is_none() || later.lost_to_delete.is_some(),
+            "Paykit wire 5: a later write drops lost_to_delete",
         )
     }
 
@@ -2640,6 +2663,7 @@ impl PaymentListRecord {
                 })
                 .collect(),
             msg_ids: &msg_ids,
+            lost_to_delete: self.lost_to_delete.as_ref().map(|hash| b64(hash)),
         };
         let json = serde_json::to_vec(&out)
             .map_err(|_| Error::Invalid(format!("{LISTS}: can't be written")))?;

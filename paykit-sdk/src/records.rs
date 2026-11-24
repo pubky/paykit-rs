@@ -579,24 +579,41 @@ impl Paykit {
             .collect())
     }
 
-    /// Whether `list`, a `payment_lists` value read at its key, may be used: never over a
-    /// record this app saw deleted, or read naming a delete, whatever its list and marks
-    /// ([`crate::state::LostListRecord`]; Paykit spec 6, "Visible deletion without a copy";
-    /// wire 5, "Incomplete protected-record contract").
-    pub(crate) async fn list_admitted(&self, list: &PaymentListRecord) -> Result<bool> {
-        let record = self
+    /// The `lgone/` entry of the `payment_lists` record at `record_key`, if this app saw it
+    /// deleted or read a value there naming a delete ([`crate::state::LostListRecord`]).
+    pub(crate) async fn list_record_lost(
+        &self,
+        record_key: &[u8; 32],
+    ) -> Result<Option<crate::state::LostListRecord>> {
+        self.local_get::<crate::state::LostListRecord>(&crate::state::key::list_record_lost(
+            record_key,
+        ))
+        .await
+    }
+
+    /// Whether `destination`, an attempt's to `payee`, is an endpoint of a Private Payment
+    /// List whose key the gate closes ([`list_key_open`]): such an attempt is never
+    /// dispatched, first or repeat, by hand or automatically. What the payment method shows
+    /// of it, its history or a receipt, still settles it (Paykit spec 6; wire 5).
+    pub(crate) async fn list_destination_held(
+        &self,
+        payee: &[u8; 32],
+        destination: &crate::journal::Destination,
+    ) -> Result<bool> {
+        if destination.source()? != paykit_lib::records::DestinationSource::List {
+            return Ok(false);
+        }
+        let record_key = self
             .app
-            .record_key(&list_target(&list.payee, &list.app_id))?;
-        let lost = self
-            .local_get::<crate::state::LostListRecord>(&crate::state::key::list_record_lost(
-                &record,
-            ))
-            .await?;
-        Ok(lost.is_none())
+            .record_key(&list_target(payee, &destination.app_id))?;
+        Ok(!list_key_open(
+            self.list_record_lost(&record_key).await?.as_ref(),
+        ))
     }
 
     /// As [`Paykit::lists_of`], each with the version of the write whose content it is: the
-    /// write the app took, never one it refused (Switch spec 8.2).
+    /// write the app took, never one it refused (Switch spec 8.2). Only a list the gate
+    /// admits ([`usable_list`]).
     pub(crate) async fn lists_read_of(
         &self,
         payee: &[u8; 32],
@@ -607,8 +624,10 @@ impl Paykit {
             let Some(value) = record.content.value() else {
                 continue;
             };
-            if let Some(list) = bind_list(value, &own, &record.key, |t| self.app.record_key(t).ok())
-            {
+            let lost = self.list_record_lost(&record.key).await?;
+            if let Some(list) = usable_list(value, &own, &record.key, lost.as_ref(), |t| {
+                self.app.record_key(t).ok()
+            }) {
                 if &list.payee == payee {
                     out.push((list, record.version));
                 }
@@ -863,12 +882,46 @@ pub(crate) fn bind_list(
     key: &[u8; 32],
     record_key: impl Fn(&RecordTarget) -> Option<[u8; 32]>,
 ) -> Option<PaymentListRecord> {
-    let members: Map<String, Value> = serde_json::from_slice(value).ok()?;
-    if members.contains_key("lost_to_delete") {
+    let record = PaymentListRecord::read(value, own).ok()?;
+    if record.lost_to_delete.is_some() {
         return None;
     }
-    let record = PaymentListRecord::read(value, own).ok()?;
     (record_key(&list_target(&record.payee, &record.app_id))? == *key).then_some(record)
+}
+
+/// The gate every use of a `payment_lists` key passes: none once this app saw the record
+/// deleted, or read a value there naming a delete (`lost`, [`crate::state::LostListRecord`]).
+/// No value at the key is then taken as a list, placed or written over, and no attempt to
+/// one of its endpoints is dispatched, whatever the value's version or marks: the current
+/// Switch proves no record's lineage after a delete, so every later authorization of the
+/// record, and every endpoint use that depends on it, is withheld (Paykit spec 6, "Visible
+/// deletion without a copy"; wire 5, "Incomplete protected-record contract"). The payee is
+/// still paid through a request's own destination and its public endpoints.
+///
+/// Where each use passes it:
+/// - a new selection, and the reconstruction of an attempt's destination from its
+///   single-use mark ([`Paykit::lists_read_of`]);
+/// - every dispatch, first or repeat, by hand or automatic, a resumed attempt's included
+///   ([`Paykit::list_destination_held`], from `Paykit::dispatch_held`);
+/// - a list received, taken into the record or held (`receive::list_effect`);
+/// - a held list placed (`Paykit::place_held_list`).
+pub(crate) fn list_key_open(lost: Option<&crate::state::LostListRecord>) -> bool {
+    lost.is_none()
+}
+
+/// The list a `payment_lists` value read at `key` gives, if the gate ([`list_key_open`])
+/// admits the key and the value binds there ([`bind_list`]).
+pub(crate) fn usable_list(
+    value: &[u8],
+    own: &[u8; 32],
+    key: &[u8; 32],
+    lost: Option<&crate::state::LostListRecord>,
+    record_key: impl Fn(&RecordTarget) -> Option<[u8; 32]>,
+) -> Option<PaymentListRecord> {
+    if !list_key_open(lost) {
+        return None;
+    }
+    bind_list(value, own, key, record_key)
 }
 
 /// The client's target of the `payment_lists` record of a payee app.
