@@ -613,7 +613,7 @@ impl Paykit {
 
     /// As [`Paykit::lists_of`], each with the version of the write whose content it is: the
     /// write the app took, never one it refused (Switch spec 8.2). Only a list the gate
-    /// admits ([`usable_list`]).
+    /// admits ([`list_key_open`]).
     pub(crate) async fn lists_read_of(
         &self,
         payee: &[u8; 32],
@@ -624,14 +624,18 @@ impl Paykit {
             let Some(value) = record.content.value() else {
                 continue;
             };
-            let lost = self.list_record_lost(&record.key).await?;
-            if let Some(list) = usable_list(value, &own, &record.key, lost.as_ref(), |t| {
-                self.app.record_key(t).ok()
-            }) {
-                if &list.payee == payee {
-                    out.push((list, record.version));
-                }
+            let Some(list) = bind_list(value, &own, &record.key, |t| self.app.record_key(t).ok())
+            else {
+                continue;
+            };
+            // The gate, read for this payee's lists only: each read is a lookup in the
+            // host's store.
+            if &list.payee != payee
+                || !list_key_open(self.list_record_lost(&record.key).await?.as_ref())
+            {
+                continue;
             }
+            out.push((list, record.version));
         }
         Ok(out)
     }
