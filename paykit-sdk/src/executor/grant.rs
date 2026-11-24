@@ -50,6 +50,8 @@ impl Paykit {
     /// unavailable, the ledger cannot be reconciled, a later user decision is owed, or accessing
     /// the store or service failed.
     pub async fn resume_allowance_executor(&mut self, record: &[u8; 32]) -> Result<()> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         Box::pin(self.apply_executor_grant(record, None)).await
     }
 
@@ -68,6 +70,8 @@ impl Paykit {
         record: &[u8; 32],
         confirmed: UserConfirmed,
     ) -> Result<()> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         Box::pin(self.apply_executor_grant(record, Some(confirmed))).await
     }
 
@@ -220,6 +224,7 @@ impl Paykit {
             &view.counterparty,
             &view.allowance_id,
             opening.deletion,
+            &opening.deletion_write,
         ))
         .await?
         .ok_or_else(held)?;

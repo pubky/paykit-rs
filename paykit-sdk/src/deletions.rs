@@ -841,6 +841,8 @@ impl Paykit {
     ///
     /// A local store failure.
     pub async fn retained_payee_receipts(&mut self) -> Result<Vec<RetainedPayeeReceipt>> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         let mut by_receipt = std::collections::BTreeMap::<_, Vec<_>>::new();
         for (_, d) in self
             .local_scan::<PayeeDeletion>(key::PAYEE_DELETIONS)
@@ -917,6 +919,8 @@ impl Paykit {
     ///
     /// A store failure or a notice that is no longer the one shown.
     pub async fn acknowledge_payee_deletion(&mut self, notice: &PayeeDeletionNotice) -> Result<()> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         let key = deletion_key(
             &notice.record,
             notice.generation,

@@ -1292,6 +1292,8 @@ impl Paykit {
     ///
     /// A changed proposal or an uncertain read leaves the pending record in place.
     pub async fn discard_pending_allowance(&mut self, record: &[u8; 32]) -> Result<()> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         self.refresh_own()?;
         self.first_read_before_writing().await?;
         self.refresh_own()?;

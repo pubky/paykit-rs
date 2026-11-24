@@ -42,6 +42,8 @@ impl Paykit {
         &mut self,
         record: &[u8; 32],
     ) -> Result<Vec<ReservedByOtherApp>> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         if !self.holds("paykit_allowance_execute") {
             return Err(Refusal::ScopeMissing("paykit_allowance_execute".into()).into());
         }
@@ -65,6 +67,8 @@ impl Paykit {
         attempt_id: AttemptId,
         _confirmed: UserConfirmed,
     ) -> Result<()> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         self.refresh_own()?;
         Box::pin(self.first_read_before_writing()).await?;
         self.refresh_own()?;
@@ -285,8 +289,9 @@ impl Paykit {
                 let dated = held.ops.iter().any(|op| {
                     AppliedRecord::retained(&self.app, &record, op).is_some_and(|write| {
                         write.dates_payment_proof(&self.app, proof)
+                            // The sequence continues across an orderly generation change.
                             && before.is_none_or(|limit| {
-                                write.revision.generation == limit.revision.generation
+                                write.revision.generation <= limit.revision.generation
                                     && write.revision.seq < limit.revision.seq
                                     && write.at_ms <= limit.at_ms
                             })

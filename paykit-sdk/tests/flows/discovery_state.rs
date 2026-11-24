@@ -537,7 +537,17 @@ async fn test_discovery_state_ask_clock_and_version_progress() {
     let w = World::new();
     let mut held = Box::pin(produced(&w, Family::HeldAsk)).await;
     let asked = w.clock.now_ms();
-    w.clock.set_ms(asked - 1);
+    // The device clock is set back, a millisecond before the ask, while the service's isn't.
+    let device = w.device_clock(asked - 1);
+    let app_id = held.wallet.app_id();
+    held.wallet = w
+        .load_on_clock(
+            &w.alice,
+            Arc::clone(&held.storage),
+            app_id,
+            Arc::clone(&device),
+        )
+        .await;
     let error = held.read(&w).await.unwrap_err();
     assert!(
         matches!(error.refusal(), Some(Refusal::WaitingForList { .. })),
@@ -553,6 +563,7 @@ async fn test_discovery_state_ask_clock_and_version_progress() {
         2
     );
     w.clock.set_ms(asked + 24 * HOUR_MS);
+    device.set_ms(asked + 24 * HOUR_MS);
     let error = held.read(&w).await.unwrap_err();
     assert!(
         matches!(error.refusal(), Some(Refusal::WaitingForList { .. })),
@@ -569,6 +580,7 @@ async fn test_discovery_state_ask_clock_and_version_progress() {
     );
     // The newly received version is named immediately, before another day passes.
     Box::pin(list(&w, &mut held.wallet, held.app, list_version(1, 8))).await;
+    device.set_ms(w.clock.now_ms());
     let error = held.read(&w).await.unwrap_err();
     assert!(
         matches!(error.refusal(), Some(Refusal::WaitingForList { .. })),

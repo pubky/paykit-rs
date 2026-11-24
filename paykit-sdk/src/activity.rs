@@ -81,6 +81,10 @@ pub(crate) enum SideTag {
 pub(crate) struct KeptSide {
     pub(crate) msg_id: String,
     pub(crate) side: SideTag,
+    /// The label of the sale a payee's cancellation is about, whose selling scope sends it;
+    /// `None` for a payer's and for an unlabelled sale (Paykit spec 3.4).
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub(crate) label: Option<String>,
 }
 
 impl SideTag {
@@ -373,13 +377,14 @@ mod tests {
             let value = KeptSide {
                 msg_id: "123e4567-e89b-42d3-a456-426614174000".into(),
                 side,
+                label: None,
             };
             let json = serde_json::to_value(&value).unwrap();
             assert_eq!(
                 serde_json::from_value::<KeptSide>(json.clone()).unwrap(),
                 value
             );
-            for member in ["msg_id", "side"] {
+            for member in ["msg_id", "side", "label"] {
                 let mut missing = json.clone();
                 missing.as_object_mut().unwrap().remove(member).unwrap();
                 assert!(
