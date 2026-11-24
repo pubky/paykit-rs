@@ -3494,15 +3494,31 @@ async fn restored_over_an_answer(
 
 #[tokio::test]
 async fn test_periods_restore_after_the_payer_rejected_queues_no_details() {
-    // The request record holds alice's rejection in place of her acceptance, as another own
-    // app recorded it: a later stop that covers the details, so the restored shop queues
-    // neither, and the re-send is owed no more (Paykit spec 7.2, "What a restore loses").
+    // Another own app writes alice's rejection in place of the acceptance the backup saw. A
+    // mark now survives a restore (Switch spec 12.4 "Seen marks"), so the restored shop
+    // checks that write as the backed-up installation would: it replaces a message in a role
+    // seen, and is flagged, not taken (Paykit wire 5.3 "Seen roles"). The shop queues neither
+    // details, and the re-send scan, which can't read a stop in the record, stays owed until
+    // the restore window ends (Paykit spec 7.2, "What a restore loses").
     let w = World::new();
-    let (shop, sent) = restored_over_an_answer(&w, |value| {
+    let (mut shop, sent) = restored_over_an_answer(&w, |value| {
         value["response"] =
             alice_signs_again(&w, &value["response"], "paykit.payment_request_rejection");
     })
     .await;
+    assert!(!shop.app().flagged_writes().await.unwrap().is_empty());
+    assert!(shop
+        .app()
+        .protocol_get("paykit", b"ro")
+        .await
+        .unwrap()
+        .is_some());
+    for msg_id in &sent {
+        assert!(!queued(&shop, msg_id).await, "{msg_id}");
+    }
+    w.clock
+        .advance_ms(pubky_switch_client::app::SENT_RETENTION_MS + 1);
+    shop.receive(None).await.unwrap();
     assert!(shop
         .app()
         .protocol_get("paykit", b"ro")
