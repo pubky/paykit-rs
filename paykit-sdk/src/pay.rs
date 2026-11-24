@@ -1003,7 +1003,10 @@ pub(crate) fn entry_waits(error: &PaykitError) -> bool {
     }
     match error {
         PaykitError::Client(client) => client_waits(client),
-        PaykitError::Refused(Refusal::SwitchUnavailable(_) | Refusal::IdentityUnavailable(_))
+        // This SDK's own wait: every reason of it clears with no one acting.
+        PaykitError::Refused(
+            Refusal::SwitchUnavailable(_) | Refusal::IdentityUnavailable(_) | Refusal::NotNow(_),
+        )
         | PaykitError::Conflict(_)
         | PaykitError::Rail(RailError::Unavailable(_)) => true,
         _ => false,
@@ -1013,8 +1016,7 @@ pub(crate) fn entry_waits(error: &PaykitError) -> bool {
 /// Whether a failure met after work a step can't take back (a payment made, an outcome
 /// written) is judged by the resume's table rather than taken as best effort: the Switch
 /// client's, which [`client_waits`] classifies exactly. This SDK's own refusals stay best
-/// effort there, as before: `Refusal::NotNow` carries its reason as text, which tells a wait
-/// (a scope key awaited) from a step only the user takes only once it is typed.
+/// effort there, as before.
 fn judged_at_resume(error: &PaykitError) -> bool {
     matches!(error, PaykitError::Client(_))
 }
@@ -7375,7 +7377,9 @@ mod tests {
             PaykitError::Client(AppError::InvalidData("member".into())),
             answer(E::StaleEpoch),
             answer(E::Moved),
-            PaykitError::Refused(Refusal::NotNow("reconcile".into())),
+            PaykitError::Refused(Refusal::HeldForUser(crate::HeldForUserReason::Unresolved(
+                "reconcile",
+            ))),
             PaykitError::Client(AppError::Transport(TransportError::Refused(
                 "origin".into(),
             ))),
@@ -7393,6 +7397,9 @@ mod tests {
         for stop in [answer(E::NotCurrent), held_back(ClientRefusal::Left)] {
             assert!(!entry_waits(&stop), "{stop:?}");
         }
+        // This SDK's own wait is one: a later read clears it with no one acting.
+        let wait = PaykitError::Refused(Refusal::NotNow(crate::NotNowReason::ReadAgain("read")));
+        assert!(entry_waits(&wait) && !stops_resume(&wait));
     }
 
     #[test]
