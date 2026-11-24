@@ -80,7 +80,8 @@ impl CheckoutFixture {
             rail: rail.clone(),
             timer: Arc::new(RuntimeTimer),
         });
-        let scopes = AppScopes::new().request().build()?;
+        // The shop sells, and pays the requests a payee wallet sends it (Paykit spec 3.1).
+        let scopes = AppScopes::new().request().pay().build()?;
         let names: Vec<_> = scopes.scopes.iter().map(String::as_str).collect();
         let asking = Asking::for_scopes(world.app_keys(&owner, "wallet")?, &names)?;
         let review = issuer.review(asking.request.signed(), &asking.auth)?;
@@ -360,6 +361,26 @@ impl CheckoutFixture {
             Box::pin(seller.confirm_payment(&entry.record))
                 .await?
                 .ok_or(WalletError::invalid("original seller receipt"))
+        })
+        .await
+    }
+    /// Have the shop pay a request the buyer's wallet sent it, through the host's payment
+    /// method, so the buyer's wallet holds the proof as the payee (Paykit spec 7.2, 8.1).
+    pub async fn pay_request(self: Arc<Self>, request: RequestId) -> Result<(), WalletError> {
+        crate::runtime::run(async move {
+            let request: RequestRef = request.try_into()?;
+            let mut seller = self.seller.lock().await;
+            // The shop's first read lists its records; a later one brings the request.
+            for _ in 0..8 {
+                Box::pin(seller.receive(None)).await?;
+                if seller.requests().await?.iter().any(|r| r.request == request) {
+                    break;
+                }
+            }
+            Box::pin(seller.pay_request(&request, Default::default()))
+                .await
+                .outcome?;
+            Ok(())
         })
         .await
     }
