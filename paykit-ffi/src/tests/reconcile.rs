@@ -325,14 +325,10 @@ async fn resolve(world: &World) -> TestResult {
     let uncertain = second.handle(&report)?;
 
     assert_eq!(first.outcome(&wallet).await?, Some(Outcome::Open));
-    wallet
-        .resolve_confirmed_attempt(paid, Paid)
-        .await?;
+    wallet.resolve_confirmed_attempt(paid, Paid).await?;
     assert_eq!(first.outcome(&wallet).await?, Some(Outcome::Done));
     assert_eq!(second.outcome(&wallet).await?, Some(Outcome::Open));
-    wallet
-        .resolve_confirmed_attempt(uncertain, Unknown)
-        .await?;
+    wallet.resolve_confirmed_attempt(uncertain, Unknown).await?;
     assert_eq!(second.outcome(&wallet).await?, Some(Outcome::Unknown));
     let report = reconcile(&wallet).await?;
     assert!(report
@@ -351,9 +347,7 @@ async fn resolve(world: &World) -> TestResult {
     receive(&wallet, 0).await?;
     assert_eq!(second.outcome(&wallet).await?, None);
     refused(
-        wallet
-            .resolve_confirmed_attempt(remaining, Paid)
-            .await,
+        wallet.resolve_confirmed_attempt(remaining, Paid).await,
         "permanent",
         "not_found",
     )?;
