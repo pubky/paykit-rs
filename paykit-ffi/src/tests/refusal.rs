@@ -520,6 +520,9 @@ fn every_refusal_kind() -> Vec<RefusalKind> {
             reason: HeldForUserKind::AllowanceNotResumed,
         },
         RefusalKind::HeldForUser {
+            reason: HeldForUserKind::AllowanceNotResumedAfterRestore,
+        },
+        RefusalKind::HeldForUser {
             reason: HeldForUserKind::AllowanceExecutionHeld,
         },
         RefusalKind::HeldForUser {
@@ -980,6 +983,7 @@ fn every_recovery_kind() -> Vec<RecoveryNeededKind> {
             | HeldForUserKind::RecordUnreadable
             | HeldForUserKind::FloorRecordUnreadable
             | HeldForUserKind::AllowanceNotResumed
+            | HeldForUserKind::AllowanceNotResumedAfterRestore
             | HeldForUserKind::AllowanceExecutionHeld
             | HeldForUserKind::AttemptCheck
             | HeldForUserKind::ReloadRequired
