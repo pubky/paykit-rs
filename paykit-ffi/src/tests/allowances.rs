@@ -395,7 +395,7 @@ async fn refusals(world: &World) -> TestResult {
     let root = tempfile::tempdir()?;
     let account = Arc::new(Account::open(root.path(), world.clock().clone()));
     let (_, wallet, _, _) = Box::pin(enrolled_payer(world, root.path(), account)).await?;
-    refused(wallet.allowances().await, "needs_user", "not_now")?;
+    refused(wallet.allowances().await, "retry_later", "records_not_listed")?;
     Box::pin(receive(&wallet)).await?;
     let to = world.identity("shop")?.public().to_vec();
     let record = vec![5; 32];
