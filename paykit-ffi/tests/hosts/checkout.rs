@@ -80,8 +80,9 @@ impl CheckoutFixture {
             rail: rail.clone(),
             timer: Arc::new(RuntimeTimer),
         });
-        // The shop sells, and pays the requests a payee wallet sends it (Paykit spec 3.1).
-        let scopes = AppScopes::new().request().pay().build()?;
+        // The shop sells, pays the requests a payee wallet sends it, and proposes Allowances
+        // in either role (Paykit spec 3.1).
+        let scopes = AppScopes::new().request().allowance_execute().build()?;
         let names: Vec<_> = scopes.scopes.iter().map(String::as_str).collect();
         let asking = Asking::for_scopes(world.app_keys(&owner, "wallet")?, &names)?;
         let review = issuer.review(asking.request.signed(), &asking.auth)?;
@@ -398,6 +399,54 @@ impl CheckoutFixture {
                 .await
                 .outcome?;
             shop_paid(outcome)
+        })
+        .await
+    }
+    /// Have the shop propose an Allowance in which the buyer takes `role`: the shop pays the
+    /// buyer when the buyer is allowee, and is paid when it is allower. Return the Allowance
+    /// ID (Paykit spec 8.3.1).
+    pub async fn propose_allowance(
+        self: Arc<Self>,
+        role: crate::AllowanceRole,
+    ) -> Result<String, WalletError> {
+        crate::runtime::run(async move {
+            let terms = paykit_lib::allowances::AllowanceTerms::from_json(&serde_json::json!({
+                "asset": "btc",
+                "per_payment_amount": {"minimum": "0.01", "maximum": "2.00"},
+                "period_limits": [{
+                    "amount_limit": null,
+                    "payment_count_limit": 3,
+                    "period": {"kind": "rolling", "every": 1, "unit": "week"},
+                }],
+                "lifetime_amount_limit": "10.0",
+                "active_from": null,
+                "expires_at": null,
+                "allowed_payment_endpoint_identifiers": ["btc-lightning-bolt11"],
+            }))
+            .map_err(paykit_sdk::PaykitError::from)?;
+            let mut seller = self.seller.lock().await;
+            // Its first read lists its records before it writes (Paykit spec 6).
+            Box::pin(seller.receive(None)).await?;
+            let sent = match role {
+                crate::AllowanceRole::Allower => {
+                    Box::pin(seller.propose_allowance(
+                        self.buyer,
+                        paykit_sdk::AllowanceRole::Allowee,
+                        terms,
+                    ))
+                    .await?
+                }
+                crate::AllowanceRole::Allowee => {
+                    Box::pin(seller.propose_executable_allowance(
+                        self.buyer,
+                        terms,
+                        paykit_sdk::UserConfirmed::new(),
+                    ))
+                    .await?
+                }
+                crate::AllowanceRole::Other => return Err(WalletError::invalid("role")),
+            };
+            Ok(sent.allowance_id.as_str().into())
         })
         .await
     }

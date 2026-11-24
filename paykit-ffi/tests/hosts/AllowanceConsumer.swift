@@ -114,4 +114,35 @@ func checkAllowances(fixture: CheckoutFixture, wallet: NativeWallet) async throw
     try await allowanceNotFound { _ = try await wallet.allowance(record: withdrawn) }
     let remaining = try await wallet.allowances().map(\.allowanceId)
     precondition(Set(remaining) == Set(before))
+
+    // The shop proposes in each role. The wallet accepts each and ends it, then rejects a third
+    // proposal (Paykit spec 8.3.1).
+    func incoming(_ role: AllowanceRole) async throws -> Data {
+        let id = try await fixture.proposeAllowance(role: role)
+        try await wallet.finishReceive()
+        guard let view = try await wallet.allowances().first(where: { $0.allowanceId == id }) else {
+            preconditionFailure("missing incoming proposal")
+        }
+        precondition(!view.proposedHere && view.role == role && view.status == .proposed)
+        precondition(view.counterparty == peer && view.terms == terms)
+        return view.record
+    }
+    func status(_ record: Data) async throws -> AllowanceStatus {
+        try await wallet.allowance(record: record).status
+    }
+    for role in [AllowanceRole.allowee, .allower] {
+        let record = try await incoming(role)
+        let accepted = role == .allower
+            ? try await wallet.acceptExecutableAllowance(record: record, userConfirmed: true)
+            : try await wallet.acceptAllowance(record: record)
+        let acceptedStatus = try await status(record)
+        precondition(UUID(uuidString: accepted) != nil && acceptedStatus == .accepted)
+        let ended = try await wallet.endAllowance(record: record)
+        let endedStatus = try await status(record)
+        precondition(UUID(uuidString: ended) != nil && endedStatus == .ended)
+    }
+    let declined = try await incoming(.allower)
+    let rejection = try await wallet.rejectAllowance(record: declined)
+    let rejectedStatus = try await status(declined)
+    precondition(UUID(uuidString: rejection) != nil && rejectedStatus == .rejected)
 }

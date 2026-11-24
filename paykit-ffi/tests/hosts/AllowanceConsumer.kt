@@ -108,4 +108,35 @@ internal suspend fun checkAllowances(fixture: CheckoutFixture, wallet: NativeWal
     allowanceNotFound { wallet.endAllowance(withdrawn) }
     allowanceNotFound { wallet.allowance(withdrawn) }
     check(wallet.allowanceIds().toSet() == before.toSet())
+
+    // The shop proposes in each role. The wallet accepts each and ends it, then rejects a third
+    // proposal (Paykit spec 8.3.1).
+    suspend fun incoming(role: AllowanceRole): ByteArray {
+        val id = fixture.proposeAllowance(role)
+        wallet.finishReceive()
+        val views = wallet.allowances()
+        try {
+            val view = views.single { it.allowanceId == id }
+            check(!view.proposedHere && view.role == role && view.status == AllowanceStatus.PROPOSED)
+            check(view.counterparty.contentEquals(peer) && view.terms == terms)
+            return view.record
+        } finally {
+            views.forEach { it.close() }
+        }
+    }
+    suspend fun status(record: ByteArray) = wallet.allowance(record).use { it.status }
+    for (role in listOf(AllowanceRole.ALLOWEE, AllowanceRole.ALLOWER)) {
+        val record = incoming(role)
+        val accepted = if (role == AllowanceRole.ALLOWER) {
+            wallet.acceptExecutableAllowance(record, true)
+        } else {
+            wallet.acceptAllowance(record)
+        }
+        check(UUID.fromString(accepted).version() == 4 && status(record) == AllowanceStatus.ACCEPTED)
+        val ended = wallet.endAllowance(record)
+        check(UUID.fromString(ended).version() == 4 && status(record) == AllowanceStatus.ENDED)
+    }
+    val declined = incoming(AllowanceRole.ALLOWER)
+    check(UUID.fromString(wallet.rejectAllowance(declined)).version() == 4)
+    check(status(declined) == AllowanceStatus.REJECTED)
 }

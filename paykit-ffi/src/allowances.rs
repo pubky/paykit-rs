@@ -185,7 +185,7 @@ impl TryFrom<AllowanceTerms> for rules::AllowanceTerms {
             .map(|range| {
                 let minimum = decimal(range.minimum, "per_payment_amount.minimum")?;
                 let maximum = decimal(range.maximum, "per_payment_amount.maximum")?;
-                Ok(json!({ "minimum": minimum.as_str(), "maximum": maximum.as_str() }))
+                Ok::<_, WalletError>(json!({ "minimum": minimum.as_str(), "maximum": maximum.as_str() }))
             })
             .transpose()?;
         let lifetime = terms
@@ -214,7 +214,10 @@ impl TryFrom<AllowanceTerms> for rules::AllowanceTerms {
             }
         }
         if let Some(ids) = &terms.allowed_payment_endpoint_identifiers {
-            if ids.iter().any(|id| PaymentEndpointIdentifier::new(id).is_err()) {
+            if ids
+                .iter()
+                .any(|id| PaymentEndpointIdentifier::new(id).is_err())
+            {
                 return Err(WalletError::invalid("allowed_payment_endpoint_identifiers"));
             }
         }
