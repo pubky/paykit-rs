@@ -335,6 +335,27 @@ impl CheckoutFixture {
         })
         .await
     }
+    /// Send a daily recurring seven-unit checkout from the shop, its first period starting now
+    /// (Paykit spec 8.2, Paykit wire 4.4).
+    pub async fn send_recurring_checkout(self: Arc<Self>) -> Result<RequestId, WalletError> {
+        use paykit_lib::periods::{AnchoredRule, Recurrence, Unit};
+        crate::runtime::run(async move {
+            let start = self.host.clock.now_ms();
+            let terms = AnchoredRule::new(start, 1, Unit::Day)
+                .and_then(|rule| Recurrence::new(rule, start, None))
+                .map_err(paykit_sdk::PaykitError::from)?;
+            let draft = invoice()
+                .map_err(paykit_sdk::PaykitError::from)?
+                .with_recurrence(terms);
+            let mut seller = self.seller.lock().await;
+            Ok(Box::pin(seller.send_request(self.buyer, draft))
+                .await?
+                .request
+                .ok_or(WalletError::invalid("signed recurring checkout"))?
+                .into())
+        })
+        .await
+    }
     /// Have the enrolled seller verify the original payer proof and issue its signed receipt.
     pub async fn confirm_payment(
         self: Arc<Self>,
