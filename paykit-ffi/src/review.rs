@@ -269,7 +269,7 @@ pub enum RefusalKind {
     /// A recovery step clears this; no wait does.
     RecoveryNeeded {
         /// The recovery step.
-        reason: RecoveryKind,
+        reason: RecoveryNeededKind,
     },
     /// The identity's block floor is held after it was seen divergent: no unblock or widening
     /// that needs a raise goes, and retrying changes nothing until the shared post-loss hold
@@ -513,8 +513,12 @@ pub enum NotNowKind {
     EarlierWriteUnresolved,
     /// The counterparty's message is awaited; a receive brings it.
     AwaitingCounterparty,
-    /// A bounded set is full; an entry finishing makes room.
-    Full,
+    /// Eight own Allowance proposals to this counterparty are already pending.
+    PendingProposalsFull,
+    /// The block marks are full until a mark's asks are delivered.
+    BlockMarksFull,
+    /// The Allowance ledger has no room until earlier outcomes resolve.
+    AllowanceLedgerFull,
     /// A check before money moved failed; a new payment makes a new attempt.
     AttemptCheck,
     /// The same call made again clears this.
@@ -579,7 +583,7 @@ pub enum HeldForUserKind {
 
 /// The recovery step of the wallet as a whole for a [`RefusalKind::RecoveryNeeded`].
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
-pub enum RecoveryKind {
+pub enum RecoveryNeededKind {
     /// `reconcile` runs the payer pass owed since a restore.
     PayerPassOwed,
     /// The wallet lacks current recovery access, which the signer gives.
@@ -610,7 +614,9 @@ impl From<&paykit_sdk::NotNowReason> for NotNowKind {
             R::ReadAgain(_) => Self::ReadAgain,
             R::EarlierWriteUnresolved(_) => Self::EarlierWriteUnresolved,
             R::AwaitingCounterparty(_) => Self::AwaitingCounterparty,
-            R::Full(_) => Self::Full,
+            R::PendingProposalsFull => Self::PendingProposalsFull,
+            R::BlockMarksFull => Self::BlockMarksFull,
+            R::AllowanceLedgerFull => Self::AllowanceLedgerFull,
             R::AttemptCheck(_) => Self::AttemptCheck,
             R::CallAgain(_) => Self::CallAgain,
             R::ReloadRequired => Self::ReloadRequired,
@@ -641,7 +647,7 @@ impl From<&paykit_sdk::HeldForUserReason> for HeldForUserKind {
     }
 }
 
-impl From<&paykit_sdk::RecoveryReason> for RecoveryKind {
+impl From<&paykit_sdk::RecoveryReason> for RecoveryNeededKind {
     fn from(reason: &paykit_sdk::RecoveryReason) -> Self {
         use paykit_sdk::RecoveryReason as R;
         match reason {

@@ -58,10 +58,18 @@ pub enum NotNowReason {
     /// The text names it.
     #[error("{0}")]
     AwaitingCounterparty(&'static str),
-    /// A bounded set is full; an entry in it finishing or being dropped makes room. The text
-    /// names the set.
-    #[error("{0}")]
-    Full(&'static str),
+    /// Eight own Allowance proposals to this counterparty are already pending; one being
+    /// answered or withdrawn makes room (Paykit spec 8.3).
+    #[error("eight own proposals to this counterparty are already pending")]
+    PendingProposalsFull,
+    /// The block marks are full; a mark whose asks are delivered becomes droppable and makes
+    /// room (Paykit spec 8.1).
+    #[error("the block marks are full")]
+    BlockMarksFull,
+    /// The Allowance ledger has no room for the payment and its outcome; earlier outcomes
+    /// resolving let it compact and make room (Paykit spec 8.3).
+    #[error("the Allowance ledger has no room for the payment and its outcome")]
+    AllowanceLedgerFull,
     /// A check before money moved failed, so the attempt was written `failed` and nothing was
     /// paid. It comes only inside [`crate::Refusal::AttemptFailed`]; a new payment makes a
     /// new attempt once the check can pass, for a certificate expiring within the budget

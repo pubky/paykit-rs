@@ -100,10 +100,10 @@ impl PublicationHistory {
             || binder.record_key(&target(&publisher, &floor.recipient, floor.generation))?
                 != *record_key
         {
-            return Err(counter_unavailable().into());
+            return Err(history_unbound().into());
         }
         if self.acknowledged && self.conflict.is_none() {
-            return Err(counter_unavailable().into());
+            return Err(history_unbound().into());
         }
         if let Some(report) = &self.conflict {
             let same_key = |r: &ListPublicationRecord| {
@@ -116,7 +116,7 @@ impl PublicationHistory {
                 || report.held.check_later_write(floor).is_err()
                 || report.held.check_later_write(&report.refused).is_ok()
             {
-                return Err(counter_unavailable().into());
+                return Err(history_unbound().into());
             }
         }
         Ok(())
@@ -255,6 +255,16 @@ fn observed_local<T: state::Stored>(
         crate::receive::Fail::Store(error) => error,
         _ => StoreFailure::of_entry(pubky_switch_client::error::StoreError::Corrupt),
     })
+}
+
+/// The refusal for a publication history kept for a recipient that doesn't bind to its
+/// counter key or to itself: no later read or wait changes what this app keeps, so
+/// publication to that recipient is held for the user (Paykit wire 5.8).
+fn history_unbound() -> crate::Refusal {
+    crate::Refusal::HeldForUser(crate::HeldForUserReason::PublicationConflict(
+        "Paykit wire 5.8: the publication history kept for this recipient doesn't bind to its counter"
+            .into(),
+    ))
 }
 
 impl Paykit {

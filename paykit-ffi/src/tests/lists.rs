@@ -266,7 +266,10 @@ async fn check_conflicts(wallet: &NativeWallet, recipient: &[u8; 32]) -> TestRes
         let (case, failure) = error
             .and_then(categorized)
             .ok_or("expected a publication counter refusal")?;
-        assert_eq!((case, failure.code().as_str()), ("retry_later", "read_again"));
+        assert_eq!(
+            (case, failure.code().as_str()),
+            ("needs_user", "publication_conflict")
+        );
     }
     Ok(())
 }

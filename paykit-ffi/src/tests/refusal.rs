@@ -1,5 +1,5 @@
 use crate::{
-    HeldForUserKind, ListingRetryKind, NotNowKind, PaymentRefusal, RecoveryKind, RefusalKind,
+    HeldForUserKind, ListingRetryKind, NotNowKind, PaymentRefusal, RecoveryNeededKind, RefusalKind,
     SwitchRefusalKind, WalletError, WalletFailure,
 };
 use paykit_sdk::{PaykitError, RailError, Refusal};
@@ -909,7 +909,9 @@ fn every_not_now_kind() -> Vec<NotNowKind> {
         R::ReadAgain,
         R::EarlierWriteUnresolved,
         R::AwaitingCounterparty,
-        R::Full,
+        R::PendingProposalsFull,
+        R::BlockMarksFull,
+        R::AllowanceLedgerFull,
         R::AttemptCheck,
         R::CallAgain,
         R::ReloadRequired,
@@ -932,7 +934,9 @@ fn every_not_now_kind() -> Vec<NotNowKind> {
             | R::ReadAgain
             | R::EarlierWriteUnresolved
             | R::AwaitingCounterparty
-            | R::Full
+            | R::PendingProposalsFull
+            | R::BlockMarksFull
+            | R::AllowanceLedgerFull
             | R::AttemptCheck
             | R::CallAgain
             | R::ReloadRequired
@@ -946,8 +950,8 @@ fn every_not_now_kind() -> Vec<NotNowKind> {
 }
 
 /// One of every recovery step; the match has no wildcard.
-fn every_recovery_kind() -> Vec<RecoveryKind> {
-    use RecoveryKind as R;
+fn every_recovery_kind() -> Vec<RecoveryNeededKind> {
+    use RecoveryNeededKind as R;
     let kinds = vec![R::PayerPassOwed, R::RecoveryAccessMissing, R::Unknown];
     for kind in &kinds {
         match kind {

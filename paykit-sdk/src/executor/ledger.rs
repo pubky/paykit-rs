@@ -43,10 +43,7 @@ pub(super) fn reserved_ledger(
         }
     }
     if size > limit {
-        return Err(crate::Refusal::NotNow(crate::NotNowReason::Full(
-            "the Allowance ledger has no room for the payment and its outcome",
-        ))
-        .into());
+        return Err(crate::Refusal::NotNow(crate::NotNowReason::AllowanceLedgerFull).into());
     }
     Ok(ledger)
 }
@@ -138,7 +135,7 @@ mod tests {
                 assert!(matches!(
                     result,
                     Err(crate::PaykitError::Refused(crate::Refusal::NotNow(
-                        crate::NotNowReason::Full(_)
+                        crate::NotNowReason::AllowanceLedgerFull
                     )))
                 ));
             }

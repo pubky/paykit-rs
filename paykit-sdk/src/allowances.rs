@@ -1937,10 +1937,7 @@ impl Paykit {
             "the current pending proposals have not been read",
         )))?;
         if count >= pending::LIMIT {
-            return Err(Refusal::NotNow(crate::NotNowReason::Full(
-                "eight own proposals to this counterparty are already pending",
-            ))
-            .into());
+            return Err(Refusal::NotNow(crate::NotNowReason::PendingProposalsFull).into());
         }
         let allowance_id = AllowanceId::generate()?;
         let target = allowance_record_target(Collection::AllowanceProposals, &to, &allowance_id);

@@ -619,7 +619,9 @@ Two rules override a code's case. A failure with a `keptBatch` comes as `Outcome
 | `read_again` | `NotNowReason::ReadAgain` | `RetryLater` | What the call relies on isn't verified or changed: `receive`, then call again. |
 | `earlier_write_unresolved` | `NotNowReason::EarlierWriteUnresolved` | `RetryLater` | Call again once the earlier write is answered, after `receive`. |
 | `awaiting_counterparty` | `NotNowReason::AwaitingCounterparty` | `RetryLater` | Call again once the counterparty's message arrives in a `receive`. |
-| `full` | `NotNowReason::Full` | `RetryLater` | Call again once an earlier entry finishes and makes room. |
+| `pending_proposals_full` | `NotNowReason::PendingProposalsFull` | `RetryLater` | Eight of this wallet's Allowance proposals to the counterparty are pending: call again once one is answered, or after the user withdraws one. |
+| `block_marks_full` | `NotNowReason::BlockMarksFull` | `RetryLater` | The block marks are full: call again once earlier blocks' asks are delivered. |
+| `allowance_ledger_full` | `NotNowReason::AllowanceLedgerFull` | `RetryLater` | The Allowance ledger has no room for this payment: call again once earlier payments' outcomes resolve. |
 | `attempt_check` | `NotNowReason::AttemptCheck` | `RetryLater` | Inside `attempt_failed`: a check before money moved failed, nothing was paid; pay again. |
 | `call_again` | `NotNowReason::CallAgain` | `RetryLater` | Make the same call again. |
 | `reload_required` | `NotNowReason::ReloadRequired` | `RetryLater` | Load the wallet again, then edit its record. |

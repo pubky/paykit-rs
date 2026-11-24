@@ -385,7 +385,9 @@ fn not_now_code(reason: &crate::NotNowKind) -> &'static str {
         R::ReadAgain => "read_again",
         R::EarlierWriteUnresolved => "earlier_write_unresolved",
         R::AwaitingCounterparty => "awaiting_counterparty",
-        R::Full => "full",
+        R::PendingProposalsFull => "pending_proposals_full",
+        R::BlockMarksFull => "block_marks_full",
+        R::AllowanceLedgerFull => "allowance_ledger_full",
         R::AttemptCheck => "attempt_check",
         R::CallAgain => "call_again",
         R::ReloadRequired => "reload_required",
@@ -413,8 +415,8 @@ fn held_for_user_code(reason: &crate::HeldForUserKind) -> &'static str {
 }
 
 /// The stable code of each recovery step.
-fn recovery_code(reason: &crate::RecoveryKind) -> &'static str {
-    use crate::RecoveryKind as R;
+fn recovery_code(reason: &crate::RecoveryNeededKind) -> &'static str {
+    use crate::RecoveryNeededKind as R;
     match reason {
         R::PayerPassOwed => "payer_pass_owed",
         R::RecoveryAccessMissing => "recovery_access_missing",
