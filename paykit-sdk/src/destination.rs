@@ -316,13 +316,19 @@ impl Paykit {
             Ok(identity) => identity,
             Err(refusal) => return Ok(Err(refusal)),
         };
-        match carrier {
-            Carrier::Record(record)
-                if !self
-                    .last_public_read
+        // A read is reused only while the payee app records kept still use the record it
+        // selected, judged now (Paykit spec 4).
+        let reused = match carrier {
+            Carrier::Record(record) => {
+                self.last_public_read
                     .as_ref()
-                    .is_some_and(|read| read.qualifies(record, &identity, self.now())) =>
-            {
+                    .is_some_and(|read| read.qualifies(record, &identity, self.now()))
+                    && self.seen_still_uses(payee, record).await?
+            }
+            _ => false,
+        };
+        match carrier {
+            Carrier::Record(_) if !reused => {
                 // A changed source or a recovered payment needs a fresh read of the selected app.
                 let mut failures = Vec::new();
                 let checked = Box::pin(self.public_records(

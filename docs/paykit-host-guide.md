@@ -81,6 +81,12 @@ async fn payment_after_restart(wallet: &Paykit, attempt_id: &AttemptId) -> Resul
 and any unavailable public endpoint apps. Keep an explicit conservative fallback
 for future variants in non-exhaustive enums.
 
+After a restore that isn't clean, the wallet raises the identity's block floor to
+the time of its first read of the deny list. A one-time request created before that
+time plus the 5-minute clock tolerance opens `manual_only`, whatever its sender,
+blocked before or not: it is paid only by hand. One created later opens without it,
+unless a higher floor or a hold covers it too.
+
 ## Publish a public endpoint
 
 An app with plain `paykit_request` and record publication enabled can use
@@ -136,6 +142,16 @@ rail's capabilities before the App is saved. Open backups with
 `Paykit::restore` or `Paykit::restore_with_protocols` so Paykit validates the
 journal before any restore write. If an SDK-restored store is still in
 reconciliation on startup, reopen it with the SDK load constructors.
+
+A backup restored in place, into the store of the installation it came from, keeps
+what that installation still holds that stops a payment: a cancellation or an
+Allowance end not yet recorded, an Allowance removed from the consent list, an
+answer held back, a block not yet in the deny list, the newest payee records seen
+and a list held over an unreadable record. The restored app can only do less
+because of them, and the user can act on each as before, by unblocking or
+consenting to a new Allowance. If the installation's store is damaged so that
+`Paykit::restore` refuses it, restore into a new, empty store instead: that
+restore reads nothing of the old installation.
 
 Register the extension kinds your app handles with `PaykitConfig::with_extension_kinds`.
 After a receive, read `Paykit::extension_messages` and acknowledge each message by
@@ -419,7 +435,7 @@ the new cursor to the service. Acknowledging the deletion notice leaves the cred
 | `NoticeKind::CreditNeedsUser` | Show the user which settlement or requested proof needs a credit decision. Acknowledging the warning leaves the credit decision open. |
 | `NoticeKind::DroppedMessagesLost` | Show the counterparty and the acceptance-time range for which the wallet stopped requesting dropped replies. Check the payment method for any payment whose outcome is still unknown. Acknowledge the notice after showing it. With 64 distinct loss windows retained, an input that would add another waits for space. |
 | `NoticeKind::BlockFloorHeld` | Tell the user that the wallet saw the identity's block floor diverge after a provider loss and holds it for good: no one-time request is paid automatically, each can still be paid by hand, and an unblock or a widening that needs the floor raised waits, with the unblocked sender's one-time requests and, after a restore that isn't clean or a missed item, every re-send request, unless the shared post-loss hold stands too (`NoticeKind::AutomaticPaymentsHeld`), when they go without the raise. Billing Periods and payments without a request go on. Shown once, and again after each reopen while the hold stands; acknowledge it after showing it. |
-| `NoticeKind::FloorRaiseWaiting` | Tell the user that the wallet owes a block floor raise it can't write now, because the floor doesn't read or the switch refuses the write for now: until it is written, an unblocked sender's one-time requests wait and it is asked nothing, and while the raise of a restore that isn't clean or of a missed item waits, no one is asked to re-send. Payments by hand, Billing Periods and payments without a request go on. The wallet tries again at each receive. Shown once per load while it stands, and again after a reopen while the raise stays unwritten; the notice goes when the raise is written, or when the divergence hold stands (`NoticeKind::BlockFloorHeld`). Acknowledge it after showing it. |
+| `NoticeKind::FloorRaiseWaiting` | Tell the user that the wallet owes a block floor raise it can't write now, because the floor doesn't read or the switch refuses the write for now: until it is written, an unblocked sender's one-time requests wait and it is asked nothing, and while the raise of a restore that isn't clean or of a missed item waits, no one is asked to re-send. Payments by hand, Billing Periods and payments without a request go on. The wallet tries again at the next receive, and from its second unwritten try in a row after a wait of one minute, doubling to ten; the wait ends early when the floor record changes, the floor becomes readable or a new raise is owed. Shown once per load while it stands, and again after a reopen while the raise stays unwritten; the notice goes when the raise is written, or when the divergence hold stands (`NoticeKind::BlockFloorHeld`). Acknowledge it after showing it. |
 | `NoticeKind::AutomaticPaymentsHeld` | Tell the user that, after a provider loss, no one-time request of the identity is paid automatically any more, on any of its wallets, and no payment of one is repeated at a resume, one the user started included; each can still be paid by hand. Billing Periods and payments without a request go on. Shown once, and again after each reopen; acknowledge it after showing it. |
 | `PaykitError::Client` | Handle the enclosed Switch outcome. Preserve any kept batch and its ID. |
 | `PaykitError::Lib` | Use the rule error to distinguish invalid input from invalid network or shared data. |
