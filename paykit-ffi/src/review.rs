@@ -501,8 +501,6 @@ pub enum NotNowKind {
     /// A record's value is sealed under keys not stored yet; the signer stores them when
     /// online.
     ValueAwaitsKey,
-    /// The block floor can't be read now; a later read clears this.
-    FloorUnreadable,
     /// A raise of the block floor left unwritten waits before it is tried again.
     FloorRaiseWaiting,
     /// No service time is verified yet; a read of the switch clears this.
@@ -513,12 +511,8 @@ pub enum NotNowKind {
     EarlierWriteUnresolved,
     /// The counterparty's message is awaited; a receive brings it.
     AwaitingCounterparty,
-    /// Eight own Allowance proposals to this counterparty are already pending.
-    PendingProposalsFull,
     /// The block marks are full until a mark's asks are delivered.
     BlockMarksFull,
-    /// The Allowance ledger has no room until earlier outcomes resolve.
-    AllowanceLedgerFull,
     /// The same call made again clears this.
     CallAgain,
     /// An Allowance limit has no room now; its window rolling makes room.
@@ -526,8 +520,6 @@ pub enum NotNowKind {
         /// The limit with no room.
         limit: String,
     },
-    /// The original Allowance answer's delivery isn't known; a receive learns it.
-    AnswerOutcomeUnknown,
     /// A reason these bindings don't know.
     Unknown,
 }
@@ -582,6 +574,14 @@ pub enum HeldForUserKind {
     /// A hold on one request, publication or delivery that no wait clears, as the message
     /// names.
     Unresolved,
+    /// The block floor can't be read now; a later read clears this.
+    FloorUnreadable,
+    /// Eight own Allowance proposals to this counterparty are already pending.
+    PendingProposalsFull,
+    /// The Allowance ledger has no room until earlier outcomes resolve.
+    AllowanceLedgerFull,
+    /// The original Allowance answer's delivery isn't known; a receive learns it.
+    AnswerOutcomeUnknown,
     /// A reason these bindings don't know.
     Unknown,
 }
@@ -611,20 +611,16 @@ impl From<&paykit_sdk::NotNowReason> for NotNowKind {
             R::RecordsNotListed => Self::RecordsNotListed,
             R::ScopeKeysAwaited => Self::ScopeKeysAwaited,
             R::ValueAwaitsKey => Self::ValueAwaitsKey,
-            R::FloorUnreadable => Self::FloorUnreadable,
             R::FloorRaiseWaiting => Self::FloorRaiseWaiting,
             R::NoServiceTime(_) => Self::NoServiceTime,
             R::ReadAgain(_) => Self::ReadAgain,
             R::EarlierWriteUnresolved(_) => Self::EarlierWriteUnresolved,
             R::AwaitingCounterparty(_) => Self::AwaitingCounterparty,
-            R::PendingProposalsFull => Self::PendingProposalsFull,
             R::BlockMarksFull => Self::BlockMarksFull,
-            R::AllowanceLedgerFull => Self::AllowanceLedgerFull,
             R::CallAgain(_) => Self::CallAgain,
             R::AllowanceLimit { limit } => Self::AllowanceLimit {
                 limit: limit.clone(),
             },
-            R::AnswerOutcomeUnknown => Self::AnswerOutcomeUnknown,
             _ => Self::Unknown,
         }
     }
@@ -646,6 +642,10 @@ impl From<&paykit_sdk::HeldForUserReason> for HeldForUserKind {
             R::ReloadRequired => Self::ReloadRequired,
             R::SwitchClient(_) => Self::SwitchClient,
             R::Unresolved(_) => Self::Unresolved,
+            R::FloorUnreadable => Self::FloorUnreadable,
+            R::PendingProposalsFull => Self::PendingProposalsFull,
+            R::AllowanceLedgerFull => Self::AllowanceLedgerFull,
+            R::AnswerOutcomeUnknown => Self::AnswerOutcomeUnknown,
             _ => Self::Unknown,
         }
     }

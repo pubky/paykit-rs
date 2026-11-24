@@ -1150,12 +1150,13 @@ impl Paykit {
 
     async fn resolve_publications(&mut self, recipient: &[u8; 32]) -> Result<()> {
         let mut pending = false;
-        let mut kept = false;
+        // An unresolved batch the client no longer keeps, which no answer settles.
+        let mut lost = false;
         for (original, ids) in self.publication_batches(recipient).await? {
             let mut remaining = PublicationIds::new();
             for &id in &ids {
                 let status = self.app.kept_batch(id).await?;
-                kept |= matches!(status, Some(KeptBatchStatus::Kept { .. }));
+                let kept = matches!(status, Some(KeptBatchStatus::Kept { .. }));
                 let resolved = match status {
                     Some(KeptBatchStatus::Applied { .. }) => true,
                     Some(KeptBatchStatus::Dropped {
@@ -1176,6 +1177,7 @@ impl Paykit {
                 };
                 if !resolved {
                     remaining.insert(id);
+                    lost |= !kept;
                 }
             }
             pending |= !remaining.is_empty();
@@ -1184,11 +1186,12 @@ impl Paykit {
             }
         }
         if pending {
-            // A batch still kept settles by itself; one gone with its outcome unknown doesn't.
-            return Err(if kept {
-                unresolved()
-            } else {
+            // Batches all still kept settle by themselves; one gone with its outcome unknown
+            // doesn't, whatever the others do.
+            return Err(if lost {
                 unresolved_for_good()
+            } else {
+                unresolved()
             }
             .into());
         }

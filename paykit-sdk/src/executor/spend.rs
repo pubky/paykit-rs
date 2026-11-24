@@ -187,8 +187,10 @@ pub(crate) fn standing(app: &Paykit, view: &AllowanceView, consent: ConsentState
     // establishes no complete usage authority, so its usage waits for a repair (Paykit spec
     // 8.3, "After provider loss"). Neither lifts the shared hold on one-time payments.
     // A known wait comes first: confirming wouldn't lift it.
+    // A missed item or a record not held as executing needs: a flagged record can stay so,
+    // so it is shown, not waited on.
     if let ConsentState::Waiting(why) = consent {
-        return Standing::Temporary(read_again(why));
+        return Standing::Temporary(execution_held(why));
     }
     // The regrant is a write over the record: while that waits for the user's confirmation
     // of the record, or for the messages kept over it, so does the Allowance's (Paykit spec 6).
@@ -231,7 +233,7 @@ pub(crate) fn standing(app: &Paykit, view: &AllowanceView, consent: ConsentState
         (ConsentState::Unrecorded, true) => {
             Standing::Temporary(execution_held(CONSENT_NOT_ON_DEVICE))
         }
-        (ConsentState::Waiting(why), _) => Standing::Temporary(read_again(why)),
+        (ConsentState::Waiting(why), _) => Standing::Temporary(execution_held(why)),
         (ConsentState::Removed(reason), _) => Standing::Final(removed_refusal(reason)),
     }
 }
@@ -244,12 +246,15 @@ fn status_standing(status: AllowanceStatus, proposed_here: bool) -> Option<Stand
         AllowanceStatus::Ended => Standing::Final(Refusal::AllowanceEnded),
         AllowanceStatus::Conflicted => Standing::Final(Refusal::AllowanceConflicted),
         AllowanceStatus::Rejected => Standing::Final(Refusal::Rejected),
-        AllowanceStatus::AwaitingConflictCheck => Standing::Temporary(read_again(CONFLICT_CHECK)),
+        AllowanceStatus::AwaitingConflictCheck => {
+            Standing::Temporary(execution_held(CONFLICT_CHECK))
+        }
         // A proposal of this identity waits for the counterparty's answer; one the
         // counterparty proposed waits for this user's.
-        _ if proposed_here => Standing::Temporary(Refusal::NotNow(
-            crate::NotNowReason::AwaitingCounterparty("the Allowance isn't accepted yet"),
-        )),
+        // An answer may never come, or the proposal may have lapsed: shown, not waited on.
+        _ if proposed_here => {
+            Standing::Temporary(execution_held("the Allowance isn't accepted yet"))
+        }
         _ => Standing::Temporary(execution_held(
             "the Allowance waits for this wallet's acceptance",
         )),
@@ -484,8 +489,21 @@ impl AllowanceReservation {
                         .is_some_and(|sum| sum <= cap.scaled())
                 })
             };
+            // A limit this payment alone exceeds, or a count limit of none, never makes room.
+            let never_fits = checked.terms.period_limits.iter().any(|period| {
+                period.payment_count_limit == Some(0)
+                    || period
+                        .amount_limit
+                        .as_ref()
+                        .is_some_and(|cap| amount.value.scaled() > cap.scaled())
+            }) || checked
+                .terms
+                .lifetime_amount_limit
+                .as_ref()
+                .is_some_and(|cap| amount.value.scaled() > cap.scaled());
             match limit {
                 LimitKind::PerPayment => not_automatic(&why),
+                _ if never_fits => not_automatic(&why),
                 // Room another app's failed attempt holds comes back once the user releases
                 // it, when that makes room for this payment, and room a reserved entry holds
                 // once it is released.
@@ -493,17 +511,6 @@ impl AllowanceReservation {
                 // releases it, so it is the user's to answer.
                 LimitKind::Lifetime if release_fits() => execution_held(RELEASE_HELD).into(),
                 LimitKind::Lifetime if checked.usage.reserved() == 0 => not_automatic(&why),
-                // A period's amount limit below this payment alone never makes room.
-                LimitKind::PeriodAmount
-                    if checked.terms.period_limits.iter().any(|period| {
-                        period
-                            .amount_limit
-                            .as_ref()
-                            .is_some_and(|cap| amount.value.scaled() > cap.scaled())
-                    }) =>
-                {
-                    not_automatic(&why)
-                }
                 // Usage of other terms: no window or release mends it (Paykit spec 8.3).
                 LimitKind::InconsistentUsage => execution_held(INCONSISTENT_USAGE).into(),
                 _ => no_room(),
@@ -696,9 +703,8 @@ impl Paykit {
             .executor_replies_pending(record, payee, &view.allowance_id, false)
             .await?
         {
-            return Err(waits(crate::NotNowReason::EarlierWriteUnresolved(
-                "a reply to the Allowance waits to be written",
-            )));
+            // A reply's mark can outlive its delivery: shown, not waited on.
+            return Err(execution_held("a reply to the Allowance waits to be written").into());
         }
         let target = ledger_target(payee, &view.allowance_id);
         if self.pause_at(record).await?.blocks_automatic()
@@ -870,7 +876,7 @@ mod tests {
         // the check, with its own reason, not as one not accepted yet.
         assert_eq!(
             status_standing(shown_status(AllowanceStatus::Accepted, true), true),
-            Some(Standing::Temporary(read_again(CONFLICT_CHECK)))
+            Some(Standing::Temporary(execution_held(CONFLICT_CHECK)))
         );
         assert_eq!(
             status_standing(shown_status(AllowanceStatus::Accepted, false), true),

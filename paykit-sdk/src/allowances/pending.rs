@@ -96,8 +96,10 @@ pub(super) enum Acceptance {
     Unconfirmed,
 }
 
+/// A pending proposal or Allowance that doesn't verify as current: a later read may show it,
+/// or a mismatch kept durably never clears, so it is shown.
 fn not_current() -> PaykitError {
-    Refusal::NotNow(crate::NotNowReason::ReadAgain(
+    Refusal::HeldForUser(crate::HeldForUserReason::Unresolved(
         "the current pending proposal and Allowance could not be verified",
     ))
     .into()
@@ -620,7 +622,7 @@ impl Paykit {
         };
         let previous = intent.message.stored(&intent.peer)?;
         if previous.body().kind() != kind {
-            return Err(Refusal::NotNow(crate::NotNowReason::EarlierWriteUnresolved(
+            return Err(Refusal::HeldForUser(crate::HeldForUserReason::Unresolved(
                 "an earlier answer to this proposal is awaiting settlement",
             ))
             .into());
@@ -636,7 +638,7 @@ impl Paykit {
                 Box::pin(self.retry_prepared_answer(key, &intent)).await?;
                 Ok(Some(msg_id.clone()))
             }
-            _ => Err(Refusal::NotNow(crate::NotNowReason::AnswerOutcomeUnknown).into()),
+            _ => Err(Refusal::HeldForUser(crate::HeldForUserReason::AnswerOutcomeUnknown).into()),
         }
     }
 

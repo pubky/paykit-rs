@@ -850,11 +850,9 @@ impl AutomaticHold {
     /// it.
     pub(crate) fn refusal(self) -> Refusal {
         match self {
+            // A floor deleted reads unknown for good: the user may pay by hand.
             Self::Floor(crate::floor::SharedFloor::Unknown) => {
-                Refusal::NotNow(crate::NotNowReason::ReadAgain(
-                    "this request is held from automatic payment while the block floor isn't \
-                     known",
-                ))
+                Refusal::HeldForUser(crate::HeldForUserReason::HeldFromAutomatic)
             }
             // Held for good (Paykit wire 5.6, Divergent floor): the refusal that names it.
             Self::Floor(crate::floor::SharedFloor::Divergent) => Refusal::FloorHeld,
@@ -6277,10 +6275,11 @@ mod tests {
 
     #[test]
     fn test_pay_automatic_hold_waits_for_a_floor_not_known() {
-        assert!(matches!(
+        // A floor deleted reads unknown for good: held, the user may pay by hand.
+        assert_eq!(
             AutomaticHold::Floor(crate::floor::SharedFloor::Unknown).refusal(),
-            Refusal::NotNow(crate::NotNowReason::ReadAgain(why)) if why.contains("block floor")
-        ));
+            Refusal::HeldForUser(crate::HeldForUserReason::HeldFromAutomatic)
+        );
     }
 
     #[test]

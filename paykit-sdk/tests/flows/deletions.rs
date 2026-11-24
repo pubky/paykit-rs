@@ -691,7 +691,7 @@ async fn confirm_after_conflict(changed_proof: bool) {
     if changed_proof {
         assert!(matches!(
             shop.confirm_payment(&key).await.unwrap_err().refusal(),
-            Some(paykit_sdk::Refusal::NotNow(_))
+            Some(paykit_sdk::Refusal::HeldForUser(_))
         ));
         let checks = &w.rail.proof_checks()[count..];
         assert_eq!(checks.len(), 1);

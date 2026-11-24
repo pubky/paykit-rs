@@ -355,7 +355,7 @@ async fn test_allowance_regrant_a_known_wait_comes_before_the_confirmation() {
     assert!(!payer.allowance(&key).await.unwrap().confirmation_needed);
     assert_eq!(
         refusal_of(Box::pin(payer.resume_allowance_executor(&key)).await),
-        paykit_sdk::Refusal::NotNow(paykit_sdk::NotNowReason::ReadAgain(
+        paykit_sdk::Refusal::HeldForUser(paykit_sdk::HeldForUserReason::AllowanceExecutionHeld(
             "a missed item holds every Allowance until the next receive marks it for confirmation"
         ))
     );

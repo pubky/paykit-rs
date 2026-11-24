@@ -6408,3 +6408,43 @@ async fn test_blocked_held_rejection_after_the_backup_survives_an_older_in_place
     let paid = wallet.pay_request(&next, options).await.outcome.unwrap();
     assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
 }
+
+#[tokio::test]
+async fn test_blocked_settled_unblock_waits_for_a_read_rather_than_asks_the_user() {
+    // The wallet's unblock of bob is kept unanswered, then sent again and applied by the
+    // next write, a block of carol, while the copy of the deny list is still fresh. The
+    // unblock counts no more, so the copy holds bob, failing closed, until a read of the
+    // lists judges him again: a send to bob waits for that read; it isn't a block the user
+    // has to lift (Paykit spec 8.1).
+    let w = World::new();
+    let (mut wallet, _, _) = received(&w, PaykitConfig::default()).await;
+    wallet.block(&w.bob_id()).await.unwrap();
+    keep_unblock_ops(&w, 1);
+    wallet.unblock(&w.bob_id()).await.unwrap();
+    wallet.block(&w.carol_id()).await.unwrap();
+    let refused = wallet
+        .request_resend(
+            w.bob_id(),
+            paykit_sdk::ResendSelection::default().with_accepted_from_ms(0),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        !matches!(
+            refused.refusal(),
+            Some(paykit_sdk::Refusal::HeldForUser(
+                paykit_sdk::HeldForUserReason::CounterpartyBlocked(_)
+            ))
+        ),
+        "{refused}"
+    );
+    assert!(
+        matches!(
+            refused.refusal(),
+            Some(paykit_sdk::Refusal::NotNow(
+                paykit_sdk::NotNowReason::ReadAgain(_)
+            ))
+        ),
+        "{refused}"
+    );
+}

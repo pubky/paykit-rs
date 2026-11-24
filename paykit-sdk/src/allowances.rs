@@ -1933,11 +1933,17 @@ impl Paykit {
             self.require_payer_choice(execution.as_ref())?;
         }
         Box::pin(self.require_sends_allowed(&to)).await?;
-        let count = count.ok_or(Refusal::NotNow(crate::NotNowReason::ReadAgain(
-            "the current pending proposals have not been read",
-        )))?;
+        // A proposal that doesn't read keeps the count unknown until it is answered,
+        // withdrawn or discarded: shown, not waited on.
+        let count = count.ok_or(Refusal::HeldForUser(
+            crate::HeldForUserReason::RecordUnreadable(
+                "the current pending proposals have not been read",
+            ),
+        ))?;
         if count >= pending::LIMIT {
-            return Err(Refusal::NotNow(crate::NotNowReason::PendingProposalsFull).into());
+            return Err(
+                Refusal::HeldForUser(crate::HeldForUserReason::PendingProposalsFull).into(),
+            );
         }
         let allowance_id = AllowanceId::generate()?;
         let target = allowance_record_target(Collection::AllowanceProposals, &to, &allowance_id);
@@ -2284,7 +2290,9 @@ impl Paykit {
                 .ok_or(Refusal::NotFound)?;
             // Nothing is sent for a conflicted Allowance (Paykit spec 8.3, "Conflicted").
             if self.unresolved_for_allowance(record, &held).await? {
-                return Err(Refusal::NotNow(crate::NotNowReason::ReadAgain(
+                // The check may never settle, as when the earlier lifetime can't be
+                // established: shown, not waited on.
+                return Err(Refusal::HeldForUser(crate::HeldForUserReason::Unresolved(
                     "Allowance conflict check pending",
                 ))
                 .into());

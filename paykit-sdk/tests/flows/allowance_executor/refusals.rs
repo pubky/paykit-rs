@@ -399,7 +399,7 @@ async fn test_allowance_refusals_unanswered_proposal_is_not_now() {
     let request = Box::pin(one_time(&w, &mut shop, &mut payer, "1")).await;
     assert_eq!(
         refused(Box::pin(payer.pay_under_allowance(&request, &second.record)).await),
-        paykit_sdk::Refusal::NotNow(paykit_sdk::NotNowReason::AwaitingCounterparty(
+        paykit_sdk::Refusal::HeldForUser(paykit_sdk::HeldForUserReason::AllowanceExecutionHeld(
             "the Allowance isn't accepted yet"
         ))
     );
@@ -456,6 +456,12 @@ async fn test_allowance_refusals_lifetime_limit_waits_while_reserved_then_is_fin
             limit: "lifetime".into()
         })
     );
+    // More than the lifetime limit alone never fits, whatever the reservation does.
+    let over = Box::pin(one_time(&w, &mut shop, &mut payer, "101")).await;
+    assert_eq!(
+        refused(Box::pin(payer.pay_under_allowance(&over, &key)).await),
+        Refusal::NotAutomatic("the lifetime limit has no room".into())
+    );
     // Once the 70 are paid, nothing is reserved, and no room comes back.
     w.rail.settle(&attempt_id, true);
     Box::pin(payer.resume_payments()).await.unwrap();
@@ -465,6 +471,27 @@ async fn test_allowance_refusals_lifetime_limit_waits_while_reserved_then_is_fin
     );
     assert_eq!(w.rail.all_executions().len(), 1);
 }
+#[tokio::test]
+async fn test_allowance_refusals_a_count_limit_of_none_is_final() {
+    // A period that admits no payment never makes room: final for automatic payment, even
+    // in an empty window.
+    let terms = terms_with(json!({
+        "period_limits": [{
+            "amount_limit": null,
+            "payment_count_limit": 0,
+            "period": {"kind": "rolling", "every": 1, "unit": "day"},
+        }],
+    }));
+    let (w, mut payer, mut shop, key) = Box::pin(first_grant_in(store(), terms)).await;
+    w.rail.set_history_payer(payer.identity());
+    let request = Box::pin(one_time(&w, &mut shop, &mut payer, "1")).await;
+    assert_eq!(
+        refused(Box::pin(payer.pay_under_allowance(&request, &key)).await),
+        Refusal::NotAutomatic("the period_count limit has no room".into())
+    );
+    assert!(w.rail.all_executions().is_empty());
+}
+
 #[tokio::test]
 async fn test_allowance_refusals_confirmation_needed_after_restore_until_confirmed() {
     let (w, mut payer, _shop, key) = Box::pin(first_grant_in(store(), terms())).await;
@@ -1095,9 +1122,10 @@ async fn test_allowance_refusals_missed_mark_waits_with_its_reason() {
         )
         .await
         .unwrap();
-    let waits = paykit_sdk::Refusal::NotNow(paykit_sdk::NotNowReason::ReadAgain(
-        "a missed item holds every Allowance until the next receive marks it for confirmation",
-    ));
+    let waits =
+        paykit_sdk::Refusal::HeldForUser(paykit_sdk::HeldForUserReason::AllowanceExecutionHeld(
+            "a missed item holds every Allowance until the next receive marks it for confirmation",
+        ));
     assert_eq!(
         refusal_of(Box::pin(payer.resume_allowance_executor(&key)).await),
         waits

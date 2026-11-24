@@ -1307,10 +1307,11 @@ impl Paykit {
             let accepted_at = held
                 .filter(|r| r.authenticated && !r.doubtful)
                 .and_then(|r| r.written_at_ms)
-                // A later read can authenticate the write.
-                .ok_or(Refusal::NotNow(crate::NotNowReason::ReadAgain(
-                    "no proof dates the accepted subscription's write",
-                )))?;
+                // No proof may ever date it: not automatically, though the user may pay by
+                // hand.
+                .ok_or(Refusal::NotAutomatic(
+                    "no proof dates the accepted subscription's write".into(),
+                ))?;
             if accepted_at >= period.ends_at {
                 return Err(Refusal::NotAutomatic(
                     "the Billing Period ended before the verified subscription acceptance".into(),

@@ -531,6 +531,18 @@ fn every_refusal_kind() -> Vec<RefusalKind> {
         RefusalKind::HeldForUser {
             reason: HeldForUserKind::Unresolved,
         },
+        RefusalKind::HeldForUser {
+            reason: HeldForUserKind::FloorUnreadable,
+        },
+        RefusalKind::HeldForUser {
+            reason: HeldForUserKind::PendingProposalsFull,
+        },
+        RefusalKind::HeldForUser {
+            reason: HeldForUserKind::AllowanceLedgerFull,
+        },
+        RefusalKind::HeldForUser {
+            reason: HeldForUserKind::AnswerOutcomeUnknown,
+        },
         RefusalKind::FloorHeld,
         RefusalKind::Usage,
         RefusalKind::RecordHeld,
@@ -918,20 +930,16 @@ fn every_not_now_kind() -> Vec<NotNowKind> {
         R::RecordsNotListed,
         R::ScopeKeysAwaited,
         R::ValueAwaitsKey,
-        R::FloorUnreadable,
         R::FloorRaiseWaiting,
         R::NoServiceTime,
         R::ReadAgain,
         R::EarlierWriteUnresolved,
         R::AwaitingCounterparty,
-        R::PendingProposalsFull,
         R::BlockMarksFull,
-        R::AllowanceLedgerFull,
         R::CallAgain,
         R::AllowanceLimit {
             limit: "lifetime".into(),
         },
-        R::AnswerOutcomeUnknown,
         R::Unknown,
     ]);
     for kind in &kinds {
@@ -940,18 +948,14 @@ fn every_not_now_kind() -> Vec<NotNowKind> {
             | R::RecordsNotListed
             | R::ScopeKeysAwaited
             | R::ValueAwaitsKey
-            | R::FloorUnreadable
             | R::FloorRaiseWaiting
             | R::NoServiceTime
             | R::ReadAgain
             | R::EarlierWriteUnresolved
             | R::AwaitingCounterparty
-            | R::PendingProposalsFull
             | R::BlockMarksFull
-            | R::AllowanceLedgerFull
             | R::CallAgain
             | R::AllowanceLimit { .. }
-            | R::AnswerOutcomeUnknown
             | R::Unknown => {}
         }
     }
@@ -982,6 +986,10 @@ fn every_recovery_kind() -> Vec<RecoveryNeededKind> {
             | HeldForUserKind::ReloadRequired
             | HeldForUserKind::SwitchClient
             | HeldForUserKind::Unresolved
+            | HeldForUserKind::FloorUnreadable
+            | HeldForUserKind::PendingProposalsFull
+            | HeldForUserKind::AllowanceLedgerFull
+            | HeldForUserKind::AnswerOutcomeUnknown
             | HeldForUserKind::Unknown => {}
         }
     }
@@ -1217,8 +1225,8 @@ fn test_wallet_errors_sdk_refusals_take_the_table_code_through_the_conversion() 
         ),
         (Refusal::Usage("bad".into()), "not_sent", "usage"),
         (
-            Refusal::NotNow(paykit_sdk::NotNowReason::FloorUnreadable),
-            "retry_later",
+            Refusal::HeldForUser(paykit_sdk::HeldForUserReason::FloorUnreadable),
+            "needs_user",
             "floor_unreadable",
         ),
     ] {

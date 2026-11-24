@@ -83,7 +83,8 @@ pub(super) fn restore_seals(
     commitment: [u8; 32],
 ) -> Result<()> {
     let held = || {
-        crate::error::Refusal::NotNow(crate::NotNowReason::ReadAgain(
+        // A changed epoch, plaintext or commitment never matches the saved seals again.
+        crate::error::Refusal::HeldForUser(crate::HeldForUserReason::Unresolved(
             "the original Allowance write is not current",
         ))
     };

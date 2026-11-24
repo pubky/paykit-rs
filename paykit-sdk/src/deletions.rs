@@ -823,10 +823,12 @@ impl Paykit {
             }
         }
         if incomplete {
-            return Err(Refusal::NotNow(crate::NotNowReason::ReadAgain(
-                "the signed request of a retained receipt is unavailable",
-            ))
-            .into());
+            return Err(
+                Refusal::HeldForUser(crate::HeldForUserReason::RecordUnreadable(
+                    "the signed request of a retained receipt is unavailable",
+                ))
+                .into(),
+            );
         }
         Ok(false)
     }

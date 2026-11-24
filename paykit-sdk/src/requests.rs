@@ -1002,10 +1002,12 @@ impl Paykit {
     ) -> Result<Option<pubky_switch_client::app::SharedRecord>> {
         let held = self.activity_write_base(key).await?;
         if held.as_ref().is_some_and(|r| r.flagged || r.not_taken) {
-            return Err(Refusal::NotNow(crate::NotNowReason::ReadAgain(
-                "the current payee activity was not accepted",
-            ))
-            .into());
+            return Err(
+                Refusal::HeldForUser(crate::HeldForUserReason::RecordUnreadable(
+                    "the current payee activity was not accepted",
+                ))
+                .into(),
+            );
         }
         Ok(held)
     }
@@ -2637,10 +2639,10 @@ impl Paykit {
             if !matches!(fresh, Some(ref current) if current.to_json()? == record.to_json()?)
                 || !held.is_some_and(|r| r.authenticated && !r.doubtful)
             {
-                return Err(Refusal::NotNow(crate::NotNowReason::ReadAgain(
-                    "the current subscription is not available for automatic acceptance",
-                ))
-                .into());
+                // Automatic acceptance only: the user may accept by hand.
+                return Err(
+                    Refusal::HeldForUser(crate::HeldForUserReason::HeldFromAutomatic).into(),
+                );
             }
             if self.pause_at(&request_key).await?.blocks_automatic() {
                 return Err(crate::pay::AutomaticHold::Paused.refusal().into());

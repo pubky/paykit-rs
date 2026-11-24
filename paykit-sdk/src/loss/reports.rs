@@ -175,7 +175,8 @@ impl Paykit {
                     && doc.body().recovery_from == self.app.own_identity().body().recovery_from
             })
             .ok_or_else(|| {
-                Refusal::NotNow(crate::NotNowReason::ReadAgain(
+                // A pruned chain prefix has no way back here: shown, not waited on.
+                Refusal::HeldForUser(crate::HeldForUserReason::Unresolved(
                     "the recovery opening is not available",
                 ))
                 .into()
@@ -188,9 +189,12 @@ impl Paykit {
     ///
     /// # Errors
     ///
-    /// [`Refusal::NotNow`] until the own `identity.json` is confirmed fresh and the opening is
-    /// available; [`Refusal::NotCurrent`] while the app's certificate isn't current or has
-    /// expired; [`Refusal::RecoveryNeeded`] while the app lacks the recovery scope or its key.
+    /// [`Refusal::NotNow`] until the own `identity.json` is confirmed fresh
+    /// ([`crate::NotNowReason::ReadAgain`]) or the recovery scope's key is stored
+    /// ([`crate::NotNowReason::ScopeKeysAwaited`]); [`Refusal::HeldForUser`] while the opening
+    /// isn't available ([`crate::HeldForUserReason::Unresolved`]); [`Refusal::NotCurrent`]
+    /// while the app's certificate isn't current or has expired; [`Refusal::ScopeMissing`]
+    /// while the certificate lacks `paykit_recovery`.
     /// [`Refusal::LossChanged`] if a different loss now decides. Identity and store
     /// errors propagate.
     pub async fn recovery_members(&mut self) -> Result<Option<RecoveryMembers>> {

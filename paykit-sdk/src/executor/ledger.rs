@@ -43,7 +43,9 @@ pub(super) fn reserved_ledger(
         }
     }
     if size > limit {
-        return Err(crate::Refusal::NotNow(crate::NotNowReason::AllowanceLedgerFull).into());
+        return Err(
+            crate::Refusal::HeldForUser(crate::HeldForUserReason::AllowanceLedgerFull).into(),
+        );
     }
     Ok(ledger)
 }
@@ -134,8 +136,8 @@ mod tests {
             } else {
                 assert!(matches!(
                     result,
-                    Err(crate::PaykitError::Refused(crate::Refusal::NotNow(
-                        crate::NotNowReason::AllowanceLedgerFull
+                    Err(crate::PaykitError::Refused(crate::Refusal::HeldForUser(
+                        crate::HeldForUserReason::AllowanceLedgerFull
                     )))
                 ));
             }

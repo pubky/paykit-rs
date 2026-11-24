@@ -36,9 +36,6 @@ pub enum NotNowReason {
          the signer stores when it is next online"
     )]
     ValueAwaitsKey,
-    /// The block floor can't be read now; a later read of it clears this (Paykit wire 5.6).
-    #[error("Paykit wire 5.6: the block floor can't be read now")]
-    FloorUnreadable,
     /// A raise of the block floor left unwritten waits before it is tried again; the same
     /// call once the wait has passed clears this (Paykit wire 5.6).
     #[error("Paykit wire 5.6: a block floor raise left unwritten waits before it is tried again")]
@@ -58,18 +55,10 @@ pub enum NotNowReason {
     /// The text names it.
     #[error("{0}")]
     AwaitingCounterparty(&'static str),
-    /// Eight own Allowance proposals to this counterparty are already pending; one being
-    /// answered or withdrawn makes room (Paykit spec 8.3).
-    #[error("eight own proposals to this counterparty are already pending")]
-    PendingProposalsFull,
     /// The block marks are full; a mark whose asks are delivered becomes droppable and makes
     /// room (Paykit spec 8.1).
     #[error("the block marks are full")]
     BlockMarksFull,
-    /// The Allowance ledger has no room for the payment and its outcome; earlier outcomes
-    /// resolving let it compact and make room (Paykit spec 8.3).
-    #[error("the Allowance ledger has no room for the payment and its outcome")]
-    AllowanceLedgerFull,
     /// The same call made again clears this: it picks a new identifier or reads again. The
     /// text names why.
     #[error("{0}")]
@@ -81,10 +70,6 @@ pub enum NotNowReason {
         /// The limit with no room.
         limit: String,
     },
-    /// The original Allowance answer has no verified outcome; a receive learns whether it
-    /// was delivered (Paykit spec 8.3).
-    #[error("the original Allowance answer has no verified outcome")]
-    AnswerOutcomeUnknown,
 }
 
 /// The call [`NotNowReason::RecordsUnlisted`] names to continue a listing.
@@ -185,6 +170,25 @@ pub enum HeldForUserReason {
     /// wallet can tell: the text names it, and the host shows it (Paykit spec 8.1, 8.4).
     #[error("{0}")]
     Unresolved(&'static str),
+    /// Eight own Allowance proposals to this counterparty are already pending: the
+    /// counterparty answering one makes room, though a conflicted one keeps counting until
+    /// the user discards or withdraws it, so it is shown (Paykit spec 8.3).
+    #[error("eight own proposals to this counterparty are already pending")]
+    PendingProposalsFull,
+    /// The Allowance ledger has no room for the payment and its outcome: earlier outcomes
+    /// resolving may let it compact and make room, or the entries it keeps may never, so it
+    /// is shown (Paykit spec 8.3).
+    #[error("the Allowance ledger has no room for the payment and its outcome")]
+    AllowanceLedgerFull,
+    /// The original Allowance answer has no verified outcome: a receive may learn whether it
+    /// was delivered, or its delivery may have failed for good, so it is shown (Paykit spec
+    /// 8.3).
+    #[error("the original Allowance answer has no verified outcome")]
+    AnswerOutcomeUnknown,
+    /// The block floor can't be read now: a later read may clear this, or never, as for a
+    /// floor deleted, so it is shown (Paykit wire 5.6).
+    #[error("Paykit wire 5.6: the block floor can't be read now")]
+    FloorUnreadable,
 }
 
 /// The recovery step of the wallet as a whole that clears a refusal: no wait does (Paykit

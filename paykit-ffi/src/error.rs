@@ -394,18 +394,14 @@ fn not_now_code(reason: &crate::NotNowKind) -> &'static str {
         R::RecordsNotListed => "records_not_listed",
         R::ScopeKeysAwaited => "scope_keys_awaited",
         R::ValueAwaitsKey => "value_awaits_key",
-        R::FloorUnreadable => "floor_unreadable",
         R::FloorRaiseWaiting => "floor_raise_waiting",
         R::NoServiceTime => "no_service_time",
         R::ReadAgain => "read_again",
         R::EarlierWriteUnresolved => "earlier_write_unresolved",
         R::AwaitingCounterparty => "awaiting_counterparty",
-        R::PendingProposalsFull => "pending_proposals_full",
         R::BlockMarksFull => "block_marks_full",
-        R::AllowanceLedgerFull => "allowance_ledger_full",
         R::CallAgain => "call_again",
         R::AllowanceLimit { .. } => "allowance_limit",
-        R::AnswerOutcomeUnknown => "answer_outcome_unknown",
         R::Unknown => "not_now",
     }
 }
@@ -426,6 +422,10 @@ fn held_for_user_code(reason: &crate::HeldForUserKind) -> &'static str {
         R::ReloadRequired => "reload_required",
         R::SwitchClient => "switch_client_hold",
         R::Unresolved => "held_unresolved",
+        R::FloorUnreadable => "floor_unreadable",
+        R::PendingProposalsFull => "pending_proposals_full",
+        R::AllowanceLedgerFull => "allowance_ledger_full",
+        R::AnswerOutcomeUnknown => "answer_outcome_unknown",
         R::Unknown => "held_for_user",
     }
 }

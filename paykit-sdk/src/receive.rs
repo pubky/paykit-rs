@@ -4290,6 +4290,22 @@ impl Paykit {
                     .into(),
             );
         }
+        // An own block or unblock that counts no more, as one the switch has settled: the
+        // copy holds it failing closed until a read of the lists judges it again, which is
+        // no block for the user to lift.
+        if let Some(mark) = self
+            .local_get::<OwnBlockMark>(&key::own_block(pubky))
+            .await?
+        {
+            if self.own_change(&mark).await?.is_none() {
+                return Err(
+                    crate::error::Refusal::NotNow(crate::NotNowReason::ReadAgain(
+                        DENY_COPY_UNKNOWN,
+                    ))
+                    .into(),
+                );
+            }
+        }
         if self.denied_as_last_read(pubky).await? {
             return Err(crate::error::Refusal::HeldForUser(
                 crate::HeldForUserReason::CounterpartyBlocked(SENDS_BLOCKED),

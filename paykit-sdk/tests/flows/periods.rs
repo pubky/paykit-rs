@@ -5734,7 +5734,7 @@ async fn credit_after_wrong_period(period: PeriodRef, missing_request: bool) {
                 .await
                 .unwrap_err()
                 .refusal(),
-            Some(Refusal::NotNow(_))
+            Some(Refusal::HeldForUser(_))
         ));
         assert_eq!(w.record_writes(&w.bob, &other), count);
         seller_wallet

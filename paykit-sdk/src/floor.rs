@@ -735,7 +735,8 @@ impl Paykit {
             if self.floor_kept().await?.divergent && !self.shared_loss_hold().await? {
                 return Err(Refusal::FloorHeld.into());
             }
-            return Err(Refusal::NotNow(crate::NotNowReason::EarlierWriteUnresolved(
+            // A raise over a floor deleted stays owed: shown, not waited on.
+            return Err(Refusal::HeldForUser(crate::HeldForUserReason::Unresolved(
                 "Paykit wire 5.6: no one is asked while a floor raise this app owes isn't \
                  written",
             ))
@@ -1321,7 +1322,7 @@ const ABSENT_FLOOR: &str =
 
 /// The refusal while the floor a raise builds on can't be read.
 pub(crate) fn unreadable_floor() -> crate::error::PaykitError {
-    Refusal::NotNow(crate::NotNowReason::FloorUnreadable).into()
+    Refusal::HeldForUser(crate::HeldForUserReason::FloorUnreadable).into()
 }
 
 /// Report an unavailable floor for retryable service failures. Preserve definite refusals,
@@ -1352,7 +1353,9 @@ pub(crate) fn floor_write_error(error: crate::error::PaykitError) -> crate::erro
 pub(crate) fn is_unreadable_floor(error: &crate::error::PaykitError) -> bool {
     matches!(
         error.refusal(),
-        Some(Refusal::NotNow(crate::NotNowReason::FloorUnreadable))
+        Some(Refusal::HeldForUser(
+            crate::HeldForUserReason::FloorUnreadable
+        ))
     )
 }
 
@@ -1920,7 +1923,7 @@ mod tests {
         assert!(is_unreadable_floor(&unreadable_floor()));
         assert_eq!(
             unreadable_floor().to_string(),
-            "refused: not now: Paykit wire 5.6: the block floor can't be read now"
+            "refused: held for the user: Paykit wire 5.6: the block floor can't be read now"
         );
     }
 
@@ -1928,7 +1931,7 @@ mod tests {
     fn test_floor_unreadable_not_told_by_text_alone() {
         use crate::NotNowReason;
         // Another wait whose text reads the same is not the floor's: only the reason tells.
-        let text = NotNowReason::FloorUnreadable.to_string();
+        let text = crate::HeldForUserReason::FloorUnreadable.to_string();
         let same_text: crate::error::PaykitError =
             Refusal::HeldForUser(crate::HeldForUserReason::SwitchClient(text.clone())).into();
         assert!(!is_unreadable_floor(&same_text));

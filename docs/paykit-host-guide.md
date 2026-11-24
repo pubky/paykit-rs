@@ -558,7 +558,7 @@ The method declares `payment_time_tolerance_ms` with its declaration. The payee 
 | `Refusal::FloorHeld` | The identity's block floor is held after it was seen divergent: the unblock or widening that needs a raise waits, and retrying changes nothing until the shared post-loss hold stands too, when it goes without the raise. Tell the user that requests can still be paid by hand. |
 | `Refusal::NotNow` | Wait as its `NotNowReason` names, then call again: a later call, a read or the signer coming online clears it. |
 | `Refusal::HeldForUser` | Show the counterparty, request or record its `HeldForUserReason` names: the user unblocks it, confirms the paused record or pays by hand, or it waits for the record's repair or the loss steps. It holds that one item, not the wallet. |
-| `Refusal::RecoveryNeeded` | Run the wallet's recovery step its `RecoveryReason` names: `reconcile` for the payer pass owed since a restore, or new recovery access from the signer. |
+| `Refusal::RecoveryNeeded` | Run the wallet's recovery step its `RecoveryReason` names: `reconcile` for the payer pass owed since a restore. A missing `paykit_recovery` scope comes as `ScopeMissing`, and its key not stored yet as `NotNow` with `ScopeKeysAwaited`. |
 | `Refusal::Usage` | Correct the supplied API input, such as a payment under an Allowance asked of an app that isn't its executor. |
 | `Refusal::RecordHeld` | A payer record with payment history lost to deletion permanently holds that obligation. For a temporarily unreadable record, resume when it can be read or repaired. |
 | `Refusal::CertificateRefused` | Seek a suitable certificate from the signer and keep Paykit actions paused meanwhile. |
@@ -637,25 +637,25 @@ Two rules override a code's case. A failure with a `keptBatch` comes as `Outcome
 | `records_not_listed` | `NotNowReason::RecordsNotListed` | `RetryLater` | `receive`, which lists the shared records, then call again. |
 | `scope_keys_awaited` | `NotNowReason::ScopeKeysAwaited` | `RetryLater` | The signer stores the certificate's keys when it is next online; tell the user if it stays. |
 | `value_awaits_key` | `NotNowReason::ValueAwaitsKey` | `RetryLater` | The signer stores the record's keys when it is next online; call again then. |
-| `floor_unreadable` | `NotNowReason::FloorUnreadable` | `RetryLater` | The block floor can't be read now: call again later. |
+| `floor_unreadable` | `HeldForUserReason::FloorUnreadable` | `NeedsUser` | The block floor can't be read now: show that blocks and unblocks wait; a later `receive` may clear it, or never, as for a floor deleted. |
 | `floor_raise_waiting` | `NotNowReason::FloorRaiseWaiting` | `RetryLater` | A block floor raise left unwritten waits before it is tried again: call again later. |
 | `no_service_time` | `NotNowReason::NoServiceTime` | `RetryLater` | `receive`, which verifies a service time, then call again. |
 | `read_again` | `NotNowReason::ReadAgain` | `RetryLater` | What the call relies on isn't verified or changed: `receive`, then call again. |
 | `earlier_write_unresolved` | `NotNowReason::EarlierWriteUnresolved` | `RetryLater` | Call again once the earlier write is answered, after `receive`. |
 | `awaiting_counterparty` | `NotNowReason::AwaitingCounterparty` | `RetryLater` | Call again once the counterparty's message arrives in a `receive`. |
-| `pending_proposals_full` | `NotNowReason::PendingProposalsFull` | `RetryLater` | Eight of this wallet's Allowance proposals to the counterparty are pending: call again once one is answered, or after the user withdraws one. |
+| `pending_proposals_full` | `HeldForUserReason::PendingProposalsFull` | `NeedsUser` | Eight of this wallet's Allowance proposals to the counterparty are pending: show them; one answered makes room, and a conflicted one counts until the user discards or withdraws it. |
 | `block_marks_full` | `NotNowReason::BlockMarksFull` | `RetryLater` | The block marks are full: call again once earlier blocks' asks are delivered. |
-| `allowance_ledger_full` | `NotNowReason::AllowanceLedgerFull` | `RetryLater` | The Allowance ledger has no room for this payment: call again once earlier payments' outcomes resolve. |
+| `allowance_ledger_full` | `HeldForUserReason::AllowanceLedgerFull` | `NeedsUser` | The Allowance ledger has no room for this payment: show it; earlier payments' outcomes resolving may make room, or not. The user may pay by hand. |
 | `call_again` | `NotNowReason::CallAgain` | `RetryLater` | Make the same call again. |
 | `allowance_limit` | `NotNowReason::AllowanceLimit` | `RetryLater` | The Allowance limit has no room now; pay when its window rolls. |
-| `answer_outcome_unknown` | `NotNowReason::AnswerOutcomeUnknown` | `RetryLater` | `receive` learns whether the earlier answer was delivered; then call again. |
+| `answer_outcome_unknown` | `HeldForUserReason::AnswerOutcomeUnknown` | `NeedsUser` | Whether the earlier Allowance answer was delivered isn't known: show it; a `receive` may learn it, or its delivery may have failed for good. |
 | `not_now` | a `NotNowReason` the bindings don't know | `RetryLater` | Call again later. |
 | `counterparty_blocked` | `HeldForUserReason::CounterpartyBlocked` | `NeedsUser` | The deny list holds the counterparty: the user unblocks it, then call again. |
 | `held_from_automatic` | `HeldForUserReason::HeldFromAutomatic` | `NeedsUser` | A block or a pause holds the request from automatic payment: the user unblocks or confirms the record, or pays it by hand. |
 | `held_for_user` | a `HeldForUserReason` the bindings don't know | `NeedsUser` | Show `reason()` to the user. |
 | `attempt_check` | `HeldForUserReason::AttemptCheck` | `NeedsUser` | Inside `attempt_failed`: a check before money moved failed and nothing was paid. A new payment is the user's decision once the check can pass, for a certificate expiring soon after the signer renews it. |
 | `reload_required` | `HeldForUserReason::ReloadRequired` | `NeedsUser` | Load the wallet again, then edit its record. |
-| `switch_client_hold` | `HeldForUserReason::SwitchClient` | `NeedsUser` | The Switch client holds the attempt, as `reason()` names: reconcile mode, which the user ends; the clocks apart, which the user may have to correct; or a display read the host owes. |
+| `switch_client_hold` | `HeldForUserReason::SwitchClient` | `NeedsUser` | The Switch client holds the attempt. The bindings carry no subtype: tell the user the wallet holds payments for now, finish a reconciliation or a display read the host started, and check the device clock; then make the call again. |
 | `held_unresolved` | `HeldForUserReason::Unresolved` | `NeedsUser` | A hold on one request, publication or delivery that no wait clears as far as the wallet can tell: show `reason()`. |
 | `payer_pass_owed` | `RecoveryReason::PayerPassOwed` | `Recovery` | `reconcile` with pay runs the payer pass owed since the restore. |
 | `activity_base_changed` | `HeldForUserReason::ActivityBaseChanged` | `NeedsUser` | After a provider loss another write sits at this record's version: show it for that request; it goes on once the loss steps run or a write the app takes replaces it. |
