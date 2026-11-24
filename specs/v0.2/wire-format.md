@@ -2,7 +2,7 @@
 
 This draft defines Paykit’s encodings and validation. The [specification](spec.md) identifies the normative Pubky Switch revision and each separately adopted contract. Wire Section 5 identifies the protected-record paths whose positive wire contract is incomplete. Appendix A lists encoding choices.
 
-**Invitation delivery.** All invitation-specific rules and citations use [Switch revision `6ef258d1ada96db7637394b57307335cb802b461`](https://github.com/pubky/pubky-switch/blob/6ef258d1ada96db7637394b57307335cb802b461/spec/wire-format.md), as named in the specification's **Invitation delivery** paragraph. These include registration (6.2), its service-written conversation transition (6.5), the request header and trusted-time rule (7.1, 7.3), append and retry by the same sealed envelope (7.4.3), the allowlist response (7.4.6), readable feed entries (7.5) and export parts (10.3). Unrelated Switch rules retain their earlier references. No invitation member is added to a signed Paykit message body, and the stored Paykit vectors are unchanged. The [implementation table](implementation.md) links the SDK runtime checks.
+**Invitation delivery.** All invitation-specific rules and citations use [Switch revision `6ef258d1ada96db7637394b57307335cb802b461`](https://github.com/pubky/pubky-switch/blob/6ef258d1ada96db7637394b57307335cb802b461/spec/wire-format.md), as named in the specification's **Invitation delivery** paragraph. These include registration (6.2), its service-written `reply.add` transition (6.5), the request header and trusted-time rule (7.1, 7.3), append and retry by the same sealed envelope (7.4.3), the allowlist response (7.4.6), readable feed entries (7.5) and export parts (10.3). The admission encodings these sections touch, the permission `reply.add` that registering and withdrawing an invite code require and that gives access to `invite_code.*` feed entries (6.2, 7.5), the service-written `reply.add` transition and which apps may read it in the feed (6.5, 7.4.3, 7.5), the `peers` array of the allowlist response (7.4.6) and the `admission` export part (10.3), are those of the peer admission adoption at Pubky Switch revision `964c832895630465812292ded65227104dca22ca` (spec Section 4), not of this invitation revision. Unrelated Switch rules retain their earlier references. No invitation member is added to a signed Paykit message body, and the stored Paykit vectors are unchanged. The [implementation table](implementation.md) links the SDK runtime checks.
 
 **Test vectors.** The [vector guide](vectors/README.md) lists the files, fixed inputs and regeneration order. The [implementation table](implementation.md) distinguishes library checks, generated examples and wallet behavior.
 
@@ -130,7 +130,7 @@ A well-formed list with a permission missing, or, in a certificate that holds no
 | `claims.write` | `paykit_pay` |
 | `lists.read` | `paykit_contacts` |
 | `lists.manage` | `paykit_manage_contacts` |
-| `conversation.add` | `paykit_pay`, `paykit_request`, any labelled selling scope `paykit_request:<label>`, `paykit_allowance`, any extension scope `paykit_ext:<prefix>` |
+| `reply.add` | `paykit_pay`, `paykit_request`, any labelled selling scope `paykit_request:<label>`, `paykit_allowance`, any extension scope `paykit_ext:<prefix>` |
 
 Only valid names count in this table: a name that starts with `paykit_request:` or `paykit_ext:` but isn't a valid labelled selling scope or extension scope (above), such as `paykit_ext:paykit`, derives no permission. A certificate holding one is invalid at Paykit's verifiers anyway.
 
@@ -142,7 +142,7 @@ Only valid names count in this table: a name that starts with `paykit_request:` 
 - Paykit's scope rules apply in full to Paykit's scopes, and the bounds of 8 extension scopes and 8 labelled selling scopes count only them.
 - Another protocol's scopes, and the permissions they bring, authorize nothing in Paykit: check 8 (4.1) still needs the Paykit scope of each kind, and a certificate that holds no Paykit scope sends and receives no Paykit kind, though Paykit's verifiers take it.
 
-Vectors: `documents.json` `multi_protocol_certificates` and `messages.json` `multi_protocol_senders`. The accepted selling certificate holds `paykit_request`, `paykit_settlements`, `paykit_contacts` and `chat`, with `lists.read`, `lists.manage` and `conversation.add`; `chat` alone with `lists.read` is also accepted. The refused certificates omit `conversation.add`, omit `paykit_contacts` from a selling certificate, or use the malformed extension scope `paykit_ext:cap`.
+Vectors: `documents.json` `multi_protocol_certificates` and `messages.json` `multi_protocol_senders`. The accepted selling certificate holds `paykit_request`, `paykit_settlements`, `paykit_contacts` and `chat`, with `lists.read`, `lists.manage` and `reply.add`; `chat` alone with `lists.read` is also accepted. The refused certificates omit `reply.add`, omit `paykit_contacts` from a selling certificate, or use the malformed extension scope `paykit_ext:cap`.
 
 **Outbound authorization** (spec 3.1). Extension-only and Allowance-only certificates remain valid for receiving. Extension messages, Allowance proposals, acceptances and rejections, and `resend_request` require `paykit_contacts` in the sender's certificate as well as the kind's other scopes; a recipient checks that sender column in 4.3. This adds no implicit scope and changes no permission derivation above. Another protocol's `lists.read` supplies no Paykit authority. Missing scope refuses the send with `MissingScope` before signing, recording or queueing. With the scope, an unknown deny copy or a known block still prevents the send. Queued delivery and re-sends also require that current authorization and deny check. The user's initial `allowance_end` and own-app `executor_notice` keep their precise exceptions under spec 8.3; an end reflecting a crossing response is recorded at once but its message waits for contacts authorization and a permitting deny copy; a re-send to a counterparty does not inherit the initial-stop exception. Recovery marks waiting for authorization use spec 9's ordinary bounded pool. These authorization rules require implementing code and positive and negative cases; no vector support is claimed for them here.
 
@@ -192,7 +192,7 @@ Example (`documents.json` `executor_grant`, whose write built on version (1, 12)
   "app_id": "cw5ahtdkixcafna9zh1y5y5o1w",
   "cert": {
     "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFw...",
-    "sig": "JEGa78qsr_F28gpLUIq1wG1q5zlNcZQ3SpZNstomnJXVaGVFCERjADDUWpaikmdTNBBnpCLsyvYKUS6ukIiWBA"
+    "sig": "Ir-nJajpFEnwb23vssI3EeOQj5e1-q6-40FrkjXZb0f6irORauaGp_fi8YPsLbC3V153vNz1PfcjyPJI_DXODA"
   },
   "confirmed_generation": 1,
   "sig": "jKZ13zfRyNtQPpLEeOU2USP0AH5ryagD_QqudMVFPn2bi61kshMto6Uuqxohf38_ueLZXBivfe9V3j_CWacmBg",
@@ -550,7 +550,7 @@ Asks the counterparty to re-send messages it sent (spec 5, Switch spec 8.2, 12.6
 - The sender re-seals each selected message it first accepted in the last 30 days to the current receive keys, with its original signed plaintext, and only messages of kinds that the requesting app's certificate allows it to receive (spec 9): a wallet with `paykit_pay` and `paykit_contacts` but no `paykit_allowance` gets back no Allowance messages. Of a payer's acceptances, rejections, cancellations and proofs, and a payee's cancellations, it re-sends only those check 8 lets the requesting app take under their label and role (Switch wire 5.1, Section 4.3): an app whose only selling scope is `paykit_request:shop2` gets back none labelled `shop1` and none without a label, and one holding `paykit_request` and not `paykit_pay` no payee's cancellation. A sender that keeps messages longer doesn't re-send older ones, since recipients keep processed IDs for 30 days. Retention runs from the first acceptance: the sender keeps one entry per `msg_id` with its first acceptance time and the later ones, and a re-send doesn't restart it.
 - **Limits** (spec 9): the sender re-sends one message to the same requester identity at most once an hour (`RESEND_COOLDOWN_MS`), and at most a daily number of messages per requester identity, which it chooses; it leaves the rest out. Shifting a range by a millisecond selects the same messages, so it gets nothing new.
 - **What an app asks for** (spec 9): the unopenable, unreadable and `missed` items that lead an app to ask come from the service, and the app can't check them. For an entry it can't open, an unreadable item and a `missed` item, it never asks for a time before its cursor's time less the clock tolerance (5 minutes): for the entry and the unreadable item, only if its `accepted_at` is no earlier than that, and for the `missed` item, from the later of its `accepted_from` and that time (Switch spec 8.2). For an unreadable item it also asks only after it has verified a departure of another own app in its chain (a `leave` or `revoke` transition, Switch wire 6.5) at or after the entry's `accepted_at`. It ignores an item whose times don't parse.
-- A `resend_request` adds no conversation entry (Switch spec 7): a forged entry from a stranger must not admit that stranger.
+- A `resend_request` adds no reply grant (Switch spec 7): a forged entry from a stranger must not admit that stranger.
 - `billing_period` is read only with `request_hashes`; without them it selects nothing, and senders don't send it alone. An empty array counts as absent.
 - `request_hashes` selects each named request and every message whose `refs` name one of them. With `billing_period`, only the messages whose body names that Billing Period are selected; the request itself, which names none, is left out. Selectors combine as a union, and each message is re-sent once, whatever its selectors (duplicates are dropped by `msg_id`).
 - Any own Paykit App holding `paykit_contacts` may ask for entries it can't open, whatever its other Paykit scopes; one without it keeps the recovery mark under spec 9's ordinary bounds and reports `MissingScope` without signing or queueing an ask.
@@ -578,7 +578,7 @@ By request and Billing Period (`messages.json` `resend_request_period`):
 
 ### 4.13 `private_payment_list`
 
-The latest list of one publishing app for one recipient identity (spec 8.4). The publisher's signing certificate must hold plain `paykit_request`. The payer drops a list that fails this check before comparing versions or installing or withdrawing endpoints (4.1). An empty `payment_endpoints` object identifies a withdrawal. Every delivery of that signed message omits the publisher's conversation-entry write (spec 8.4.1). Nonempty lists follow the ordinary first-message rule.
+The latest list of one publishing app for one recipient identity (spec 8.4). The publisher's signing certificate must hold plain `paykit_request`. The payer drops a list that fails this check before comparing versions or installing or withdrawing endpoints (4.1). An empty `payment_endpoints` object identifies a withdrawal. Every delivery of that signed message omits the publisher's reply grant write (spec 8.4.1). Nonempty lists follow the ordinary first-message rule.
 
 | Field | Type | Req | Constraints | Notes |
 |---|---|---|---|---|
@@ -1007,7 +1007,7 @@ Example entry (`documents.json` `executor_grant_history_entry`: the record was c
     "app_id": "cw5ahtdkixcafna9zh1y5y5o1w",
     "cert": {
       "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFw...",
-      "sig": "JEGa78qsr_F28gpLUIq1wG1q5zlNcZQ3SpZNstomnJXVaGVFCERjADDUWpaikmdTNBBnpCLsyvYKUS6ukIiWBA"
+      "sig": "Ir-nJajpFEnwb23vssI3EeOQj5e1-q6-40FrkjXZb0f6irORauaGp_fi8YPsLbC3V153vNz1PfcjyPJI_DXODA"
     },
     "confirmed_generation": 1,
     "sig": "jKZ13zfRyNtQPpLEeOU2USP0AH5ryagD_QqudMVFPn2bi61kshMto6Uuqxohf38_ueLZXBivfe9V3j_CWacmBg",
@@ -1267,7 +1267,7 @@ Use these choices when serializing and validating the relevant fields.
 | A11 | Re-send limits | one message to one requester identity at most once an hour; a daily number of messages per requester identity the sender chooses (4.12) |
 | A12 | What a compacted `failed` entry keeps | its `obligation`, `attempt_id` and `value` in `totals.failed`, so the executor can read its claim again and add a later `done` to the totals once (5.5) |
 | A13 | Record age limit | `record_max_age` in whole seconds, at least 1, 90 days when absent; an `updated_at` more than 5 minutes ahead is refused (3.2, Switch wire 3.3) |
-| A14 | Extension scopes and kinds | `paykit_ext:<prefix>`, prefix `paykit-` and 1 to 25 more of `a-z`, `0-9`, `-` (so its kinds are Paykit's, Switch wire 3.1 "Scope roots"); kind `<prefix>.<name>`, name 1 to 64 of `a-z`, `0-9`, `_`; at most 8 extension scopes per certificate; they give `conversation.add` |
+| A14 | Extension scopes and kinds | `paykit_ext:<prefix>`, prefix `paykit-` and 1 to 25 more of `a-z`, `0-9`, `-` (so its kinds are Paykit's, Switch wire 3.1 "Scope roots"); kind `<prefix>.<name>`, name 1 to 64 of `a-z`, `0-9`, `_`; at most 8 extension scopes per certificate; they give `reply.add` |
 | A15 | Removed | Paykit defines no settlement ID: the payment method does (1.5) |
 | A16 | Settlement marks | derived from the settlement ID alone, never the endpoint; 1,024 buckets by the first 10 bits of a blinded tag, a 21-byte mark (12-byte settlement tag, kind, 8-byte occurrence tag), at most 9,000 per bucket; written in the credit's batch at the bucket's version; the scope `paykit_settlements`, which every payee scope requires (1.5, 3.1, 5.7) |
 

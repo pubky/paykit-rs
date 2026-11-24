@@ -663,6 +663,7 @@ impl Stored for u64 {
             | StateKey::Resent { .. }
             | StateKey::ResentDay { .. }
             | StateKey::ListsRead
+            | StateKey::ListsReadUnder
             | StateKey::ServiceTime => Ok(()),
             // A generation recovered at follows another.
             StateKey::LossRecorded if *self > 0 => Ok(()),
@@ -2024,6 +2025,9 @@ pub(crate) mod key {
     pub(crate) const LIST_RECIPIENTS: &str = "lrec/";
     pub(crate) const LIST_DISCOVERY: &str = "ld";
     pub(crate) const LISTS_READ: &str = "lr";
+    /// The provider loss the lists were last read under: its lost generation plus one, or 0
+    /// for none ([`crate::receive::lists_read_counts`]).
+    pub(crate) const LISTS_READ_UNDER: &str = "lu";
     pub(crate) const SERVICE_TIME: &str = "sv";
     pub(crate) const HELD_LISTS: &str = "lh/";
     pub(crate) const LISTS_LOST: &str = "lgone/";
@@ -2638,6 +2642,8 @@ pub(crate) enum StateKey {
     },
     /// `lr`: when the lists were last read.
     ListsRead,
+    /// `lu`: the provider loss the lists were last read under.
+    ListsReadUnder,
     /// `sv`: the highest service time verified, for the delivery hook.
     ServiceTime,
     /// `lh/<record key>`: a list held over a record that didn't read.
@@ -2876,6 +2882,7 @@ impl StateKey {
             "ro" => Self::OwnResendOwed,
             "lc" => Self::ListedCert,
             "lr" => Self::ListsRead,
+            "lu" => Self::ListsReadUnder,
             "sv" => Self::ServiceTime,
             "dl" => Self::Denied,
             "fg" => Self::Flagged,
@@ -4206,6 +4213,7 @@ mod tests {
                 },
             ),
             (key::LISTS_READ.into(), StateKey::ListsRead),
+            (key::LISTS_READ_UNDER.into(), StateKey::ListsReadUnder),
             (key::SERVICE_TIME.into(), StateKey::ServiceTime),
             (key::DENIED.into(), StateKey::Denied),
             (key::own_block(&pubky), StateKey::OwnBlock(pubky)),
