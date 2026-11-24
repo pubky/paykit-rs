@@ -2,6 +2,7 @@
 //! a payee app that publishes its record, with `expires_at` and renewal past half its
 //! lifetime, and the capabilities of a paying app.
 
+mod receive_upkeep;
 mod restored_publication;
 
 use std::collections::BTreeMap;
@@ -586,6 +587,11 @@ async fn test_own_record_edit_after_an_unknown_store_result_waits_for_a_load() {
     };
     assert!(text.contains("load the app again"), "{text}");
     assert_eq!(shop.app().record(), &record);
+    // A receive's upkeep doesn't sign either, and tells the host the record is owed until the
+    // app is loaded again.
+    let summary = shop.receive(None).await.unwrap();
+    let owed = summary.app_record_owed.unwrap();
+    assert!(owed.contains("loaded again"), "{owed}");
     let app_id = shop.app_id();
     drop(shop);
     // Loaded again, the app holds the withdrawal, and adding B never brings A back.
@@ -1034,17 +1040,19 @@ async fn test_own_record_oversized_capabilities_refuse_the_update() {
 }
 
 #[tokio::test]
-async fn test_own_record_oversized_capabilities_refuse_the_receive() {
+async fn test_own_record_oversized_capabilities_left_owed_at_the_receive() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let before = wallet.app().record().clone();
     w.rail.set_endpoint_identifiers(oversized_capabilities());
-    let error = wallet.receive(None).await.unwrap_err();
-    assert!(is_usage(&error), "{error:?}");
+    // Refused before anything is signed; the receive goes on and tells the host.
+    let summary = wallet.receive(None).await.unwrap();
+    assert!(summary.app_record_owed.is_some(), "{summary:?}");
     assert_eq!(wallet.app().record(), &before);
     let supported = endpoint("btc-onchain-address");
     w.rail.set_endpoint_identifiers(vec![supported.clone()]);
-    wallet.receive(None).await.unwrap();
+    let summary = wallet.receive(None).await.unwrap();
+    assert_eq!(summary.app_record_owed, None, "{summary:?}");
     assert_eq!(
         PaykitMember::read(&held(&wallet, w.alice_id()))
             .unwrap()
@@ -1765,8 +1773,13 @@ async fn test_own_record_renewal_without_request_scope_signs_no_endpoint() {
     w.rail.set_endpoint_identifiers(oversized_capabilities());
     let path = app_record_path(&wallet.app_id());
     let writes = w.homeserver.writes(&w.alice_id(), &path);
-    let error = wallet.receive(None).await.unwrap_err();
-    assert!(is_usage(&error), "{error:?}");
+    // The receive goes on past the failed clean-up: the records are listed under the renewed
+    // certificate, and the host is told the record is owed.
+    let summary = wallet.receive(None).await.unwrap();
+    assert!(summary.app_record_owed.is_some(), "{summary:?}");
+    assert_eq!(summary.records_unlisted, None, "{summary:?}");
+    // A read refused while the records are unlisted goes through.
+    wallet.requests().await.unwrap();
     // The record signed with the renewed certificate, the one the Homeserver got, carries
     // no public endpoint and no expiry: the earlier member was never signed under it.
     assert_eq!(wallet.app().cert().hash(), narrower.hash());
@@ -1908,7 +1921,8 @@ async fn test_own_record_renewal_over_another_devices_endpoint_preserves_its_nul
     // The second device takes the first's record, and its upkeep fails each time after:
     // the payment method's list no longer fits. Its own ask was never set.
     w.rail.set_endpoint_identifiers(oversized_capabilities());
-    assert!(second.receive(None).await.is_err());
+    let summary = second.receive(None).await.unwrap();
+    assert!(summary.app_record_owed.is_some(), "{summary:?}");
     assert_eq!(second.own_public_endpoints().unwrap().len(), 1);
     // Renewal preserves the endpoint without assigning a deadline.
     let old = second.app().cert().clone();
@@ -1920,7 +1934,8 @@ async fn test_own_record_renewal_over_another_devices_endpoint_preserves_its_nul
     );
     crate::certificate::list(&w, second.app_id(), &old, &renewed);
     w.clock.advance_ms(1_000);
-    assert!(second.receive(None).await.is_err());
+    let summary = second.receive(None).await.unwrap();
+    assert!(summary.app_record_owed.is_some(), "{summary:?}");
     let held = held(&second, w.alice_id());
     assert_eq!(held.cert().hash(), renewed.hash());
     assert_eq!(PaykitMember::read(&held).unwrap().public_endpoints.len(), 1);

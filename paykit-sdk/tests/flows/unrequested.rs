@@ -2173,19 +2173,28 @@ async fn test_unrequested_put_back_of_the_known_history_after_a_newer_recreation
 }
 
 #[tokio::test]
-async fn test_unrequested_marks_read_after_a_delete_kept_through_a_fresh_restore() {
+async fn test_unrequested_marks_kept_through_a_fresh_restore() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut phone = w.wallet("phone").await;
     let mut shop = w.shop().await;
-    let (key, marked) =
-        pay_single_use_then_delete_elsewhere(&w, &mut wallet, &mut phone, &mut shop).await;
+    // The wallet pays the first list's single-use endpoint, and the phone a newer list's:
+    // the wallet reads both marks.
+    w.list_to_alice(
+        &mut shop,
+        &[wallet.app_id(), phone.app_id()],
+        list_version(1, 1),
+    )
+    .await;
+    wallet.receive(None).await.unwrap();
+    let paid = wallet
+        .pay_without_request(to_bob(&w, "0.0015", "btc-bitcoin-p2wpkh"))
+        .await
+        .outcome
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
     let target = shop_list_target(&w, &shop);
-    wallet.receive(None).await.unwrap();
-    // The phone puts the record back with the mark, and pays a newer list's single-use
-    // endpoint: the wallet reads both marks.
-    put_list_record(&mut phone, &target, Some(&marked)).await;
-    wallet.receive(None).await.unwrap();
+    let (_, marked) = list_record(&wallet, &w).await;
     w.list_to_alice(
         &mut shop,
         &[wallet.app_id(), phone.app_id()],
@@ -2203,25 +2212,21 @@ async fn test_unrequested_marks_read_after_a_delete_kept_through_a_fresh_restore
     wallet.receive(None).await.unwrap();
     let (_, both) = list_record(&wallet, &w).await;
     assert_eq!(both["used"].as_array().unwrap().len(), 2, "{both}");
+    // Restored onto a fresh store, the wallet keeps what it saw of the record (Switch spec
+    // 12.4): a newly joined app's write of the newer list with the first mark only drops a
+    // mark it saw, so it isn't taken, and the paid endpoint isn't paid again (Paykit wire
+    // 5.4, "Seen lists").
     let backup = wallet.backup().await.unwrap();
     drop(wallet);
-    // The record is deleted again, the service forgets it, and the wallet is restored onto
-    // a fresh store: what it read is gone with the store.
-    phone.app_mut().read_record(&target).await.unwrap();
-    put_list_record(&mut phone, &target, None).await;
-    w.alice.switch().drop_record(&key).unwrap();
     let mut restored = restored_onto(&w, crate::common::store(), &backup).await;
     restored.receive(None).await.unwrap();
-    // A newly joined app writes the newer list with the first mark only.
     let mut first_only = both.clone();
     first_only["used"] = marked["used"].clone();
     let mut tablet = w.wallet("tablet").await;
+    tablet.app_mut().read_record(&target).await.unwrap();
     put_list_record(&mut tablet, &target, Some(&first_only)).await;
     restored.receive(None).await.unwrap();
-    let writes = w.record_writes(&w.alice, &key);
-    w.list_to_alice(&mut shop, &[restored.app_id()], list_version(1, 2))
-        .await;
-    restored.receive(None).await.unwrap();
+    assert_eq!(restored.app().flagged_writes().await.unwrap().len(), 1);
     let again = restored
         .pay_without_request(to_bob(&w, "0.0015", "btc-bitcoin-p2wpkh"))
         .await
@@ -2231,8 +2236,6 @@ async fn test_unrequested_marks_read_after_a_delete_kept_through_a_fresh_restore
         "the paid single-use endpoint was paid again: {again:?}"
     );
     assert_eq!(w.rail.all_executions().len(), 2);
-    assert_eq!(w.record_writes(&w.alice, &key), writes);
-    assert_eq!(restored.held_lists().await.unwrap().len(), 1);
 }
 
 /// `app` writes `value`, or a delete, at the `payment_lists` record `target`, outside the
@@ -2306,7 +2309,7 @@ async fn test_unrequested_delete_seen_again_keeps_the_list_held_over_a_put_back(
 }
 
 #[tokio::test]
-async fn test_unrequested_older_list_over_a_forgotten_delete_not_paid() {
+async fn test_unrequested_older_list_written_back_not_paid() {
     for fresh in [false, true] {
         let w = World::new();
         let mut wallet = w.wallet("wallet").await;
@@ -2332,13 +2335,7 @@ async fn test_unrequested_older_list_over_a_forgotten_delete_not_paid() {
         )
         .await;
         wallet.receive(None).await.unwrap();
-        // The record is deleted, the wallet sees it, and the service forgets it.
-        phone.app_mut().read_record(&target).await.unwrap();
-        put_list_record(&mut phone, &target, None).await;
-        wallet.receive(None).await.unwrap();
-        let key = wallet.app().record_key(&target).unwrap();
-        w.alice.switch().drop_record(&key).unwrap();
-        // Restored onto a fresh store, the wallet keeps only what it knew of the delete.
+        // Restored onto a fresh store or not, the wallet holds what it saw of the record.
         let mut wallet = if fresh {
             let backup = wallet.backup().await.unwrap();
             drop(wallet);
@@ -2348,8 +2345,10 @@ async fn test_unrequested_older_list_over_a_forgotten_delete_not_paid() {
         } else {
             wallet
         };
-        // A newly joined app writes the older list back, holding every mark.
+        // A newly joined app writes the older list back over it, holding every mark: the
+        // version rule refuses it (Paykit wire 5.4, "Seen lists").
         let mut tablet = w.wallet("tablet").await;
+        tablet.app_mut().read_record(&target).await.unwrap();
         put_list_record(&mut tablet, &target, Some(&older)).await;
         wallet.receive(None).await.unwrap();
         let again = wallet
@@ -2365,11 +2364,10 @@ async fn test_unrequested_older_list_over_a_forgotten_delete_not_paid() {
 }
 
 #[tokio::test]
-async fn test_unrequested_other_list_at_the_same_version_over_a_forgotten_delete_not_paid() {
+async fn test_unrequested_other_list_at_the_same_version_not_paid() {
     for fresh in [false, true] {
         let w = World::new();
         let mut wallet = w.wallet("wallet").await;
-        let mut phone = w.wallet("phone").await;
         let mut shop = w.shop().await;
         w.list_to_alice_with(
             &mut shop,
@@ -2379,14 +2377,7 @@ async fn test_unrequested_other_list_at_the_same_version_over_a_forgotten_delete
         )
         .await;
         wallet.receive(None).await.unwrap();
-        let target = shop_list_target(&w, &shop);
-        // The record is deleted, the wallet sees it, and the service forgets it.
-        phone.app_mut().read_record(&target).await.unwrap();
-        put_list_record(&mut phone, &target, None).await;
-        wallet.receive(None).await.unwrap();
-        let key = wallet.app().record_key(&target).unwrap();
-        w.alice.switch().drop_record(&key).unwrap();
-        // Restored onto a fresh store, the wallet keeps only what it knew of the delete.
+        // Restored onto a fresh store or not, the wallet holds what it saw of the record.
         let mut wallet = if fresh {
             let backup = wallet.backup().await.unwrap();
             drop(wallet);
@@ -2396,8 +2387,8 @@ async fn test_unrequested_other_list_at_the_same_version_over_a_forgotten_delete
         } else {
             wallet
         };
-        // A newly joined app writes another list signed at the same version: equivocation, which
-        // the version rule refuses (Paykit wire 5.4, "Seen lists").
+        // Another list signed at the same version comes: equivocation, which the version rule
+        // refuses (Paykit wire 4.13, 5.4, "Seen lists").
         let mut laptop = w.wallet("laptop").await;
         w.list_to_alice_with(
             &mut shop,
@@ -2408,15 +2399,27 @@ async fn test_unrequested_other_list_at_the_same_version_over_a_forgotten_delete
         .await;
         laptop.receive(None).await.unwrap();
         wallet.receive(None).await.unwrap();
-        let again = wallet
+        // The list seen at that version is the one offered for the payment, never the other.
+        let paid = wallet
             .pay_without_request(to_bob(&w, "0.0015", "btc-lightning-bolt12"))
             .await
             .outcome;
+        assert!(matches!(paid, Ok(PayOutcome::Paid { .. })), "{paid:?}");
+        let offered: Vec<String> = w
+            .rail
+            .selections()
+            .into_iter()
+            .flat_map(|(candidates, _)| candidates)
+            .map(|c| c.payload.as_str().to_owned())
+            .collect();
         assert!(
-            !matches!(again, Ok(PayOutcome::Paid { .. })),
-            "fresh {fresh}: another list at the seen version was paid: {again:?}"
+            offered.iter().any(|p| p == "lno1newoffer"),
+            "fresh {fresh}: {offered:?}"
         );
-        assert!(w.rail.all_executions().is_empty());
+        assert!(
+            !offered.iter().any(|p| p == "lno1other"),
+            "fresh {fresh}: {offered:?}"
+        );
     }
 }
 

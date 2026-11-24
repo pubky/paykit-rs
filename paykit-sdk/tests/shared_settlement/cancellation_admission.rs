@@ -337,10 +337,9 @@ async fn dual_role_wallet(world: &World, outcome: WaitingReply) -> TestResult {
     );
     assert_eq!(read_duties(&wallet, b"kc/").await?, saved);
 
-    wallet
-        .app_mut()
-        .delete_record(&payer_target, Vec::new())
-        .await?;
+    // The payer record's readable value finally arrives, holding the authentic purchase:
+    // the kept stop is applied to it.
+    Box::pin(place_purchase(&mut wallet, &peer, &purchase, &payer_target)).await?;
     peer.app_mut().queue_signed(purchase.clone()).await?;
     peer.flush().await?;
     for _ in 0..3 {
@@ -369,6 +368,32 @@ async fn dual_role_wallet(world: &World, outcome: WaitingReply) -> TestResult {
     );
     assert!(read_duties(&wallet, b"kc/").await?.is_empty());
     assert!(rail.all_executions().is_empty());
+    Ok(())
+}
+
+/// The payer record at `payer_target` written readable, holding the peer's signed `purchase`.
+async fn place_purchase(
+    wallet: &mut Paykit,
+    peer: &Paykit,
+    purchase: &SignedMessage,
+    payer_target: &RecordTarget,
+) -> TestResult {
+    let own = wallet.identity();
+    let other = peer.identity();
+    let signed = StoredMessage::new(
+        other,
+        peer.app().cert().signed(),
+        purchase.plaintext().clone(),
+        None,
+        &own,
+    )?;
+    let mut record = ActivityRecord::new(ActivitySide::Payer, other);
+    record.msg_ids.push(purchase.msg_id().to_owned());
+    record.request = Some(signed);
+    wallet
+        .app_mut()
+        .put_record(payer_target, &record.to_json()?, Vec::new())
+        .await?;
     Ok(())
 }
 
