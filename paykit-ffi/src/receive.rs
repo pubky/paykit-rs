@@ -99,6 +99,10 @@ pub struct WalletReceiveReport {
     /// The records this receive paused: a view showed them divergent after a provider loss
     /// (Paykit spec 6).
     pub divergent: Vec<Divergence>,
+    /// The app record's upkeep at this receive failed short of a wallet-wide stop: why. The
+    /// record is tried again at the next receive, or at once by `update_own_record`, which
+    /// returns its outcome; every other step of the receive ran (Paykit spec 4).
+    pub app_record_owed: Option<String>,
 }
 /// What a wait for the feed ended in (`FeedWait::wait`).
 #[derive(Clone, Copy, uniffi::Enum)]
@@ -183,6 +187,7 @@ impl NativeWallet {
                     key_epochs_awaited: s.key_epochs_awaited,
                     account_gone: s.account_gone,
                     divergent: s.divergent.into_iter().map(Into::into).collect(),
+                    app_record_owed: s.app_record_owed,
                 })
             })
         })

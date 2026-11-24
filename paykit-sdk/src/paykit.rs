@@ -291,6 +291,13 @@ pub struct ReceiveSummary {
     /// until no record the refusal names shows `writes_waiting`, and only then calls again.
     /// Every record paused, whenever, is in [`Paykit::divergent_records`].
     pub divergent: Vec<crate::DivergentRecord>,
+    /// The app record's upkeep at this receive (Paykit spec 4) failed short of a wallet-wide
+    /// stop: why, in fixed text. The record stays as last signed, or its change stays owed by
+    /// the client, and is tried again at the next receive, or at once by
+    /// [`Paykit::update_own_record`], which returns its outcome. No other step of the receive
+    /// depends on the record, and each ran. A wallet-wide stop still ends the receive with its
+    /// error.
+    pub app_record_owed: Option<String>,
 }
 
 impl ReceiveSummary {
@@ -316,6 +323,7 @@ impl ReceiveSummary {
         self.key_epochs_awaited.sort_unstable();
         self.key_epochs_awaited.dedup();
         self.scope_keys_awaited |= !self.key_epochs_awaited.is_empty();
+        self.app_record_owed = self.app_record_owed.or(earlier.app_record_owed);
         self
     }
 }
@@ -1245,13 +1253,18 @@ impl Paykit {
         }
         // A restore's listing may need several reads. Clear its mark only when the client
         // finishes the listing with the required scope keys.
+        let mut app_record_owed = None;
         if !report.stopped {
             Box::pin(self.records_listed(keys_held_before)).await?;
             // A `missed` item whose end isn't known holds every open request until a read
             // completes: this one did, so the hold is bounded by the service time verified
             // (`hold.rs`).
             Box::pin(self.bound_missed_hold()).await?;
-            Box::pin(self.tend_own_record()).await?;
+            // The app record's upkeep: none of the steps below depends on it, so a failure
+            // that is the publisher's own leaves the record owed and is told in the summary
+            // once they have run; a wallet-wide stop still ends the receive here (Paykit
+            // spec 4, `Paykit::tend_own_record_at_receive`).
+            app_record_owed = Box::pin(self.tend_own_record_at_receive()).await?;
         }
         // A certificate the read took, any other than the one the records were listed under,
         // a narrower one included: they are listed now, or stay unlisted for the next
@@ -1363,6 +1376,7 @@ impl Paykit {
             key_epochs_awaited,
             account_gone: false,
             divergent,
+            app_record_owed,
         })
     }
 
