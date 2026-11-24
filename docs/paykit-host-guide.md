@@ -450,6 +450,74 @@ are more than 30 days old. Those are given up and never sent from this installat
 only that this installation never saw the message accepted: after a restore, the device
 the backup came from may have delivered it.
 
+## What the host drives
+
+### Sending queued messages
+
+The outbox is the host's to drive. `Paykit::flush` (`NativeWallet::flush` in the wallet bindings) makes one bounded delivery try: it reaches a few queued messages within a time budget, and can return `Ok` with messages still queued. `receive` retries some messages, such as the batches it keeps and a queued Private Payment List, but it doesn't drive the outbox. Call `flush` on a schedule of the host's choice, for example after each `receive`, when the app comes to the foreground, when it reconnects, and on a timer.
+
+A request the recipient's switch refused because the sender isn't admitted yet stays queued, and is sent again when a delivery try reaches it after the recipient admits the sender. `Paykit::message_delivery` (`NativeWallet::message_delivery`) tells where a message stands: kept in a batch, queued with its tries, waiting for admission, waiting for a current certificate, accepted by the recipient's inbox, or failed. `None` means the client keeps no delivery status for that message ID; the request's activity may still hold evidence, so look at it before sending anything in the message's place.
+
+### Crediting a payment exactly once
+
+Which payment-method output a proof names is the integrator's to check: Paykit names no payment method and checks no method's outputs. The wallet's `Rail::verify` checks the evidence and returns the time it dates the payment. `Rail::settlement_id` returns the identifier of the settlement the proof pays. For example, a Bitcoin method could check the transaction and output a proof names, and return them as the settlement ID.
+
+`Paykit::confirm_payment` credits a payment by storing its signed receipt and the settlement's mark in one batch. The mark is shared by the payee's own apps: once a settlement's mark is visible, no other credit of it is made, whether for another request, a Billing Period or a payment without a request. A repeat for the same occurrence returns its existing receipt. A provider loss can hide an earlier mark from the app deciding. When the SDK can't tell whether the settlement was already credited, it refuses with `Refusal::MaybeCredited`; when the settlement's bucket is full, or the Switch refuses the bucket for its quota or size, with `Refusal::SettlementBucketFull`. Show the risk, and retry with `Paykit::confirm_payment_with` only on the user's explicit confirmation: `with_maybe_credited_confirmed` for the first, `with_unmarked_credit_confirmed` for the second. The first is still refused when no fresh bucket version was read, or when a bucket seen before is gone with no provider loss to explain it. A credit without a mark can duplicate a credit made elsewhere.
+
+### Sharing a Private Payment List from several selling apps
+
+A selling app that publishes a Private Payment List keeps a counter for each recipient and generation of its own identity. Another app holding the unlabelled selling scope (`paykit_request`) can write that counter. When `publish_list_to` or `withdraw_list_from` has to reserve a new list version and the current counter was written by another app, the call is refused as not now, a withdrawal included. Show which app wrote it when the refusal names it, and keep that recipient's publication or withdrawal pending: a retry in the same generation of the identity is refused again, and publishing to that recipient goes on only from the identity's next generation. Other recipients are not affected.
+
+### Receive events the host acts on
+
+`Paykit::receive` returns the events of its read in `ReceiveSummary::report.events`; `NativeWallet::receive` returns them in the report's `events`. Handle them in order. Among them, three need the host:
+
+- `AppEvent::ProtocolDeferred`: a prerequisite was missing for this input, such as an Allowance record that doesn't read yet. The input stays unprocessed. Make the prerequisite available, then call `receive` again.
+- `AppEvent::StoreFailing`: the host's store keeps failing for an input. The client keeps the input; repair or free storage, then call `receive` again.
+- `AppEvent::SeenMarksIncomplete`: after a restore, the marks of records this app had seen were missing, unreadable or too large to keep, so a record it saw before is now checked as new. Show or log it.
+
+These three are not kept after the call returns. A crash before the host handles them, or a Paykit error after the read, can lose them; `SeenMarksIncomplete` is held in memory from the restore until the first `receive`, so a crash before that first `receive` loses it too. Duty events are kept until acknowledged and can be read again with `unacknowledged_events`.
+
+### Withdrawing public endpoints and paying offline
+
+To stop offering public endpoints, call `set_public_endpoints` with an empty set while publication is on, and check the result. `Published` means the Homeserver holds the record without them. For any other result, check that the withdrawal is visible before going further. Turn `publishes_record` off only if the app should stop publishing its record on the Homeserver altogether; it still gives its app record to the Switch. Until the withdrawal is visible, the old endpoints expire, or the app is revoked, a payer can still pay the endpoints it read before.
+
+With the own Switch unreachable, `pay_without_request` can still pay a reusable public endpoint the user picked explicitly, with `PaymentMode::Public` and the endpoint named in the payment's options. It needs the app's own identity document confirmed within the last 60 seconds, a copy of the deny list read within the last 10 minutes, and the payee's identity checked. Once the switch is back, call `resume_payments`: it records the payment the method made offline, and never sends that payment again.
+
+### Reply grants and push
+
+The host manages the identity's reply grants through the Switch App (`Paykit::app_mut`). `App::allow_list` lists the peers, each grant's origin, when it was given and when the peer last sent through it, so check the app's own outgoing activity separately; `App::remove_reply` removes a grant and keeps a peer the user keeps for another reason. Pruning is the host's policy: for example, check once a day and remove a grant only after it has been idle in both directions for 180 days, never for a peer the user keeps or an exchange that is unfinished or uncertain.
+
+Push is registered through the Switch App: `App::register_push` with the relay URL and device token, also to change relays, and `App::reregister_push` to retry the saved settings after an interruption or a provider change. A push only wakes the app: it can arrive twice or not at all. Read the feed with `receive` for the payment's state; never take it from the push.
+
+## After a restore or a provider loss
+
+### Restoring a backup
+
+Before restoring, ask who has the device the backup came from (`WalletHost::restore` takes the answer). If it may be lost or stolen, revoke its app and enroll a new one instead.
+
+After `Paykit::restore`, call `receive` before using the Switch App directly; Paykit's own outgoing calls make that first read themselves. `App::restore_held_cursor` gives the first read's verdict once a page settles it: `Clean` releases this restore's hold, though the hold of an earlier restore that wasn't clean, or of a missed feed item, can remain, and a later page found `Ahead` ends the verdict; `Ahead` and `Unknown` keep open requests on hold until the user confirms each, or evidence shows it ended. Run `reconcile` and show its report: each outcome it resolved, the obligations in doubt, and whether payer obligations were skipped because the certificate lacks `paykit_pay`. After the user has seen it, call `end_reconcile` (`endConfirmedReconciliation` in the wallet bindings); an open restore question must be answered first. When payer obligations were skipped, payments still wait for a reconcile by an app holding `paykit_pay`.
+
+If the switch saw receive-key registrations the backup can't explain, `App::restore_question` lists them. Show them, and pass the exact list to `confirm_restored_registrations` when the user recognizes them, or to `refuse_restored_registrations`, which raises the compromise alarm.
+
+A payment refused with `Refusal::HeldAfterRestore` is for a request the payee may have cancelled. Show the hold; `confirm_possibly_cancelled` with that exact hold releases it on the user's confirmation.
+
+### Possible payment before a provider loss
+
+After the identity's provider is lost, a one-time request that was payable before the loss may have been paid by another own app at the old provider. An empty claim at the new provider doesn't show it wasn't.
+
+- A payment by hand on such a request is refused `Refusal::MayBePaid`, its doubt showing the loss (`before_loss`). Show the user that the request may already have been paid. Only on the user's consent, pass that same doubt back (`PayOptions::with_may_be_paid_confirmed`) for one attempt. That consent records nothing and lifts nothing else; an attempt that fails leaves the doubt as it was.
+- `confirm_not_paid_before_loss` records the user's statement, through this wallet, that the request was not paid before that loss. Before calling it, account for what Paykit can't see: every original app of the identity, through a verified report or a signed removal (`recovery_members`, which needs the recovery scope, lists the original and removed apps and the reports it could verify; an original can have neither), and every funding account and submission that could have paid it. A report from one installation, an empty claim at the new provider, or a reminder from the payee is not that accounting.
+- Nothing the user states releases an automatic payment, or a repeat of an earlier payment on resume. A Billing Period of a subscription accepted before the loss stays held while its payment history is incomplete.
+
+### Records shown divergent
+
+A shared record the switch shows divergent pauses the payments, credits and ordinary writes that depend on it; a cancellation or a rejection can still be written. `divergent_records` lists them: show each, and pass each observation the user confirms to `confirm_divergent`. While `writes_waiting` is set, keep calling `receive`. For a credit, confirm the observation the credit's own refusal returns. Automatic payment waits until the record is no longer divergent. A divergent block floor holds for good: `confirm_divergent` can't release it.
+
+### Replacing the signer
+
+The wallet that holds the identity key can restore the signer on a new installation with `Signer::restore_new`, on the user's confirmation, from the identity key in the new installation's keyring and the signer's encrypted backup on the Homeserver; exporting the key and importing it there are the wallet's. Once the old installation sees its successor, `Signer::status` reports `ManagedBy` with the new installation: show which installation signs now, and stop offering signer actions on the old one.
+
 ## Notices and errors
 
 Read `notices` and `payee_deletion_notices` by their stable identities. Acknowledge
@@ -630,7 +698,7 @@ Two rules override a code's case. A failure with a `keptBatch` comes as `Outcome
 | `blocked` | `Refusal::Blocked` | `NeedsUser` | Show the blocked payee and the exact payment; on the user's yes pass the refusal back. |
 | `may_be_paid` | `Refusal::MayBePaid` with a doubt | `NeedsUser` | Show the doubt; on the user's yes pass the refusal back. |
 | `may_be_paid_reconcile` | `Refusal::MayBePaid` without a doubt | `NeedsUser` | Show that an earlier payment may be paid; `reconcile` and answer its doubtful payments, then pay again. |
-| `transfer` | `Refusal::Transfer` | `NeedsUser` | Show the transfer and fee quote; on the user's yes pass the refusal back. |
+| `transfer` | `Refusal::Transfer` | `NeedsUser` | Show the amount asked beside the amount and asset the payment method would transfer, or that it can't tell; on the user's yes pass the refusal back. |
 | `priced_by_rate` | `Refusal::PricedByRate` | `NeedsUser` | Get the user's authorization for this quote; then pass the refusal back. |
 | `loss_changed` | `Refusal::LossChanged` | `NeedsUser` | Show the current provider-loss boundary and ask again with it. |
 | `list_delivery_unknown` | `Refusal::ListDeliveryUnknown` | `NeedsUser` | Show the counterparty and list; call `sendListAgain` only after the user confirms. |
