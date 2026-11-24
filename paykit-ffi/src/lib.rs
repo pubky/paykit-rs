@@ -23,6 +23,7 @@ mod flights;
 mod lists;
 mod method;
 mod notices;
+mod opaque;
 mod payee;
 mod payer;
 mod payments;
