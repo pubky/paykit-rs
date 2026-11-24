@@ -1094,14 +1094,19 @@ struct Turns {
 impl Turns {
     /// Keep what a step told, where it says more of an open entry than its stage does.
     fn tell(&mut self, outcome: PayOutcome) {
-        if matches!(
-            outcome,
+        match outcome {
             PayOutcome::Uncertain { .. }
-                | PayOutcome::PaidUnreported { .. }
-                | PayOutcome::RecordHeld { .. }
-                | PayOutcome::RecordDivergent { .. }
-        ) {
-            self.open.insert(outcome.attempt_id(), outcome);
+            | PayOutcome::PaidUnreported { .. }
+            | PayOutcome::RecordHeld { .. }
+            | PayOutcome::RecordDivergent { .. } => {
+                self.open.insert(outcome.attempt_id(), outcome);
+            }
+            // What the journal holds when the call ends says these: nothing to keep.
+            PayOutcome::Paid { .. }
+            | PayOutcome::Failed { .. }
+            | PayOutcome::Pending { .. }
+            | PayOutcome::PaidOutcomeUnwritten { .. }
+            | PayOutcome::Resolved { .. } => {}
         }
     }
 }
@@ -1197,12 +1202,33 @@ fn open_outcome(now: &EntryFacts, turns: &Turns) -> PayOutcome {
                 | PayOutcome::RecordHeld { .. }
                 | PayOutcome::RecordDivergent { .. }),
             ) => told.clone(),
-            _ => PayOutcome::PaidOutcomeUnwritten { attempt_id },
+            // Nothing told, or a doubt told before the proof came: paid and unwritten.
+            None
+            | Some(
+                PayOutcome::Uncertain { .. }
+                | PayOutcome::Paid { .. }
+                | PayOutcome::Failed { .. }
+                | PayOutcome::Pending { .. }
+                | PayOutcome::PaidOutcomeUnwritten { .. }
+                | PayOutcome::Resolved { .. },
+            ) => PayOutcome::PaidOutcomeUnwritten { attempt_id },
         }
     } else {
         match told {
             Some(told @ PayOutcome::Uncertain { .. }) => told.clone(),
-            _ => PayOutcome::Pending { attempt_id },
+            // Nothing told, or a wait told of a write for a proof the entry no longer
+            // holds: pending.
+            None
+            | Some(
+                PayOutcome::PaidUnreported { .. }
+                | PayOutcome::RecordHeld { .. }
+                | PayOutcome::RecordDivergent { .. }
+                | PayOutcome::Paid { .. }
+                | PayOutcome::Failed { .. }
+                | PayOutcome::Pending { .. }
+                | PayOutcome::PaidOutcomeUnwritten { .. }
+                | PayOutcome::Resolved { .. },
+            ) => PayOutcome::Pending { attempt_id },
         }
     }
 }

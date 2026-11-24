@@ -793,8 +793,16 @@ async fn resumed_under(
         });
     }
     for _ in 0..2 {
-        // An error carries no outcome and is no disagreement; a result is checked inside.
-        let _ = wallet.resume_payments().await;
+        // An error carries no outcome and is no disagreement. A result is checked against
+        // the journal inside the call; here, that it names only these two payments.
+        if let Ok(outcomes) = wallet.resume_payments().await {
+            assert!(
+                outcomes
+                    .iter()
+                    .all(|outcome| attempts.contains(&outcome.attempt_id())),
+                "{case}: {outcomes:?}"
+            );
+        }
     }
     for attempt in attempts {
         assert!(w.rail.executions(&attempt) <= 1, "{case}");
