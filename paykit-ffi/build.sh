@@ -96,6 +96,15 @@ if release == "true":
     if rc == "true":
         sequence = int(match[5] or 0) if bump == "none" else 0
         new += f"-rc{sequence + 1}"
+
+    def order(version):
+        """Major, minor and patch, then alpha before candidate before final."""
+        parts = re.fullmatch(rf"{number}\.{number}\.{number}(?:-alpha\.{number}|-rc{number})?", version)
+        stage = (0, int(parts[4])) if parts[4] else (1, int(parts[5])) if parts[5] else (2, 0)
+        return tuple(map(int, parts.group(1, 2, 3))) + stage
+
+    if order(new) <= order(old):
+        sys.exit(f"v{new} doesn't come after v{old}: add --patch or --minor to start a later version")
     if subprocess.check_output(["git", "tag", "--list", f"v{new}"]).strip():
         sys.exit(f"Tag v{new} already exists")
 
@@ -136,6 +145,18 @@ if [[ $release == true ]]; then
     sed -e "s/@TAG@/v$version/" -e "s/@CHECKSUM@/$checksum/" "$template" > "$work/Package.swift"
     grep -Fxq "let checksum = \"$checksum\"" "$work/Package.swift" || fail "Missing checksum in Package.swift"
     grep -Fxq "let tag = \"v$version\"" "$work/Package.swift" || fail "Missing tag in Package.swift"
+    # With it go the prepared Swift sources its target reads. Nothing is written there before
+    # both packages are built, so a failed build leaves them as they were.
+    sources="$ffi/dist/ios/Sources/Paykit"
+    mkdir -p "$work/ios"
+    for name in Paykit.swift WalletRedaction.swift; do
+        require_file "$sources/$name"
+        [[ $(head -n 1 "$sources/$name") == "// Prepared by paykit-ffi/prepare-bindings.py" ]] ||
+            fail "$name was not prepared by prepare-bindings.py"
+        cp "$sources/$name" "$work/ios/$name"
+    done
+    mkdir -p "$ffi/bindings/ios"
+    mv "$work/ios/Paykit.swift" "$work/ios/WalletRedaction.swift" "$ffi/bindings/ios/"
     mv "$work/Package.swift" Package.swift
 fi
 restore=false
