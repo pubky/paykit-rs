@@ -536,7 +536,12 @@ impl Paykit {
             {
                 true
             }
-            _ if self.take_expired_stop(&mut tx, event).await? => true,
+            // A `resend_request` given up settles its delivery evidence in the same commit,
+            // so an overlapping recovery request may go (Paykit spec 7.2).
+            _ if self.take_expired_stop(&mut tx, event).await? => {
+                self.take_reply_ask_duty(&mut tx, event).await?;
+                true
+            }
             _ => self.take_reply_ask_duty(&mut tx, event).await?,
         };
         if taken {

@@ -56,13 +56,19 @@ pub enum NoticeKind {
     /// Also a rejection or payer's cancellation this app recorded while sends to the payee
     /// were held ([`Paykit::reject_request`], [`Paykit::cancel_request`]) whose replay window
     /// of 30 days from its signing passed before they weren't, or one queued and never
-    /// tried that was still in the outbox past that window: it was never sent, and never
-    /// will be. Its request record still holds it, so no own app pays or accepts the
-    /// request; the payee wasn't told. `counterparty` is then the payee, and `msg_id` the
-    /// answer's. The same notice tells of such an answer whose request record, read and not
-    /// paused as divergent, no longer holds it nor any stop, as after a provider loss whose
-    /// confirmed write lacks it: it was never sent, the request may be paid or accepted
-    /// again, and the user may answer it again.
+    /// tried that was still in the outbox past that window: this store never saw it
+    /// accepted, and it never sends it. So is a payment request, period details or a
+    /// subscription acceptance this app queued, never tried, still in the outbox past that
+    /// window once sends to its counterparty weren't held: its activity record still holds
+    /// it, so a subscription it accepted stays accepted (Paykit spec 8.1). The host may
+    /// conclude only that this store never saw the message accepted, not that the
+    /// counterparty never got it: after a restore, the device the backup came from may have
+    /// delivered it ("Undelivered messages"). For a held answer, its request record still
+    /// holds it, so no own app pays or accepts the request. `counterparty` is then the
+    /// payee, and `msg_id` the answer's. The same notice tells of such an answer whose
+    /// request record, read and not paused as divergent, no longer holds it nor any stop,
+    /// as after a provider loss whose confirmed write lacks it: this store never sent it,
+    /// the request may be paid or accepted again, and the user may answer it again.
     MessageGivenUp,
     /// Ordinary placement expired, but the wallet retained a hold on this Allowance
     /// because the signed message could still establish a conflict.
@@ -401,6 +407,10 @@ pub(crate) enum GivenUpOrigin {
     /// were held (`ha/`) or held in the outbox (`qs/`), passed its replay window unsent, or
     /// was lost with a write of its request record that holds neither it nor any stop.
     HeldAnswer,
+    /// This app's own payment request, period details or subscription acceptance, held in
+    /// the outbox while sends to its counterparty were held (`qs/`), passed its replay
+    /// window unsent; its activity record still holds it.
+    HeldSend,
     /// A received message whose entry was held unprocessed while the record it goes into
     /// couldn't be read, past its 30 days.
     HeldUnread,
