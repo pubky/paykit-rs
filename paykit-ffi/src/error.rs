@@ -170,8 +170,9 @@ impl WalletFailure {
     pub fn settlement_bucket(&self) -> Option<u16> {
         self.settlement_bucket
     }
-    /// For `settlement_warning_unsaved`, what became of the bucket's warning in the store:
-    /// not saved, or saved or not, unknown. `None` for every other code.
+    /// For `settlement_warning_unsaved`, what this call did to the bucket's warning in the
+    /// store: wrote none, or can't tell the outcome of its lookup or its write. `None` for
+    /// every other code.
     pub fn settlement_warning_outcome(&self) -> Option<SettlementWarningOutcome> {
         self.settlement_warning
     }
@@ -666,9 +667,12 @@ impl From<PaykitError> for WalletError {
 /// (`settlement_warning_unsaved`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum SettlementWarningOutcome {
-    /// The warning wasn't saved, or its status couldn't be read: nothing of it was applied.
+    /// This call wrote no warning. When it was the lookup of an earlier warning that failed,
+    /// whether one is saved already is unverified: the host shows the bucket's warning if it
+    /// has yet to, either way.
     Failed,
-    /// The store can't tell whether the warning was saved: it may already be.
+    /// The store can't tell the outcome of this call's lookup or write of the warning: it may
+    /// be saved, by this call or an earlier one.
     OutcomeUnknown,
 }
 
