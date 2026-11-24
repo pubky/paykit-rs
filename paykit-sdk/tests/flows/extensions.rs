@@ -127,7 +127,10 @@ async fn test_extensions_registered_kind_kept_until_taken() {
 }
 
 #[tokio::test]
-async fn test_extensions_payer_receives_after_the_unblock_floor_can_be_checked() {
+async fn test_extensions_payer_receives_while_the_unblock_floor_cannot_be_checked() {
+    // An extension message carries no payment semantics and isn't a one-time request, so it
+    // never waits for the raise of its sender's unblock (Paykit spec 8.1; Paykit wire 5.6,
+    // Raising): it is taken while the owed unblocks can't be read.
     let w = World::new();
     let lists = Arc::new(ListsStore::default());
     let mut payer = sender_on(&w, handling(), lists.clone()).await;
@@ -142,9 +145,6 @@ async fn test_extensions_payer_receives_after_the_unblock_floor_can_be_checked()
     // Isolate delivery from the SDK's after-read work on the same floor.
     lists.pending_unblocks_unreadable(true);
     payer.app_mut().receive(None).await.unwrap();
-    assert!(payer.extension_messages().await.unwrap().is_empty());
-    lists.pending_unblocks_unreadable(false);
-    payer.receive(None).await.unwrap();
     let kept = payer.extension_messages().await.unwrap();
     assert_eq!(kept.len(), 1);
     assert_eq!(kept[0].msg_id, id);
@@ -582,7 +582,7 @@ async fn test_extensions_restored_sender_waits_for_its_first_feed_read() {
     )
     .await
     .unwrap();
-    let before = restored.app().queued_messages("paykit").await.unwrap();
+    let before = restored.queued_in_delivery().await.unwrap();
     reads.then(w.alice_id(), 0, true);
     let error = restored
         .send_extension(w.bob_id(), &offer(), Vec::new(), body(1))
@@ -592,10 +592,7 @@ async fn test_extensions_restored_sender_waits_for_its_first_feed_read() {
         error.refusal(),
         Some(Refusal::IdentityUnavailable(_))
     ));
-    assert_eq!(
-        restored.app().queued_messages("paykit").await.unwrap(),
-        before
-    );
+    assert_eq!(restored.queued_in_delivery().await.unwrap(), before);
     shop.receive(None).await.unwrap();
     assert!(shop.extension_messages().await.unwrap().is_empty());
 
@@ -720,7 +717,7 @@ async fn test_extensions_send_requires_the_extension_scope_and_contacts() {
         (wallet, "paykit_ext:paykit-cap"),
         (extension, "paykit_contacts"),
     ] {
-        let before = app.app().queued_messages("paykit").await.unwrap();
+        let before = app.queued_in_delivery().await.unwrap();
         let refused = app
             .send_extension(w.bob_id(), &offer(), Vec::new(), body(1))
             .await
@@ -729,7 +726,7 @@ async fn test_extensions_send_requires_the_extension_scope_and_contacts() {
             matches!(refused.refusal(), Some(Refusal::ScopeMissing(scope)) if scope == missing),
             "{refused:?}"
         );
-        assert_eq!(app.app().queued_messages("paykit").await.unwrap(), before);
+        assert_eq!(app.queued_in_delivery().await.unwrap(), before);
     }
     shop.receive(None).await.unwrap();
     assert!(shop.extension_messages().await.unwrap().is_empty());
@@ -753,8 +750,7 @@ async fn test_extensions_queued_delivery_checks_the_block_and_the_current_certif
         .unwrap();
     async fn eligible(wallet: &Paykit, id: &str) -> bool {
         wallet
-            .app()
-            .queued_messages("paykit")
+            .queued_in_delivery()
             .await
             .unwrap()
             .into_iter()

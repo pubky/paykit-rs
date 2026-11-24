@@ -390,8 +390,11 @@ async fn test_conversion_payee_credits_no_priced_payment_of_another_amount() {
 /// The world's rail declared idempotent, so a resume repeats a dispatch left in flight.
 fn idempotent(w: &World) {
     w.rail.set_declaration(
-        paykit_sdk::RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
-            .with_idempotent(true),
+        paykit_sdk::RailDeclaration::new(
+            paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
+            paykit_sdk::rail::FAKE_PAYMENT_TIME_TOLERANCE_MS,
+        )
+        .with_idempotent(true),
     );
 }
 
@@ -677,7 +680,7 @@ async fn test_conversion_unusable_list_endpoints_beside_an_expired_list_ask_for_
         .outcome
         .unwrap_err();
     assert!(
-        matches!(refused.refusal(), Some(Refusal::WaitingForList)),
+        matches!(refused.refusal(), Some(Refusal::WaitingForList { .. })),
         "{refused:?}"
     );
     // Each app whose list is held is asked for its current one.
@@ -746,7 +749,7 @@ async fn test_conversion_unusable_list_endpoints_beside_a_used_up_list_ask_for_i
         .outcome
         .unwrap_err();
     assert!(
-        matches!(refused.refusal(), Some(Refusal::WaitingForList)),
+        matches!(refused.refusal(), Some(Refusal::WaitingForList { .. })),
         "{refused:?}"
     );
     assert!(list_asks(&wallet, &w.bob_id()).await > asked);

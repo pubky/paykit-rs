@@ -489,7 +489,36 @@ BackupRefusal from app::BackupRefusal {
     /// The restore's one commit wouldn't fit the store's value or batch size: the layer, or the
     /// entries stored locally and the processed pairs it carries, are too large for now.
     TooLarge,
+    /// The restore's one commit wouldn't fit beside the duty events the protocols haven't
+    /// acknowledged, which the backup carries: acknowledge the duty events acted on, then
+    /// take the backup again.
+    DutiesTooLarge {
+        /// The duty events the backup would carry.
+        duty_events: u64,
+    },
 }
+}
+
+/// What a restored backup left out of its lists because they didn't fit beside the rest
+/// (Switch spec 7): its kept peers and reply grants first, and its deny entries only if
+/// those don't fit either.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum ListsLeftOut {
+    /// The backup carried its lists whole; also at a provider loss.
+    Nothing,
+    /// The backup carried its deny entries alone.
+    KeptAndReplies,
+    /// The backup carried no lists.
+    Everything,
+}
+impl From<app::ListsLeftOut> for ListsLeftOut {
+    fn from(value: app::ListsLeftOut) -> Self {
+        match value {
+            app::ListsLeftOut::Nothing => Self::Nothing,
+            app::ListsLeftOut::KeptAndReplies => Self::KeptAndReplies,
+            app::ListsLeftOut::Everything => Self::Everything,
+        }
+    }
 }
 
 /// Why a verified Switch notice holds the installation (Switch spec 12.6).
@@ -901,12 +930,26 @@ WalletEventData from app::AppEvent {
         /// The `n` of the app's current key.
         current: u64,
     },
+    /// A restore, or a provider loss whose upload contributed them, left kept peers or reply
+    /// grants unverified, or the restored backup left part of its lists out (Switch spec 7,
+    /// 12.4, 12.6): they don't admit until a list read or a change to that peer confirms
+    /// them. Show the user, who may look over the kept peers, then acknowledge it.
+    ListsUnverified {
+        /// The kept peers not yet verified.
+        kept: u64,
+        /// The reply grants not yet verified.
+        replies: u64,
+        /// Whether a provider loss's upload contributed the `kept` peers.
+        contributed: bool,
+        /// What the restored backup left out of its lists.
+        left_out: ListsLeftOut => left_out.into(),
+    },
     /// The verified service and identity inventories differ.
     ListsDiffer {
-        /// Contacts and deny list entries added back.
+        /// Kept peers and deny list entries added back.
         added: u64,
-        /// Contacts the service holds that the app never saw added; shown, not removed.
-        unverified_contacts: u64,
+        /// Kept peers the service holds that the app never saw added; shown, not removed.
+        unverified_kept_peers: u64,
         /// Invite codes withdrawn.
         withdrawn_codes: u64,
     },
@@ -921,6 +964,15 @@ WalletEventData from app::AppEvent {
     ProviderRecovered {
         /// The generation recovered at.
         generation: u64,
+    },
+    /// After a provider loss, `over` of the app's deny entries don't fit the replacement's
+    /// deny list and nothing of the list was merged: the user unblocks that many peers, and
+    /// the recovery is followed again (Switch docs/app-host-guide.md).
+    RecoveryDenyListFull {
+        /// The generation being recovered.
+        generation: u64,
+        /// How many of the app's new deny entries don't fit.
+        over: u64,
     },
     /// A newer provider change superseded this one.
     ProviderChangeSuperseded {
@@ -1042,6 +1094,9 @@ WalletEventData from app::AppEvent {
         item_hash: Vec<u8> => item_hash.into(),
         /// Why the replacement could not be written.
         reason: String,
+        /// The replacement already sent, if it was, whose outcome may not be known yet: the
+        /// kept batch tells what became of it.
+        batch_id: Option<Vec<u8>> => batch_id.map(Vec::from),
     },
     /// The app could not apply locally retained writes.
     LocalWritesRefused {

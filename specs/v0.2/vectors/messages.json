@@ -5,13 +5,13 @@
         "json": "{\"v\":1,\"kind\":\"paykit.payment_request_cancellation\",\"msg_id\":\"d2c95fff-c3f8-42fb-9f8b-94057e391fc4\",\"created_at\":\"2026-02-10T00:00:00.000Z\",\"from\":{\"identity\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"app_id\":\"brrz3m6g5rci6iqnzke44q4djc\"},\"to\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"refs\":[\"c_ys4n4gUNKJa3D13sszDTpkj8rqdB206n-gIMVuzXY\"],\"body\":{\"reason\":\"subscription_ended\"}}",
         "name": "the payee's cancellation, from paykit_request to paykit_pay",
         "recipient_cert": {
-          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI2ZnJhbzh3OXNzNWNuNTQ0cWQ2NGh5bmlrcmJyOTdhZTFzNTk0MWM3bWE1ZTFlcGlmaGd5IiwiYXBwX2lkIjoid2VqZjM3bmdyN3FpemVqM2VvaWpuM2hxNGMiLCJzaWduaW5nX2tleSI6IjM0WkdWbVZaTEVhVzlMVi1mdmRocTVMV3N0UGhsakhHYkpnY1FWU1I5RWsiLCJidW5kbGVfa2V5IjoiaVNGVk9XV2V1TjRFdU5CN2p4MEljT0NoWGRqRmFGRjBQOVlaR2VZTHNtRSIsInNjb3BlcyI6WyJwYXlraXRfcGF5IiwicGF5a2l0X2NvbnRhY3RzIl0sInBlcm1pc3Npb25zIjpbImNsYWltcy5yZWFkIiwiY2xhaW1zLndyaXRlIiwibGlzdHMucmVhZCIsImNvbnZlcnNhdGlvbi5hZGQiXSwiaXNzdWVkX2F0IjoiMjAyNS0xMi0wMVQwMDowMDowMC4wMDBaIiwiZXhwaXJlc19hdCI6IjIwMjYtMTItMDFUMDA6MDA6MDAuMDAwWiJ9",
-          "sig": "gLO1fw8OQWFvHtDoSMGcfnFw5sSuWhcEv9wOjOLWQ-72mKPQQq0RQPIeHAvvxcFto2HpNOhzNgYyFUv6urCLCg"
+          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI2ZnJhbzh3OXNzNWNuNTQ0cWQ2NGh5bmlrcmJyOTdhZTFzNTk0MWM3bWE1ZTFlcGlmaGd5IiwiYXBwX2lkIjoid2VqZjM3bmdyN3FpemVqM2VvaWpuM2hxNGMiLCJzaWduaW5nX2tleSI6IjM0WkdWbVZaTEVhVzlMVi1mdmRocTVMV3N0UGhsakhHYkpnY1FWU1I5RWsiLCJidW5kbGVfa2V5IjoiaVNGVk9XV2V1TjRFdU5CN2p4MEljT0NoWGRqRmFGRjBQOVlaR2VZTHNtRSIsInNjb3BlcyI6WyJwYXlraXRfcGF5IiwicGF5a2l0X2NvbnRhY3RzIl0sInBlcm1pc3Npb25zIjpbImNsYWltcy5yZWFkIiwiY2xhaW1zLndyaXRlIiwibGlzdHMucmVhZCIsInJlcGx5LmFkZCJdLCJpc3N1ZWRfYXQiOiIyMDI1LTEyLTAxVDAwOjAwOjAwLjAwMFoiLCJleHBpcmVzX2F0IjoiMjAyNi0xMi0wMVQwMDowMDowMC4wMDBaIn0",
+          "sig": "Ei1zgc28rZgJHumzmiK2WaEABuyTgSTUzD7VIBkApRtllGOZhOoqUXfwn9izuVu9ClUKlKPn0Igqj3QX9K4WBA"
         },
         "sender_app": "brrz3m6g5rci6iqnzke44q4djc",
         "sender_cert": {
-          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI3cDRmbjQ0cW9zaGN3Z2ZuZHo1Z3J0N2Z5eXoxZXljcXlkdXhkcWU4bzU4b2YxYnl6b2RvIiwiYXBwX2lkIjoiYnJyejNtNmc1cmNpNmlxbnprZTQ0cTRkamMiLCJzaWduaW5nX2tleSI6IkQ5dlhoeU9pNzZCc1N1UHNjcWozdFU4dF9pNXJjUmtkT2txUHlNeTFXV00iLCJidW5kbGVfa2V5IjoiYjZRUWd1N1RENmdiMHhzY3B3S0Q4SEJndmZaS1ZsbzdsRUs3TUEwQjRIMCIsInNjb3BlcyI6WyJwYXlraXRfcmVxdWVzdCIsInBheWtpdF9zZXR0bGVtZW50cyIsInBheWtpdF9jb250YWN0cyJdLCJwZXJtaXNzaW9ucyI6WyJsaXN0cy5yZWFkIiwiY29udmVyc2F0aW9uLmFkZCJdLCJpc3N1ZWRfYXQiOiIyMDI1LTEyLTAxVDAwOjAwOjAwLjAwMFoiLCJleHBpcmVzX2F0IjoiMjAyNi0xMi0wMVQwMDowMDowMC4wMDBaIn0",
-          "sig": "juYBfd9grUVWde-QAIyxN5eeFYRBs4eaIr_zSHV7vjMG1OjUvYcCJeLecW8i0gM4g9CIL5c78qCyqvEgu0oGDQ"
+          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI3cDRmbjQ0cW9zaGN3Z2ZuZHo1Z3J0N2Z5eXoxZXljcXlkdXhkcWU4bzU4b2YxYnl6b2RvIiwiYXBwX2lkIjoiYnJyejNtNmc1cmNpNmlxbnprZTQ0cTRkamMiLCJzaWduaW5nX2tleSI6IkQ5dlhoeU9pNzZCc1N1UHNjcWozdFU4dF9pNXJjUmtkT2txUHlNeTFXV00iLCJidW5kbGVfa2V5IjoiYjZRUWd1N1RENmdiMHhzY3B3S0Q4SEJndmZaS1ZsbzdsRUs3TUEwQjRIMCIsInNjb3BlcyI6WyJwYXlraXRfcmVxdWVzdCIsInBheWtpdF9zZXR0bGVtZW50cyIsInBheWtpdF9jb250YWN0cyJdLCJwZXJtaXNzaW9ucyI6WyJsaXN0cy5yZWFkIiwicmVwbHkuYWRkIl0sImlzc3VlZF9hdCI6IjIwMjUtMTItMDFUMDA6MDA6MDAuMDAwWiIsImV4cGlyZXNfYXQiOiIyMDI2LTEyLTAxVDAwOjAwOjAwLjAwMFoifQ",
+          "sig": "0kIY6HpTlKXI59Vj99pDfEYlPeYe3ST3Y3n5BjionX4c7oSRms0HuNITPMyrh17FzDToc6zoNahv3JUQRQNuAg"
         },
         "signature": "0prmCC_v8TQJSZVgtpg-MjWqP4CnoVOB7ISYxev5QMlX6w93x0LaicnlzExtUk7Q5uFGghieycuSsGeBmdcdCg"
       },
@@ -19,13 +19,13 @@
         "json": "{\"v\":1,\"kind\":\"paykit.payment_request_cancellation\",\"msg_id\":\"d2c95fff-c3f8-42fb-9f8b-94057e391fc4\",\"created_at\":\"2026-02-10T00:00:00.000Z\",\"from\":{\"identity\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"app_id\":\"brrz3m6g5rci6iqnzke44q4djc\"},\"to\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"refs\":[\"c_ys4n4gUNKJa3D13sszDTpkj8rqdB206n-gIMVuzXY\"],\"body\":{\"reason\":\"subscription_ended\"}}",
         "name": "the payer's cancellation, from paykit_pay to paykit_request",
         "recipient_cert": {
-          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI2ZnJhbzh3OXNzNWNuNTQ0cWQ2NGh5bmlrcmJyOTdhZTFzNTk0MWM3bWE1ZTFlcGlmaGd5IiwiYXBwX2lkIjoid2VqZjM3bmdyN3FpemVqM2VvaWpuM2hxNGMiLCJzaWduaW5nX2tleSI6IjM0WkdWbVZaTEVhVzlMVi1mdmRocTVMV3N0UGhsakhHYkpnY1FWU1I5RWsiLCJidW5kbGVfa2V5IjoiaVNGVk9XV2V1TjRFdU5CN2p4MEljT0NoWGRqRmFGRjBQOVlaR2VZTHNtRSIsInNjb3BlcyI6WyJwYXlraXRfcmVxdWVzdCIsInBheWtpdF9zZXR0bGVtZW50cyIsInBheWtpdF9jb250YWN0cyJdLCJwZXJtaXNzaW9ucyI6WyJsaXN0cy5yZWFkIiwiY29udmVyc2F0aW9uLmFkZCJdLCJpc3N1ZWRfYXQiOiIyMDI1LTEyLTAxVDAwOjAwOjAwLjAwMFoiLCJleHBpcmVzX2F0IjoiMjAyNi0xMi0wMVQwMDowMDowMC4wMDBaIn0",
-          "sig": "fTf6nCN1IWvQ1lFcXROl1Jm2Q2T4GDZhcVC8ydqC0TXJ0LfWeIfc63vOjOhZ5jXLh5txVhcOuZGZkhmqyk6fAQ"
+          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI2ZnJhbzh3OXNzNWNuNTQ0cWQ2NGh5bmlrcmJyOTdhZTFzNTk0MWM3bWE1ZTFlcGlmaGd5IiwiYXBwX2lkIjoid2VqZjM3bmdyN3FpemVqM2VvaWpuM2hxNGMiLCJzaWduaW5nX2tleSI6IjM0WkdWbVZaTEVhVzlMVi1mdmRocTVMV3N0UGhsakhHYkpnY1FWU1I5RWsiLCJidW5kbGVfa2V5IjoiaVNGVk9XV2V1TjRFdU5CN2p4MEljT0NoWGRqRmFGRjBQOVlaR2VZTHNtRSIsInNjb3BlcyI6WyJwYXlraXRfcmVxdWVzdCIsInBheWtpdF9zZXR0bGVtZW50cyIsInBheWtpdF9jb250YWN0cyJdLCJwZXJtaXNzaW9ucyI6WyJsaXN0cy5yZWFkIiwicmVwbHkuYWRkIl0sImlzc3VlZF9hdCI6IjIwMjUtMTItMDFUMDA6MDA6MDAuMDAwWiIsImV4cGlyZXNfYXQiOiIyMDI2LTEyLTAxVDAwOjAwOjAwLjAwMFoifQ",
+          "sig": "3zpphm6RfIYrJepvzZX26xpWt75crvKZwVPqKyn6DpBkufO1QawY8bufRRcM3pnlF_R_t7IxgZiQQ8KrBOrfBQ"
         },
         "sender_app": "brrz3m6g5rci6iqnzke44q4djc",
         "sender_cert": {
-          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI3cDRmbjQ0cW9zaGN3Z2ZuZHo1Z3J0N2Z5eXoxZXljcXlkdXhkcWU4bzU4b2YxYnl6b2RvIiwiYXBwX2lkIjoiYnJyejNtNmc1cmNpNmlxbnprZTQ0cTRkamMiLCJzaWduaW5nX2tleSI6IkQ5dlhoeU9pNzZCc1N1UHNjcWozdFU4dF9pNXJjUmtkT2txUHlNeTFXV00iLCJidW5kbGVfa2V5IjoiYjZRUWd1N1RENmdiMHhzY3B3S0Q4SEJndmZaS1ZsbzdsRUs3TUEwQjRIMCIsInNjb3BlcyI6WyJwYXlraXRfcGF5IiwicGF5a2l0X2NvbnRhY3RzIl0sInBlcm1pc3Npb25zIjpbImNsYWltcy5yZWFkIiwiY2xhaW1zLndyaXRlIiwibGlzdHMucmVhZCIsImNvbnZlcnNhdGlvbi5hZGQiXSwiaXNzdWVkX2F0IjoiMjAyNS0xMi0wMVQwMDowMDowMC4wMDBaIiwiZXhwaXJlc19hdCI6IjIwMjYtMTItMDFUMDA6MDA6MDAuMDAwWiJ9",
-          "sig": "nyV_NIkej_6b7-cgAAlvJWrUZyOjgjpno6zXuRPN5D_LnIuvpiEbPhmDODsXW9QQLcossaTuLyGiwfgrpm4sDA"
+          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI3cDRmbjQ0cW9zaGN3Z2ZuZHo1Z3J0N2Z5eXoxZXljcXlkdXhkcWU4bzU4b2YxYnl6b2RvIiwiYXBwX2lkIjoiYnJyejNtNmc1cmNpNmlxbnprZTQ0cTRkamMiLCJzaWduaW5nX2tleSI6IkQ5dlhoeU9pNzZCc1N1UHNjcWozdFU4dF9pNXJjUmtkT2txUHlNeTFXV00iLCJidW5kbGVfa2V5IjoiYjZRUWd1N1RENmdiMHhzY3B3S0Q4SEJndmZaS1ZsbzdsRUs3TUEwQjRIMCIsInNjb3BlcyI6WyJwYXlraXRfcGF5IiwicGF5a2l0X2NvbnRhY3RzIl0sInBlcm1pc3Npb25zIjpbImNsYWltcy5yZWFkIiwiY2xhaW1zLndyaXRlIiwibGlzdHMucmVhZCIsInJlcGx5LmFkZCJdLCJpc3N1ZWRfYXQiOiIyMDI1LTEyLTAxVDAwOjAwOjAwLjAwMFoiLCJleHBpcmVzX2F0IjoiMjAyNi0xMi0wMVQwMDowMDowMC4wMDBaIn0",
+          "sig": "LPq89NInmeq2PkviXsgmidPpyNVaAsAo4I2WqviY_vFCIFVRxUB5nXGk8aBJVVGjsj31xsDm_wt2Jg9oN_xLAg"
         },
         "signature": "0prmCC_v8TQJSZVgtpg-MjWqP4CnoVOB7ISYxev5QMlX6w93x0LaicnlzExtUk7Q5uFGghieycuSsGeBmdcdCg"
       }
@@ -37,13 +37,13 @@
         "name": "a cancellation from paykit_pay to paykit_pay",
         "reason": "invalid: a cancellation's recipient doesn't hold the other role than its sender",
         "recipient_cert": {
-          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI2ZnJhbzh3OXNzNWNuNTQ0cWQ2NGh5bmlrcmJyOTdhZTFzNTk0MWM3bWE1ZTFlcGlmaGd5IiwiYXBwX2lkIjoid2VqZjM3bmdyN3FpemVqM2VvaWpuM2hxNGMiLCJzaWduaW5nX2tleSI6IjM0WkdWbVZaTEVhVzlMVi1mdmRocTVMV3N0UGhsakhHYkpnY1FWU1I5RWsiLCJidW5kbGVfa2V5IjoiaVNGVk9XV2V1TjRFdU5CN2p4MEljT0NoWGRqRmFGRjBQOVlaR2VZTHNtRSIsInNjb3BlcyI6WyJwYXlraXRfcGF5IiwicGF5a2l0X2NvbnRhY3RzIl0sInBlcm1pc3Npb25zIjpbImNsYWltcy5yZWFkIiwiY2xhaW1zLndyaXRlIiwibGlzdHMucmVhZCIsImNvbnZlcnNhdGlvbi5hZGQiXSwiaXNzdWVkX2F0IjoiMjAyNS0xMi0wMVQwMDowMDowMC4wMDBaIiwiZXhwaXJlc19hdCI6IjIwMjYtMTItMDFUMDA6MDA6MDAuMDAwWiJ9",
-          "sig": "gLO1fw8OQWFvHtDoSMGcfnFw5sSuWhcEv9wOjOLWQ-72mKPQQq0RQPIeHAvvxcFto2HpNOhzNgYyFUv6urCLCg"
+          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI2ZnJhbzh3OXNzNWNuNTQ0cWQ2NGh5bmlrcmJyOTdhZTFzNTk0MWM3bWE1ZTFlcGlmaGd5IiwiYXBwX2lkIjoid2VqZjM3bmdyN3FpemVqM2VvaWpuM2hxNGMiLCJzaWduaW5nX2tleSI6IjM0WkdWbVZaTEVhVzlMVi1mdmRocTVMV3N0UGhsakhHYkpnY1FWU1I5RWsiLCJidW5kbGVfa2V5IjoiaVNGVk9XV2V1TjRFdU5CN2p4MEljT0NoWGRqRmFGRjBQOVlaR2VZTHNtRSIsInNjb3BlcyI6WyJwYXlraXRfcGF5IiwicGF5a2l0X2NvbnRhY3RzIl0sInBlcm1pc3Npb25zIjpbImNsYWltcy5yZWFkIiwiY2xhaW1zLndyaXRlIiwibGlzdHMucmVhZCIsInJlcGx5LmFkZCJdLCJpc3N1ZWRfYXQiOiIyMDI1LTEyLTAxVDAwOjAwOjAwLjAwMFoiLCJleHBpcmVzX2F0IjoiMjAyNi0xMi0wMVQwMDowMDowMC4wMDBaIn0",
+          "sig": "Ei1zgc28rZgJHumzmiK2WaEABuyTgSTUzD7VIBkApRtllGOZhOoqUXfwn9izuVu9ClUKlKPn0Igqj3QX9K4WBA"
         },
         "sender_app": "brrz3m6g5rci6iqnzke44q4djc",
         "sender_cert": {
-          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI3cDRmbjQ0cW9zaGN3Z2ZuZHo1Z3J0N2Z5eXoxZXljcXlkdXhkcWU4bzU4b2YxYnl6b2RvIiwiYXBwX2lkIjoiYnJyejNtNmc1cmNpNmlxbnprZTQ0cTRkamMiLCJzaWduaW5nX2tleSI6IkQ5dlhoeU9pNzZCc1N1UHNjcWozdFU4dF9pNXJjUmtkT2txUHlNeTFXV00iLCJidW5kbGVfa2V5IjoiYjZRUWd1N1RENmdiMHhzY3B3S0Q4SEJndmZaS1ZsbzdsRUs3TUEwQjRIMCIsInNjb3BlcyI6WyJwYXlraXRfcGF5IiwicGF5a2l0X2NvbnRhY3RzIl0sInBlcm1pc3Npb25zIjpbImNsYWltcy5yZWFkIiwiY2xhaW1zLndyaXRlIiwibGlzdHMucmVhZCIsImNvbnZlcnNhdGlvbi5hZGQiXSwiaXNzdWVkX2F0IjoiMjAyNS0xMi0wMVQwMDowMDowMC4wMDBaIiwiZXhwaXJlc19hdCI6IjIwMjYtMTItMDFUMDA6MDA6MDAuMDAwWiJ9",
-          "sig": "nyV_NIkej_6b7-cgAAlvJWrUZyOjgjpno6zXuRPN5D_LnIuvpiEbPhmDODsXW9QQLcossaTuLyGiwfgrpm4sDA"
+          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI3cDRmbjQ0cW9zaGN3Z2ZuZHo1Z3J0N2Z5eXoxZXljcXlkdXhkcWU4bzU4b2YxYnl6b2RvIiwiYXBwX2lkIjoiYnJyejNtNmc1cmNpNmlxbnprZTQ0cTRkamMiLCJzaWduaW5nX2tleSI6IkQ5dlhoeU9pNzZCc1N1UHNjcWozdFU4dF9pNXJjUmtkT2txUHlNeTFXV00iLCJidW5kbGVfa2V5IjoiYjZRUWd1N1RENmdiMHhzY3B3S0Q4SEJndmZaS1ZsbzdsRUs3TUEwQjRIMCIsInNjb3BlcyI6WyJwYXlraXRfcGF5IiwicGF5a2l0X2NvbnRhY3RzIl0sInBlcm1pc3Npb25zIjpbImNsYWltcy5yZWFkIiwiY2xhaW1zLndyaXRlIiwibGlzdHMucmVhZCIsInJlcGx5LmFkZCJdLCJpc3N1ZWRfYXQiOiIyMDI1LTEyLTAxVDAwOjAwOjAwLjAwMFoiLCJleHBpcmVzX2F0IjoiMjAyNi0xMi0wMVQwMDowMDowMC4wMDBaIn0",
+          "sig": "LPq89NInmeq2PkviXsgmidPpyNVaAsAo4I2WqviY_vFCIFVRxUB5nXGk8aBJVVGjsj31xsDm_wt2Jg9oN_xLAg"
         },
         "signature": "0prmCC_v8TQJSZVgtpg-MjWqP4CnoVOB7ISYxev5QMlX6w93x0LaicnlzExtUk7Q5uFGghieycuSsGeBmdcdCg"
       },
@@ -52,13 +52,13 @@
         "name": "a cancellation from paykit_request to paykit_request",
         "reason": "invalid: a cancellation's recipient doesn't hold the other role than its sender",
         "recipient_cert": {
-          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI2ZnJhbzh3OXNzNWNuNTQ0cWQ2NGh5bmlrcmJyOTdhZTFzNTk0MWM3bWE1ZTFlcGlmaGd5IiwiYXBwX2lkIjoid2VqZjM3bmdyN3FpemVqM2VvaWpuM2hxNGMiLCJzaWduaW5nX2tleSI6IjM0WkdWbVZaTEVhVzlMVi1mdmRocTVMV3N0UGhsakhHYkpnY1FWU1I5RWsiLCJidW5kbGVfa2V5IjoiaVNGVk9XV2V1TjRFdU5CN2p4MEljT0NoWGRqRmFGRjBQOVlaR2VZTHNtRSIsInNjb3BlcyI6WyJwYXlraXRfcmVxdWVzdCIsInBheWtpdF9zZXR0bGVtZW50cyIsInBheWtpdF9jb250YWN0cyJdLCJwZXJtaXNzaW9ucyI6WyJsaXN0cy5yZWFkIiwiY29udmVyc2F0aW9uLmFkZCJdLCJpc3N1ZWRfYXQiOiIyMDI1LTEyLTAxVDAwOjAwOjAwLjAwMFoiLCJleHBpcmVzX2F0IjoiMjAyNi0xMi0wMVQwMDowMDowMC4wMDBaIn0",
-          "sig": "fTf6nCN1IWvQ1lFcXROl1Jm2Q2T4GDZhcVC8ydqC0TXJ0LfWeIfc63vOjOhZ5jXLh5txVhcOuZGZkhmqyk6fAQ"
+          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI2ZnJhbzh3OXNzNWNuNTQ0cWQ2NGh5bmlrcmJyOTdhZTFzNTk0MWM3bWE1ZTFlcGlmaGd5IiwiYXBwX2lkIjoid2VqZjM3bmdyN3FpemVqM2VvaWpuM2hxNGMiLCJzaWduaW5nX2tleSI6IjM0WkdWbVZaTEVhVzlMVi1mdmRocTVMV3N0UGhsakhHYkpnY1FWU1I5RWsiLCJidW5kbGVfa2V5IjoiaVNGVk9XV2V1TjRFdU5CN2p4MEljT0NoWGRqRmFGRjBQOVlaR2VZTHNtRSIsInNjb3BlcyI6WyJwYXlraXRfcmVxdWVzdCIsInBheWtpdF9zZXR0bGVtZW50cyIsInBheWtpdF9jb250YWN0cyJdLCJwZXJtaXNzaW9ucyI6WyJsaXN0cy5yZWFkIiwicmVwbHkuYWRkIl0sImlzc3VlZF9hdCI6IjIwMjUtMTItMDFUMDA6MDA6MDAuMDAwWiIsImV4cGlyZXNfYXQiOiIyMDI2LTEyLTAxVDAwOjAwOjAwLjAwMFoifQ",
+          "sig": "3zpphm6RfIYrJepvzZX26xpWt75crvKZwVPqKyn6DpBkufO1QawY8bufRRcM3pnlF_R_t7IxgZiQQ8KrBOrfBQ"
         },
         "sender_app": "brrz3m6g5rci6iqnzke44q4djc",
         "sender_cert": {
-          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI3cDRmbjQ0cW9zaGN3Z2ZuZHo1Z3J0N2Z5eXoxZXljcXlkdXhkcWU4bzU4b2YxYnl6b2RvIiwiYXBwX2lkIjoiYnJyejNtNmc1cmNpNmlxbnprZTQ0cTRkamMiLCJzaWduaW5nX2tleSI6IkQ5dlhoeU9pNzZCc1N1UHNjcWozdFU4dF9pNXJjUmtkT2txUHlNeTFXV00iLCJidW5kbGVfa2V5IjoiYjZRUWd1N1RENmdiMHhzY3B3S0Q4SEJndmZaS1ZsbzdsRUs3TUEwQjRIMCIsInNjb3BlcyI6WyJwYXlraXRfcmVxdWVzdCIsInBheWtpdF9zZXR0bGVtZW50cyIsInBheWtpdF9jb250YWN0cyJdLCJwZXJtaXNzaW9ucyI6WyJsaXN0cy5yZWFkIiwiY29udmVyc2F0aW9uLmFkZCJdLCJpc3N1ZWRfYXQiOiIyMDI1LTEyLTAxVDAwOjAwOjAwLjAwMFoiLCJleHBpcmVzX2F0IjoiMjAyNi0xMi0wMVQwMDowMDowMC4wMDBaIn0",
-          "sig": "juYBfd9grUVWde-QAIyxN5eeFYRBs4eaIr_zSHV7vjMG1OjUvYcCJeLecW8i0gM4g9CIL5c78qCyqvEgu0oGDQ"
+          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI3cDRmbjQ0cW9zaGN3Z2ZuZHo1Z3J0N2Z5eXoxZXljcXlkdXhkcWU4bzU4b2YxYnl6b2RvIiwiYXBwX2lkIjoiYnJyejNtNmc1cmNpNmlxbnprZTQ0cTRkamMiLCJzaWduaW5nX2tleSI6IkQ5dlhoeU9pNzZCc1N1UHNjcWozdFU4dF9pNXJjUmtkT2txUHlNeTFXV00iLCJidW5kbGVfa2V5IjoiYjZRUWd1N1RENmdiMHhzY3B3S0Q4SEJndmZaS1ZsbzdsRUs3TUEwQjRIMCIsInNjb3BlcyI6WyJwYXlraXRfcmVxdWVzdCIsInBheWtpdF9zZXR0bGVtZW50cyIsInBheWtpdF9jb250YWN0cyJdLCJwZXJtaXNzaW9ucyI6WyJsaXN0cy5yZWFkIiwicmVwbHkuYWRkIl0sImlzc3VlZF9hdCI6IjIwMjUtMTItMDFUMDA6MDA6MDAuMDAwWiIsImV4cGlyZXNfYXQiOiIyMDI2LTEyLTAxVDAwOjAwOjAwLjAwMFoifQ",
+          "sig": "0kIY6HpTlKXI59Vj99pDfEYlPeYe3ST3Y3n5BjionX4c7oSRms0HuNITPMyrh17FzDToc6zoNahv3JUQRQNuAg"
         },
         "signature": "0prmCC_v8TQJSZVgtpg-MjWqP4CnoVOB7ISYxev5QMlX6w93x0LaicnlzExtUk7Q5uFGghieycuSsGeBmdcdCg"
       }
@@ -470,8 +470,8 @@
         "name": "an acceptance labelled shop1 at an app holding only paykit_request:shop2",
         "reason": "invalid: the reply's label is outside the recipient's certificate",
         "recipient_cert": {
-          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI3cDRmbjQ0cW9zaGN3Z2ZuZHo1Z3J0N2Z5eXoxZXljcXlkdXhkcWU4bzU4b2YxYnl6b2RvIiwiYXBwX2lkIjoiYnNtYjE5NDczZTFnaWhlb2l6ZnhqMTRvamEiLCJzaWduaW5nX2tleSI6InZ0Z3MzLWlyMk02eWJPRS1ETjZFUkdPMktSekU4RmRtQnpVLWJXdVFJSnMiLCJidW5kbGVfa2V5IjoiQjJZcTVuR01ENnpBQkU0ZVFsdjU3M1lfSlB3bGlybU53eFVFc0t2T2ZsdyIsInNjb3BlcyI6WyJwYXlraXRfcmVxdWVzdDpzaG9wMiIsInBheWtpdF9zZXR0bGVtZW50cyIsInBheWtpdF9jb250YWN0cyJdLCJwZXJtaXNzaW9ucyI6WyJsaXN0cy5yZWFkIiwiY29udmVyc2F0aW9uLmFkZCJdLCJpc3N1ZWRfYXQiOiIyMDI1LTEyLTAxVDAwOjAwOjAwLjAwMFoiLCJleHBpcmVzX2F0IjoiMjAyNi0xMi0wMVQwMDowMDowMC4wMDBaIn0",
-          "sig": "K8ZrXJO1X13JcCokTQqLIPJW6h8DDlyILdbCa9p4IIDKxnDaT-LC-37N2JXunzZ9Ydy7uTkyq1B3e0swrslPCw"
+          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI3cDRmbjQ0cW9zaGN3Z2ZuZHo1Z3J0N2Z5eXoxZXljcXlkdXhkcWU4bzU4b2YxYnl6b2RvIiwiYXBwX2lkIjoiYnNtYjE5NDczZTFnaWhlb2l6ZnhqMTRvamEiLCJzaWduaW5nX2tleSI6InZ0Z3MzLWlyMk02eWJPRS1ETjZFUkdPMktSekU4RmRtQnpVLWJXdVFJSnMiLCJidW5kbGVfa2V5IjoiQjJZcTVuR01ENnpBQkU0ZVFsdjU3M1lfSlB3bGlybU53eFVFc0t2T2ZsdyIsInNjb3BlcyI6WyJwYXlraXRfcmVxdWVzdDpzaG9wMiIsInBheWtpdF9zZXR0bGVtZW50cyIsInBheWtpdF9jb250YWN0cyJdLCJwZXJtaXNzaW9ucyI6WyJsaXN0cy5yZWFkIiwicmVwbHkuYWRkIl0sImlzc3VlZF9hdCI6IjIwMjUtMTItMDFUMDA6MDA6MDAuMDAwWiIsImV4cGlyZXNfYXQiOiIyMDI2LTEyLTAxVDAwOjAwOjAwLjAwMFoifQ",
+          "sig": "xOWt49ss9Lgz5LXKzNwTNZaZgaUCQJUx0HmahL1T9wcB3jAXHSSoZu_czhZPXJtTUKr3_IX9hTJMGDYTLSVBAQ"
         },
         "sender_app": "wejf37ngr7qizej3eoijn3hq4c",
         "signature": "6sLWvHEdS6N8FsPW3KKuVI3smO3120QKNs-6dRMDanFnnIGcYk31F1XqDgSIaT7o7rSQfCDm2ng1MpjOO-cJDA"
@@ -481,14 +481,14 @@
         "name": "an acceptance without a label at an app holding only paykit_request:shop1",
         "reason": "invalid: the reply's label is outside the recipient's certificate",
         "recipient_cert": {
-          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI3cDRmbjQ0cW9zaGN3Z2ZuZHo1Z3J0N2Z5eXoxZXljcXlkdXhkcWU4bzU4b2YxYnl6b2RvIiwiYXBwX2lkIjoiYnNtYjE5NDczZTFnaWhlb2l6ZnhqMTRvamEiLCJzaWduaW5nX2tleSI6InZ0Z3MzLWlyMk02eWJPRS1ETjZFUkdPMktSekU4RmRtQnpVLWJXdVFJSnMiLCJidW5kbGVfa2V5IjoiQjJZcTVuR01ENnpBQkU0ZVFsdjU3M1lfSlB3bGlybU53eFVFc0t2T2ZsdyIsInNjb3BlcyI6WyJwYXlraXRfcmVxdWVzdDpzaG9wMSIsInBheWtpdF9zZXR0bGVtZW50cyIsInBheWtpdF9jb250YWN0cyJdLCJwZXJtaXNzaW9ucyI6WyJsaXN0cy5yZWFkIiwiY29udmVyc2F0aW9uLmFkZCJdLCJpc3N1ZWRfYXQiOiIyMDI1LTEyLTAxVDAwOjAwOjAwLjAwMFoiLCJleHBpcmVzX2F0IjoiMjAyNi0xMi0wMVQwMDowMDowMC4wMDBaIn0",
-          "sig": "YYLjdLY2g8lW0mpVaD0V6LoeNhOtKELxBYB3XiVvfai2iKp3U21yzgZiguI9KSlDhK39qiO8uOaDT98iJakOCA"
+          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI3cDRmbjQ0cW9zaGN3Z2ZuZHo1Z3J0N2Z5eXoxZXljcXlkdXhkcWU4bzU4b2YxYnl6b2RvIiwiYXBwX2lkIjoiYnNtYjE5NDczZTFnaWhlb2l6ZnhqMTRvamEiLCJzaWduaW5nX2tleSI6InZ0Z3MzLWlyMk02eWJPRS1ETjZFUkdPMktSekU4RmRtQnpVLWJXdVFJSnMiLCJidW5kbGVfa2V5IjoiQjJZcTVuR01ENnpBQkU0ZVFsdjU3M1lfSlB3bGlybU53eFVFc0t2T2ZsdyIsInNjb3BlcyI6WyJwYXlraXRfcmVxdWVzdDpzaG9wMSIsInBheWtpdF9zZXR0bGVtZW50cyIsInBheWtpdF9jb250YWN0cyJdLCJwZXJtaXNzaW9ucyI6WyJsaXN0cy5yZWFkIiwicmVwbHkuYWRkIl0sImlzc3VlZF9hdCI6IjIwMjUtMTItMDFUMDA6MDA6MDAuMDAwWiIsImV4cGlyZXNfYXQiOiIyMDI2LTEyLTAxVDAwOjAwOjAwLjAwMFoifQ",
+          "sig": "XjrMCqxalWYrMtLZP2z0WJuLV6fr3zHGVqvK4o-RfvO6kXvzppmFDOTQc0RZs-XyqJogUuSJaYFfTww2KY7SAA"
         },
         "sender_app": "wejf37ngr7qizej3eoijn3hq4c",
         "signature": "0zH0ql5Vewph15FoWgvEaxyFRqI1Y_jXz3is0-5y4Zg68b_dCB3konz9JggvB7AhMPjN2Mltj6QpB6Zd7QklBg"
       }
     ],
-    "description": "Switch wire 5.1 checks 8 and 10, wire 4.1, 4.5, 4.6: payment_request messages a payer drops for their label, signed by bob's hosted app, whose certificate (documents.json certificates) holds only paykit_request:shop1, each messages.json's payment_request_labelled with its label changed; alice's acceptance with a label that isn't valid, which bob's apps drop; and alice's acceptances a payee app drops at check 8 because its certificate (recipient_cert) doesn't hold their label: messages.json's payment_request_acceptance_labelled (label shop1) at an app holding only paykit_request:shop2, the hosted certificate with scopes changed and permissions derived, and the same acceptance without its label at the hosted app, which holds only paykit_request:shop1. A payer's reply with a label needs paykit_request or paykit_request:<label> for that label at the recipient; one without needs paykit_request. reason is the prototype's wording, of the first check that refuses it."
+    "description": "Switch wire 5.1 checks 8 and 10, wire 4.1, 4.5, 4.6: payment_request messages a payer drops for their label, signed by bob's hosted app, whose certificate (documents.json certificates) holds only paykit_request:shop1, each messages.json's payment_request_labelled with its label changed; alice's acceptance with a label that isn't valid, which bob's apps drop; and alice's acceptances a payee app drops at check 8 because its certificate (recipient_cert) doesn't hold their label: messages.json's payment_request_acceptance_labelled (label shop1) at an app holding only paykit_request:shop2, the hosted certificate with scopes changed and permissions derived, and the same acceptance without its label at the hosted app, which holds only paykit_request:shop1. A payer's reply with a label needs paykit_request or paykit_request:<label> for that label at the recipient; one without needs paykit_request. reason is paykit-lib's wording, of the first check that refuses it."
   },
   "list_versions": {
     "description": "Wire 4.13: the shop's private_payment_list with its version replaced by a malformed one and signed again by the shop; every other member is the list's. A version is an object with generation and counter, each 1 through 9007199254740991. A payer drops each at check 10. reason is paykit-lib's wording.",
@@ -602,28 +602,28 @@
       "signature": "dMCkyqKlLy9Bs1Cd6O1Ms2FINV4BMeG3lWMeC-gCQ-2GKz7G_NZ5-VFbxAgUfJiMJ2MbkZijt3M4c_Wr9lHECQ"
     },
     {
-      "hash": "BDGN__ffJTDNNNyF2lkTCrRNUox5u3NGNuwKgxAhcJc",
-      "json": "{\"v\":1,\"kind\":\"paykit.payment_proof\",\"msg_id\":\"c8fc5427-bee0-47fc-87bd-9c948c32e152\",\"created_at\":\"2026-01-01T00:05:00.000Z\",\"from\":{\"identity\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"app_id\":\"wejf37ngr7qizej3eoijn3hq4c\"},\"to\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"refs\":[\"pukrdI5C7SfN7mlLheLGWRk2qzt8RTKXlXv4E1rRGKg\"],\"body\":{\"attempt_id\":\"DgCVYQKL1eyDacZvG6YhZg\",\"payment_app_id\":\"brrz3m6g5rci6iqnzke44q4djc\",\"payment_endpoint_identifier\":\"btc-lightning-bolt11\",\"proof\":{\"data\":\"8f2a5c6e0b1d4f3a9c7e2b6d0a4f8c1e3b5d7f9a2c4e6b8d0f1a3c5e7b9d2f4a\",\"type\":\"bitcoin-bolt11-preimage\"}}}",
+      "hash": "5i4nqp8KShw1uLnlx5y6UTsNNw8rNS9dt7n5OBbZieQ",
+      "json": "{\"v\":1,\"kind\":\"paykit.payment_proof\",\"msg_id\":\"c8fc5427-bee0-47fc-87bd-9c948c32e152\",\"created_at\":\"2026-01-01T00:05:00.000Z\",\"from\":{\"identity\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"app_id\":\"wejf37ngr7qizej3eoijn3hq4c\"},\"to\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"refs\":[\"pukrdI5C7SfN7mlLheLGWRk2qzt8RTKXlXv4E1rRGKg\"],\"body\":{\"attempt_id\":\"DgCVYQKL1eyDacZvG6YhZg\",\"payment_app_id\":\"brrz3m6g5rci6iqnzke44q4djc\",\"payment_endpoint_identifier\":\"btc-lightning-bolt11\",\"proof\":{\"data\":\"8f2a5c6e0b1d4f3a9c7e2b6d0a4f8c1e3b5d7f9a2c4e6b8d0f1a3c5e7b9d2f4a\",\"type\":\"example\"}}}",
       "kind": "paykit.payment_proof",
       "name": "payment_proof",
       "note": "Proof of the one-time request's attempt.",
-      "plaintext_hex": "a2125cf446275d5ba139442a91678ed3026864c6a03bcbd7db164ed439f43827c410c4919936e8d9073f92e096c55c1f173f4c439ffe70fbc984a1a20eb4e015df93e35d8238c20e99984b876cf42a0d000002687b2276223a312c226b696e64223a227061796b69742e7061796d656e745f70726f6f66222c226d73675f6964223a2263386663353432372d626565302d343766632d383762642d396339343863333265313532222c22637265617465645f6174223a22323032362d30312d30315430303a30353a30302e3030305a222c2266726f6d223a7b226964656e74697479223a22366672616f387739737335636e3534347164363468796e696b7262723937616531733539343163376d6135653165706966686779222c226170705f6964223a2277656a6633376e67723771697a656a33656f696a6e3368713463227d2c22746f223a22377034666e3434716f7368637767666e647a35677274376679797a316579637179647578647165386f35386f663162797a6f646f222c2272656673223a5b2270756b72644935433753664e376d6c4c68654c4757526b32717a743852544b586c58763445317252474b67225d2c22626f6479223a7b22617474656d70745f6964223a224467435659514b4c3165794461635a76473659685a67222c227061796d656e745f6170705f6964223a226272727a336d3667357263693669716e7a6b6534347134646a63222c227061796d656e745f656e64706f696e745f6964656e746966696572223a226274632d6c696768746e696e672d626f6c743131222c2270726f6f66223a7b2264617461223a2238663261356336653062316434663361396337653262366430613466386331653362356437663961326334653662386430663161336335653762396432663461222c2274797065223a22626974636f696e2d626f6c7431312d707265696d616765227d7d7d",
+      "plaintext_hex": "a2125cf446275d5ba139442a91678ed399a53fb8cb35b0828371ddc2925a82bbee2d605b9f5d0ef3e08276976bce21a10c01822eb80992a8cca274d9af76180dcf5a764103a3331dbabe25a6cb861804000002587b2276223a312c226b696e64223a227061796b69742e7061796d656e745f70726f6f66222c226d73675f6964223a2263386663353432372d626565302d343766632d383762642d396339343863333265313532222c22637265617465645f6174223a22323032362d30312d30315430303a30353a30302e3030305a222c2266726f6d223a7b226964656e74697479223a22366672616f387739737335636e3534347164363468796e696b7262723937616531733539343163376d6135653165706966686779222c226170705f6964223a2277656a6633376e67723771697a656a33656f696a6e3368713463227d2c22746f223a22377034666e3434716f7368637767666e647a35677274376679797a316579637179647578647165386f35386f663162797a6f646f222c2272656673223a5b2270756b72644935433753664e376d6c4c68654c4757526b32717a743852544b586c58763445317252474b67225d2c22626f6479223a7b22617474656d70745f6964223a224467435659514b4c3165794461635a76473659685a67222c227061796d656e745f6170705f6964223a226272727a336d3667357263693669716e7a6b6534347134646a63222c227061796d656e745f656e64706f696e745f6964656e746966696572223a226274632d6c696768746e696e672d626f6c743131222c2270726f6f66223a7b2264617461223a2238663261356336653062316434663361396337653262366430613466386331653362356437663961326334653662386430663161336335653762396432663461222c2274797065223a226578616d706c65227d7d7d",
       "recipient_identity": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
       "sender_app": "wejf37ngr7qizej3eoijn3hq4c",
       "sender_identity": "6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy",
-      "signature": "AmhkxqA7y9fbFk7UOfQ4J8QQxJGZNujZBz-S4JbFXB8XP0xDn_5w-8mEoaIOtOAV35PjXYI4wg6ZmEuHbPQqDQ"
+      "signature": "maU_uMs1sIKDcd3CklqCu-4tYFufXQ7z4IJ2l2vOIaEMAYIuuAmSqMyidNmvdhgNz1p2QQOjMx26viWmy4YYBA"
     },
     {
-      "hash": "cJ5DcarMfOlxXQeu4Z-crRMkXAgBr22CUagAhQ1T1fg",
-      "json": "{\"v\":1,\"kind\":\"paykit.payment_proof\",\"msg_id\":\"5aabefde-df1d-43dd-99d1-086bac038944\",\"created_at\":\"2026-02-28T00:00:00.000Z\",\"from\":{\"identity\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"app_id\":\"wejf37ngr7qizej3eoijn3hq4c\"},\"to\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"refs\":[\"c_ys4n4gUNKJa3D13sszDTpkj8rqdB206n-gIMVuzXY\",\"kM3kzLA74HW6gW84eMivgv3gCSowYHwWWlBefx5WXnU\"],\"body\":{\"attempt_id\":\"4TyjQUac-NiiIf-haaHWbA\",\"billing_period\":{\"ends_at\":\"2026-03-31T00:00:00.000Z\",\"starts_at\":\"2026-02-28T00:00:00.000Z\"},\"payment_app_id\":\"brrz3m6g5rci6iqnzke44q4djc\",\"payment_endpoint_identifier\":\"btc-lightning-bolt11\",\"proof\":{\"data\":\"0d1c2b3a\",\"type\":\"bitcoin-bolt11-preimage\"}}}",
+      "hash": "Lnlz-k-Vo77NpfSHm4Gp9oXVw8JvmbjbYhLnLSl8kfM",
+      "json": "{\"v\":1,\"kind\":\"paykit.payment_proof\",\"msg_id\":\"5aabefde-df1d-43dd-99d1-086bac038944\",\"created_at\":\"2026-02-28T00:00:00.000Z\",\"from\":{\"identity\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"app_id\":\"wejf37ngr7qizej3eoijn3hq4c\"},\"to\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"refs\":[\"c_ys4n4gUNKJa3D13sszDTpkj8rqdB206n-gIMVuzXY\",\"kM3kzLA74HW6gW84eMivgv3gCSowYHwWWlBefx5WXnU\"],\"body\":{\"attempt_id\":\"4TyjQUac-NiiIf-haaHWbA\",\"billing_period\":{\"ends_at\":\"2026-03-31T00:00:00.000Z\",\"starts_at\":\"2026-02-28T00:00:00.000Z\"},\"payment_app_id\":\"brrz3m6g5rci6iqnzke44q4djc\",\"payment_endpoint_identifier\":\"btc-lightning-bolt11\",\"proof\":{\"data\":\"0d1c2b3a\",\"type\":\"example\"}}}",
       "kind": "paykit.payment_proof",
       "name": "payment_proof_period",
       "note": "Payment of the February period by alice's wallet, in btc at the period details' rate (a manual payment: an Allowance pays only requests in its own asset); refs name the request and the period details it used.",
-      "plaintext_hex": "a2125cf446275d5ba139442a91678ed329e357585c1bdc870f0a695179af0a5b3a8c66f38d695f6ac806f1011e8266886042d971ad8d639c8835e9099c8113bf8c40f10539ac82159e03015fd7790f0b000002bd7b2276223a312c226b696e64223a227061796b69742e7061796d656e745f70726f6f66222c226d73675f6964223a2235616162656664652d646631642d343364642d393964312d303836626163303338393434222c22637265617465645f6174223a22323032362d30322d32385430303a30303a30302e3030305a222c2266726f6d223a7b226964656e74697479223a22366672616f387739737335636e3534347164363468796e696b7262723937616531733539343163376d6135653165706966686779222c226170705f6964223a2277656a6633376e67723771697a656a33656f696a6e3368713463227d2c22746f223a22377034666e3434716f7368637767666e647a35677274376679797a316579637179647578647165386f35386f663162797a6f646f222c2272656673223a5b22635f7973346e3467554e4b4a613344313373737a4454706b6a38727164423230366e2d67494d56757a5859222c226b4d336b7a4c41373448573667573834654d69766776336743536f7759487757576c426566783557586e55225d2c22626f6479223a7b22617474656d70745f6964223a223454796a515561632d4e696949662d68616148576241222c2262696c6c696e675f706572696f64223a7b22656e64735f6174223a22323032362d30332d33315430303a30303a30302e3030305a222c227374617274735f6174223a22323032362d30322d32385430303a30303a30302e3030305a227d2c227061796d656e745f6170705f6964223a226272727a336d3667357263693669716e7a6b6534347134646a63222c227061796d656e745f656e64706f696e745f6964656e746966696572223a226274632d6c696768746e696e672d626f6c743131222c2270726f6f66223a7b2264617461223a223064316332623361222c2274797065223a22626974636f696e2d626f6c7431312d707265696d616765227d7d7d",
+      "plaintext_hex": "a2125cf446275d5ba139442a91678ed321240d8d556dd3dedcb388807a141b4cc9483fe780850f21a43034684720762e34a9354d4c5c3aebe215911ee9c66bd77ff311caf38825515c6187126e880a0d000002ad7b2276223a312c226b696e64223a227061796b69742e7061796d656e745f70726f6f66222c226d73675f6964223a2235616162656664652d646631642d343364642d393964312d303836626163303338393434222c22637265617465645f6174223a22323032362d30322d32385430303a30303a30302e3030305a222c2266726f6d223a7b226964656e74697479223a22366672616f387739737335636e3534347164363468796e696b7262723937616531733539343163376d6135653165706966686779222c226170705f6964223a2277656a6633376e67723771697a656a33656f696a6e3368713463227d2c22746f223a22377034666e3434716f7368637767666e647a35677274376679797a316579637179647578647165386f35386f663162797a6f646f222c2272656673223a5b22635f7973346e3467554e4b4a613344313373737a4454706b6a38727164423230366e2d67494d56757a5859222c226b4d336b7a4c41373448573667573834654d69766776336743536f7759487757576c426566783557586e55225d2c22626f6479223a7b22617474656d70745f6964223a223454796a515561632d4e696949662d68616148576241222c2262696c6c696e675f706572696f64223a7b22656e64735f6174223a22323032362d30332d33315430303a30303a30302e3030305a222c227374617274735f6174223a22323032362d30322d32385430303a30303a30302e3030305a227d2c227061796d656e745f6170705f6964223a226272727a336d3667357263693669716e7a6b6534347134646a63222c227061796d656e745f656e64706f696e745f6964656e746966696572223a226274632d6c696768746e696e672d626f6c743131222c2270726f6f66223a7b2264617461223a223064316332623361222c2274797065223a226578616d706c65227d7d7d",
       "recipient_identity": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
       "sender_app": "wejf37ngr7qizej3eoijn3hq4c",
       "sender_identity": "6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy",
-      "signature": "KeNXWFwb3IcPCmlRea8KWzqMZvONaV9qyAbxAR6CZohgQtlxrY1jnIg16QmcgRO_jEDxBTmsghWeAwFf13kPCw"
+      "signature": "ISQNjVVt097cs4iAehQbTMlIP-eAhQ8hpDA0aEcgdi40qTVNTFw66-IVkR7pxmvXf_MRyvOIJVFcYYcSbogKDQ"
     },
     {
       "hash": "ykRhQK7khxRFTdzCz3SMBIXzXnDcMD0aWTMV7jPpT3E",
@@ -638,28 +638,28 @@
       "signature": "wcYCUkAalxE-KbQs-uafb-WUD6S0P3aUF3qNj9wBzQ4bZ9kmKkdNjD6CZg9POvA6wIaJNoJWDFUDYFk_4pe5BA"
     },
     {
-      "hash": "1ywIwYm3Jj7Sh5GgHP_rUatBFh1Oefxm2rS4fC6oEzk",
-      "json": "{\"v\":1,\"kind\":\"paykit.payment_proof\",\"msg_id\":\"53918dc4-8213-4422-8951-6b02f05883bc\",\"created_at\":\"2026-01-01T00:07:00.000Z\",\"from\":{\"identity\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"app_id\":\"wejf37ngr7qizej3eoijn3hq4c\"},\"to\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"refs\":[],\"body\":{\"amount\":{\"asset\":\"btc\",\"value\":\"0.0015\"},\"attempt_id\":\"mAFdg5_0tVNjmrgiTUZW4g\",\"list_version\":{\"counter\":12,\"generation\":1},\"payment_app_id\":\"brrz3m6g5rci6iqnzke44q4djc\",\"payment_endpoint_identifier\":\"btc-bitcoin-p2wpkh\",\"proof\":{\"txid\":\"4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b\",\"type\":\"bitcoin-txid\"}}}",
+      "hash": "p_QzUSgZi6BSiwaB_lIC-hzYibCtWAVl9h20vUgLCRE",
+      "json": "{\"v\":1,\"kind\":\"paykit.payment_proof\",\"msg_id\":\"53918dc4-8213-4422-8951-6b02f05883bc\",\"created_at\":\"2026-01-01T00:07:00.000Z\",\"from\":{\"identity\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"app_id\":\"wejf37ngr7qizej3eoijn3hq4c\"},\"to\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"refs\":[],\"body\":{\"amount\":{\"asset\":\"btc\",\"value\":\"0.0015\"},\"attempt_id\":\"mAFdg5_0tVNjmrgiTUZW4g\",\"list_version\":{\"counter\":12,\"generation\":1},\"payment_app_id\":\"brrz3m6g5rci6iqnzke44q4djc\",\"payment_endpoint_identifier\":\"btc-bitcoin-p2wpkh\",\"proof\":{\"data\":\"4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b\",\"type\":\"example\"}}}",
       "kind": "paykit.payment_proof",
       "name": "payment_proof_unrequested",
       "note": "Proof of a payment without a request, to the single-use list endpoint; no refs.",
-      "plaintext_hex": "a2125cf446275d5ba139442a91678ed310cfd8c5f0ee28c7b9d9f35648cee42237ebcf5009a5bc4f039b73f2019f36d54f73f9816b339f46a7c69292f593d05d23a7d805d8cbce594de103654dc00000000002857b2276223a312c226b696e64223a227061796b69742e7061796d656e745f70726f6f66222c226d73675f6964223a2235333931386463342d383231332d343432322d383935312d366230326630353838336263222c22637265617465645f6174223a22323032362d30312d30315430303a30373a30302e3030305a222c2266726f6d223a7b226964656e74697479223a22366672616f387739737335636e3534347164363468796e696b7262723937616531733539343163376d6135653165706966686779222c226170705f6964223a2277656a6633376e67723771697a656a33656f696a6e3368713463227d2c22746f223a22377034666e3434716f7368637767666e647a35677274376679797a316579637179647578647165386f35386f663162797a6f646f222c2272656673223a5b5d2c22626f6479223a7b22616d6f756e74223a7b226173736574223a22627463222c2276616c7565223a22302e30303135227d2c22617474656d70745f6964223a226d41466467355f3074564e6a6d72676954555a573467222c226c6973745f76657273696f6e223a7b22636f756e746572223a31322c2267656e65726174696f6e223a317d2c227061796d656e745f6170705f6964223a226272727a336d3667357263693669716e7a6b6534347134646a63222c227061796d656e745f656e64706f696e745f6964656e746966696572223a226274632d626974636f696e2d703277706b68222c2270726f6f66223a7b2274786964223a2234613565316534626161623839663361333235313861383863333162633837663631386637363637336532636337376162323132376237616664656461333362222c2274797065223a22626974636f696e2d74786964227d7d7d",
+      "plaintext_hex": "a2125cf446275d5ba139442a91678ed31dc2dd171ff8259461a64b34add0154a4579a35930e30405f00a07bf3c5a7b187620f1dc4ac3841c12be01ff7abf9658e4e2715503fbef2684b27acc7827920c000002807b2276223a312c226b696e64223a227061796b69742e7061796d656e745f70726f6f66222c226d73675f6964223a2235333931386463342d383231332d343432322d383935312d366230326630353838336263222c22637265617465645f6174223a22323032362d30312d30315430303a30373a30302e3030305a222c2266726f6d223a7b226964656e74697479223a22366672616f387739737335636e3534347164363468796e696b7262723937616531733539343163376d6135653165706966686779222c226170705f6964223a2277656a6633376e67723771697a656a33656f696a6e3368713463227d2c22746f223a22377034666e3434716f7368637767666e647a35677274376679797a316579637179647578647165386f35386f663162797a6f646f222c2272656673223a5b5d2c22626f6479223a7b22616d6f756e74223a7b226173736574223a22627463222c2276616c7565223a22302e30303135227d2c22617474656d70745f6964223a226d41466467355f3074564e6a6d72676954555a573467222c226c6973745f76657273696f6e223a7b22636f756e746572223a31322c2267656e65726174696f6e223a317d2c227061796d656e745f6170705f6964223a226272727a336d3667357263693669716e7a6b6534347134646a63222c227061796d656e745f656e64706f696e745f6964656e746966696572223a226274632d626974636f696e2d703277706b68222c2270726f6f66223a7b2264617461223a2234613565316534626161623839663361333235313861383863333162633837663631386637363637336532636337376162323132376237616664656461333362222c2274797065223a226578616d706c65227d7d7d",
       "recipient_identity": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
       "sender_app": "wejf37ngr7qizej3eoijn3hq4c",
       "sender_identity": "6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy",
-      "signature": "EM_YxfDuKMe52fNWSM7kIjfrz1AJpbxPA5tz8gGfNtVPc_mBazOfRqfGkpL1k9BdI6fYBdjLzllN4QNlTcAAAA"
+      "signature": "HcLdFx_4JZRhpks0rdAVSkV5o1kw4wQF8AoHvzxaexh2IPHcSsOEHBK-Af96v5ZY5OJxVQP77yaEsnrMeCeSDA"
     },
     {
-      "hash": "SFPCcXzzLoW1Wx6LG0jLh-HShv4xvSo_oKmSUrFxiw4",
-      "json": "{\"v\":1,\"kind\":\"paykit.payment_receipt\",\"msg_id\":\"f447883c-ff13-4876-81d6-86f54a79abd8\",\"created_at\":\"2026-01-01T00:08:00.000Z\",\"from\":{\"identity\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"app_id\":\"brrz3m6g5rci6iqnzke44q4djc\"},\"to\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"refs\":[\"BDGN__ffJTDNNNyF2lkTCrRNUox5u3NGNuwKgxAhcJc\",\"pukrdI5C7SfN7mlLheLGWRk2qzt8RTKXlXv4E1rRGKg\"],\"body\":{\"attempt_id\":\"DgCVYQKL1eyDacZvG6YhZg\"}}",
+      "hash": "nJ4LreewTCnplahyB-RvGPKGGLCkZis2MC6wfdMM-gU",
+      "json": "{\"v\":1,\"kind\":\"paykit.payment_receipt\",\"msg_id\":\"f447883c-ff13-4876-81d6-86f54a79abd8\",\"created_at\":\"2026-01-01T00:08:00.000Z\",\"from\":{\"identity\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"app_id\":\"brrz3m6g5rci6iqnzke44q4djc\"},\"to\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"refs\":[\"5i4nqp8KShw1uLnlx5y6UTsNNw8rNS9dt7n5OBbZieQ\",\"pukrdI5C7SfN7mlLheLGWRk2qzt8RTKXlXv4E1rRGKg\"],\"body\":{\"attempt_id\":\"DgCVYQKL1eyDacZvG6YhZg\"}}",
       "kind": "paykit.payment_receipt",
       "name": "payment_receipt",
       "note": "Receipt for the one-time proof; refs name the proof, then the request.",
-      "plaintext_hex": "09097cafc6d9195f55c2ba91ad3b434b1eb3b0918fce51b4f4570dbd6b5eb7124fb6822ab2f63c9682c127775d326a3aa8a0e08accc578798072e6cd8e61994aa555134e60858d25a67a65a105d64d03000001c07b2276223a312c226b696e64223a227061796b69742e7061796d656e745f72656365697074222c226d73675f6964223a2266343437383833632d666631332d343837362d383164362d383666353461373961626438222c22637265617465645f6174223a22323032362d30312d30315430303a30383a30302e3030305a222c2266726f6d223a7b226964656e74697479223a22377034666e3434716f7368637767666e647a35677274376679797a316579637179647578647165386f35386f663162797a6f646f222c226170705f6964223a226272727a336d3667357263693669716e7a6b6534347134646a63227d2c22746f223a22366672616f387739737335636e3534347164363468796e696b7262723937616531733539343163376d6135653165706966686779222c2272656673223a5b224244474e5f5f66664a54444e4e4e7946326c6b544372524e556f783575334e474e75774b67784168634a63222c2270756b72644935433753664e376d6c4c68654c4757526b32717a743852544b586c58763445317252474b67225d2c22626f6479223a7b22617474656d70745f6964223a224467435659514b4c3165794461635a76473659685a67227d7d",
+      "plaintext_hex": "09097cafc6d9195f55c2ba91ad3b434b78715c5b5d74e8f351012aff7f7299291196d48ce215b73e4983bbdb0f96524b78764ba73058eafe859aaaad238f7d89413f8e632836fac28bb7c69c5ac3210c000001c07b2276223a312c226b696e64223a227061796b69742e7061796d656e745f72656365697074222c226d73675f6964223a2266343437383833632d666631332d343837362d383164362d383666353461373961626438222c22637265617465645f6174223a22323032362d30312d30315430303a30383a30302e3030305a222c2266726f6d223a7b226964656e74697479223a22377034666e3434716f7368637767666e647a35677274376679797a316579637179647578647165386f35386f663162797a6f646f222c226170705f6964223a226272727a336d3667357263693669716e7a6b6534347134646a63227d2c22746f223a22366672616f387739737335636e3534347164363468796e696b7262723937616531733539343163376d6135653165706966686779222c2272656673223a5b223569346e7170384b53687731754c6e6c783579365554734e4e7738724e53396474376e354f42625a696551222c2270756b72644935433753664e376d6c4c68654c4757526b32717a743852544b586c58763445317252474b67225d2c22626f6479223a7b22617474656d70745f6964223a224467435659514b4c3165794461635a76473659685a67227d7d",
       "recipient_identity": "6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy",
       "sender_app": "brrz3m6g5rci6iqnzke44q4djc",
       "sender_identity": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
-      "signature": "HrOwkY_OUbT0Vw29a163Ek-2giqy9jyWgsEnd10yajqooOCKzMV4eYBy5s2OYZlKpVUTTmCFjSWmemWhBdZNAw"
+      "signature": "eHFcW1106PNRASr_f3KZKRGW1IziFbc-SYO72w-WUkt4dkunMFjq_oWaqq0jj32JQT-OYyg2-sKLt8acWsMhDA"
     },
     {
       "hash": "RS_RaGy42ac76LYyLAQcj9x34Umj8hGl9DBPM1CjQxQ",
@@ -802,8 +802,8 @@
         "recipient_app": "wejf37ngr7qizej3eoijn3hq4c",
         "sender_app": "brrz3m6g5rci6iqnzke44q4djc",
         "sender_cert": {
-          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI3cDRmbjQ0cW9zaGN3Z2ZuZHo1Z3J0N2Z5eXoxZXljcXlkdXhkcWU4bzU4b2YxYnl6b2RvIiwiYXBwX2lkIjoiYnJyejNtNmc1cmNpNmlxbnprZTQ0cTRkamMiLCJzaWduaW5nX2tleSI6IkQ5dlhoeU9pNzZCc1N1UHNjcWozdFU4dF9pNXJjUmtkT2txUHlNeTFXV00iLCJidW5kbGVfa2V5IjoiYjZRUWd1N1RENmdiMHhzY3B3S0Q4SEJndmZaS1ZsbzdsRUs3TUEwQjRIMCIsInNjb3BlcyI6WyJwYXlraXRfcmVxdWVzdCIsInBheWtpdF9zZXR0bGVtZW50cyIsInBheWtpdF9jb250YWN0cyIsImNoYXQiXSwicGVybWlzc2lvbnMiOlsibGlzdHMucmVhZCIsImxpc3RzLm1hbmFnZSIsImNvbnZlcnNhdGlvbi5hZGQiXSwiaXNzdWVkX2F0IjoiMjAyNS0xMi0wMVQwMDowMDowMC4wMDBaIiwiZXhwaXJlc19hdCI6IjIwMjYtMTItMDFUMDA6MDA6MDAuMDAwWiJ9",
-          "sig": "fgWfT-AKpoaqJeybvo7i3S1E_uoD60zOlhLBXsy8UpBJDjSA0RoBK7-Pir9ElGbtIoKFiZo1CSzE_8WfJKmNBg"
+          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI3cDRmbjQ0cW9zaGN3Z2ZuZHo1Z3J0N2Z5eXoxZXljcXlkdXhkcWU4bzU4b2YxYnl6b2RvIiwiYXBwX2lkIjoiYnJyejNtNmc1cmNpNmlxbnprZTQ0cTRkamMiLCJzaWduaW5nX2tleSI6IkQ5dlhoeU9pNzZCc1N1UHNjcWozdFU4dF9pNXJjUmtkT2txUHlNeTFXV00iLCJidW5kbGVfa2V5IjoiYjZRUWd1N1RENmdiMHhzY3B3S0Q4SEJndmZaS1ZsbzdsRUs3TUEwQjRIMCIsInNjb3BlcyI6WyJwYXlraXRfcmVxdWVzdCIsInBheWtpdF9zZXR0bGVtZW50cyIsInBheWtpdF9jb250YWN0cyIsImNoYXQiXSwicGVybWlzc2lvbnMiOlsibGlzdHMucmVhZCIsImxpc3RzLm1hbmFnZSIsInJlcGx5LmFkZCJdLCJpc3N1ZWRfYXQiOiIyMDI1LTEyLTAxVDAwOjAwOjAwLjAwMFoiLCJleHBpcmVzX2F0IjoiMjAyNi0xMi0wMVQwMDowMDowMC4wMDBaIn0",
+          "sig": "z6A5OKq7r6Q8GmHaxdlqu9gykNPJf9e21cUM7EOtuZTaShvNXVX3tCBjU0GfG2VwQ4qxLNhTvqJgFlqXGUM1Ag"
         },
         "signature": "9AI7IHiwT4Ze9m4FJmNLSlcb9gR0gjXtW9WQP--XzeWUaaVjIuTXkuBMzJNAzOIq-I_WsvGpOPsggy4Och3JCg"
       },
@@ -813,8 +813,8 @@
         "recipient_app": "wejf37ngr7qizej3eoijn3hq4c",
         "sender_app": "brrz3m6g5rci6iqnzke44q4djc",
         "sender_cert": {
-          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI3cDRmbjQ0cW9zaGN3Z2ZuZHo1Z3J0N2Z5eXoxZXljcXlkdXhkcWU4bzU4b2YxYnl6b2RvIiwiYXBwX2lkIjoiYnJyejNtNmc1cmNpNmlxbnprZTQ0cTRkamMiLCJzaWduaW5nX2tleSI6IkQ5dlhoeU9pNzZCc1N1UHNjcWozdFU4dF9pNXJjUmtkT2txUHlNeTFXV00iLCJidW5kbGVfa2V5IjoiYjZRUWd1N1RENmdiMHhzY3B3S0Q4SEJndmZaS1ZsbzdsRUs3TUEwQjRIMCIsInNjb3BlcyI6WyJwYXlraXRfcmVxdWVzdCIsInBheWtpdF9zZXR0bGVtZW50cyIsInBheWtpdF9jb250YWN0cyIsImNoYXQiXSwicGVybWlzc2lvbnMiOlsibGlzdHMucmVhZCIsImxpc3RzLm1hbmFnZSIsImNvbnZlcnNhdGlvbi5hZGQiXSwiaXNzdWVkX2F0IjoiMjAyNS0xMi0wMVQwMDowMDowMC4wMDBaIiwiZXhwaXJlc19hdCI6IjIwMjYtMTItMDFUMDA6MDA6MDAuMDAwWiJ9",
-          "sig": "fgWfT-AKpoaqJeybvo7i3S1E_uoD60zOlhLBXsy8UpBJDjSA0RoBK7-Pir9ElGbtIoKFiZo1CSzE_8WfJKmNBg"
+          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI3cDRmbjQ0cW9zaGN3Z2ZuZHo1Z3J0N2Z5eXoxZXljcXlkdXhkcWU4bzU4b2YxYnl6b2RvIiwiYXBwX2lkIjoiYnJyejNtNmc1cmNpNmlxbnprZTQ0cTRkamMiLCJzaWduaW5nX2tleSI6IkQ5dlhoeU9pNzZCc1N1UHNjcWozdFU4dF9pNXJjUmtkT2txUHlNeTFXV00iLCJidW5kbGVfa2V5IjoiYjZRUWd1N1RENmdiMHhzY3B3S0Q4SEJndmZaS1ZsbzdsRUs3TUEwQjRIMCIsInNjb3BlcyI6WyJwYXlraXRfcmVxdWVzdCIsInBheWtpdF9zZXR0bGVtZW50cyIsInBheWtpdF9jb250YWN0cyIsImNoYXQiXSwicGVybWlzc2lvbnMiOlsibGlzdHMucmVhZCIsImxpc3RzLm1hbmFnZSIsInJlcGx5LmFkZCJdLCJpc3N1ZWRfYXQiOiIyMDI1LTEyLTAxVDAwOjAwOjAwLjAwMFoiLCJleHBpcmVzX2F0IjoiMjAyNi0xMi0wMVQwMDowMDowMC4wMDBaIn0",
+          "sig": "z6A5OKq7r6Q8GmHaxdlqu9gykNPJf9e21cUM7EOtuZTaShvNXVX3tCBjU0GfG2VwQ4qxLNhTvqJgFlqXGUM1Ag"
         },
         "signature": "q_cbwc-j0Cf2jYlzasI-B1M-3rLK_ElvjVILaUNmeUXXsQy1YbeFmNcal__a6uAT3shMtAd6TPjWMxWrDmHhBw"
       }
@@ -855,8 +855,8 @@
         "request": "request_recurring",
         "sender_app": "brrz3m6g5rci6iqnzke44q4djc",
         "sender_cert": {
-          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI3cDRmbjQ0cW9zaGN3Z2ZuZHo1Z3J0N2Z5eXoxZXljcXlkdXhkcWU4bzU4b2YxYnl6b2RvIiwiYXBwX2lkIjoiYnJyejNtNmc1cmNpNmlxbnprZTQ0cTRkamMiLCJzaWduaW5nX2tleSI6IkQ5dlhoeU9pNzZCc1N1UHNjcWozdFU4dF9pNXJjUmtkT2txUHlNeTFXV00iLCJidW5kbGVfa2V5IjoiYjZRUWd1N1RENmdiMHhzY3B3S0Q4SEJndmZaS1ZsbzdsRUs3TUEwQjRIMCIsInNjb3BlcyI6WyJwYXlraXRfcmVxdWVzdCIsInBheWtpdF9zZXR0bGVtZW50cyIsInBheWtpdF9jb250YWN0cyJdLCJwZXJtaXNzaW9ucyI6WyJsaXN0cy5yZWFkIiwiY29udmVyc2F0aW9uLmFkZCJdLCJpc3N1ZWRfYXQiOiIyMDI1LTEyLTAxVDAwOjAwOjAwLjAwMFoiLCJleHBpcmVzX2F0IjoiMjAyNi0xMi0wMVQwMDowMDowMC4wMDBaIn0",
-          "sig": "juYBfd9grUVWde-QAIyxN5eeFYRBs4eaIr_zSHV7vjMG1OjUvYcCJeLecW8i0gM4g9CIL5c78qCyqvEgu0oGDQ"
+          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI3cDRmbjQ0cW9zaGN3Z2ZuZHo1Z3J0N2Z5eXoxZXljcXlkdXhkcWU4bzU4b2YxYnl6b2RvIiwiYXBwX2lkIjoiYnJyejNtNmc1cmNpNmlxbnprZTQ0cTRkamMiLCJzaWduaW5nX2tleSI6IkQ5dlhoeU9pNzZCc1N1UHNjcWozdFU4dF9pNXJjUmtkT2txUHlNeTFXV00iLCJidW5kbGVfa2V5IjoiYjZRUWd1N1RENmdiMHhzY3B3S0Q4SEJndmZaS1ZsbzdsRUs3TUEwQjRIMCIsInNjb3BlcyI6WyJwYXlraXRfcmVxdWVzdCIsInBheWtpdF9zZXR0bGVtZW50cyIsInBheWtpdF9jb250YWN0cyJdLCJwZXJtaXNzaW9ucyI6WyJsaXN0cy5yZWFkIiwicmVwbHkuYWRkIl0sImlzc3VlZF9hdCI6IjIwMjUtMTItMDFUMDA6MDA6MDAuMDAwWiIsImV4cGlyZXNfYXQiOiIyMDI2LTEyLTAxVDAwOjAwOjAwLjAwMFoifQ",
+          "sig": "0kIY6HpTlKXI59Vj99pDfEYlPeYe3ST3Y3n5BjionX4c7oSRms0HuNITPMyrh17FzDToc6zoNahv3JUQRQNuAg"
         },
         "sender_scope": "paykit_request",
         "signature": "nAk-08fm6LOwjQgaNX2tC5MROtTm50drOhwn63__xs9kiSS8UASpbYecJjJYFgnu6VGyUxQOoqgzSGv26XW_CQ"
@@ -867,35 +867,35 @@
         "request": "request_recurring",
         "sender_app": "brrz3m6g5rci6iqnzke44q4djc",
         "sender_cert": {
-          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI3cDRmbjQ0cW9zaGN3Z2ZuZHo1Z3J0N2Z5eXoxZXljcXlkdXhkcWU4bzU4b2YxYnl6b2RvIiwiYXBwX2lkIjoiYnJyejNtNmc1cmNpNmlxbnprZTQ0cTRkamMiLCJzaWduaW5nX2tleSI6IkQ5dlhoeU9pNzZCc1N1UHNjcWozdFU4dF9pNXJjUmtkT2txUHlNeTFXV00iLCJidW5kbGVfa2V5IjoiYjZRUWd1N1RENmdiMHhzY3B3S0Q4SEJndmZaS1ZsbzdsRUs3TUEwQjRIMCIsInNjb3BlcyI6WyJwYXlraXRfcmVxdWVzdDpzaG9wMSIsInBheWtpdF9zZXR0bGVtZW50cyIsInBheWtpdF9jb250YWN0cyJdLCJwZXJtaXNzaW9ucyI6WyJsaXN0cy5yZWFkIiwiY29udmVyc2F0aW9uLmFkZCJdLCJpc3N1ZWRfYXQiOiIyMDI1LTEyLTAxVDAwOjAwOjAwLjAwMFoiLCJleHBpcmVzX2F0IjoiMjAyNi0xMi0wMVQwMDowMDowMC4wMDBaIn0",
-          "sig": "Mp2zSxjG7lALld3BVwjpW9zAyNnM8DDyz_FyEt93agV7t5H5LESs7AYqiQpF8b4ldYOG4GuhMCK86mKTd8jjCQ"
+          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI3cDRmbjQ0cW9zaGN3Z2ZuZHo1Z3J0N2Z5eXoxZXljcXlkdXhkcWU4bzU4b2YxYnl6b2RvIiwiYXBwX2lkIjoiYnJyejNtNmc1cmNpNmlxbnprZTQ0cTRkamMiLCJzaWduaW5nX2tleSI6IkQ5dlhoeU9pNzZCc1N1UHNjcWozdFU4dF9pNXJjUmtkT2txUHlNeTFXV00iLCJidW5kbGVfa2V5IjoiYjZRUWd1N1RENmdiMHhzY3B3S0Q4SEJndmZaS1ZsbzdsRUs3TUEwQjRIMCIsInNjb3BlcyI6WyJwYXlraXRfcmVxdWVzdDpzaG9wMSIsInBheWtpdF9zZXR0bGVtZW50cyIsInBheWtpdF9jb250YWN0cyJdLCJwZXJtaXNzaW9ucyI6WyJsaXN0cy5yZWFkIiwicmVwbHkuYWRkIl0sImlzc3VlZF9hdCI6IjIwMjUtMTItMDFUMDA6MDA6MDAuMDAwWiIsImV4cGlyZXNfYXQiOiIyMDI2LTEyLTAxVDAwOjAwOjAwLjAwMFoifQ",
+          "sig": "b37jxcEohtAq_rwWmluBJtL83vBLr5fUP179GQJ0YliRWofC3w_xx8XAss8955R023RLG5PNxrp8BQXBqiX3Dw"
         },
         "sender_scope": "paykit_request:shop1",
         "signature": "nAk-08fm6LOwjQgaNX2tC5MROtTm50drOhwn63__xs9kiSS8UASpbYecJjJYFgnu6VGyUxQOoqgzSGv26XW_CQ"
       },
       {
-        "json": "{\"v\":1,\"kind\":\"paykit.payment_receipt\",\"msg_id\":\"f447883c-ff13-4876-81d6-86f54a79abd8\",\"created_at\":\"2026-01-01T00:08:00.000Z\",\"from\":{\"identity\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"app_id\":\"brrz3m6g5rci6iqnzke44q4djc\"},\"to\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"refs\":[\"DbhWX6PJoSdFO6CrgTYTZICh48DaYhlMadmr_o__t3Q\",\"c7LOrtftWjK3Vl-U1Q8rk50EqD1nZgzTMXMcf-WFEuE\"],\"body\":{\"attempt_id\":\"DgCVYQKL1eyDacZvG6YhZg\"}}",
+        "json": "{\"v\":1,\"kind\":\"paykit.payment_receipt\",\"msg_id\":\"f447883c-ff13-4876-81d6-86f54a79abd8\",\"created_at\":\"2026-01-01T00:08:00.000Z\",\"from\":{\"identity\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"app_id\":\"brrz3m6g5rci6iqnzke44q4djc\"},\"to\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"refs\":[\"LN35AdhAI6tWoI2OH0xJAv66k92jpUS3oTAbwD2gVrA\",\"c7LOrtftWjK3Vl-U1Q8rk50EqD1nZgzTMXMcf-WFEuE\"],\"body\":{\"attempt_id\":\"DgCVYQKL1eyDacZvG6YhZg\"}}",
         "name": "a receipt from paykit_request",
         "request": "payment_request_labelled",
         "sender_app": "brrz3m6g5rci6iqnzke44q4djc",
         "sender_cert": {
-          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI3cDRmbjQ0cW9zaGN3Z2ZuZHo1Z3J0N2Z5eXoxZXljcXlkdXhkcWU4bzU4b2YxYnl6b2RvIiwiYXBwX2lkIjoiYnJyejNtNmc1cmNpNmlxbnprZTQ0cTRkamMiLCJzaWduaW5nX2tleSI6IkQ5dlhoeU9pNzZCc1N1UHNjcWozdFU4dF9pNXJjUmtkT2txUHlNeTFXV00iLCJidW5kbGVfa2V5IjoiYjZRUWd1N1RENmdiMHhzY3B3S0Q4SEJndmZaS1ZsbzdsRUs3TUEwQjRIMCIsInNjb3BlcyI6WyJwYXlraXRfcmVxdWVzdCIsInBheWtpdF9zZXR0bGVtZW50cyIsInBheWtpdF9jb250YWN0cyJdLCJwZXJtaXNzaW9ucyI6WyJsaXN0cy5yZWFkIiwiY29udmVyc2F0aW9uLmFkZCJdLCJpc3N1ZWRfYXQiOiIyMDI1LTEyLTAxVDAwOjAwOjAwLjAwMFoiLCJleHBpcmVzX2F0IjoiMjAyNi0xMi0wMVQwMDowMDowMC4wMDBaIn0",
-          "sig": "juYBfd9grUVWde-QAIyxN5eeFYRBs4eaIr_zSHV7vjMG1OjUvYcCJeLecW8i0gM4g9CIL5c78qCyqvEgu0oGDQ"
+          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI3cDRmbjQ0cW9zaGN3Z2ZuZHo1Z3J0N2Z5eXoxZXljcXlkdXhkcWU4bzU4b2YxYnl6b2RvIiwiYXBwX2lkIjoiYnJyejNtNmc1cmNpNmlxbnprZTQ0cTRkamMiLCJzaWduaW5nX2tleSI6IkQ5dlhoeU9pNzZCc1N1UHNjcWozdFU4dF9pNXJjUmtkT2txUHlNeTFXV00iLCJidW5kbGVfa2V5IjoiYjZRUWd1N1RENmdiMHhzY3B3S0Q4SEJndmZaS1ZsbzdsRUs3TUEwQjRIMCIsInNjb3BlcyI6WyJwYXlraXRfcmVxdWVzdCIsInBheWtpdF9zZXR0bGVtZW50cyIsInBheWtpdF9jb250YWN0cyJdLCJwZXJtaXNzaW9ucyI6WyJsaXN0cy5yZWFkIiwicmVwbHkuYWRkIl0sImlzc3VlZF9hdCI6IjIwMjUtMTItMDFUMDA6MDA6MDAuMDAwWiIsImV4cGlyZXNfYXQiOiIyMDI2LTEyLTAxVDAwOjAwOjAwLjAwMFoifQ",
+          "sig": "0kIY6HpTlKXI59Vj99pDfEYlPeYe3ST3Y3n5BjionX4c7oSRms0HuNITPMyrh17FzDToc6zoNahv3JUQRQNuAg"
         },
         "sender_scope": "paykit_request",
-        "signature": "9gmMa3x7SdasNWRg3b3KmP3CM9U1AStv0-l8J40nY6rxGBY1Ia8RNLp9AATzosJt8P957JzJdn-T2Smiy39nCw"
+        "signature": "dQUgy-mFvBtioRSGgcr7D9ayz0xUk1n4b_c3SQ_Qg97zoWyo9VSaYRLm85nln9qCHAwOABiaGowHDwUZkIHRCA"
       },
       {
-        "json": "{\"v\":1,\"kind\":\"paykit.payment_receipt\",\"msg_id\":\"f447883c-ff13-4876-81d6-86f54a79abd8\",\"created_at\":\"2026-01-01T00:08:00.000Z\",\"from\":{\"identity\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"app_id\":\"brrz3m6g5rci6iqnzke44q4djc\"},\"to\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"refs\":[\"DbhWX6PJoSdFO6CrgTYTZICh48DaYhlMadmr_o__t3Q\",\"c7LOrtftWjK3Vl-U1Q8rk50EqD1nZgzTMXMcf-WFEuE\"],\"body\":{\"attempt_id\":\"DgCVYQKL1eyDacZvG6YhZg\"}}",
+        "json": "{\"v\":1,\"kind\":\"paykit.payment_receipt\",\"msg_id\":\"f447883c-ff13-4876-81d6-86f54a79abd8\",\"created_at\":\"2026-01-01T00:08:00.000Z\",\"from\":{\"identity\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"app_id\":\"brrz3m6g5rci6iqnzke44q4djc\"},\"to\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"refs\":[\"LN35AdhAI6tWoI2OH0xJAv66k92jpUS3oTAbwD2gVrA\",\"c7LOrtftWjK3Vl-U1Q8rk50EqD1nZgzTMXMcf-WFEuE\"],\"body\":{\"attempt_id\":\"DgCVYQKL1eyDacZvG6YhZg\"}}",
         "name": "a receipt from paykit_request:shop1",
         "request": "payment_request_labelled",
         "sender_app": "brrz3m6g5rci6iqnzke44q4djc",
         "sender_cert": {
-          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI3cDRmbjQ0cW9zaGN3Z2ZuZHo1Z3J0N2Z5eXoxZXljcXlkdXhkcWU4bzU4b2YxYnl6b2RvIiwiYXBwX2lkIjoiYnJyejNtNmc1cmNpNmlxbnprZTQ0cTRkamMiLCJzaWduaW5nX2tleSI6IkQ5dlhoeU9pNzZCc1N1UHNjcWozdFU4dF9pNXJjUmtkT2txUHlNeTFXV00iLCJidW5kbGVfa2V5IjoiYjZRUWd1N1RENmdiMHhzY3B3S0Q4SEJndmZaS1ZsbzdsRUs3TUEwQjRIMCIsInNjb3BlcyI6WyJwYXlraXRfcmVxdWVzdDpzaG9wMSIsInBheWtpdF9zZXR0bGVtZW50cyIsInBheWtpdF9jb250YWN0cyJdLCJwZXJtaXNzaW9ucyI6WyJsaXN0cy5yZWFkIiwiY29udmVyc2F0aW9uLmFkZCJdLCJpc3N1ZWRfYXQiOiIyMDI1LTEyLTAxVDAwOjAwOjAwLjAwMFoiLCJleHBpcmVzX2F0IjoiMjAyNi0xMi0wMVQwMDowMDowMC4wMDBaIn0",
-          "sig": "Mp2zSxjG7lALld3BVwjpW9zAyNnM8DDyz_FyEt93agV7t5H5LESs7AYqiQpF8b4ldYOG4GuhMCK86mKTd8jjCQ"
+          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI3cDRmbjQ0cW9zaGN3Z2ZuZHo1Z3J0N2Z5eXoxZXljcXlkdXhkcWU4bzU4b2YxYnl6b2RvIiwiYXBwX2lkIjoiYnJyejNtNmc1cmNpNmlxbnprZTQ0cTRkamMiLCJzaWduaW5nX2tleSI6IkQ5dlhoeU9pNzZCc1N1UHNjcWozdFU4dF9pNXJjUmtkT2txUHlNeTFXV00iLCJidW5kbGVfa2V5IjoiYjZRUWd1N1RENmdiMHhzY3B3S0Q4SEJndmZaS1ZsbzdsRUs3TUEwQjRIMCIsInNjb3BlcyI6WyJwYXlraXRfcmVxdWVzdDpzaG9wMSIsInBheWtpdF9zZXR0bGVtZW50cyIsInBheWtpdF9jb250YWN0cyJdLCJwZXJtaXNzaW9ucyI6WyJsaXN0cy5yZWFkIiwicmVwbHkuYWRkIl0sImlzc3VlZF9hdCI6IjIwMjUtMTItMDFUMDA6MDA6MDAuMDAwWiIsImV4cGlyZXNfYXQiOiIyMDI2LTEyLTAxVDAwOjAwOjAwLjAwMFoifQ",
+          "sig": "b37jxcEohtAq_rwWmluBJtL83vBLr5fUP179GQJ0YliRWofC3w_xx8XAss8955R023RLG5PNxrp8BQXBqiX3Dw"
         },
         "sender_scope": "paykit_request:shop1",
-        "signature": "9gmMa3x7SdasNWRg3b3KmP3CM9U1AStv0-l8J40nY6rxGBY1Ia8RNLp9AATzosJt8P957JzJdn-T2Smiy39nCw"
+        "signature": "dQUgy-mFvBtioRSGgcr7D9ayz0xUk1n4b_c3SQ_Qg97zoWyo9VSaYRLm85nln9qCHAwOABiaGowHDwUZkIHRCA"
       },
       {
         "json": "{\"v\":1,\"kind\":\"paykit.payment_request_cancellation\",\"msg_id\":\"d2c95fff-c3f8-42fb-9f8b-94057e391fc4\",\"created_at\":\"2026-02-10T00:00:00.000Z\",\"from\":{\"identity\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"app_id\":\"brrz3m6g5rci6iqnzke44q4djc\"},\"to\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"refs\":[\"c7LOrtftWjK3Vl-U1Q8rk50EqD1nZgzTMXMcf-WFEuE\"],\"body\":{\"reason\":\"subscription_ended\"}}",
@@ -903,8 +903,8 @@
         "request": "payment_request_labelled",
         "sender_app": "brrz3m6g5rci6iqnzke44q4djc",
         "sender_cert": {
-          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI3cDRmbjQ0cW9zaGN3Z2ZuZHo1Z3J0N2Z5eXoxZXljcXlkdXhkcWU4bzU4b2YxYnl6b2RvIiwiYXBwX2lkIjoiYnJyejNtNmc1cmNpNmlxbnprZTQ0cTRkamMiLCJzaWduaW5nX2tleSI6IkQ5dlhoeU9pNzZCc1N1UHNjcWozdFU4dF9pNXJjUmtkT2txUHlNeTFXV00iLCJidW5kbGVfa2V5IjoiYjZRUWd1N1RENmdiMHhzY3B3S0Q4SEJndmZaS1ZsbzdsRUs3TUEwQjRIMCIsInNjb3BlcyI6WyJwYXlraXRfcmVxdWVzdCIsInBheWtpdF9zZXR0bGVtZW50cyIsInBheWtpdF9jb250YWN0cyJdLCJwZXJtaXNzaW9ucyI6WyJsaXN0cy5yZWFkIiwiY29udmVyc2F0aW9uLmFkZCJdLCJpc3N1ZWRfYXQiOiIyMDI1LTEyLTAxVDAwOjAwOjAwLjAwMFoiLCJleHBpcmVzX2F0IjoiMjAyNi0xMi0wMVQwMDowMDowMC4wMDBaIn0",
-          "sig": "juYBfd9grUVWde-QAIyxN5eeFYRBs4eaIr_zSHV7vjMG1OjUvYcCJeLecW8i0gM4g9CIL5c78qCyqvEgu0oGDQ"
+          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI3cDRmbjQ0cW9zaGN3Z2ZuZHo1Z3J0N2Z5eXoxZXljcXlkdXhkcWU4bzU4b2YxYnl6b2RvIiwiYXBwX2lkIjoiYnJyejNtNmc1cmNpNmlxbnprZTQ0cTRkamMiLCJzaWduaW5nX2tleSI6IkQ5dlhoeU9pNzZCc1N1UHNjcWozdFU4dF9pNXJjUmtkT2txUHlNeTFXV00iLCJidW5kbGVfa2V5IjoiYjZRUWd1N1RENmdiMHhzY3B3S0Q4SEJndmZaS1ZsbzdsRUs3TUEwQjRIMCIsInNjb3BlcyI6WyJwYXlraXRfcmVxdWVzdCIsInBheWtpdF9zZXR0bGVtZW50cyIsInBheWtpdF9jb250YWN0cyJdLCJwZXJtaXNzaW9ucyI6WyJsaXN0cy5yZWFkIiwicmVwbHkuYWRkIl0sImlzc3VlZF9hdCI6IjIwMjUtMTItMDFUMDA6MDA6MDAuMDAwWiIsImV4cGlyZXNfYXQiOiIyMDI2LTEyLTAxVDAwOjAwOjAwLjAwMFoifQ",
+          "sig": "0kIY6HpTlKXI59Vj99pDfEYlPeYe3ST3Y3n5BjionX4c7oSRms0HuNITPMyrh17FzDToc6zoNahv3JUQRQNuAg"
         },
         "sender_scope": "paykit_request",
         "signature": "vY59jwkQiHSldlTLjxQVEoO_7-Rjd0XaeyjlkVqGNo8eIyvp71dekBe5MTsHJjPzVuKEz9cd3xsVL9ETPouvDg"
@@ -915,8 +915,8 @@
         "request": "payment_request_labelled",
         "sender_app": "brrz3m6g5rci6iqnzke44q4djc",
         "sender_cert": {
-          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI3cDRmbjQ0cW9zaGN3Z2ZuZHo1Z3J0N2Z5eXoxZXljcXlkdXhkcWU4bzU4b2YxYnl6b2RvIiwiYXBwX2lkIjoiYnJyejNtNmc1cmNpNmlxbnprZTQ0cTRkamMiLCJzaWduaW5nX2tleSI6IkQ5dlhoeU9pNzZCc1N1UHNjcWozdFU4dF9pNXJjUmtkT2txUHlNeTFXV00iLCJidW5kbGVfa2V5IjoiYjZRUWd1N1RENmdiMHhzY3B3S0Q4SEJndmZaS1ZsbzdsRUs3TUEwQjRIMCIsInNjb3BlcyI6WyJwYXlraXRfcmVxdWVzdDpzaG9wMSIsInBheWtpdF9zZXR0bGVtZW50cyIsInBheWtpdF9jb250YWN0cyJdLCJwZXJtaXNzaW9ucyI6WyJsaXN0cy5yZWFkIiwiY29udmVyc2F0aW9uLmFkZCJdLCJpc3N1ZWRfYXQiOiIyMDI1LTEyLTAxVDAwOjAwOjAwLjAwMFoiLCJleHBpcmVzX2F0IjoiMjAyNi0xMi0wMVQwMDowMDowMC4wMDBaIn0",
-          "sig": "Mp2zSxjG7lALld3BVwjpW9zAyNnM8DDyz_FyEt93agV7t5H5LESs7AYqiQpF8b4ldYOG4GuhMCK86mKTd8jjCQ"
+          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI3cDRmbjQ0cW9zaGN3Z2ZuZHo1Z3J0N2Z5eXoxZXljcXlkdXhkcWU4bzU4b2YxYnl6b2RvIiwiYXBwX2lkIjoiYnJyejNtNmc1cmNpNmlxbnprZTQ0cTRkamMiLCJzaWduaW5nX2tleSI6IkQ5dlhoeU9pNzZCc1N1UHNjcWozdFU4dF9pNXJjUmtkT2txUHlNeTFXV00iLCJidW5kbGVfa2V5IjoiYjZRUWd1N1RENmdiMHhzY3B3S0Q4SEJndmZaS1ZsbzdsRUs3TUEwQjRIMCIsInNjb3BlcyI6WyJwYXlraXRfcmVxdWVzdDpzaG9wMSIsInBheWtpdF9zZXR0bGVtZW50cyIsInBheWtpdF9jb250YWN0cyJdLCJwZXJtaXNzaW9ucyI6WyJsaXN0cy5yZWFkIiwicmVwbHkuYWRkIl0sImlzc3VlZF9hdCI6IjIwMjUtMTItMDFUMDA6MDA6MDAuMDAwWiIsImV4cGlyZXNfYXQiOiIyMDI2LTEyLTAxVDAwOjAwOjAwLjAwMFoifQ",
+          "sig": "b37jxcEohtAq_rwWmluBJtL83vBLr5fUP179GQJ0YliRWofC3w_xx8XAss8955R023RLG5PNxrp8BQXBqiX3Dw"
         },
         "sender_scope": "paykit_request:shop1",
         "signature": "vY59jwkQiHSldlTLjxQVEoO_7-Rjd0XaeyjlkVqGNo8eIyvp71dekBe5MTsHJjPzVuKEz9cd3xsVL9ETPouvDg"
@@ -924,9 +924,9 @@
     ],
     "description": "Spec 3.3, 3.4, wire 4.1 check 8, 4.8, 4.9, 4.11, 5.3: the shop's messages as messages.json signs them, with the refs changed to name request, presented with a certificate of the shop's keys holding sender_scope and the paykit_settlements and paykit_contacts it requires (sender_cert). request is payment_request_labelled for the receipt and the cancellation; request_recurring, messages.json's payment_request_recurring with label shop1 sent by the hosted app, or payment_request_recurring itself, unlabelled, for the period details; null for a receipt naming no request, which names payment_proof_unrequested. The receipt about a request confirms proof: messages.json's payment_proof naming payment_request_labelled and copying its label. Each passes check 10, and the details are valid against their request (wire 4.9). accepted are those the payer takes, from paykit_request and from the request's label. refused are those it drops: about a request, from another label or from a label about an unlabelled request, which pass check 8 and are dropped where the payer reads the request, a payer request record holding such a receipt or cancellation being invalid; and a receipt naming no request from a labelled scope, dropped at check 8. reason is paykit-lib's wording.",
     "proof": {
-      "json": "{\"v\":1,\"kind\":\"paykit.payment_proof\",\"msg_id\":\"c8fc5427-bee0-47fc-87bd-9c948c32e152\",\"created_at\":\"2026-01-01T00:05:00.000Z\",\"from\":{\"identity\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"app_id\":\"wejf37ngr7qizej3eoijn3hq4c\"},\"to\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"refs\":[\"c7LOrtftWjK3Vl-U1Q8rk50EqD1nZgzTMXMcf-WFEuE\"],\"body\":{\"attempt_id\":\"DgCVYQKL1eyDacZvG6YhZg\",\"label\":\"shop1\",\"payment_app_id\":\"brrz3m6g5rci6iqnzke44q4djc\",\"payment_endpoint_identifier\":\"btc-lightning-bolt11\",\"proof\":{\"data\":\"8f2a5c6e0b1d4f3a9c7e2b6d0a4f8c1e3b5d7f9a2c4e6b8d0f1a3c5e7b9d2f4a\",\"type\":\"bitcoin-bolt11-preimage\"}}}",
+      "json": "{\"v\":1,\"kind\":\"paykit.payment_proof\",\"msg_id\":\"c8fc5427-bee0-47fc-87bd-9c948c32e152\",\"created_at\":\"2026-01-01T00:05:00.000Z\",\"from\":{\"identity\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"app_id\":\"wejf37ngr7qizej3eoijn3hq4c\"},\"to\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"refs\":[\"c7LOrtftWjK3Vl-U1Q8rk50EqD1nZgzTMXMcf-WFEuE\"],\"body\":{\"attempt_id\":\"DgCVYQKL1eyDacZvG6YhZg\",\"label\":\"shop1\",\"payment_app_id\":\"brrz3m6g5rci6iqnzke44q4djc\",\"payment_endpoint_identifier\":\"btc-lightning-bolt11\",\"proof\":{\"data\":\"8f2a5c6e0b1d4f3a9c7e2b6d0a4f8c1e3b5d7f9a2c4e6b8d0f1a3c5e7b9d2f4a\",\"type\":\"example\"}}}",
       "sender_app": "wejf37ngr7qizej3eoijn3hq4c",
-      "signature": "lvBI8n6p5XgzvW9ZjXqct2xvDeEYeII0ltbXkdiIDqXnOz16NIcObm5rjVZHAWZVxSZyHpd6C1IgWDLv8JB8Aw"
+      "signature": "73c2sNnbVrtF-7n8DlOo12yHYsJRc0IuB3cFPPzULhtbXrWawYKvAj8IDYyN9_t8ohC_7OJgXFBEuS0CLoQTBg"
     },
     "refused": [
       {
@@ -936,8 +936,8 @@
         "request": "request_recurring",
         "sender_app": "brrz3m6g5rci6iqnzke44q4djc",
         "sender_cert": {
-          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI3cDRmbjQ0cW9zaGN3Z2ZuZHo1Z3J0N2Z5eXoxZXljcXlkdXhkcWU4bzU4b2YxYnl6b2RvIiwiYXBwX2lkIjoiYnJyejNtNmc1cmNpNmlxbnprZTQ0cTRkamMiLCJzaWduaW5nX2tleSI6IkQ5dlhoeU9pNzZCc1N1UHNjcWozdFU4dF9pNXJjUmtkT2txUHlNeTFXV00iLCJidW5kbGVfa2V5IjoiYjZRUWd1N1RENmdiMHhzY3B3S0Q4SEJndmZaS1ZsbzdsRUs3TUEwQjRIMCIsInNjb3BlcyI6WyJwYXlraXRfcmVxdWVzdDpzaG9wMiIsInBheWtpdF9zZXR0bGVtZW50cyIsInBheWtpdF9jb250YWN0cyJdLCJwZXJtaXNzaW9ucyI6WyJsaXN0cy5yZWFkIiwiY29udmVyc2F0aW9uLmFkZCJdLCJpc3N1ZWRfYXQiOiIyMDI1LTEyLTAxVDAwOjAwOjAwLjAwMFoiLCJleHBpcmVzX2F0IjoiMjAyNi0xMi0wMVQwMDowMDowMC4wMDBaIn0",
-          "sig": "Qv5509LFwsCK_HqVl9DFJm9S23mA0i17siZUKwQtRZbru65_hB707rnXD9elzBxxsY9oa94dj8WjJrjTSV9PAw"
+          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI3cDRmbjQ0cW9zaGN3Z2ZuZHo1Z3J0N2Z5eXoxZXljcXlkdXhkcWU4bzU4b2YxYnl6b2RvIiwiYXBwX2lkIjoiYnJyejNtNmc1cmNpNmlxbnprZTQ0cTRkamMiLCJzaWduaW5nX2tleSI6IkQ5dlhoeU9pNzZCc1N1UHNjcWozdFU4dF9pNXJjUmtkT2txUHlNeTFXV00iLCJidW5kbGVfa2V5IjoiYjZRUWd1N1RENmdiMHhzY3B3S0Q4SEJndmZaS1ZsbzdsRUs3TUEwQjRIMCIsInNjb3BlcyI6WyJwYXlraXRfcmVxdWVzdDpzaG9wMiIsInBheWtpdF9zZXR0bGVtZW50cyIsInBheWtpdF9jb250YWN0cyJdLCJwZXJtaXNzaW9ucyI6WyJsaXN0cy5yZWFkIiwicmVwbHkuYWRkIl0sImlzc3VlZF9hdCI6IjIwMjUtMTItMDFUMDA6MDA6MDAuMDAwWiIsImV4cGlyZXNfYXQiOiIyMDI2LTEyLTAxVDAwOjAwOjAwLjAwMFoifQ",
+          "sig": "sqrNOpaPh4Ajb-j3gsyjpJjVi4SCyPc_zQPgci0bfRGYVhPAwDhPSK6qJ5n35eJh3Kj1Bgu4BJVWdo9FpgGpAA"
         },
         "sender_scope": "paykit_request:shop2",
         "signature": "nAk-08fm6LOwjQgaNX2tC5MROtTm50drOhwn63__xs9kiSS8UASpbYecJjJYFgnu6VGyUxQOoqgzSGv26XW_CQ"
@@ -949,24 +949,24 @@
         "request": "payment_request_recurring",
         "sender_app": "brrz3m6g5rci6iqnzke44q4djc",
         "sender_cert": {
-          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI3cDRmbjQ0cW9zaGN3Z2ZuZHo1Z3J0N2Z5eXoxZXljcXlkdXhkcWU4bzU4b2YxYnl6b2RvIiwiYXBwX2lkIjoiYnJyejNtNmc1cmNpNmlxbnprZTQ0cTRkamMiLCJzaWduaW5nX2tleSI6IkQ5dlhoeU9pNzZCc1N1UHNjcWozdFU4dF9pNXJjUmtkT2txUHlNeTFXV00iLCJidW5kbGVfa2V5IjoiYjZRUWd1N1RENmdiMHhzY3B3S0Q4SEJndmZaS1ZsbzdsRUs3TUEwQjRIMCIsInNjb3BlcyI6WyJwYXlraXRfcmVxdWVzdDpzaG9wMSIsInBheWtpdF9zZXR0bGVtZW50cyIsInBheWtpdF9jb250YWN0cyJdLCJwZXJtaXNzaW9ucyI6WyJsaXN0cy5yZWFkIiwiY29udmVyc2F0aW9uLmFkZCJdLCJpc3N1ZWRfYXQiOiIyMDI1LTEyLTAxVDAwOjAwOjAwLjAwMFoiLCJleHBpcmVzX2F0IjoiMjAyNi0xMi0wMVQwMDowMDowMC4wMDBaIn0",
-          "sig": "Mp2zSxjG7lALld3BVwjpW9zAyNnM8DDyz_FyEt93agV7t5H5LESs7AYqiQpF8b4ldYOG4GuhMCK86mKTd8jjCQ"
+          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI3cDRmbjQ0cW9zaGN3Z2ZuZHo1Z3J0N2Z5eXoxZXljcXlkdXhkcWU4bzU4b2YxYnl6b2RvIiwiYXBwX2lkIjoiYnJyejNtNmc1cmNpNmlxbnprZTQ0cTRkamMiLCJzaWduaW5nX2tleSI6IkQ5dlhoeU9pNzZCc1N1UHNjcWozdFU4dF9pNXJjUmtkT2txUHlNeTFXV00iLCJidW5kbGVfa2V5IjoiYjZRUWd1N1RENmdiMHhzY3B3S0Q4SEJndmZaS1ZsbzdsRUs3TUEwQjRIMCIsInNjb3BlcyI6WyJwYXlraXRfcmVxdWVzdDpzaG9wMSIsInBheWtpdF9zZXR0bGVtZW50cyIsInBheWtpdF9jb250YWN0cyJdLCJwZXJtaXNzaW9ucyI6WyJsaXN0cy5yZWFkIiwicmVwbHkuYWRkIl0sImlzc3VlZF9hdCI6IjIwMjUtMTItMDFUMDA6MDA6MDAuMDAwWiIsImV4cGlyZXNfYXQiOiIyMDI2LTEyLTAxVDAwOjAwOjAwLjAwMFoifQ",
+          "sig": "b37jxcEohtAq_rwWmluBJtL83vBLr5fUP179GQJ0YliRWofC3w_xx8XAss8955R023RLG5PNxrp8BQXBqiX3Dw"
         },
         "sender_scope": "paykit_request:shop1",
         "signature": "dMCkyqKlLy9Bs1Cd6O1Ms2FINV4BMeG3lWMeC-gCQ-2GKz7G_NZ5-VFbxAgUfJiMJ2MbkZijt3M4c_Wr9lHECQ"
       },
       {
-        "json": "{\"v\":1,\"kind\":\"paykit.payment_receipt\",\"msg_id\":\"f447883c-ff13-4876-81d6-86f54a79abd8\",\"created_at\":\"2026-01-01T00:08:00.000Z\",\"from\":{\"identity\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"app_id\":\"brrz3m6g5rci6iqnzke44q4djc\"},\"to\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"refs\":[\"DbhWX6PJoSdFO6CrgTYTZICh48DaYhlMadmr_o__t3Q\",\"c7LOrtftWjK3Vl-U1Q8rk50EqD1nZgzTMXMcf-WFEuE\"],\"body\":{\"attempt_id\":\"DgCVYQKL1eyDacZvG6YhZg\"}}",
+        "json": "{\"v\":1,\"kind\":\"paykit.payment_receipt\",\"msg_id\":\"f447883c-ff13-4876-81d6-86f54a79abd8\",\"created_at\":\"2026-01-01T00:08:00.000Z\",\"from\":{\"identity\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"app_id\":\"brrz3m6g5rci6iqnzke44q4djc\"},\"to\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"refs\":[\"LN35AdhAI6tWoI2OH0xJAv66k92jpUS3oTAbwD2gVrA\",\"c7LOrtftWjK3Vl-U1Q8rk50EqD1nZgzTMXMcf-WFEuE\"],\"body\":{\"attempt_id\":\"DgCVYQKL1eyDacZvG6YhZg\"}}",
         "name": "a receipt from paykit_request:shop2",
         "reason": "invalid: the sender's certificate holds neither paykit_request nor the label of the request the message names",
         "request": "payment_request_labelled",
         "sender_app": "brrz3m6g5rci6iqnzke44q4djc",
         "sender_cert": {
-          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI3cDRmbjQ0cW9zaGN3Z2ZuZHo1Z3J0N2Z5eXoxZXljcXlkdXhkcWU4bzU4b2YxYnl6b2RvIiwiYXBwX2lkIjoiYnJyejNtNmc1cmNpNmlxbnprZTQ0cTRkamMiLCJzaWduaW5nX2tleSI6IkQ5dlhoeU9pNzZCc1N1UHNjcWozdFU4dF9pNXJjUmtkT2txUHlNeTFXV00iLCJidW5kbGVfa2V5IjoiYjZRUWd1N1RENmdiMHhzY3B3S0Q4SEJndmZaS1ZsbzdsRUs3TUEwQjRIMCIsInNjb3BlcyI6WyJwYXlraXRfcmVxdWVzdDpzaG9wMiIsInBheWtpdF9zZXR0bGVtZW50cyIsInBheWtpdF9jb250YWN0cyJdLCJwZXJtaXNzaW9ucyI6WyJsaXN0cy5yZWFkIiwiY29udmVyc2F0aW9uLmFkZCJdLCJpc3N1ZWRfYXQiOiIyMDI1LTEyLTAxVDAwOjAwOjAwLjAwMFoiLCJleHBpcmVzX2F0IjoiMjAyNi0xMi0wMVQwMDowMDowMC4wMDBaIn0",
-          "sig": "Qv5509LFwsCK_HqVl9DFJm9S23mA0i17siZUKwQtRZbru65_hB707rnXD9elzBxxsY9oa94dj8WjJrjTSV9PAw"
+          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI3cDRmbjQ0cW9zaGN3Z2ZuZHo1Z3J0N2Z5eXoxZXljcXlkdXhkcWU4bzU4b2YxYnl6b2RvIiwiYXBwX2lkIjoiYnJyejNtNmc1cmNpNmlxbnprZTQ0cTRkamMiLCJzaWduaW5nX2tleSI6IkQ5dlhoeU9pNzZCc1N1UHNjcWozdFU4dF9pNXJjUmtkT2txUHlNeTFXV00iLCJidW5kbGVfa2V5IjoiYjZRUWd1N1RENmdiMHhzY3B3S0Q4SEJndmZaS1ZsbzdsRUs3TUEwQjRIMCIsInNjb3BlcyI6WyJwYXlraXRfcmVxdWVzdDpzaG9wMiIsInBheWtpdF9zZXR0bGVtZW50cyIsInBheWtpdF9jb250YWN0cyJdLCJwZXJtaXNzaW9ucyI6WyJsaXN0cy5yZWFkIiwicmVwbHkuYWRkIl0sImlzc3VlZF9hdCI6IjIwMjUtMTItMDFUMDA6MDA6MDAuMDAwWiIsImV4cGlyZXNfYXQiOiIyMDI2LTEyLTAxVDAwOjAwOjAwLjAwMFoifQ",
+          "sig": "sqrNOpaPh4Ajb-j3gsyjpJjVi4SCyPc_zQPgci0bfRGYVhPAwDhPSK6qJ5n35eJh3Kj1Bgu4BJVWdo9FpgGpAA"
         },
         "sender_scope": "paykit_request:shop2",
-        "signature": "9gmMa3x7SdasNWRg3b3KmP3CM9U1AStv0-l8J40nY6rxGBY1Ia8RNLp9AATzosJt8P957JzJdn-T2Smiy39nCw"
+        "signature": "dQUgy-mFvBtioRSGgcr7D9ayz0xUk1n4b_c3SQ_Qg97zoWyo9VSaYRLm85nln9qCHAwOABiaGowHDwUZkIHRCA"
       },
       {
         "json": "{\"v\":1,\"kind\":\"paykit.payment_request_cancellation\",\"msg_id\":\"d2c95fff-c3f8-42fb-9f8b-94057e391fc4\",\"created_at\":\"2026-02-10T00:00:00.000Z\",\"from\":{\"identity\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"app_id\":\"brrz3m6g5rci6iqnzke44q4djc\"},\"to\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"refs\":[\"c7LOrtftWjK3Vl-U1Q8rk50EqD1nZgzTMXMcf-WFEuE\"],\"body\":{\"reason\":\"subscription_ended\"}}",
@@ -975,24 +975,24 @@
         "request": "payment_request_labelled",
         "sender_app": "brrz3m6g5rci6iqnzke44q4djc",
         "sender_cert": {
-          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI3cDRmbjQ0cW9zaGN3Z2ZuZHo1Z3J0N2Z5eXoxZXljcXlkdXhkcWU4bzU4b2YxYnl6b2RvIiwiYXBwX2lkIjoiYnJyejNtNmc1cmNpNmlxbnprZTQ0cTRkamMiLCJzaWduaW5nX2tleSI6IkQ5dlhoeU9pNzZCc1N1UHNjcWozdFU4dF9pNXJjUmtkT2txUHlNeTFXV00iLCJidW5kbGVfa2V5IjoiYjZRUWd1N1RENmdiMHhzY3B3S0Q4SEJndmZaS1ZsbzdsRUs3TUEwQjRIMCIsInNjb3BlcyI6WyJwYXlraXRfcmVxdWVzdDpzaG9wMiIsInBheWtpdF9zZXR0bGVtZW50cyIsInBheWtpdF9jb250YWN0cyJdLCJwZXJtaXNzaW9ucyI6WyJsaXN0cy5yZWFkIiwiY29udmVyc2F0aW9uLmFkZCJdLCJpc3N1ZWRfYXQiOiIyMDI1LTEyLTAxVDAwOjAwOjAwLjAwMFoiLCJleHBpcmVzX2F0IjoiMjAyNi0xMi0wMVQwMDowMDowMC4wMDBaIn0",
-          "sig": "Qv5509LFwsCK_HqVl9DFJm9S23mA0i17siZUKwQtRZbru65_hB707rnXD9elzBxxsY9oa94dj8WjJrjTSV9PAw"
+          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI3cDRmbjQ0cW9zaGN3Z2ZuZHo1Z3J0N2Z5eXoxZXljcXlkdXhkcWU4bzU4b2YxYnl6b2RvIiwiYXBwX2lkIjoiYnJyejNtNmc1cmNpNmlxbnprZTQ0cTRkamMiLCJzaWduaW5nX2tleSI6IkQ5dlhoeU9pNzZCc1N1UHNjcWozdFU4dF9pNXJjUmtkT2txUHlNeTFXV00iLCJidW5kbGVfa2V5IjoiYjZRUWd1N1RENmdiMHhzY3B3S0Q4SEJndmZaS1ZsbzdsRUs3TUEwQjRIMCIsInNjb3BlcyI6WyJwYXlraXRfcmVxdWVzdDpzaG9wMiIsInBheWtpdF9zZXR0bGVtZW50cyIsInBheWtpdF9jb250YWN0cyJdLCJwZXJtaXNzaW9ucyI6WyJsaXN0cy5yZWFkIiwicmVwbHkuYWRkIl0sImlzc3VlZF9hdCI6IjIwMjUtMTItMDFUMDA6MDA6MDAuMDAwWiIsImV4cGlyZXNfYXQiOiIyMDI2LTEyLTAxVDAwOjAwOjAwLjAwMFoifQ",
+          "sig": "sqrNOpaPh4Ajb-j3gsyjpJjVi4SCyPc_zQPgci0bfRGYVhPAwDhPSK6qJ5n35eJh3Kj1Bgu4BJVWdo9FpgGpAA"
         },
         "sender_scope": "paykit_request:shop2",
         "signature": "vY59jwkQiHSldlTLjxQVEoO_7-Rjd0XaeyjlkVqGNo8eIyvp71dekBe5MTsHJjPzVuKEz9cd3xsVL9ETPouvDg"
       },
       {
-        "json": "{\"v\":1,\"kind\":\"paykit.payment_receipt\",\"msg_id\":\"f447883c-ff13-4876-81d6-86f54a79abd8\",\"created_at\":\"2026-01-01T00:08:00.000Z\",\"from\":{\"identity\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"app_id\":\"brrz3m6g5rci6iqnzke44q4djc\"},\"to\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"refs\":[\"1ywIwYm3Jj7Sh5GgHP_rUatBFh1Oefxm2rS4fC6oEzk\"],\"body\":{\"attempt_id\":\"mAFdg5_0tVNjmrgiTUZW4g\"}}",
+        "json": "{\"v\":1,\"kind\":\"paykit.payment_receipt\",\"msg_id\":\"f447883c-ff13-4876-81d6-86f54a79abd8\",\"created_at\":\"2026-01-01T00:08:00.000Z\",\"from\":{\"identity\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"app_id\":\"brrz3m6g5rci6iqnzke44q4djc\"},\"to\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"refs\":[\"p_QzUSgZi6BSiwaB_lIC-hzYibCtWAVl9h20vUgLCRE\"],\"body\":{\"attempt_id\":\"mAFdg5_0tVNjmrgiTUZW4g\"}}",
         "name": "a receipt naming no request from paykit_request:shop1",
         "reason": "invalid: a receipt naming no request needs paykit_request",
         "request": null,
         "sender_app": "brrz3m6g5rci6iqnzke44q4djc",
         "sender_cert": {
-          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI3cDRmbjQ0cW9zaGN3Z2ZuZHo1Z3J0N2Z5eXoxZXljcXlkdXhkcWU4bzU4b2YxYnl6b2RvIiwiYXBwX2lkIjoiYnJyejNtNmc1cmNpNmlxbnprZTQ0cTRkamMiLCJzaWduaW5nX2tleSI6IkQ5dlhoeU9pNzZCc1N1UHNjcWozdFU4dF9pNXJjUmtkT2txUHlNeTFXV00iLCJidW5kbGVfa2V5IjoiYjZRUWd1N1RENmdiMHhzY3B3S0Q4SEJndmZaS1ZsbzdsRUs3TUEwQjRIMCIsInNjb3BlcyI6WyJwYXlraXRfcmVxdWVzdDpzaG9wMSIsInBheWtpdF9zZXR0bGVtZW50cyIsInBheWtpdF9jb250YWN0cyJdLCJwZXJtaXNzaW9ucyI6WyJsaXN0cy5yZWFkIiwiY29udmVyc2F0aW9uLmFkZCJdLCJpc3N1ZWRfYXQiOiIyMDI1LTEyLTAxVDAwOjAwOjAwLjAwMFoiLCJleHBpcmVzX2F0IjoiMjAyNi0xMi0wMVQwMDowMDowMC4wMDBaIn0",
-          "sig": "Mp2zSxjG7lALld3BVwjpW9zAyNnM8DDyz_FyEt93agV7t5H5LESs7AYqiQpF8b4ldYOG4GuhMCK86mKTd8jjCQ"
+          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI3cDRmbjQ0cW9zaGN3Z2ZuZHo1Z3J0N2Z5eXoxZXljcXlkdXhkcWU4bzU4b2YxYnl6b2RvIiwiYXBwX2lkIjoiYnJyejNtNmc1cmNpNmlxbnprZTQ0cTRkamMiLCJzaWduaW5nX2tleSI6IkQ5dlhoeU9pNzZCc1N1UHNjcWozdFU4dF9pNXJjUmtkT2txUHlNeTFXV00iLCJidW5kbGVfa2V5IjoiYjZRUWd1N1RENmdiMHhzY3B3S0Q4SEJndmZaS1ZsbzdsRUs3TUEwQjRIMCIsInNjb3BlcyI6WyJwYXlraXRfcmVxdWVzdDpzaG9wMSIsInBheWtpdF9zZXR0bGVtZW50cyIsInBheWtpdF9jb250YWN0cyJdLCJwZXJtaXNzaW9ucyI6WyJsaXN0cy5yZWFkIiwicmVwbHkuYWRkIl0sImlzc3VlZF9hdCI6IjIwMjUtMTItMDFUMDA6MDA6MDAuMDAwWiIsImV4cGlyZXNfYXQiOiIyMDI2LTEyLTAxVDAwOjAwOjAwLjAwMFoifQ",
+          "sig": "b37jxcEohtAq_rwWmluBJtL83vBLr5fUP179GQJ0YliRWofC3w_xx8XAss8955R023RLG5PNxrp8BQXBqiX3Dw"
         },
         "sender_scope": "paykit_request:shop1",
-        "signature": "KX_uLKURzVdkBpKqI03Vfd77PBzu_aIVE8qPEFELC9zwRHVS9dVkpw8DpvkJk1HfyK8FeFaWhKtWtU7jEQHGCQ"
+        "signature": "T7FIOlbFItJCTGjn6dezlO4aA3X4oHrlx1Ttb9x9TeWuvwCqUf3aE5cd1BUT7iKFkYo7D9QinEZgP2CnHzpzCA"
       }
     ],
     "request_recurring": {
@@ -1006,91 +1006,91 @@
     "refused": [
       {
         "base": "payment_proof",
-        "json": "{\"v\":1,\"kind\":\"paykit.payment_proof\",\"msg_id\":\"c8fc5427-bee0-47fc-87bd-9c948c32e152\",\"created_at\":\"2026-01-01T00:05:00.000Z\",\"from\":{\"identity\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"app_id\":\"wejf37ngr7qizej3eoijn3hq4c\"},\"to\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"refs\":[\"pukrdI5C7SfN7mlLheLGWRk2qzt8RTKXlXv4E1rRGKg\"],\"body\":{\"amount\":{\"asset\":\"btc\",\"value\":\"0.00025\"},\"attempt_id\":\"DgCVYQKL1eyDacZvG6YhZg\",\"payment_app_id\":\"brrz3m6g5rci6iqnzke44q4djc\",\"payment_endpoint_identifier\":\"btc-lightning-bolt11\",\"proof\":{\"data\":\"8f2a5c6e0b1d4f3a9c7e2b6d0a4f8c1e3b5d7f9a2c4e6b8d0f1a3c5e7b9d2f4a\",\"type\":\"bitcoin-bolt11-preimage\"}}}",
+        "json": "{\"v\":1,\"kind\":\"paykit.payment_proof\",\"msg_id\":\"c8fc5427-bee0-47fc-87bd-9c948c32e152\",\"created_at\":\"2026-01-01T00:05:00.000Z\",\"from\":{\"identity\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"app_id\":\"wejf37ngr7qizej3eoijn3hq4c\"},\"to\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"refs\":[\"pukrdI5C7SfN7mlLheLGWRk2qzt8RTKXlXv4E1rRGKg\"],\"body\":{\"amount\":{\"asset\":\"btc\",\"value\":\"0.00025\"},\"attempt_id\":\"DgCVYQKL1eyDacZvG6YhZg\",\"payment_app_id\":\"brrz3m6g5rci6iqnzke44q4djc\",\"payment_endpoint_identifier\":\"btc-lightning-bolt11\",\"proof\":{\"data\":\"8f2a5c6e0b1d4f3a9c7e2b6d0a4f8c1e3b5d7f9a2c4e6b8d0f1a3c5e7b9d2f4a\",\"type\":\"example\"}}}",
         "name": "a request's proof carrying amount",
         "reason": "invalid: payment_proof: amount: only in a proof of a payment without a request; a request's comes from the request",
         "sender_app": "wejf37ngr7qizej3eoijn3hq4c",
-        "signature": "QULd6VKG1DQQ_4JSjpJSWVuH44h_v2QrB-NWAG9LymwTlPCxkjHsNzCc0x7LrDfLRnjeZrJ_WmKHanEs4KwZDQ"
+        "signature": "jPFULAX469hYtqdZaJ8vgQ5pEbjMXnyPOqKBc1b5W7gKGNEsY8pEo24FJt1LRh2kyhLsOp9Z8S0nEdEUYPg2Cg"
       },
       {
         "base": "payment_proof_unrequested",
-        "json": "{\"v\":1,\"kind\":\"paykit.payment_proof\",\"msg_id\":\"53918dc4-8213-4422-8951-6b02f05883bc\",\"created_at\":\"2026-01-01T00:07:00.000Z\",\"from\":{\"identity\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"app_id\":\"wejf37ngr7qizej3eoijn3hq4c\"},\"to\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"refs\":[],\"body\":{\"amount\":{\"asset\":\"btc\",\"value\":\"0.0015\"},\"attempt_id\":\"mAFdg5_0tVNjmrgiTUZW4g\",\"billing_period\":{\"ends_at\":\"2026-03-31T00:00:00.000Z\",\"starts_at\":\"2026-02-28T00:00:00.000Z\"},\"list_version\":{\"counter\":12,\"generation\":1},\"payment_app_id\":\"brrz3m6g5rci6iqnzke44q4djc\",\"payment_endpoint_identifier\":\"btc-bitcoin-p2wpkh\",\"proof\":{\"txid\":\"4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b\",\"type\":\"bitcoin-txid\"}}}",
+        "json": "{\"v\":1,\"kind\":\"paykit.payment_proof\",\"msg_id\":\"53918dc4-8213-4422-8951-6b02f05883bc\",\"created_at\":\"2026-01-01T00:07:00.000Z\",\"from\":{\"identity\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"app_id\":\"wejf37ngr7qizej3eoijn3hq4c\"},\"to\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"refs\":[],\"body\":{\"amount\":{\"asset\":\"btc\",\"value\":\"0.0015\"},\"attempt_id\":\"mAFdg5_0tVNjmrgiTUZW4g\",\"billing_period\":{\"ends_at\":\"2026-03-31T00:00:00.000Z\",\"starts_at\":\"2026-02-28T00:00:00.000Z\"},\"list_version\":{\"counter\":12,\"generation\":1},\"payment_app_id\":\"brrz3m6g5rci6iqnzke44q4djc\",\"payment_endpoint_identifier\":\"btc-bitcoin-p2wpkh\",\"proof\":{\"data\":\"4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b\",\"type\":\"example\"}}}",
         "name": "a proof without a request carrying billing_period",
         "reason": "invalid: payment_proof: billing_period: only in a proof of a request, not of a payment without one",
         "sender_app": "wejf37ngr7qizej3eoijn3hq4c",
-        "signature": "Nbg-u3Kg9cLs2HgVhNnBSnisl0a6sJHKahfT6OXWDarj4pcvj3pOplBvPdFyt_3ZRxRKUK-FVhMp7aoo-SWQAQ"
+        "signature": "SwRCwhVMRV_2OApr2tR4rX-0hixU9Lb90cLbsxo33TpYNK8aXgf_UeOkgKmzFjCHdwK2UnT8htZt5GYkCXv6BA"
       },
       {
         "base": "payment_proof_unrequested",
-        "json": "{\"v\":1,\"kind\":\"paykit.payment_proof\",\"msg_id\":\"53918dc4-8213-4422-8951-6b02f05883bc\",\"created_at\":\"2026-01-01T00:07:00.000Z\",\"from\":{\"identity\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"app_id\":\"wejf37ngr7qizej3eoijn3hq4c\"},\"to\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"refs\":[],\"body\":{\"amount\":{\"asset\":\"btc\",\"value\":\"0.0015\"},\"attempt_id\":\"mAFdg5_0tVNjmrgiTUZW4g\",\"label\":\"shop1\",\"list_version\":{\"counter\":12,\"generation\":1},\"payment_app_id\":\"brrz3m6g5rci6iqnzke44q4djc\",\"payment_endpoint_identifier\":\"btc-bitcoin-p2wpkh\",\"proof\":{\"txid\":\"4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b\",\"type\":\"bitcoin-txid\"}}}",
+        "json": "{\"v\":1,\"kind\":\"paykit.payment_proof\",\"msg_id\":\"53918dc4-8213-4422-8951-6b02f05883bc\",\"created_at\":\"2026-01-01T00:07:00.000Z\",\"from\":{\"identity\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"app_id\":\"wejf37ngr7qizej3eoijn3hq4c\"},\"to\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"refs\":[],\"body\":{\"amount\":{\"asset\":\"btc\",\"value\":\"0.0015\"},\"attempt_id\":\"mAFdg5_0tVNjmrgiTUZW4g\",\"label\":\"shop1\",\"list_version\":{\"counter\":12,\"generation\":1},\"payment_app_id\":\"brrz3m6g5rci6iqnzke44q4djc\",\"payment_endpoint_identifier\":\"btc-bitcoin-p2wpkh\",\"proof\":{\"data\":\"4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b\",\"type\":\"example\"}}}",
         "name": "a proof without a request carrying label",
         "reason": "invalid: payment_proof: label: only in a proof of a request, not of a payment without one",
         "sender_app": "wejf37ngr7qizej3eoijn3hq4c",
-        "signature": "SIyDAa2xhH6b_fQvhD7W0_TC3RboE6HiLNUWQWFKpiIOoblRvxAnwnAaxOiY55c3uQkQVE7ufNFQT7Hp8yxqCQ"
+        "signature": "mg9yCMt-JEJ05MbUukp8n5raNtCk0kMTjWd2_-cWlfBMLuz8oMHP44pjLosAzb8Rd2n4BMuPuUTUDoMN8QGLDQ"
       },
       {
         "base": "payment_proof_unrequested",
-        "json": "{\"v\":1,\"kind\":\"paykit.payment_proof\",\"msg_id\":\"53918dc4-8213-4422-8951-6b02f05883bc\",\"created_at\":\"2026-01-01T00:07:00.000Z\",\"from\":{\"identity\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"app_id\":\"wejf37ngr7qizej3eoijn3hq4c\"},\"to\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"refs\":[],\"body\":{\"amount\":{\"asset\":\"btc\",\"value\":\"0.0015\"},\"attempt_id\":\"mAFdg5_0tVNjmrgiTUZW4g\",\"list_version\":{\"counter\":12,\"generation\":1},\"payment_app_id\":\"brrz3m6g5rci6iqnzke44q4djc\",\"payment_endpoint_identifier\":\"btc-bitcoin-p2wpkh\",\"payment_reference\":\"order-1042\",\"proof\":{\"txid\":\"4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b\",\"type\":\"bitcoin-txid\"}}}",
+        "json": "{\"v\":1,\"kind\":\"paykit.payment_proof\",\"msg_id\":\"53918dc4-8213-4422-8951-6b02f05883bc\",\"created_at\":\"2026-01-01T00:07:00.000Z\",\"from\":{\"identity\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"app_id\":\"wejf37ngr7qizej3eoijn3hq4c\"},\"to\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"refs\":[],\"body\":{\"amount\":{\"asset\":\"btc\",\"value\":\"0.0015\"},\"attempt_id\":\"mAFdg5_0tVNjmrgiTUZW4g\",\"list_version\":{\"counter\":12,\"generation\":1},\"payment_app_id\":\"brrz3m6g5rci6iqnzke44q4djc\",\"payment_endpoint_identifier\":\"btc-bitcoin-p2wpkh\",\"payment_reference\":\"order-1042\",\"proof\":{\"data\":\"4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b\",\"type\":\"example\"}}}",
         "name": "a proof without a request carrying payment_reference",
         "reason": "invalid: payment_proof: payment_reference: only in a proof of a request, not of a payment without one",
         "sender_app": "wejf37ngr7qizej3eoijn3hq4c",
-        "signature": "KJe6AaYI1mnnPjJKTVDwyzuC1E_W80hak0ot8prQwfDgN3TTsaSNp__U2LLFcJBjrD9dJi20ci1ChvgPjZYsCA"
+        "signature": "cMLvc9YFEZjJ1ypqQrNmf8UlN2h3fZ-K3-X8wRZ07TrgLJzTTfR1iMg1zkP9kc_SbnzqWcBiqxk-JmcpfYeOBg"
       },
       {
         "base": "payment_proof_unrequested",
-        "json": "{\"v\":1,\"kind\":\"paykit.payment_proof\",\"msg_id\":\"53918dc4-8213-4422-8951-6b02f05883bc\",\"created_at\":\"2026-01-01T00:07:00.000Z\",\"from\":{\"identity\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"app_id\":\"wejf37ngr7qizej3eoijn3hq4c\"},\"to\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"refs\":[],\"body\":{\"allowance_id\":\"d0efffb7-191b-4709-b6c7-e343af5500b4\",\"amount\":{\"asset\":\"btc\",\"value\":\"0.0015\"},\"attempt_id\":\"mAFdg5_0tVNjmrgiTUZW4g\",\"list_version\":{\"counter\":12,\"generation\":1},\"payment_app_id\":\"brrz3m6g5rci6iqnzke44q4djc\",\"payment_endpoint_identifier\":\"btc-bitcoin-p2wpkh\",\"proof\":{\"txid\":\"4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b\",\"type\":\"bitcoin-txid\"}}}",
+        "json": "{\"v\":1,\"kind\":\"paykit.payment_proof\",\"msg_id\":\"53918dc4-8213-4422-8951-6b02f05883bc\",\"created_at\":\"2026-01-01T00:07:00.000Z\",\"from\":{\"identity\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"app_id\":\"wejf37ngr7qizej3eoijn3hq4c\"},\"to\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"refs\":[],\"body\":{\"allowance_id\":\"d0efffb7-191b-4709-b6c7-e343af5500b4\",\"amount\":{\"asset\":\"btc\",\"value\":\"0.0015\"},\"attempt_id\":\"mAFdg5_0tVNjmrgiTUZW4g\",\"list_version\":{\"counter\":12,\"generation\":1},\"payment_app_id\":\"brrz3m6g5rci6iqnzke44q4djc\",\"payment_endpoint_identifier\":\"btc-bitcoin-p2wpkh\",\"proof\":{\"data\":\"4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b\",\"type\":\"example\"}}}",
         "name": "a proof without a request carrying allowance_id",
         "reason": "invalid: payment_proof: allowance_id: only in a proof of a request, not of a payment without one",
         "sender_app": "wejf37ngr7qizej3eoijn3hq4c",
-        "signature": "G4vJYxB6Wg5akvSBY4AcsGBujaXTBssOoKEqYCNB5MEG3xWp8Yuww8wkTPdkWpzEeug6aqaiPJgYIvCs_Q_IAQ"
+        "signature": "0ejP3B_aqQ5VhyuYG0trpFeI7A3A8mCmFo2mWjLH5LG6KsClL8CPM_s2UvUuJRCFE2hDUrZQktXqRq53k-dbDw"
       },
       {
         "base": "payment_proof_period",
-        "json": "{\"v\":1,\"kind\":\"paykit.payment_proof\",\"msg_id\":\"5aabefde-df1d-43dd-99d1-086bac038944\",\"created_at\":\"2026-02-28T00:00:00.000Z\",\"from\":{\"identity\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"app_id\":\"wejf37ngr7qizej3eoijn3hq4c\"},\"to\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"refs\":[\"c_ys4n4gUNKJa3D13sszDTpkj8rqdB206n-gIMVuzXY\",\"kM3kzLA74HW6gW84eMivgv3gCSowYHwWWlBefx5WXnU\"],\"body\":{\"attempt_id\":\"4TyjQUac-NiiIf-haaHWbA\",\"payment_app_id\":\"brrz3m6g5rci6iqnzke44q4djc\",\"payment_endpoint_identifier\":\"btc-lightning-bolt11\",\"proof\":{\"data\":\"0d1c2b3a\",\"type\":\"bitcoin-bolt11-preimage\"}}}",
+        "json": "{\"v\":1,\"kind\":\"paykit.payment_proof\",\"msg_id\":\"5aabefde-df1d-43dd-99d1-086bac038944\",\"created_at\":\"2026-02-28T00:00:00.000Z\",\"from\":{\"identity\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"app_id\":\"wejf37ngr7qizej3eoijn3hq4c\"},\"to\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"refs\":[\"c_ys4n4gUNKJa3D13sszDTpkj8rqdB206n-gIMVuzXY\",\"kM3kzLA74HW6gW84eMivgv3gCSowYHwWWlBefx5WXnU\"],\"body\":{\"attempt_id\":\"4TyjQUac-NiiIf-haaHWbA\",\"payment_app_id\":\"brrz3m6g5rci6iqnzke44q4djc\",\"payment_endpoint_identifier\":\"btc-lightning-bolt11\",\"proof\":{\"data\":\"0d1c2b3a\",\"type\":\"example\"}}}",
         "name": "a proof referring to period details without billing_period",
         "reason": "invalid: payment_proof: billing_period: missing; a proof that used period details names their Billing Period",
         "sender_app": "wejf37ngr7qizej3eoijn3hq4c",
-        "signature": "a6Qx9q2naRs1LdbuVKtCvtYwsp6JsjVbbZ88g9SlUitzSdauAaxvU7y3Rzpnw80J8ULpHLyJ_L1d7UUqg_6NCg"
+        "signature": "QIfRLfAb2Uwr0zbSEOU52yVkyfLZfSBWi8pF9V56xKza0zFHTZktgdJNoYWqC0bPI9frpMAPhBm94jVbCJE3Dw"
       }
     ]
   },
   "receipt_members": {
     "accepted": [
       {
-        "json": "{\"v\":1,\"kind\":\"paykit.payment_receipt\",\"msg_id\":\"f447883c-ff13-4876-81d6-86f54a79abd8\",\"created_at\":\"2026-01-01T00:08:00.000Z\",\"from\":{\"identity\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"app_id\":\"brrz3m6g5rci6iqnzke44q4djc\"},\"to\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"refs\":[\"BDGN__ffJTDNNNyF2lkTCrRNUox5u3NGNuwKgxAhcJc\",\"pukrdI5C7SfN7mlLheLGWRk2qzt8RTKXlXv4E1rRGKg\"],\"body\":{\"attempt_id\":\"DgCVYQKL1eyDacZvG6YhZg\",\"metadata\":{\"note\":\"thank you\",\"order\":\"1042\"}}}",
+        "json": "{\"v\":1,\"kind\":\"paykit.payment_receipt\",\"msg_id\":\"f447883c-ff13-4876-81d6-86f54a79abd8\",\"created_at\":\"2026-01-01T00:08:00.000Z\",\"from\":{\"identity\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"app_id\":\"brrz3m6g5rci6iqnzke44q4djc\"},\"to\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"refs\":[\"5i4nqp8KShw1uLnlx5y6UTsNNw8rNS9dt7n5OBbZieQ\",\"pukrdI5C7SfN7mlLheLGWRk2qzt8RTKXlXv4E1rRGKg\"],\"body\":{\"attempt_id\":\"DgCVYQKL1eyDacZvG6YhZg\",\"metadata\":{\"note\":\"thank you\",\"order\":\"1042\"}}}",
         "name": "a request's receipt with metadata",
         "sender_app": "brrz3m6g5rci6iqnzke44q4djc",
-        "signature": "o_3YSW7McOO-IeYjzLSwa83AwYP3bI-KzClgKav1XG9LIebXLX4didrcsmKHys5fmujAlCyuh-brIOdfrALcDA"
+        "signature": "bG5B8vAErira6HtZZpfN6OqVUdFp79deBsdoP9oiDzeEUegFaeDppj6L4M-OufKf0foYiQbdeTaEYF0TBxIeAg"
       },
       {
-        "json": "{\"v\":1,\"kind\":\"paykit.payment_receipt\",\"msg_id\":\"f447883c-ff13-4876-81d6-86f54a79abd8\",\"created_at\":\"2026-01-01T00:08:00.000Z\",\"from\":{\"identity\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"app_id\":\"brrz3m6g5rci6iqnzke44q4djc\"},\"to\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"refs\":[\"1ywIwYm3Jj7Sh5GgHP_rUatBFh1Oefxm2rS4fC6oEzk\"],\"body\":{\"attempt_id\":\"mAFdg5_0tVNjmrgiTUZW4g\",\"metadata\":{\"note\":\"thank you\",\"order\":\"1042\"},\"payment_reference\":\"invoice-77\"}}",
+        "json": "{\"v\":1,\"kind\":\"paykit.payment_receipt\",\"msg_id\":\"f447883c-ff13-4876-81d6-86f54a79abd8\",\"created_at\":\"2026-01-01T00:08:00.000Z\",\"from\":{\"identity\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"app_id\":\"brrz3m6g5rci6iqnzke44q4djc\"},\"to\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"refs\":[\"p_QzUSgZi6BSiwaB_lIC-hzYibCtWAVl9h20vUgLCRE\"],\"body\":{\"attempt_id\":\"mAFdg5_0tVNjmrgiTUZW4g\",\"metadata\":{\"note\":\"thank you\",\"order\":\"1042\"},\"payment_reference\":\"invoice-77\"}}",
         "name": "a receipt of a payment without a request with metadata and payment_reference",
         "sender_app": "brrz3m6g5rci6iqnzke44q4djc",
-        "signature": "8_25n3Yys3ewRHBH1Hu-qKTKP95siKVH6Ki4s49v_GUrXLYOq8hNI-wPN2QP1-G0X7mHzXe9-RMDqF5PdIJMDw"
+        "signature": "4h8tW_Am8Q8wtcs9pYaEsRD70R51_5CNn9jAg9FQe9NHrrql2xwepW9iVaLLhqMP1Ffcuo5S8SMiXxcL4i8ABg"
       }
     ],
     "description": "Wire 4.11: bob's receipts, payment_receipt as the shop signs it, with members added and signed again by the shop. A receipt may carry the payee's metadata, an object, as v0.1 Receipt.metadata; and a receipt of a payment without a request, whose refs name its proof alone (here payment_proof_unrequested, with that proof's attempt_id), may carry the payee's payment_reference for it. accepted are receipts a payer takes at check 10: the request's receipt with metadata, and the receipt of the payment without a request with metadata and a payment_reference. refused are receipts it drops there: the request's receipt carrying a payment_reference, whose request's reference applies, one whose metadata isn't an object, and a receipt naming a Billing Period without a request. reason is paykit-lib's wording.",
     "refused": [
       {
-        "json": "{\"v\":1,\"kind\":\"paykit.payment_receipt\",\"msg_id\":\"f447883c-ff13-4876-81d6-86f54a79abd8\",\"created_at\":\"2026-01-01T00:08:00.000Z\",\"from\":{\"identity\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"app_id\":\"brrz3m6g5rci6iqnzke44q4djc\"},\"to\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"refs\":[\"BDGN__ffJTDNNNyF2lkTCrRNUox5u3NGNuwKgxAhcJc\",\"pukrdI5C7SfN7mlLheLGWRk2qzt8RTKXlXv4E1rRGKg\"],\"body\":{\"attempt_id\":\"DgCVYQKL1eyDacZvG6YhZg\",\"payment_reference\":\"order-1042\"}}",
+        "json": "{\"v\":1,\"kind\":\"paykit.payment_receipt\",\"msg_id\":\"f447883c-ff13-4876-81d6-86f54a79abd8\",\"created_at\":\"2026-01-01T00:08:00.000Z\",\"from\":{\"identity\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"app_id\":\"brrz3m6g5rci6iqnzke44q4djc\"},\"to\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"refs\":[\"5i4nqp8KShw1uLnlx5y6UTsNNw8rNS9dt7n5OBbZieQ\",\"pukrdI5C7SfN7mlLheLGWRk2qzt8RTKXlXv4E1rRGKg\"],\"body\":{\"attempt_id\":\"DgCVYQKL1eyDacZvG6YhZg\",\"payment_reference\":\"order-1042\"}}",
         "name": "a request's receipt carrying payment_reference",
         "reason": "invalid: payment_receipt: payment_reference: only in a receipt of a payment without a request; a request's reference applies",
         "sender_app": "brrz3m6g5rci6iqnzke44q4djc",
-        "signature": "HKN48mAOhJE2yA6z7H2vLNvqEWD2bl-3fs1H7DJZDR0WlnOs_H7vB_9-c7eFJ52P9yp56meWNaxvvkchxgg4Cg"
+        "signature": "VIJBB6E_azlIJTW0uAyMq1ya8-E5QG4e7Rht3YG3p7LwXQ0fzwCKh7TZcY-LU5sH5Gwdwq-Ioo4wJ7KAdL_0Dw"
       },
       {
-        "json": "{\"v\":1,\"kind\":\"paykit.payment_receipt\",\"msg_id\":\"f447883c-ff13-4876-81d6-86f54a79abd8\",\"created_at\":\"2026-01-01T00:08:00.000Z\",\"from\":{\"identity\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"app_id\":\"brrz3m6g5rci6iqnzke44q4djc\"},\"to\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"refs\":[\"BDGN__ffJTDNNNyF2lkTCrRNUox5u3NGNuwKgxAhcJc\",\"pukrdI5C7SfN7mlLheLGWRk2qzt8RTKXlXv4E1rRGKg\"],\"body\":{\"attempt_id\":\"DgCVYQKL1eyDacZvG6YhZg\",\"metadata\":\"thank you\"}}",
+        "json": "{\"v\":1,\"kind\":\"paykit.payment_receipt\",\"msg_id\":\"f447883c-ff13-4876-81d6-86f54a79abd8\",\"created_at\":\"2026-01-01T00:08:00.000Z\",\"from\":{\"identity\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"app_id\":\"brrz3m6g5rci6iqnzke44q4djc\"},\"to\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"refs\":[\"5i4nqp8KShw1uLnlx5y6UTsNNw8rNS9dt7n5OBbZieQ\",\"pukrdI5C7SfN7mlLheLGWRk2qzt8RTKXlXv4E1rRGKg\"],\"body\":{\"attempt_id\":\"DgCVYQKL1eyDacZvG6YhZg\",\"metadata\":\"thank you\"}}",
         "name": "a receipt whose metadata isn't an object",
         "reason": "invalid: payment_receipt: metadata: not an object",
         "sender_app": "brrz3m6g5rci6iqnzke44q4djc",
-        "signature": "FHpDF6MZyLZs4Rrnvfbphstlz0pM5jAOpC6U8Tef_l41Opdj00cyT6Mb4rgiTtL3kk0VqaUP8UpvNW1JwFE9CA"
+        "signature": "ALDtHuabObA8r5i1xJ_rlCsW3lF9dYCOXG00OtUqaDT22nkXA3J8kZRyqOtPI9bbxyPlTQXOKkjz-IZEjulNDw"
       },
       {
-        "json": "{\"v\":1,\"kind\":\"paykit.payment_receipt\",\"msg_id\":\"f447883c-ff13-4876-81d6-86f54a79abd8\",\"created_at\":\"2026-01-01T00:08:00.000Z\",\"from\":{\"identity\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"app_id\":\"brrz3m6g5rci6iqnzke44q4djc\"},\"to\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"refs\":[\"1ywIwYm3Jj7Sh5GgHP_rUatBFh1Oefxm2rS4fC6oEzk\"],\"body\":{\"attempt_id\":\"mAFdg5_0tVNjmrgiTUZW4g\",\"billing_period\":{\"ends_at\":\"2026-03-31T00:00:00.000Z\",\"starts_at\":\"2026-02-28T00:00:00.000Z\"},\"metadata\":{\"note\":\"thank you\",\"order\":\"1042\"},\"payment_reference\":\"invoice-77\"}}",
+        "json": "{\"v\":1,\"kind\":\"paykit.payment_receipt\",\"msg_id\":\"f447883c-ff13-4876-81d6-86f54a79abd8\",\"created_at\":\"2026-01-01T00:08:00.000Z\",\"from\":{\"identity\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"app_id\":\"brrz3m6g5rci6iqnzke44q4djc\"},\"to\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"refs\":[\"p_QzUSgZi6BSiwaB_lIC-hzYibCtWAVl9h20vUgLCRE\"],\"body\":{\"attempt_id\":\"mAFdg5_0tVNjmrgiTUZW4g\",\"billing_period\":{\"ends_at\":\"2026-03-31T00:00:00.000Z\",\"starts_at\":\"2026-02-28T00:00:00.000Z\"},\"metadata\":{\"note\":\"thank you\",\"order\":\"1042\"},\"payment_reference\":\"invoice-77\"}}",
         "name": "a receipt of a payment without a request naming a Billing Period",
         "reason": "invalid: payment_receipt: billing_period: only in a receipt of a recurring request, whose refs name it",
         "sender_app": "brrz3m6g5rci6iqnzke44q4djc",
-        "signature": "c0qtSUxuDhcrq1c5dx_vipXEFZxAovY7ozoWZYDJytDPeaP2JekjyXSyWNes7BgJVrpquRLT81BxqQQAdl2eDA"
+        "signature": "0reWDLe945I1KgqhiCr4LuKek2yBTnB0SV7CFqzErZU9L-q-FiYLmfuOCBvab-zNyuvLMq8QP_Mqgqk95Rr8AQ"
       }
     ]
   }

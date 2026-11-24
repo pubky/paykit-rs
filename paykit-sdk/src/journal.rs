@@ -20,7 +20,7 @@
 //! rail's proof.
 
 use paykit_lib::bodies::{Body, Conversion};
-use paykit_lib::derive::{natural_key, payment_obligation};
+use paykit_lib::derive::{natural_key, payment_obligation_blinded, request_obligation_blinded};
 use paykit_lib::periods::PeriodRef;
 use paykit_lib::records::{DestinationSource, StoredMessage};
 use paykit_lib::{
@@ -171,23 +171,15 @@ impl Destination {
 /// the rule the final payment check holds the method's transfer to again, just before each
 /// call, a repeat's included, so no call transfers more than the first was allowed to.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum TransferBound {
-    /// What the user asked for: exactly the amount paid, with a fee of nothing or at most
-    /// `cap`, the app's cap for the asset at planning.
-    Asked {
-        /// The cap, as a decimal; `None` for none.
-        cap: Option<String>,
-    },
-    /// The selected transfer the user confirmed: its amount and largest fee remain bound
-    /// for every dispatch.
+    /// What the user asked for: exactly the amount paid.
+    Asked {},
+    /// The selected transfer the user confirmed: its amount remains bound for every
+    /// dispatch.
     Confirmed {
-        /// The cap at planning, for a transfer that is what the user asked for.
-        cap: Option<String>,
         /// The amount confirmed; `None` for one the method couldn't tell.
         amount: Option<KeptAmount>,
-        /// The largest fee confirmed, as a decimal; `None` for none.
-        max_fee: Option<String>,
     },
 }
 
@@ -328,6 +320,11 @@ pub(crate) struct JournalEntry {
     /// The original executor grant that authorized this attempt's reservation.
     #[serde(deserialize_with = "Option::deserialize")]
     pub(crate) allowance: Option<crate::executor::JournalAllowance>,
+    /// The `expires_at` of the Allowance terms the reservation was made under, set with
+    /// `allowance`: no first dispatch goes once it has passed, while a repeat of a dispatch
+    /// that may have gone still reconciles (Paykit spec 8.3).
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub(crate) allowance_expires_at_ms: Option<u64>,
     pub(crate) attempt_id: String,
     #[serde(with = "serde_b64")]
     pub(crate) obligation: [u8; 32],
@@ -391,6 +388,10 @@ pub(crate) struct JournalEntry {
     /// This device ended the Allowance attempt before entering the payment method.
     /// Restore clears the evidence because the original device may have continued.
     pub(crate) never_dispatched: bool,
+    /// The user resolved this restored dispatch as paid while no claim showed it, so its
+    /// `done` went on no claim (Paykit spec 7.2, 8.4): no payment of its obligation goes
+    /// again while it is journaled, as `done` on a claim would settle it.
+    pub(crate) user_paid: bool,
     /// The attempt's transition proof, for the service and generation it was written at
     /// (Paykit spec 4, "Fresh before paying"). An entry without one is never dispatched again.
     pub(crate) attempt_proof: Option<SignedDoc>,
@@ -407,7 +408,7 @@ pub(crate) struct JournalEntry {
     pub(crate) record_held: bool,
     /// The transfer the attempt may make, as its planning allowed it. `None` only in an
     /// entry a reconcile rebuilt from its claim (`restored`), which is never dispatched
-    /// again: its repeat would be held to the app's cap now.
+    /// again.
     pub(crate) transfer_bound: Option<TransferBound>,
     /// The price its user confirmed, for a payment priced by a rate: the rate `paid` was
     /// computed by, and `amount` stays the request's. `None` for a payment no rate prices,
@@ -655,8 +656,8 @@ impl JournalEntry {
     ///   read; the destination's members read and agree;
     /// - a payment of a request has its payment reference, and its record's natural key is
     ///   the request's, or, for a Billing Period, the period's, which owes no acceptance; a
-    ///   payment without a request has neither, nor a period, owes no acceptance, and its
-    ///   claim key is the attempt's;
+    ///   payment without a request has neither, nor a period, and owes no acceptance (its
+    ///   claim key, blinded, is checked by [`JournalEntry::check_bound`]);
     /// - an acceptance is kept with its plaintext, which reads, and only when owed;
     /// - the method's proof is kept from `RailPaid` on, and before any payment time or
     ///   proof message; a `Finished` entry marked failed by the method holds no proof;
@@ -666,12 +667,20 @@ impl JournalEntry {
     ///   method.
     pub(crate) fn check(&self) -> Result<()> {
         let bad = || Err(PaykitError::corrupt());
-        let attempt = self.attempt()?;
+        self.attempt()?;
         let request_hash = self.request_hash()?;
         self.amount.amount()?;
         self.destination.check()?;
         self.label()?;
         let period = self.period()?;
+        // An expiry is the reserving Allowance's, kept only with it.
+        if self.allowance.is_none() && self.allowance_expires_at_ms.is_some() {
+            return bad();
+        }
+        // Only a restored dispatch the user resolved, and so finished, is paid by the user.
+        if self.user_paid && (!self.restored || self.stage != Stage::Finished) {
+            return bad();
+        }
         if self.offline.is_some()
             && (request_hash.is_some()
                 || self.destination.source()? != DestinationSource::Public
@@ -701,7 +710,6 @@ impl JournalEntry {
                 if self.acceptance_owed
                     || period.is_some()
                     || self.destination.source()? == DestinationSource::Request
-                    || self.obligation != payment_obligation(&attempt)
                 {
                     return bad();
                 }
@@ -820,22 +828,25 @@ impl JournalEntry {
         }
     }
 
-    /// [`JournalEntry::check`], and the entry's claim key bound to what it pays: for a
-    /// payment of a request, the obligation `request_obligation` derives from the payee, the
-    /// request and the start of the Billing Period paid, in Unix seconds, 0 for a one-time
-    /// request (Paykit spec 7.1, Paykit wire 1.5); a payment without a request's is checked
-    /// by `check` already. An entry whose claim key names another obligation would read and
-    /// write one claim while its record and proof name another: it is a corrupt store.
-    pub(crate) fn check_bound(
-        &self,
-        request_obligation: impl Fn(&[u8; 32], &[u8; 32], u64) -> [u8; 32],
-    ) -> Result<()> {
+    /// [`JournalEntry::check`], and the entry's claim key bound to what it pays, each input
+    /// blinded by `blind` with the payer's naming key (Paykit spec 7.1, Paykit wire 1.5): for
+    /// a payment of a request, the obligation of the payee, the request and the start of the
+    /// Billing Period paid, in Unix seconds, 0 for a one-time request; for a payment without
+    /// a request, the obligation of its attempt ID. An entry whose claim key names another
+    /// obligation would read and write one claim while its record and proof name another: it
+    /// is a corrupt store.
+    pub(crate) fn check_bound(&self, blind: impl Fn(&[u8]) -> [u8; 32]) -> Result<()> {
         self.check()?;
-        if let Some(hash) = self.request_hash()? {
-            if self.obligation != request_obligation(&self.payee, &hash, self.period_start_secs()?)
-            {
-                return Err(PaykitError::corrupt());
-            }
+        let expected = match self.request_hash()? {
+            Some(hash) => request_obligation_blinded(
+                &blind(&self.payee),
+                &blind(&hash),
+                self.period_start_secs()?,
+            ),
+            None => payment_obligation_blinded(&blind(&self.attempt()?.to_bytes())),
+        };
+        if self.obligation != expected {
+            return Err(PaykitError::corrupt());
         }
         Ok(())
     }
@@ -862,9 +873,9 @@ impl JournalEntry {
         &self,
         own: &[u8; 32],
         own_cert: &AppCert,
-        request_obligation: impl Fn(&[u8; 32], &[u8; 32], u64) -> [u8; 32],
+        blind: impl Fn(&[u8]) -> [u8; 32],
     ) -> Result<()> {
-        self.check_bound(request_obligation)?;
+        self.check_bound(blind)?;
         let corrupt = || Err(PaykitError::corrupt());
         let request_hash = self.request_hash()?;
         if let Some(kept) = &self.request {
@@ -1054,6 +1065,11 @@ pub struct PaymentView {
     pub stage: Stage,
     /// The entry came back from a backup.
     pub restored: bool,
+    /// Whether the payment method reported this payment made: the journal holds its proof.
+    /// At `Finished` it tells a payment made, its outcome written, from one written failed.
+    /// After a call returned a wallet-wide stop, it is how the host learns of a payment made
+    /// in that call, as the call's error carries no outcome (Paykit spec 7.2).
+    pub paid_by_method: bool,
     /// Paid by the method, its outcome waits: the payer's activity record holds a value that
     /// doesn't read, so `done` and the proof aren't written, and the attempt stays open
     /// (Paykit spec 7.2 step 3). It settles once the record reads again, at
@@ -1088,6 +1104,7 @@ impl JournalEntry {
             endpoint_id: self.destination.endpoint_id()?,
             stage: self.stage,
             restored: self.restored,
+            paid_by_method: self.rail_proof.is_some(),
             record_held: self.record_held,
             receipt: None,
         })
@@ -1115,6 +1132,23 @@ pub(crate) fn dispatched(stage: Stage, restored: bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_journal_transfer_bound_refuses_a_fee_from_earlier_builds() {
+        let read = |v: serde_json::Value| serde_json::from_value::<TransferBound>(v);
+        assert_eq!(
+            read(serde_json::json!({ "kind": "asked" })).unwrap(),
+            TransferBound::Asked {}
+        );
+        assert!(read(serde_json::json!({ "kind": "confirmed", "amount": null })).is_ok());
+        // A cap or a fee is no member of the bound: an entry holding one is refused.
+        for earlier in [
+            serde_json::json!({ "kind": "asked", "cap": null }),
+            serde_json::json!({ "kind": "confirmed", "cap": "1", "amount": null, "max_fee": null }),
+        ] {
+            assert!(read(earlier).is_err());
+        }
+    }
 
     #[test]
     fn test_journal_dispatched_only_at_paying_or_restored_before_an_outcome() {

@@ -3,7 +3,16 @@ use pubky_switch_core::{records::AuthRequest, sig::SignedDoc};
 use pubky_switch_harness::{Backend, World};
 use std::{error::Error, sync::Arc};
 
+mod allowances;
+mod executor;
+mod extensions;
+mod host_calls;
+mod lists;
 mod method;
+mod payee;
+mod payer;
+mod periods;
+mod public;
 mod refusal;
 use crate::fixture_signer as signer;
 mod storage;

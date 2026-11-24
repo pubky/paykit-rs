@@ -123,7 +123,11 @@ async fn sale(shop: &Paykit, request: &RequestRef) -> paykit_sdk::PayeeActivity 
 }
 
 fn idempotent_without_history() -> RailDeclaration {
-    RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS).with_idempotent(true)
+    RailDeclaration::new(
+        paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
+        paykit_sdk::rail::FAKE_PAYMENT_TIME_TOLERANCE_MS,
+    )
+    .with_idempotent(true)
 }
 
 #[tokio::test]
@@ -807,9 +811,12 @@ async fn test_divergent_outcome_waits_for_the_confirmation() {
     set_divergent(&base, &wallet, &record, true);
     w.rail.settle(&attempt_id, true);
     w.rail.set_declaration(
-        RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
-            .with_idempotent(true)
-            .with_history(true),
+        RailDeclaration::new(
+            paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
+            paykit_sdk::rail::FAKE_PAYMENT_TIME_TOLERANCE_MS,
+        )
+        .with_idempotent(true)
+        .with_history(true),
     );
     let resumed = wallet.resume_payments().await.unwrap();
     assert!(
@@ -1824,9 +1831,12 @@ async fn test_divergent_outcome_waits_after_the_view_clears_until_confirmed() {
     set_divergent(&base, &wallet, &record, true);
     w.rail.settle(&attempt_id, true);
     w.rail.set_declaration(
-        RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
-            .with_idempotent(true)
-            .with_history(true),
+        RailDeclaration::new(
+            paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
+            paykit_sdk::rail::FAKE_PAYMENT_TIME_TOLERANCE_MS,
+        )
+        .with_idempotent(true)
+        .with_history(true),
     );
     let resumed = wallet.resume_payments().await.unwrap();
     assert!(
@@ -4026,7 +4036,7 @@ async fn test_divergent_list_of_a_removed_app_waits_for_a_current_list() {
         .outcome
         .unwrap_err();
     assert!(
-        matches!(refused.refusal(), Some(Refusal::WaitingForList)),
+        matches!(refused.refusal(), Some(Refusal::WaitingForList { .. })),
         "{refused:?}"
     );
     assert!(w.rail.all_executions().is_empty());
@@ -4065,7 +4075,7 @@ async fn test_divergent_list_of_a_removed_app_leaves_an_expired_current_list_ask
         .outcome
         .unwrap_err();
     assert!(
-        matches!(refused.refusal(), Some(Refusal::WaitingForList)),
+        matches!(refused.refusal(), Some(Refusal::WaitingForList { .. })),
         "{refused:?}"
     );
     assert!(w.rail.all_executions().is_empty());
@@ -4298,9 +4308,12 @@ async fn test_divergent_failure_goes_on_the_claim_alone_while_divergent() {
     let before = wallet.app().shared_record(&record).await.unwrap().unwrap();
     w.rail.settle(&attempt_id, false);
     w.rail.set_declaration(
-        RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
-            .with_idempotent(true)
-            .with_history(true),
+        RailDeclaration::new(
+            paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
+            paykit_sdk::rail::FAKE_PAYMENT_TIME_TOLERANCE_MS,
+        )
+        .with_idempotent(true)
+        .with_history(true),
     );
     let resumed = wallet.resume_payments().await.unwrap();
     assert!(
@@ -4503,7 +4516,7 @@ async fn test_divergent_paused_list_above_the_payees_generation_pauses_nothing()
         .outcome
         .unwrap_err();
     assert!(
-        matches!(refused.refusal(), Some(Refusal::WaitingForList)),
+        matches!(refused.refusal(), Some(Refusal::WaitingForList { .. })),
         "{refused:?}"
     );
     assert!(w.rail.all_executions().is_empty());
@@ -4546,7 +4559,7 @@ async fn test_divergent_request_to_an_app_whose_list_certificate_no_longer_count
         .outcome
         .unwrap_err();
     assert!(
-        matches!(refused.refusal(), Some(Refusal::WaitingForList)),
+        matches!(refused.refusal(), Some(Refusal::WaitingForList { .. })),
         "{refused:?}"
     );
     assert!(w.rail.all_executions().is_empty());
@@ -4567,4 +4580,86 @@ async fn test_divergent_request_to_an_app_whose_list_certificate_no_longer_count
         mark["d"]["held_version"],
         serde_json::to_value(list_version(1, 1)).unwrap()
     );
+}
+
+#[tokio::test]
+async fn test_divergent_stored_request_never_reopens_a_divergent_delete() {
+    // The wallet's write of bob's request is refused, so the request is a stored entry and the
+    // wallet never takes a value of its record. The phone takes it, then deletes the record,
+    // and the delete shows divergent: its upload may hold what the delete lacks, a
+    // cancellation among them. Confirmed or not, the stored request is never written over the
+    // delete, so the record isn't opened again, and it is given up at its 30 days with the
+    // host's notice (Paykit spec 6, 8.1 "Stored entries").
+    let w = World::new();
+    let base = store();
+    let mut wallet = w.wallet_on("wallet", Arc::clone(&base)).await;
+    let mut phone = w.wallet("phone").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    crate::common::refuse_writes(&w.alice, 2);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(
+        wallet
+            .app()
+            .protocol_scan("paykit", b"se/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    phone.receive(None).await.unwrap();
+    let target = RecordTarget::new(
+        SwitchCollection::new(
+            Collection::PayerActivity.name(),
+            Collection::PayerActivity.policy(None),
+        ),
+        &natural_key::request_record(&w.bob_id(), &request.request_hash),
+    );
+    let record = phone.app().record_key(&target).unwrap();
+    assert!(phone
+        .app_mut()
+        .read_record(&target)
+        .await
+        .unwrap()
+        .is_some_and(|held| held.content.value().is_some()));
+    phone
+        .app_mut()
+        .delete_record(&target, Vec::new())
+        .await
+        .unwrap();
+    // The delete reaches the wallet already divergent.
+    w.alice
+        .switch()
+        .make_divergent(OTHER_UPLOADER, record, [1; 32])
+        .unwrap();
+    wallet.receive(None).await.unwrap();
+    let held = wallet.app().shared_record(&record).await.unwrap().unwrap();
+    assert!(held.divergent);
+    assert_eq!(
+        held.content,
+        pubky_switch_client::app::RecordContent::Deleted
+    );
+    confirm(&mut wallet, &record).await.unwrap();
+    for _ in 0..2 {
+        wallet.receive(None).await.unwrap();
+    }
+    let deleted = pubky_switch_client::app::RecordContent::Deleted;
+    let held = wallet.app().shared_record(&record).await.unwrap().unwrap();
+    assert_eq!(held.content, deleted);
+    w.clock.advance_ms(31 * 24 * HOUR_MS);
+    wallet.receive(None).await.unwrap();
+    let held = wallet.app().shared_record(&record).await.unwrap().unwrap();
+    assert_eq!(held.content, deleted);
+    assert!(wallet
+        .app()
+        .protocol_scan("paykit", b"se/")
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(wallet
+        .notices()
+        .await
+        .unwrap()
+        .iter()
+        .any(|n| n.kind == paykit_sdk::NoticeKind::MessageGivenUp));
 }

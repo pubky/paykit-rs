@@ -19,7 +19,7 @@ use serde_json::{json, Value};
 
 use crate::common::{
     arr, b64n, generated, hex, message_json, paykit, pubky, st, writing, Keys, Place, ALICE,
-    ALLOWANCE_ID, BOB, SHOP1, UNREQUESTED_TXID,
+    ALLOWANCE_ID, BOB, SHOP1, UNREQUESTED_SETTLEMENT,
 };
 
 #[test]
@@ -50,12 +50,17 @@ pub(crate) fn check() {
         let nk = keys.identity(&pubky(st(case, "identity"))).naming_key();
         let (material, obligation) = match case.get("attempt_id") {
             Some(attempt) => {
-                // From the attempt ID alone: no payee, no naming key.
+                // The attempt ID blinded with the payer's naming key; no payee.
                 assert!(case.get("payee").is_none() && case.get("blinded_payee").is_none());
                 let attempt = AttemptId::parse(attempt.as_str().unwrap()).unwrap();
+                assert_eq!(
+                    b64(&nk.blind(&attempt.to_bytes())),
+                    st(case, "blinded_attempt_id"),
+                    "{name}"
+                );
                 (
-                    payment_obligation_material(&attempt),
-                    payment_obligation(&attempt),
+                    payment_obligation_material(&nk, &attempt),
+                    payment_obligation(&nk, &attempt),
                 )
             }
             None => {
@@ -138,9 +143,13 @@ fn derived(keys: &Keys) -> Vec<(Place<'static>, Value)> {
         let (material, obligation) = match case.get("attempt_id") {
             Some(attempt) => {
                 let attempt = AttemptId::parse(attempt.as_str().unwrap()).unwrap();
+                out.push((
+                    at("blinded_attempt_id"),
+                    json!(b64(&nk.blind(&attempt.to_bytes()))),
+                ));
                 (
-                    payment_obligation_material(&attempt),
-                    payment_obligation(&attempt),
+                    payment_obligation_material(&nk, &attempt),
+                    payment_obligation(&nk, &attempt),
                 )
             }
             None => {
@@ -274,8 +283,9 @@ the record key, lp(collection, blinded_natural_key, policy_hash), and record_key
 derive(\"pubky-switch/v1/record\", collection, blinded_natural_key, policy_hash). The \
 request hashes are those of messages.json's payment_request, payment_request_recurring \
 (its February period, 1772236800) and payment_request_labelled, whose payee record is under \
-the policy of its label shop1. The last is the settlements bucket of the bitcoin-txid \
-settlement of the payment without a request, its settlement_id, held at bob's switch: \
+the policy of its label shop1. The last is the settlements bucket of the settlement \
+of the payment without a request, whose settlement ID is the UTF-8 bytes of settlement_id, \
+given as such rather than read from a proof, held at bob's switch: \
 settlement_tag_input_hex is lp(settlement ID), blinded_settlement_tag_input its blind, \
 settlement_tag_hex the settlement's tag, derive(\"paykit/v1/settlement\", \"tag\", \
 blinded_settlement_tag_input), bucket u16_be(tag[0..2]) >> 6, mark_settlement_tag_hex bytes 2 \
@@ -294,7 +304,7 @@ fn record_keys(keys: &Keys) -> Value {
     let allowance = AllowanceId::parse(ALLOWANCE_ID).unwrap();
     let attempt = AttemptId::parse("mAFdg5_0tVNjmrgiTUZW4g").unwrap();
     let shop = keys.app("shop").keys.app_id_bytes();
-    let txid = UNREQUESTED_TXID;
+    let settlement = UNREQUESTED_SETTLEMENT;
     let shop1 = Label::parse(SHOP1).unwrap();
     let named = [
         (
@@ -331,7 +341,7 @@ fn record_keys(keys: &Keys) -> Value {
             bob,
             natural_key::payee_payment_record(
                 &PaymentEndpointIdentifier::parse("btc-bitcoin-p2wpkh").unwrap(),
-                txid.as_bytes(),
+                settlement.as_bytes(),
             ),
             None,
         ),
@@ -405,19 +415,19 @@ fn record_keys(keys: &Keys) -> Value {
         })
         .collect();
     let mut cases = cases;
-    cases.push(settlement_bucket_case(keys, txid));
+    cases.push(settlement_bucket_case(keys, settlement));
     cases.push(crate::sealed::publications::address(keys));
     json!({ "cases": cases, "description": RECORD_KEYS_DESCRIPTION })
 }
 
 /// The `record_keys` case of the `settlements` bucket of the payment without a request's
-/// `bitcoin-txid` settlement (Paykit wire 1.5, 5.7): its tag and bucket, the bucket's record
+/// settlement, its ID given as bytes (Paykit wire 1.5, 5.7): its tag and bucket, the bucket's record
 /// key under bob's naming key, and the tag of the occurrence it was credited to, bob's payee
 /// record of that payment.
-fn settlement_bucket_case(keys: &Keys, txid: &str) -> Value {
+fn settlement_bucket_case(keys: &Keys, settlement: &str) -> Value {
     let bob = pubky(BOB);
     let nk = keys.identity(&bob).naming_key();
-    let id = txid.as_bytes();
+    let id = settlement.as_bytes();
     let material = settlement_tag_material(id);
     let blinded_id = nk.blind(&material);
     let tag = settlement_tag(&nk, id);
@@ -452,7 +462,7 @@ fn settlement_bucket_case(keys: &Keys, txid: &str) -> Value {
         "occurrence_tag_hex": hex(&occurrence_tag(&nk, &occurrence)),
         "policy_hash": b64(&policy_hash),
         "record_key": b64(&key),
-        "settlement_id": txid,
+        "settlement_id": settlement,
         "settlement_tag_hex": hex(&tag),
         "settlement_tag_input_hex": hex(&material),
     })
@@ -460,4 +470,4 @@ fn settlement_bucket_case(keys: &Keys, txid: &str) -> Value {
 
 /// The name of the `settlements` case of `record_keys`.
 const SETTLEMENT_BUCKET_CASE: &str =
-    "settlements bucket of the bitcoin-txid settlement of the payment without a request";
+    "settlements bucket of the settlement of the payment without a request";

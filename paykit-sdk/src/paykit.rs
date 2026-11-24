@@ -11,12 +11,12 @@
 //! Recurring requests' Billing Periods have theirs (`periods.rs`); Allowances and publishing
 //! Private Payment Lists add their own the same way.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use paykit_lib::derive::request_obligation_blinded;
 use paykit_lib::scopes::{acts_as_payee, check_certificate};
-use paykit_lib::{Asset, Decimal, Label};
+use paykit_lib::Label;
 use pubky_switch_client::app::{
     App, AppBackup, AppConfig, AppEnv, AppError, AppEvent, HeldCursor, HomeserverReader,
     IdentityRefresh, JoinRequest, ProtocolSet, ReceiveReport,
@@ -87,10 +87,6 @@ pub struct PaykitConfig {
     /// at the floor that leaves only the pre-dispatch budget, less the clock tolerance, so
     /// an app that wants later repeats sets a larger value.
     pub orphan_after_s: Option<u64>,
-    /// The largest fee the payee can influence through its destination that the app pays
-    /// without asking, per asset, in whole units of the payment's asset (Paykit spec 7.2
-    /// step 1): a fee in an asset without a cap here is accepted only when it is zero.
-    pub fee_caps: BTreeMap<Asset, Decimal>,
     /// The label a payee app sends its requests under (Paykit spec 3.1, 8.1). An app holding
     /// only labelled selling scopes needs one unless it holds exactly one label.
     pub selling_label: Option<Label>,
@@ -121,16 +117,6 @@ impl PaykitConfig {
     #[must_use]
     pub fn with_orphan_after_s(mut self, orphan_after_s: u64) -> Self {
         self.orphan_after_s = Some(orphan_after_s);
-        self
-    }
-
-    /// The largest fee the payee can influence through its destination that the app pays
-    /// without asking for a payment in `asset` (Paykit spec 7.2 step 1), replacing any cap
-    /// set for that asset before. A fee in an asset without a cap is accepted only when it
-    /// is zero.
-    #[must_use]
-    pub fn with_fee_cap(mut self, asset: Asset, fee_cap: Decimal) -> Self {
-        self.fee_caps.insert(asset, fee_cap);
         self
     }
 
@@ -177,7 +163,6 @@ impl Default for PaykitConfig {
         Self {
             app: AppConfig::default(),
             orphan_after_s: None,
-            fee_caps: BTreeMap::new(),
             selling_label: None,
             resend_budget: DEFAULT_RESEND_BUDGET,
             extension_kinds: Vec::new(),
@@ -241,6 +226,13 @@ pub struct ReceiveSummary {
     /// A received message's entry receipt identifies any invitation redeemed for that
     /// delivery. This service observation does not authorize a payment or replace the
     /// signed request and its seller-scope checks.
+    ///
+    /// The read is bounded. `report.more` says it stopped on one of its per-call budgets,
+    /// such as its feed pages or the kept batches it sends again, with more to do now;
+    /// nothing it left is lost or reordered. The host handles the summary's events, then,
+    /// while `report.more` is set and `report.stopped` is not, calls [`Paykit::receive`]
+    /// again without waiting. With `report.stopped` set it inspects the reported event
+    /// instead: reading again does nothing until that is dealt with.
     pub report: ReceiveReport,
     /// The `msg_id`s of the messages received, each with its effect committed with the
     /// cursor move (Switch spec 8.2).
@@ -384,6 +376,32 @@ pub struct Paykit {
     /// The capabilities the join checked, which its first update signs as they are
     /// (`crate::own_record`); `None` otherwise.
     pub(crate) capability_snapshot: Option<Vec<paykit_lib::PaymentEndpointIdentifier>>,
+    /// The identity-wide notices this load has told the host of (`crate::notices`): each
+    /// once per load while what it tells stands.
+    pub(crate) identity_told: Vec<crate::NoticeKind>,
+    /// Whether a floor raise this app owes was tried and left unwritten
+    /// ([`Paykit::settle_raise_waiting`]).
+    pub(crate) raise_unwritten: bool,
+    /// Whether the lists were read since this handle's last receive or flush began: a raise
+    /// owed asks for no second read before the next one ([`Paykit::raise_owed`]).
+    pub(crate) lists_read_this_pass: bool,
+    /// Whether the read of the lists in progress already left a raise unwritten: one read
+    /// counts one try, however many raises it leaves unwritten ([`crate::floor::RaiseRetry`]).
+    pub(crate) raise_tried_in_read: bool,
+    /// The latest device time this handle's retry check saw since its last unwritten try, so
+    /// a clock put back, part of the way included, ends a wait ([`crate::floor::RaiseRetry`]).
+    pub(crate) raise_clock_seen: std::sync::atomic::AtomicU64,
+    /// When this handle last left a raise unwritten, on its monotonic clock: none since it
+    /// started means every wait is over, the time waited not being known; with it, a clock set
+    /// back between checks can't hide time ([`crate::floor::RaiseRetry`]).
+    pub(crate) raise_tried_at: std::sync::Mutex<Option<std::time::Instant>>,
+    /// How many activity records this handle bound ([`Paykit::activity_binds`]).
+    #[cfg(feature = "test-support")]
+    pub(crate) activity_binds: std::sync::atomic::AtomicU64,
+    /// The certificates this handle verified (`crate::records::Certificates`): empty when it
+    /// is built, at a load, a join or a restore, so each certificate is verified in full the
+    /// first time this handle reads it.
+    pub(crate) certificates: std::sync::Mutex<crate::records::Certificates>,
 }
 
 impl std::fmt::Debug for Paykit {
@@ -449,6 +467,34 @@ impl Paykit {
             first_read_summary: None,
             own_record_unknown: false,
             capability_snapshot: None,
+            identity_told: Vec::new(),
+            raise_unwritten: false,
+            lists_read_this_pass: false,
+            raise_tried_in_read: false,
+            raise_clock_seen: std::sync::atomic::AtomicU64::new(0),
+            raise_tried_at: std::sync::Mutex::new(None),
+            #[cfg(feature = "test-support")]
+            activity_binds: std::sync::atomic::AtomicU64::new(0),
+            certificates: std::sync::Mutex::default(),
+        }
+    }
+
+    /// How many activity records this handle has bound since it was built: each bind checks
+    /// every stored message the record holds (Paykit wire 5.3). For tests that guard how
+    /// often a read binds a record.
+    #[cfg(feature = "test-support")]
+    pub fn activity_binds(&self) -> u64 {
+        self.activity_binds
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Move this handle's last unwritten floor raise try `ms` back on its monotonic clock, as
+    /// if that much had passed since it without a receive. For tests of the retry wait, whose
+    /// monotonic count no test clock drives.
+    #[cfg(feature = "test-support")]
+    pub fn age_raise_try(&self, ms: u64) {
+        if let Ok(mut at) = self.raise_tried_at.lock() {
+            *at = at.and_then(|at| at.checked_sub(std::time::Duration::from_millis(ms)));
         }
     }
 
@@ -580,6 +626,9 @@ impl Paykit {
             paykit.capability_snapshot = snapshot;
             let _owed = Box::pin(paykit.tend_own_record()).await;
             paykit.capability_snapshot = None;
+            // The host hears at once of what holds the identity for good, as at a load; one that
+            // can't be told now is told at the first receive's end.
+            let _told = paykit.tell_identity_notices().await;
             Ok(paykit)
         })
         .await
@@ -708,6 +757,8 @@ impl Paykit {
         // A divergent record pauses even when a crash came before the receive's events
         // were taken: look at each held record once (`divergent.rs`).
         Box::pin(self.sweep_divergent()).await?;
+        // The host hears again, at each load, of what holds the identity for good.
+        self.tell_identity_notices().await?;
         // A crash between the restore's commit and clock clamp leaves the clamp for the
         // next load. Nothing is written under a certificate Paykit refuses.
         if self.certificate_refused().is_none() {
@@ -736,8 +787,10 @@ impl Paykit {
     /// ([`orphan_floor_s`]), before anything is written. The client's errors, all before
     /// anything is written but a store failure: `InvalidData` for a backup whose certificate
     /// Paykit refuses (Paykit wire 3.1), one without Paykit's layer or one another protocol
-    /// made, or a journal with a malformed entry or two open entries for one obligation; a
-    /// store failure.
+    /// made, or a journal with a malformed entry or two open entries for one obligation that
+    /// no earlier restore left; for a restore in place, state of the installation's it keeps
+    /// that doesn't verify, where a restore into an empty store, which reads none of it, is
+    /// the way to recover; a store failure.
     pub async fn restore(
         env: AppEnv,
         config: PaykitConfig,
@@ -781,6 +834,8 @@ impl Paykit {
             let mut paykit = Self::assemble(app, protocol, config, rail, timer);
             paykit.bound_restored_cursor_time().await?;
             paykit.stamp_restore_time().await?;
+            // An app restored opens as one loaded does.
+            paykit.tell_identity_notices().await?;
             Ok(paykit)
         })
         .await
@@ -795,6 +850,13 @@ impl Paykit {
     /// The client's errors, such as a backup over the store's sizes
     /// (`AppEvent::BackupRefused`) or a journal Paykit's layer refuses; a store failure.
     pub async fn backup(&mut self) -> Result<PaykitBackup> {
+        // A divergence of the block floor the client holds or reported goes into the backup
+        // as the hold (`crate::floor`), whatever the receive that met it got to, under a
+        // refused certificate too: it is this app's own state.
+        Box::pin(self.keep_held_floor()).await?;
+        // So does the loss marker of a list record the client holds, read before the receive
+        // that would keep it (`Paykit::place_held_lists`).
+        Box::pin(self.keep_list_loss_markers()).await?;
         Ok(PaykitBackup {
             app: self.app.backup_layered().await?,
         })
@@ -842,6 +904,12 @@ impl Paykit {
     /// spec reads on the service's clock; `None` before any verified answer.
     pub(crate) fn service_time(&self) -> Option<u64> {
         self.app.highest_service_time()
+    }
+
+    /// The obligation of a payment without a request: its attempt ID blinded with the
+    /// payer's naming key (Paykit wire 1.5).
+    pub(crate) fn payment_obligation(&self, attempt_id: &paykit_lib::AttemptId) -> [u8; 32] {
+        paykit_lib::derive::payment_obligation_blinded(&self.app.blind(&attempt_id.to_bytes()))
     }
 
     /// The obligation ID of a request, or of its Billing Period starting at
@@ -930,9 +998,10 @@ impl Paykit {
     /// gone, or not: the SDK has kept what it needs of the events about stored entries
     /// before it returns. The app-wide [`App::ack_events`] acknowledges each event for every
     /// protocol it is for, so in an app with other protocols the host calls it only once
-    /// each of those has handled the event too. The SDK itself acknowledges for Paykit
-    /// ([`App::ack_events_for`]), in order, the events it took up to the first it didn't;
-    /// the rest wait for the host. An entry dropped unverified
+    /// each of those has handled the event too. The SDK itself acknowledges for Paykit each
+    /// event it took, one by one ([`App::ack_event_with`]); the rest wait for the host, such
+    /// as `AppEvent::ListsUnverified`, which the host shows the user, and none of them holds
+    /// back an event the SDK took. An entry dropped unverified
     /// (`AppEvent::StoredEntryDropped`) counts in its sender's mark, which asks that sender
     /// to send it again (`marks.rs`).
     ///
@@ -964,6 +1033,7 @@ impl Paykit {
     /// handed over (Switch spec 8.2): a listing that fails there fails the read, and this
     /// call returns its error; the next receive lists first.
     pub async fn receive(&mut self, wait: Option<u32>) -> Result<ReceiveSummary> {
+        let _delivery = self.delivery_operation();
         // The read's future goes on the heap: the client's read nests deep, and a host
         // polling it on a small stack, such as a test thread's 2 MiB, keeps room for it.
         let summary = Box::pin(self.receive_inner(wait)).await?;
@@ -974,6 +1044,7 @@ impl Paykit {
     }
 
     async fn receive_inner(&mut self, wait: Option<u32>) -> Result<ReceiveSummary> {
+        self.lists_read_this_pass = false;
         let read = Box::pin(self.read_before_effects(wait)).await?;
         Box::pin(self.after_read(read)).await
     }
@@ -1027,6 +1098,9 @@ impl Paykit {
         // Whether the client may list at this read's start ([`Paykit::records_listed`]).
         let keys_held_before = self.holds_scope_keys();
         let received = Box::pin(self.app.receive(wait)).await;
+        if received.is_ok() {
+            self.observe_service_time();
+        }
         // A read can take another device's record or a renewal into the own record.
         self.note_own_record_write(&received);
         let report = match received {
@@ -1072,7 +1146,7 @@ impl Paykit {
         count
     }
 
-    fn remember_read(&mut self, summary: ReceiveSummary) {
+    pub(crate) fn remember_read(&mut self, summary: ReceiveSummary) {
         self.first_read_summary = Some(Box::new(match self.first_read_summary.take() {
             Some(earlier) => summary.after(*earlier),
             None => summary,
@@ -1124,6 +1198,7 @@ impl Paykit {
             });
         }
         self.refresh_own()?;
+        Box::pin(self.note_service_time()).await?;
         // A recovery notice holds own writes. Return the client's report before upkeep
         // can try a held write. A restore or a kept floor batch also defers that work.
         if self.app.recovery_required().is_some()
@@ -1173,6 +1248,12 @@ impl Paykit {
         // a narrower one included: they are listed now, or stay unlisted for the next
         // receive or write (`Paykit::list_under_new_cert`).
         let records_unlisted = Box::pin(self.list_under_new_cert()).await?;
+        // A `missed` item this read took waits for its read of the lists, with or without the
+        // divergence hold and whatever the app's scopes: it is made now, its records listed,
+        // before any ask (Paykit wire 5.6, Raising).
+        if Box::pin(self.missed_widening_unread()).await? {
+            Box::pin(self.refresh_lists_when_due()).await?;
+        }
         let pending_read = records_unlisted.is_none().then_some(&report);
         let keys = Box::pin(self.scope_keys_awaited()).await?;
         // The entries the client stored for good: their messages, kept above, written into
@@ -1203,8 +1284,12 @@ impl Paykit {
         Box::pin(self.forget_blocked_pairs()).await?;
         let mut resend_refused = None;
         let marked = Box::pin(self.ask_on_marks(&mut resend_refused)).await?;
-        // The payer's records opened before this app held the block floor they fall under
-        // carry `manual_only` from now on (`crate::floor`), unless the payer's side waits.
+        // A higher floor or a divergence the reads showed is kept (`crate::floor`). The
+        // payer's records opened before this app held the block floor they fall under carry
+        // `manual_only` from now on, unless the payer's side waits.
+        Box::pin(self.keep_held_floor()).await?;
+        // A loss followed in this read is told as at a load (`crate::loss`).
+        self.tell_identity_notices().await?;
         if !Box::pin(self.payer_waits(keys)).await? {
             Box::pin(self.sweep_floor()).await?;
         }
@@ -1244,10 +1329,14 @@ impl Paykit {
             && Box::pin(self.scope_keys_awaited()).await?.is_none()
         {
             Box::pin(self.queue_restore_asks()).await?;
+            // A stop held in the outbox past its 30 days is never sent (Paykit spec 8.1).
+            Box::pin(self.give_up_expired_stops()).await?;
             Box::pin(self.queue_own_again()).await?;
             Box::pin(self.note_imported_receipt_batches()).await?;
         }
         let asked = Box::pin(self.send_asks(&mut resend_refused)).await?;
+        // After every read of this receive, the last of which may have written the raise.
+        Box::pin(self.settle_raise_waiting()).await?;
         Box::pin(self.retire_end_origins()).await?;
         // A confirmed mark goes once its record's view isn't divergent any more, after this
         // read's events were taken.
@@ -1274,10 +1363,13 @@ impl Paykit {
     ///
     /// The client's errors.
     pub async fn flush(&mut self) -> Result<()> {
+        let _delivery = self.delivery_operation();
+        self.lists_read_this_pass = false;
         self.refresh_own()?;
         Box::pin(self.first_read_before_writing()).await?;
         self.refresh_own()?;
         Box::pin(self.refresh_lists_when_due()).await?;
+        Box::pin(self.note_service_time()).await?;
         self.send_outbox().await?;
         // Flushing can settle a kept deletion. Its signed reply can leave only
         // once Paykit has verified the applied operation and its service result.
@@ -1363,8 +1455,19 @@ mod tests {
         assert_send(&wallet.end_reconcile(confirmed));
         assert_send(&wallet.request_resend(key, ResendSelection::default()));
         assert_send(&wallet.held_lists());
+        assert_send(&wallet.set_list_endpoints(std::collections::BTreeMap::new()));
+        assert_send(&wallet.publish_list_to(key));
+        assert_send(&wallet.withdraw_list_from(key));
+        let unknown = crate::UnknownListDelivery {
+            recipient: key,
+            version: paykit_lib::ListVersion::new(1, 1).unwrap(),
+            msg_id: String::new(),
+            withdrawal: true,
+            payable_until_ms: None,
+        };
+        assert_send(&wallet.send_list_again(&unknown, confirmed));
+        assert_send(&wallet.lists_waiting_to_send_again());
         assert_send(&wallet.spam_count(&key));
-        assert_send(&wallet.place_held_list_without_marks(&key, &[0; 16], confirmed));
         assert_send(&wallet.send_request(key, draft));
         assert_send(&wallet.message_delivery(""));
         assert_send(&wallet.payee_activity());

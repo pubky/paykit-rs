@@ -83,6 +83,7 @@ mod records;
 mod reply_asks;
 mod requests;
 mod resend;
+mod send_holds;
 mod settlement_marks;
 mod settlements;
 mod state;
@@ -101,7 +102,7 @@ pub use divergent::DivergentRecord;
 pub use error::{PaykitError, Refusal, Result};
 pub use executor::ReservedByOtherApp;
 pub use extensions::{ExtensionMessage, MAX_EXTENSION_MESSAGES, MAX_EXTENSION_MESSAGES_PER_SENDER};
-pub use hold::HeldRequest;
+pub use hold::{AllowanceHold, HeldRequest};
 pub use journal::{PaymentView, Stage};
 pub use loss::{LossBoundary, RecoveryMembers, RecoveryReport};
 pub use marks::MAX_DROPPED_MARKS;
@@ -117,8 +118,8 @@ pub use paykit::{
 };
 pub use paykit_lib::bodies::RequestDestination;
 pub use paykit_lib::{
-    Asset, AttemptId, Decimal, PaymentAmount, PaymentEndpointIdentifier, PaymentEndpointPayload,
-    PaymentReference,
+    Asset, AttemptId, Decimal, ListVersion, PaymentAmount, PaymentEndpointIdentifier,
+    PaymentEndpointPayload, PaymentReference,
 };
 pub use periods::{PeriodDetailsView, PeriodPrice, PeriodView};
 pub use protocol::{PaykitProtocol, HANDLED_KINDS};
@@ -126,6 +127,7 @@ pub use pubky_switch_client::app::{
     App, AppConfig, AppEnv, JoinRequest, ProtocolSet, UserConfirmed,
 };
 pub use publish::history::PublicationConflict;
+pub use publish::UnknownListDelivery;
 pub use rail::{
     CandidateError, CandidateId, EndpointSelection, PaymentEndpointCandidate, Rail,
     RailDeclaration, RailError, RailOutcome, RailPaid, RailPayment, Transfer,
@@ -192,7 +194,7 @@ mod tests {
             endpoint_id: id(),
             payload_hash: pubky_switch_core::enc::hash(payload().as_str().as_bytes()),
             amount: btc(),
-            transfer: Transfer::new(Some(btc()), None),
+            transfer: Transfer::new(Some(btc())),
         };
         let mut endpoints = std::collections::BTreeMap::new();
         endpoints.insert(id(), payload());

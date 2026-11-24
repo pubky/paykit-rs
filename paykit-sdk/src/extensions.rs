@@ -315,6 +315,8 @@ impl Paykit {
         sender: &[u8; 32],
         msg_id: &str,
     ) -> Result<()> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         self.local_delete(&key::extension(sender, msg_id)).await
     }
 
@@ -337,6 +339,8 @@ impl Paykit {
         refs: Vec<[u8; 32]>,
         body: Map<String, Value>,
     ) -> Result<String> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         self.refresh_own()?;
         Box::pin(self.first_read_before_writing()).await?;
         self.refresh_own()?;

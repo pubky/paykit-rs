@@ -1,11 +1,13 @@
 //! Destination checks before paying (Paykit spec 4, 7.2): only from the payee's current app.
 
+use std::sync::Arc;
+
 use paykit_sdk::{PayOptions, Refusal, RequestStatus};
 use pubky_switch_client::app::UserConfirmed;
 use pubky_switch_client::clock::Clock;
 use pubky_switch_core::records::RemovedApp;
 
-use crate::common::{draft, list_version, request_from, World};
+use crate::common::{draft, endpoint, list_version, request_from, World, HOUR_MS};
 
 #[tokio::test]
 async fn test_destinations_from_a_revoked_app_refused() {
@@ -711,7 +713,7 @@ async fn test_destinations_unsupported_live_list_beside_an_expired_one_asks_for_
         .outcome
         .unwrap_err();
     assert!(
-        matches!(refused.refusal(), Some(Refusal::WaitingForList)),
+        matches!(refused.refusal(), Some(Refusal::WaitingForList { .. })),
         "{refused:?}"
     );
     let got = seller_wallet.receive(None).await.unwrap();
@@ -728,7 +730,7 @@ async fn test_destinations_unsupported_live_list_beside_an_expired_one_asks_for_
 
 /// Bob's app `app` sends alice's `wallet` its list at `version`, offering the one reusable
 /// endpoint `id`, entered at her switch directly.
-fn list_from(
+pub(crate) fn list_from(
     w: &World,
     app: &str,
     wallet: [u8; 16],
@@ -1302,7 +1304,7 @@ pub(crate) async fn held_versions(
 }
 
 /// The app asked about and the `held_version` of each list request `wallet` sent bob.
-async fn list_requests_sent(
+pub(crate) async fn list_requests_sent(
     w: &World,
     wallet: &paykit_sdk::Paykit,
 ) -> Vec<(Option<[u8; 16]>, Option<paykit_lib::ListVersion>)> {
@@ -1330,7 +1332,7 @@ async fn list_requests_sent(
 }
 
 /// Whether `shop` receives a `paykit.private_payment_list_request` at its next read.
-async fn asked_for_a_list(shop: &mut paykit_sdk::Paykit) -> bool {
+pub(crate) async fn asked_for_a_list(shop: &mut paykit_sdk::Paykit) -> bool {
     let got = shop.receive(None).await.unwrap();
     got.report.events.iter().any(|e| {
         matches!(
@@ -1423,7 +1425,7 @@ async fn test_destinations_used_up_list_asked_for_whatever_the_method_pays() {
         .outcome
         .unwrap_err();
     assert!(
-        matches!(refused.refusal(), Some(Refusal::WaitingForList)),
+        matches!(refused.refusal(), Some(Refusal::WaitingForList { .. })),
         "{refused:?}"
     );
     assert!(asked_for_a_list(&mut shop).await);
@@ -1512,12 +1514,11 @@ async fn test_destinations_confirmed_transfer_of_another_destination_refused_aga
 
 #[tokio::test]
 async fn test_destinations_confirmed_transfer_quoted_again_differently_refused_again() {
-    // The method charges a fee of 5 above the app's cap of none: the user sees it and pays
-    // anyway. Asked again, the method now charges 6: the payment is refused again with the
-    // new fee, nothing paid. Confirmed at 6, it is paid, once.
+    // The method would transfer 2 btc for a 1 btc request: the user sees it and pays anyway.
+    // Asked again, the method now transfers 3: the payment is refused again with the new
+    // amount, nothing paid. Confirmed at 3, it is paid, once.
     let w = World::new();
-    w.rail
-        .set_max_fee(Some(paykit_lib::Decimal::new("5").unwrap()));
+    w.rail.set_transfer_amount(Some(crate::common::btc("2")));
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
     let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
@@ -1527,32 +1528,28 @@ async fn test_destinations_confirmed_transfer_quoted_again_differently_refused_a
         .await
         .outcome
         .unwrap_err();
-    let five = quote_of(&refused);
-    assert_eq!(
-        five.transfer.max_fee,
-        Some(paykit_lib::Decimal::new("5").unwrap())
-    );
-    w.rail
-        .set_max_fee(Some(paykit_lib::Decimal::new("6").unwrap()));
+    let two = quote_of(&refused);
+    assert_eq!(two.transfer.amount, Some(crate::common::btc("2")));
+    w.rail.set_transfer_amount(Some(crate::common::btc("3")));
     let again = wallet
         .pay_request(
             &request,
-            PayOptions::default().with_transfer_confirmed(five.clone()),
+            PayOptions::default().with_transfer_confirmed(two.clone()),
         )
         .await
         .outcome
         .unwrap_err();
-    let six = quote_of(&again);
-    assert_eq!(
-        six.transfer.max_fee,
-        Some(paykit_lib::Decimal::new("6").unwrap())
-    );
-    assert_eq!(six.endpoint_id, five.endpoint_id);
-    assert_eq!(six.payload_hash, five.payload_hash);
+    let three = quote_of(&again);
+    assert_eq!(three.transfer.amount, Some(crate::common::btc("3")));
+    assert_eq!(three.endpoint_id, two.endpoint_id);
+    assert_eq!(three.payload_hash, two.payload_hash);
     assert!(wallet.payments().await.unwrap().is_empty());
     assert!(w.rail.all_executions().is_empty());
     let outcome = wallet
-        .pay_request(&request, PayOptions::default().with_transfer_confirmed(six))
+        .pay_request(
+            &request,
+            PayOptions::default().with_transfer_confirmed(three),
+        )
         .await
         .outcome
         .unwrap();
@@ -1615,72 +1612,91 @@ async fn test_destinations_confirmed_retry_pays_a_destination_that_passes_withou
     assert_eq!(w.rail.all_executions().len(), 1);
 }
 
-/// The fee the method reports for the next transfers, one each, as decimals.
-fn fees(values: &[Option<&str>]) -> Vec<Option<paykit_lib::Decimal>> {
-    values
-        .iter()
-        .map(|v| v.map(|v| paykit_lib::Decimal::new(v).unwrap()))
-        .collect()
-}
-
-#[tokio::test]
-async fn test_destinations_fee_grown_since_planning_not_paid() {
-    // The method charges no fee when the payment is planned, and 5 just before the call:
-    // the final check refuses it, `failed` is written, and nothing is paid.
-    let w = World::new();
-    let mut wallet = w.wallet("wallet").await;
-    let mut shop = w.shop().await;
-    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
-    wallet.receive(None).await.unwrap();
-    w.rail.next_max_fees(fees(&[None, Some("5")]));
-    let refused = wallet
-        .pay_request(&request, PayOptions::default())
-        .await
-        .outcome
-        .unwrap_err();
-    let Some(Refusal::AttemptFailed(inner)) = refused.refusal() else {
-        panic!("{refused:?}");
-    };
-    let Refusal::Transfer { quote, .. } = &**inner else {
-        panic!("{inner:?}");
-    };
-    assert_eq!(
-        quote.transfer.max_fee,
-        Some(paykit_lib::Decimal::new("5").unwrap())
-    );
-    assert!(w.rail.all_executions().is_empty());
-}
-
-#[tokio::test]
-async fn test_destinations_fee_grown_past_the_confirmed_quote_not_paid() {
-    // The user confirms a fee of 5; planned at 5, the method charges 6 just before the call:
-    // the final check refuses it, and nothing is paid.
-    let w = World::new();
+/// Alice's wallet holding bob's one-time request for 1 btc whose only destination fixes
+/// 2 btc.
+async fn with_another_amount(w: &World) -> (paykit_sdk::Paykit, paykit_sdk::RequestRef) {
     w.rail
-        .set_max_fee(Some(paykit_lib::Decimal::new("5").unwrap()));
+        .set_endpoint_identifiers(vec![crate::common::endpoint("btc-bitcoin-p2wpkh")]);
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
-    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    let draft = endpoints_draft(
+        w.clock.now_ms(),
+        &[("btc-bitcoin-p2wpkh", "bc1qaddress?amount=2")],
+    );
+    let request = request_from(&mut shop, w.alice_id(), draft).await;
     wallet.receive(None).await.unwrap();
+    (wallet, request)
+}
+
+#[tokio::test]
+async fn test_destinations_confirmed_amount_compared_by_value() {
+    // The user confirms a destination that transfers 2 btc; just before the call the method
+    // spells it 2.0: the same value, so the payment goes, once (Paykit spec 7.2 step 1; Paykit
+    // wire 1.2).
+    let w = World::new();
+    let (mut wallet, request) = with_another_amount(&w).await;
     let refused = wallet
         .pay_request(&request, PayOptions::default())
         .await
         .outcome
         .unwrap_err();
-    let five = quote_of(&refused);
-    w.rail.next_max_fees(fees(&[Some("5"), Some("6")]));
-    let refused = wallet
+    let shown = quote_of(&refused);
+    w.rail
+        .next_transfer_amounts(vec![Some(crate::common::btc("2"))]);
+    w.rail.set_transfer_amount(Some(crate::common::btc("2.0")));
+    let paid = wallet
         .pay_request(
             &request,
-            PayOptions::default().with_transfer_confirmed(five),
+            PayOptions::default().with_transfer_confirmed(shown),
+        )
+        .await
+        .outcome
+        .unwrap();
+    assert!(
+        matches!(paid, paykit_sdk::PayOutcome::Paid { .. }),
+        "{paid:?}"
+    );
+    assert_eq!(w.rail.all_executions().len(), 1);
+}
+
+#[tokio::test]
+async fn test_destinations_another_amount_refused_automatically_and_paid_only_as_confirmed() {
+    // A destination that transfers another amount isn't paid automatically; confirmed, it is
+    // paid only while the method still transfers that amount (Paykit spec 7.2 step 1).
+    let w = World::new();
+    let (mut wallet, request) = with_another_amount(&w).await;
+    let refused = wallet
+        .pay_request_automatically(&request, PayOptions::default())
+        .await
+        .outcome
+        .unwrap_err();
+    assert!(
+        matches!(
+            refused.refusal(),
+            Some(paykit_sdk::Refusal::Transfer { .. })
+        ),
+        "{refused:?}"
+    );
+    let shown = quote_of(
+        &wallet
+            .pay_request(&request, PayOptions::default())
+            .await
+            .outcome
+            .unwrap_err(),
+    );
+    w.rail.set_transfer_amount(Some(crate::common::btc("3")));
+    let again = wallet
+        .pay_request(
+            &request,
+            PayOptions::default().with_transfer_confirmed(shown),
         )
         .await
         .outcome
         .unwrap_err();
-    let Some(Refusal::AttemptFailed(inner)) = refused.refusal() else {
-        panic!("{refused:?}");
-    };
-    assert!(matches!(**inner, Refusal::Transfer { .. }), "{inner:?}");
+    assert!(
+        matches!(again.refusal(), Some(paykit_sdk::Refusal::Transfer { .. })),
+        "{again:?}"
+    );
     assert!(w.rail.all_executions().is_empty());
 }
 
@@ -1746,7 +1762,12 @@ async fn test_destinations_list_expiring_while_the_payee_is_read_asked_for_again
         .outcome
         .unwrap_err();
     assert!(
-        matches!(refused.refusal(), Some(Refusal::WaitingForList)),
+        matches!(
+            refused.refusal(),
+            Some(Refusal::WaitingForList {
+                device_clock_behind: false
+            })
+        ),
         "{refused:?}"
     );
     assert!(asked_for_a_list(&mut shop).await);
@@ -1793,7 +1814,7 @@ async fn test_destinations_used_up_list_asked_for_an_endpoint_it_lacks() {
         .outcome
         .unwrap_err();
     assert!(
-        matches!(refused.refusal(), Some(Refusal::WaitingForList)),
+        matches!(refused.refusal(), Some(Refusal::WaitingForList { .. })),
         "{refused:?}"
     );
     assert!(asked_for_a_list(&mut shop).await);
@@ -1825,7 +1846,7 @@ async fn test_destinations_used_up_list_asked_for_a_request_accepting_what_it_la
         .outcome
         .unwrap_err();
     assert!(
-        matches!(refused.refusal(), Some(Refusal::WaitingForList)),
+        matches!(refused.refusal(), Some(Refusal::WaitingForList { .. })),
         "{refused:?}"
     );
     assert!(asked_for_a_list(&mut shop).await);
@@ -1892,7 +1913,7 @@ async fn test_destinations_used_up_list_beside_a_list_without_the_endpoint_asked
         .outcome
         .unwrap_err();
     assert!(
-        matches!(refused.refusal(), Some(Refusal::WaitingForList)),
+        matches!(refused.refusal(), Some(Refusal::WaitingForList { .. })),
         "{refused:?}"
     );
     assert!(asked_for_a_list(&mut shop).await);
@@ -1919,7 +1940,7 @@ async fn test_destinations_used_up_and_expired_list_beside_a_list_without_the_en
         .outcome
         .unwrap_err();
     assert!(
-        matches!(refused.refusal(), Some(Refusal::WaitingForList)),
+        matches!(refused.refusal(), Some(Refusal::WaitingForList { .. })),
         "{refused:?}"
     );
     assert!(asked_for_a_list(&mut shop).await);
@@ -1951,9 +1972,57 @@ async fn test_destinations_used_up_list_beside_a_list_the_method_doesnt_pay_aske
         .outcome
         .unwrap_err();
     assert!(
-        matches!(refused.refusal(), Some(Refusal::WaitingForList)),
+        matches!(refused.refusal(), Some(Refusal::WaitingForList { .. })),
         "{refused:?}"
     );
     assert!(asked_for_a_list(&mut shop).await);
     assert_eq!(w.rail.all_executions().len(), 1);
+}
+
+#[tokio::test]
+async fn test_destinations_list_expired_by_the_service_time_alone_asks_for_the_current_one() {
+    // The wallet's device clock runs ten seconds behind the service. Once the service time
+    // it verified reaches the list's expiry, 30 days after its inbox accepted the list, the
+    // list has expired, also for a payment by hand: it isn't chosen, and the wallet asks bob
+    // for his current list and waits for it (Paykit spec 7.2, check the destination; 8.4).
+    let w = World::new();
+    let wallet_store = crate::common::store();
+    let mut wallet = w.wallet_on("wallet", Arc::clone(&wallet_store)).await;
+    let app_id = wallet.app_id();
+    let mut shop = w.shop().await;
+    let sent = w.clock.now_ms();
+    w.list_to_alice(&mut shop, &[app_id], list_version(1, 1))
+        .await;
+    wallet.receive(None).await.unwrap();
+    drop(wallet);
+    let expires = sent + 30 * HOUR_MS * 24;
+    w.clock.set_ms(expires);
+    let behind = Arc::new(pubky_switch_client::clock::TestClock::new(expires - 10_000));
+    let mut wallet = w
+        .load_on_clock(&w.alice, wallet_store, app_id, behind)
+        .await;
+    wallet.receive(None).await.unwrap();
+    assert!(wallet
+        .app()
+        .highest_service_time()
+        .is_some_and(|at| at >= expires));
+    let refused = wallet
+        .pay_without_request(
+            paykit_sdk::UnrequestedPayment::new(w.bob_id(), crate::common::btc("0.001"))
+                .with_options(PayOptions::default().with_endpoint(endpoint("btc-bitcoin-p2wpkh"))),
+        )
+        .await
+        .outcome
+        .unwrap_err();
+    assert!(
+        matches!(
+            refused.refusal(),
+            Some(Refusal::WaitingForList {
+                device_clock_behind: true
+            })
+        ),
+        "{refused:?}"
+    );
+    assert!(asked_for_a_list(&mut shop).await);
+    assert!(w.rail.all_executions().is_empty());
 }

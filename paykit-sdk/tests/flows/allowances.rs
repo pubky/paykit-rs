@@ -72,7 +72,7 @@ fn refusal(error: &PaykitError) -> Option<&Refusal> {
 }
 
 /// Whether `summary` shows a message of `kind` received.
-fn received(summary: &paykit_sdk::ReceiveSummary, kind: &str) -> bool {
+pub(super) fn received(summary: &paykit_sdk::ReceiveSummary, kind: &str) -> bool {
     summary
         .report
         .events
@@ -362,7 +362,7 @@ enum AcceptanceGeneration {
 }
 
 /// Keep the service's records and prior verification key through an orderly advance.
-async fn advance_allowance_generation(
+pub(crate) async fn advance_allowance_generation(
     w: &World,
     payer: &mut Paykit,
 ) -> std::sync::Arc<pubky_switch_client::testing::ScriptedSwitch> {
@@ -1008,7 +1008,7 @@ async fn test_allowances_acceptance_in_the_outbox_never_delivered() {
         .queue_stored(acceptance.plaintext())
         .await
         .unwrap();
-    wallet.app_mut().flush_outbox().await.unwrap();
+    wallet.flush().await.unwrap();
     let _ = wallet.app_mut().flush_message(&msg_id).await;
     wallet.receive(None).await.unwrap();
     assert_eq!(
@@ -1235,15 +1235,17 @@ async fn test_allowances_withdrawal_crossing_the_acceptance_ends_it_on_both_side
         Some(Refusal::NotFound)
     ));
     assert!(shop.allowances().await.unwrap().is_empty());
-    let refused = Box::pin(crate::allowance_executor::attempt_after_withdrawal(
+    let (grant, refused) = Box::pin(crate::allowance_executor::attempt_after_withdrawal(
         &w,
         &mut wallet,
         &mut shop,
         &mine,
     ))
     .await;
-    assert!(
-        matches!(refused.refusal(), Some(Refusal::NotNow(reason)) if reason.contains("accepted executor grant")),
+    assert_eq!(grant.refusal(), Some(&Refusal::AllowanceEnded), "{grant:?}");
+    assert_eq!(
+        refused.refusal(),
+        Some(&Refusal::AllowanceEnded),
         "{refused:?}"
     );
     let ledger = wallet
@@ -1274,13 +1276,14 @@ async fn test_allowances_withdrawal_read_before_approval_leaves_the_ledger_unope
         .await
         .unwrap_err();
     assert_eq!(refused.refusal(), Some(&Refusal::NotFound));
-    let payment = Box::pin(crate::allowance_executor::attempt_after_withdrawal(
+    let (grant, payment) = Box::pin(crate::allowance_executor::attempt_after_withdrawal(
         &w,
         &mut wallet,
         &mut shop,
         &mine,
     ))
     .await;
+    assert_eq!(grant.refusal(), Some(&Refusal::NotFound), "{grant:?}");
     assert_eq!(payment.refusal(), Some(&Refusal::NotFound));
     assert!(wallet.app().shared_record(&mine).await.unwrap().is_none());
     assert!(wallet
@@ -1479,7 +1482,7 @@ async fn consent(app: &mut Paykit, record: &[u8; 32]) {
 }
 
 /// The consent list's entry of `record` at `app`, as stored.
-async fn consent_entry(app: &Paykit, record: &[u8; 32]) -> Option<Value> {
+pub(super) async fn consent_entry(app: &Paykit, record: &[u8; 32]) -> Option<Value> {
     let key = format!("ac/{}", pubky_switch_core::enc::b64(record));
     app.app()
         .protocol_get("paykit", key.as_bytes())
@@ -4410,7 +4413,7 @@ async fn proposal_held(how: SendsHeld) {
         .unwrap_err();
     assert!(is_not_now(&error), "{how:?} {error:?}");
     assert_eq!(wallet.allowances().await.unwrap().len(), 1);
-    wallet.app_mut().flush_outbox().await.unwrap();
+    wallet.flush().await.unwrap();
     assert_eq!(
         Box::pin(taken(&mut shop, "paykit.allowance_proposal")).await,
         0
@@ -4454,7 +4457,7 @@ async fn answer_held(how: SendsHeld, kind: &str) {
         .unwrap_err();
     assert!(is_not_now(&error), "{how:?} {kind} {error:?}");
     assert_eq!(Box::pin(raw(&wallet, &physical)).await, before);
-    wallet.app_mut().flush_outbox().await.unwrap();
+    wallet.flush().await.unwrap();
     assert_eq!(Box::pin(taken(&mut shop, kind)).await, 0);
     assert_eq!(shop.allowance(&theirs).await.unwrap().status, status);
     Box::pin(release_sends(&w, &mut wallet, how)).await;
@@ -4662,7 +4665,7 @@ async fn crossing_end_held(how: SendsHeld) {
             .len(),
         1
     );
-    wallet.app_mut().flush_outbox().await.unwrap();
+    wallet.flush().await.unwrap();
     assert_eq!(Box::pin(taken(&mut shop, "paykit.allowance_end")).await, 0);
     if let SendsHeld::Blocked = how {
         // Still held at a later receive while bob is blocked.
@@ -5193,7 +5196,7 @@ async fn test_allowances_restore_own_rejection_in_a_record_sealed_under_a_key_no
         wallet.receive(None).await.unwrap();
     }
     w.clock.advance_ms(60_000);
-    wallet.app_mut().flush_message(&rejection).await.unwrap();
+    wallet.flush_message_in_delivery(&rejection).await.unwrap();
     assert_eq!(Box::pin(taken(&mut shop, kind)).await, 1);
     assert!(Box::pin(held_deleted(&shop, &shop_pending)).await);
     assert_eq!(Box::pin(raw(&wallet, &wallet_pending)).await, recorded);
@@ -5899,7 +5902,7 @@ async fn test_allowances_restore_sends_no_proposal_after_the_counterpartys_answe
         .unwrap();
     let backup = wallet.backup().await.unwrap();
     wallet.receive(None).await.unwrap();
-    wallet.app_mut().flush_outbox().await.unwrap();
+    wallet.flush().await.unwrap();
     assert_eq!(
         Box::pin(taken(&mut shop, "paykit.allowance_proposal")).await,
         1,
@@ -6130,7 +6133,10 @@ async fn rejection_before_its_pending(
     Box::pin(assert_pending_absent(proposer, &target)).await;
 
     w.clock.advance_ms(60_000);
-    let delivery_state = responder.app_mut().flush_message(&rejected).await.unwrap();
+    let delivery_state = responder
+        .flush_message_in_delivery(&rejected)
+        .await
+        .unwrap();
     let mut observed = vec![first_read];
     for _ in 0..3 {
         observed.push(proposer.receive(None).await.unwrap());
@@ -6560,17 +6566,21 @@ async fn test_allowances_restore_own_rejection_waits_until_the_current_permanent
     drop(wallet);
     let mut restored = Box::pin(restored_unreceived(&w, &backup)).await;
     restored.receive(None).await.unwrap();
+    let tries = |delivery: Option<Delivery>| match delivery {
+        Some(Delivery::Queued { tries, .. }) => Some(tries),
+        _ => None,
+    };
+    let untried = tries(restored.app().delivery(&original).await.unwrap());
+    assert!(untried.is_some());
+    // A flush of the client's alone doesn't try the rejection: no Paykit delivery operation
+    // observed a service time for it (Paykit spec 8.1).
     for _ in 0..2 {
         w.clock.advance_ms(60_000);
-        w.alice.switch().fail_next(Fault::Unreachable {
-            path: format!("records/{}", pubky_switch_core::enc::b64(&a)),
-            after: 0,
-        });
         restored.app_mut().flush_message(&original).await.unwrap();
-        assert!(matches!(
-            restored.app().delivery(&original).await.unwrap(),
-            Some(Delivery::Queued { .. })
-        ));
+        assert_eq!(
+            tries(restored.app().delivery(&original).await.unwrap()),
+            untried
+        );
         assert_eq!(
             Box::pin(taken(&mut shop, "paykit.allowance_rejection")).await,
             0
@@ -6581,7 +6591,43 @@ async fn test_allowances_restore_own_rejection_waits_until_the_current_permanent
         );
     }
     w.clock.advance_ms(60_000);
-    restored.app_mut().flush_message(&original).await.unwrap();
+    for _ in 0..4 {
+        if restored
+            .receive(None)
+            .await
+            .unwrap()
+            .records_unlisted
+            .is_none()
+        {
+            break;
+        }
+    }
+    // While the current permanent key can't be read, a try inside a Paykit delivery operation
+    // fails and the rejection stays queued, nothing taken.
+    w.alice.switch().fail_next(Fault::Unreachable {
+        path: format!("records/{}", pubky_switch_core::enc::b64(&a)),
+        after: 0,
+    });
+    restored.flush_message_in_delivery(&original).await.unwrap();
+    assert!(matches!(
+        restored.app().delivery(&original).await.unwrap(),
+        Some(Delivery::Queued { .. })
+    ));
+    assert_ne!(
+        tries(restored.app().delivery(&original).await.unwrap()),
+        untried
+    );
+    assert_eq!(
+        Box::pin(taken(&mut shop, "paykit.allowance_rejection")).await,
+        0
+    );
+    assert_eq!(
+        shop.allowance(&theirs).await.unwrap().status,
+        AllowanceStatus::Proposed
+    );
+    // Once the key reads, the next try delivers it.
+    w.clock.advance_ms(60_000);
+    restored.flush_message_in_delivery(&original).await.unwrap();
     let got = shop.receive(None).await.unwrap();
     assert!(got
         .report
@@ -10901,7 +10947,7 @@ async fn test_allowances_crossing_end_rechecks_renewal_and_the_deny_copy_at_flus
     payer.receive(None).await.unwrap();
     let ended = Box::pin(signed_recorded_end(&payer, &mine)).await;
     let msg_id = &ended.message().msg_id;
-    let queued = payer.app().queued_messages("paykit").await.unwrap();
+    let queued = payer.queued_in_delivery().await.unwrap();
     let exact = queued.iter().find(|q| q.msg_id == *msg_id).unwrap();
     assert_eq!(exact.origin, DeliveryOrigin::Original);
     assert_eq!(exact.hash, ended.hash());
@@ -10918,7 +10964,7 @@ async fn test_allowances_crossing_end_rechecks_renewal_and_the_deny_copy_at_flus
     payer.receive(None).await.unwrap();
     payer.app_mut().release_queued(&w.bob_id()).await.unwrap();
     assert!(matches!(
-        payer.app_mut().flush_message(msg_id).await.unwrap(),
+        payer.flush_message_in_delivery(msg_id).await.unwrap(),
         Some(Delivery::Queued { .. })
     ));
     assert_eq!(Box::pin(taken(&mut shop, "paykit.allowance_end")).await, 0);
@@ -10930,7 +10976,7 @@ async fn test_allowances_crossing_end_rechecks_renewal_and_the_deny_copy_at_flus
     payer.block(&w.bob_id()).await.unwrap();
     payer.app_mut().release_queued(&w.bob_id()).await.unwrap();
     assert!(matches!(
-        payer.app_mut().flush_message(msg_id).await.unwrap(),
+        payer.flush_message_in_delivery(msg_id).await.unwrap(),
         Some(Delivery::Queued { .. })
     ));
     assert_eq!(Box::pin(taken(&mut shop, "paykit.allowance_end")).await, 0);
@@ -10942,7 +10988,7 @@ async fn test_allowances_crossing_end_rechecks_renewal_and_the_deny_copy_at_flus
     ));
     assert_eq!(Box::pin(taken(&mut shop, "paykit.allowance_end")).await, 0);
     payer.receive(None).await.unwrap();
-    payer.app_mut().flush_message(msg_id).await.unwrap();
+    payer.flush_message_in_delivery(msg_id).await.unwrap();
     assert!(matches!(
         payer.app().delivery(msg_id).await.unwrap(),
         Some(Delivery::Accepted { .. })
@@ -10980,7 +11026,7 @@ async fn test_allowances_an_owed_end_without_its_origin_stays_held_after_restore
     let mut payer = Box::pin(restored_unreceived(&w, &backup)).await;
     Box::pin(read_restored_records(&mut payer)).await;
     payer.app_mut().release_queued(&w.bob_id()).await.unwrap();
-    payer.app_mut().flush_outbox().await.unwrap();
+    payer.flush().await.unwrap();
     assert!(matches!(
         payer
             .allowance(&proposal.record)
@@ -11044,7 +11090,7 @@ async fn test_allowances_queued_proposal_and_rejection_wait_for_the_current_deny
     phone.block(&peer).await.unwrap();
     w.clock.advance_ms(paykit_sdk::LISTS_REFRESH_MS);
     wallet.app_mut().release_queued(&peer).await.unwrap();
-    wallet.app_mut().flush_outbox().await.unwrap();
+    wallet.flush().await.unwrap();
     assert!(Box::pin(received_originals(&mut shop, &ids))
         .await
         .is_empty());
@@ -12547,7 +12593,7 @@ async fn test_allowances_dropped_reply_waits_for_contacts_and_a_current_deny_cop
     store_bundle(&w, me, &wider);
     wallet.receive(None).await.unwrap();
     assert_eq!(wallet.app().cert().hash(), wider.hash());
-    wallet.app_mut().flush_outbox().await.unwrap();
+    wallet.flush().await.unwrap();
     assert!(crate::common::asked(&wallet, &recipient).await.is_empty());
     controller.unblock(&recipient).await.unwrap();
     w.clock.advance_ms(paykit_sdk::LISTS_REFRESH_MS);
@@ -15287,7 +15333,7 @@ async fn test_pending_rejection_waits_when_the_second_record_cannot_be_read() {
         Box::pin(taken(&mut bob, "paykit.allowance_rejection")).await,
         0
     );
-    alice.app_mut().flush_message(&reply).await.unwrap();
+    alice.flush_message_in_delivery(&reply).await.unwrap();
     assert!(matches!(
         alice.app().delivery(&reply).await.unwrap(),
         Some(Delivery::Accepted { .. })
@@ -15875,4 +15921,68 @@ async fn test_prepared_rejection_uses_its_original_signature_after_certificate_r
 #[tokio::test]
 async fn test_prepared_withdrawal_uses_its_original_signature_after_certificate_renewal() {
     Box::pin(prepared_answer_after_change(true, true)).await;
+}
+
+#[tokio::test]
+async fn test_allowances_end_and_executor_notice_wait_under_a_renewal_paykit_refuses() {
+    let w = World::new();
+    let (_shop, mut wallet, _exec, _phone, _, mine) = Box::pin(executed(&w)).await;
+    wallet.app_mut().hold_queued(&w.bob_id()).await.unwrap();
+    // The executor notice's first try fails, and it is held from then on.
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Error {
+            path: "/inbox".into(),
+            code: pubky_switch_core::http::ErrorCode::Unavailable,
+            current: Value::Null,
+        });
+    wallet.end_allowance(&mine).await.unwrap();
+    for queued in wallet.queued_in_delivery().await.unwrap() {
+        if queued.kind == "paykit.executor_notice" {
+            assert!(wallet
+                .app_mut()
+                .hold_message("paykit", &queued.msg_id)
+                .await
+                .unwrap());
+        }
+    }
+    let verdicts = async |wallet: &Paykit| {
+        let mut verdicts: Vec<_> = wallet
+            .queued_in_delivery()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|m| m.kind == "paykit.allowance_end" || m.kind == "paykit.executor_notice")
+            .map(|m| (m.kind, m.may_send))
+            .collect();
+        verdicts.sort();
+        verdicts
+    };
+    let both = |go: bool| {
+        vec![
+            ("paykit.allowance_end".to_owned(), go),
+            ("paykit.executor_notice".to_owned(), go),
+        ]
+    };
+    assert_eq!(verdicts(&wallet).await, both(true));
+    // Renewed with a permission its scopes don't derive, which Paykit refuses: neither the
+    // user's end nor its executor notice goes (Paykit spec 3.1 to 3.3, 7.2).
+    let scopes = AppScopes::new().pay().allowance().build().unwrap();
+    let app_id = wallet.app_id();
+    let old = wallet.app().cert().clone();
+    let refused = renew(
+        &w,
+        app_id,
+        &crate::certificate::refused(scopes.clone()),
+        1_000,
+    );
+    list(&w, app_id, &old, &refused);
+    wallet.receive(None).await.unwrap();
+    assert!(wallet.certificate_refused().is_some());
+    assert_eq!(verdicts(&wallet).await, both(false));
+    // Renewed again with one that passes, both go.
+    let passing = renew(&w, app_id, &scopes, 2_000);
+    list(&w, app_id, &refused, &passing);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(verdicts(&wallet).await, both(true));
 }

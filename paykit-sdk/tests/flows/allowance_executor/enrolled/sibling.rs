@@ -206,7 +206,7 @@ async fn funded_ledger(world: &World, proposer: AllowanceRole) -> TestResult {
     let (payer, _, excess) = Box::pin(pay(world, &mut seller, payer, key, "31")).await?;
     let refusal = excess.unwrap_err();
     assert!(
-        matches!(refusal.refusal(), Some(paykit_sdk::Refusal::NotNow(why)) if why == "the lifetime limit has no room"),
+        matches!(refusal.refusal(), Some(paykit_sdk::Refusal::NotAutomatic(why)) if why == "the lifetime limit has no room"),
         "{refusal}"
     );
     assert_eq!(rail.all_pay_calls().values().sum::<u64>(), 1);

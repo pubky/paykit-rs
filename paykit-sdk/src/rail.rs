@@ -39,7 +39,10 @@ use serde_json::{Map, Value};
 mod fake;
 
 #[cfg(feature = "test-support")]
-pub use fake::{Behaviour, FakeRail, FAKE_ENDPOINT_IDENTIFIERS, FAKE_LONGEST_COMPLETION_MS};
+pub use fake::{
+    fake_settlement_id, Behaviour, FakeRail, FAKE_ENDPOINT_IDENTIFIERS, FAKE_LONGEST_COMPLETION_MS,
+    FAKE_PAYMENT_TIME_TOLERANCE_MS, FAKE_SETTLEMENT_PREFIX,
+};
 
 /// A failure of the payment method's call (Paykit spec 7.2). [`RailError::Unavailable`] is
 /// ambiguous: a payment may have been submitted, so it means nothing yet and the attempt
@@ -88,13 +91,32 @@ pub struct RailDeclaration {
     /// least this plus [`crate::PRE_DISPATCH_BUDGET_MS`], so no other own app can resolve it
     /// while its payment may still run.
     pub longest_completion_ms: u64,
+    /// How far, in milliseconds, the method's verified payment time may lie before the
+    /// request's signed `created_at` for a payment made after the request (Paykit spec 7.1,
+    /// "Not before the request"). A payee credits no evidence dated earlier than `created_at`
+    /// less this. It widens only that lower bound, never a deadline, a destination's expiry or
+    /// a rate's window, and the SDK adds nothing to it. It must cover:
+    ///
+    /// - the method's time precision: a time in whole seconds lies up to 999 ms before the
+    ///   real time, so at least 1,000 ms for such a method;
+    /// - the clock of whatever dates the evidence against the payee's device clock, which
+    ///   dated the request: a node's settle time is that node's clock;
+    /// - the method's own timestamp rules: a Bitcoin block timestamp can lie well before the
+    ///   block was mined, so two hours is a conservative early tolerance for an on-chain
+    ///   method. A block timestamp can also lie ahead of real time, which can put a payment
+    ///   made in time past a deadline; no tolerance covers that.
+    ///
+    /// A Lightning method reading its own node's settle time needs its precision and that
+    /// node's clock skew: a few minutes. A value reaching before 1970 disables the bound.
+    pub payment_time_tolerance_ms: u64,
 }
 
 impl RailDeclaration {
-    /// A method that takes at most `longest_completion_ms` to complete or fail, and declares
-    /// nothing else: not idempotent, and no history. Each `with_` setter declares one more
-    /// thing it does.
-    pub fn new(longest_completion_ms: u64) -> Self {
+    /// A method that takes at most `longest_completion_ms` to complete or fail, whose
+    /// verified payment time lies at most `payment_time_tolerance_ms` early
+    /// ([`RailDeclaration::payment_time_tolerance_ms`]), and that declares nothing else: not
+    /// idempotent, and no history. Each `with_` setter declares one more thing it does.
+    pub fn new(longest_completion_ms: u64, payment_time_tolerance_ms: u64) -> Self {
         Self {
             idempotent: false,
             idempotency_retention_ms: None,
@@ -102,6 +124,7 @@ impl RailDeclaration {
             history_retention_ms: None,
             history_survives_restore: false,
             longest_completion_ms,
+            payment_time_tolerance_ms,
         }
     }
 
@@ -160,19 +183,16 @@ pub struct AllowanceDispatch {
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Transfer {
-    /// The amount and asset it would transfer; `None` when it can't tell before paying.
+    /// The amount and asset it would transfer; `None` when it can't tell before paying. The
+    /// fee is the payment method's, which bounds it: Paykit configures, reports and checks
+    /// none (Paykit spec 7.2 step 1).
     pub amount: Option<PaymentAmount>,
-    /// The largest fee it may charge on top, in the same asset, that the payee can influence
-    /// through the destination it chose; `None` for none.
-    pub max_fee: Option<paykit_lib::Decimal>,
 }
 
 impl Transfer {
-    /// What the method would transfer: `amount`, `None` when it can't tell before paying,
-    /// and `max_fee`, the largest fee on top that the payee can influence through the
-    /// destination it chose, `None` for none.
-    pub fn new(amount: Option<PaymentAmount>, max_fee: Option<paykit_lib::Decimal>) -> Self {
-        Self { amount, max_fee }
+    /// What the method would transfer: `amount`, `None` when it can't tell before paying.
+    pub fn new(amount: Option<PaymentAmount>) -> Self {
+        Self { amount }
     }
 }
 
@@ -541,24 +561,30 @@ pub trait Rail: Send + Sync {
         Box::pin(async { Ok(None) })
     }
 
-    /// The payee's own check of a proof (Paykit spec 8.1 step 4): the verified payment time
-    /// when the method confirms the payment reached the endpoint for the amount; `None` when
-    /// it doesn't.
+    /// The payee's own check of a proof (Paykit spec 8.1 step 4): the verified payment time,
+    /// in Unix milliseconds, when the method confirms the payment reached the endpoint for the
+    /// amount; `None` when it doesn't. That time decides credit: the payee credits the
+    /// occurrence only when it lies within the occurrence's times (Paykit spec 7.1), so it is
+    /// the time the payment's evidence dates it, never a placeholder.
     ///
     /// # Errors
     ///
     /// A [`RailError`] when the method can't check now.
     fn verify(&self, check: ProofCheck) -> BoxFuture<'_, Result<Option<u64>, RailError>>;
 
-    /// The settlement ID of a proof's `proof` object made by this method (Paykit wire 1.5):
-    /// the bytes the method defines to name one settlement, the same for every proof of it,
-    /// read from the proof alone and deterministic, so a payee credits a payment without a
+    /// The settlement ID of a proof's `proof` object made by this method, paid to
+    /// `endpoint_id` (Paykit wire 1.5): the bytes the method defines to name one settlement,
+    /// the same for every proof of it, read from the endpoint and the proof alone and
+    /// deterministic, so a payee credits a payment without a
     /// request once whoever sends its proof (Paykit spec 8.4). `None` for a proof that names
-    /// none, which isn't credited. The default reads the methods `paykit-lib` knows
-    /// ([`paykit_lib::derive::settlement_id`]); a rail of another method overrides it.
-    fn settlement_id(&self, proof: &Map<String, Value>) -> Option<Vec<u8>> {
-        paykit_lib::derive::settlement_id(proof)
-    }
+    /// none, which isn't credited. Paykit defines no settlement ID and reads no proof
+    /// itself: whether a method names one settlement per transaction, per output or
+    /// otherwise is the method's own rule, and this answer is the answer.
+    fn settlement_id(
+        &self,
+        endpoint_id: &PaymentEndpointIdentifier,
+        proof: &Map<String, Value>,
+    ) -> Option<Vec<u8>>;
 }
 
 #[cfg(test)]

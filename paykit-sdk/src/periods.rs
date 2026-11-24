@@ -145,6 +145,22 @@ pub(crate) fn destination_app_permitted(request: &PaymentRequest, app: [u8; 16])
     !matches!(&request.destination, paykit_lib::bodies::RequestDestination::RequiredApp(required) if *required != app)
 }
 
+/// `error`, the refusal of a period's last destination, with the note, when
+/// `device_clock_behind`, that eligible period details expired only by the service's time,
+/// so their destination wasn't tried (Paykit spec 7.2).
+fn with_clock_note(error: PaykitError, device_clock_behind: bool) -> PaykitError {
+    const NOTE: &str = "; details expired by the service's time: the device clock is behind it";
+    match error.refusal() {
+        Some(Refusal::NoDestination(why)) if device_clock_behind => {
+            Refusal::NoDestination(format!("{why}{NOTE}")).into()
+        }
+        Some(Refusal::UnsupportedEndpoint(why)) if device_clock_behind => {
+            Refusal::UnsupportedEndpoint(format!("{why}{NOTE}")).into()
+        }
+        _ => error,
+    }
+}
+
 /// The signed rate interval of period details (Paykit wire 4.9), without a payer or
 /// payee time policy. Callers first validate the details against their request and use
 /// the interval only when the selected payment is priced by these rates.
@@ -415,6 +431,9 @@ fn period_record_unread() -> PaykitError {
     Refusal::NotNow("Paykit wire 5.3: the period record held doesn't read".into()).into()
 }
 
+/// Period records with their keys, by the key of the request record they belong to.
+pub(crate) type PeriodsByRequest = HashMap<[u8; 32], Vec<([u8; 32], ActivityRecord)>>;
+
 impl Paykit {
     /// Open against the held write, or check the service before creating a period at zero.
     async fn period_payment_base(
@@ -441,7 +460,13 @@ impl Paykit {
                 return Ok(Some(record));
             }
         }
-        let held = match Box::pin(self.app.read_record_fresh(&target.record_target())).await? {
+        let read = Box::pin(self.app.read_record_fresh(&target.record_target())).await?;
+        if let RecordRead::Kept { reason, .. } = &read {
+            if let Some(stop) = crate::pay::kept_read_stop(reason) {
+                return Err(stop);
+            }
+        }
+        let held = match read {
             RecordRead::Fresh(held) => held,
             RecordRead::Kept {
                 reason: KeptReason::NotFound,
@@ -487,37 +512,36 @@ impl Paykit {
 
     /// The period records of `collection` this app holds that bind, with their keys, by the
     /// request they belong to; [`period_views`] shows them.
-    pub(crate) async fn periods_of(
-        &self,
-        collection: Collection,
-    ) -> Result<HashMap<[u8; 32], Vec<([u8; 32], ActivityRecord)>>> {
-        let own = self.identity();
+    pub(crate) async fn periods_of(&self, collection: Collection) -> Result<PeriodsByRequest> {
         let side = match collection {
             Collection::PayeeActivity => ActivitySide::Payee,
             _ => ActivitySide::Payer,
         };
-        let mut out: HashMap<[u8; 32], Vec<([u8; 32], ActivityRecord)>> = HashMap::new();
+        let mut bound = Vec::new();
         for held in self.app.records_of(collection.name()).await? {
-            let (Some(value), Some(label)) =
-                (held.content.value(), collection.policy_label(&held.policy))
-            else {
+            let Some(label) = collection.policy_label(&held.policy) else {
                 continue;
             };
-            let Some(record) = crate::records::bind_activity(
-                value,
-                &own,
-                side,
-                label.as_ref(),
-                &held.key,
-                |t| self.app.record_key(t).ok(),
-                &|p| self.rail.settlement_id(p),
-            ) else {
-                continue;
-            };
+            if let Some(record) = self.bind_held(&held, side, label.as_ref()) {
+                bound.push((held.key, label, record));
+            }
+        }
+        self.group_periods(bound)
+    }
+
+    /// The period records among `bound`, records each bound at its key under the label its
+    /// policy gives it, by the request record they belong to ([`Paykit::periods_of`]).
+    pub(crate) fn group_periods(
+        &self,
+        bound: impl IntoIterator<Item = ([u8; 32], Option<paykit_lib::Label>, ActivityRecord)>,
+    ) -> Result<PeriodsByRequest> {
+        let own = self.identity();
+        let mut out = PeriodsByRequest::new();
+        for (key, label, record) in bound {
             if let Some(parent) = period_request_target(&record, &own, label.as_ref()) {
                 out.entry(self.activity_key(&parent)?)
                     .or_default()
-                    .push((held.key, record));
+                    .push((key, record));
             }
         }
         Ok(out)
@@ -609,6 +633,8 @@ impl Paykit {
         record: &[u8; 32],
         details: PeriodDetails,
     ) -> Result<SentMessage> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         // The call's future goes on the heap, as `receive`'s does: it nests deep.
         Box::pin(self.send_period_details_inner(record, details)).await
     }
@@ -876,9 +902,19 @@ impl Paykit {
         funding: Option<&paykit_lib::AllowanceId>,
         crossing_payee: Option<[u8; 32]>,
     ) -> Result<Option<AutomaticPeriodWrite>> {
-        let Ok(RecordRead::Fresh(held)) = self.app.read_record_fresh(&target.record_target()).await
-        else {
-            return Ok(None);
+        let held = match self.app.read_record_fresh(&target.record_target()).await {
+            Ok(RecordRead::Fresh(held)) => held,
+            Ok(RecordRead::Kept { reason, .. }) => {
+                if let Some(stop) = crate::pay::kept_read_stop(&reason) {
+                    return Err(stop);
+                }
+                return Ok(None);
+            }
+            Ok(_) => return Ok(None),
+            Err(error) => {
+                crate::pay::unless_stop(error)?;
+                return Ok(None);
+            }
         };
         if held.doubtful || self.pause_of(&held).await?.blocks_automatic() {
             return Ok(None);
@@ -959,6 +995,8 @@ impl Paykit {
         period: &PeriodRef,
         options: PayOptions,
     ) -> PayResult {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         self.pay_selected_period(request, period, PeriodPayer::User, options)
             .await
     }
@@ -986,6 +1024,8 @@ impl Paykit {
         period: &PeriodRef,
         price: PeriodPrice<'_>,
     ) -> PayResult {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         let options = match price {
             PeriodPrice::RequestedAmount => PayOptions::default(),
             PeriodPrice::QuoteFor(endpoint) => PayOptions {
@@ -1007,13 +1047,16 @@ impl Paykit {
     ///
     /// # Errors
     ///
-    /// As [`Paykit::pay_period_automatically`] and [`Paykit::pay_under_allowance`].
+    /// As [`Paykit::pay_period_automatically`] and [`Paykit::pay_under_allowance`], whose
+    /// refusals tell a final stop from one the user or a later read lifts.
     /// An unfunded subscription, an ineligible period or an unverified grant cannot spend.
     pub async fn pay_period_under_allowance(
         &mut self,
         request: &RequestRef,
         period: &PeriodRef,
     ) -> PayResult {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         self.pay_selected_period(
             request,
             period,
@@ -1057,6 +1100,7 @@ impl Paykit {
         options: PayOptions,
         public_failures: &mut Vec<PublicAppFailure>,
     ) -> Result<Plan> {
+        self.refuse_held_back()?;
         self.refresh_own()?;
         if options.quote_only {
             self.require_first_read()?;
@@ -1075,7 +1119,7 @@ impl Paykit {
         };
         self.app
             .may_attempt(automatic)
-            .map_err(crate::pay::not_now)?;
+            .map_err(crate::pay::held_back)?;
         self.refuse_while_payer_pass_owed().await?;
         let parent = ActivityTarget::payer(natural_key::request_record(
             &request.payee,
@@ -1223,7 +1267,8 @@ impl Paykit {
                 .filter(|r| r.authenticated && !r.doubtful)
                 .and_then(|r| r.written_at_ms)
                 .ok_or_else(|| {
-                    Refusal::NotAutomatic("no proof dates the accepted subscription's write".into())
+                    // A later read can authenticate the write.
+                    Refusal::NotNow("no proof dates the accepted subscription's write".into())
                 })?;
             if accepted_at >= period.ends_at {
                 return Err(Refusal::NotAutomatic(
@@ -1256,21 +1301,33 @@ impl Paykit {
         let mut details = held_period
             .as_ref()
             .map_or_else(Vec::new, |held| valid_details(held, &body));
+        // Whether a period details' destination expired only by the service's time: the user
+        // is told the device clock is behind it (Paykit spec 7.2).
+        let mut device_clock_behind = false;
         let mut destinations = if per_period_destination {
-            let now = self.now();
+            // A period details' destination is used while neither clock is at its expiry
+            // (Paykit spec 7.2).
+            let clocks = self.clocks();
             let named = options.selected_period_rate();
+            // The details eligible as this period's destination, expired or not.
+            let eligible = |signed: &StoredMessage| {
+                matches!(signed.body(), Body::PaymentPeriodDetails(detail)
+                    if detail.payment_endpoints.is_some()
+                        && destination_app_permitted(&body, signed.cert().app_id())
+                        && named.is_none_or(|id| id == signed.message().msg_id))
+            };
+            let expires_at = |signed: &StoredMessage| match signed.body() {
+                Body::PaymentPeriodDetails(detail) => detail.expires_at,
+                _ => 0,
+            };
+            device_clock_behind = details.iter().any(|signed| {
+                let at = expires_at(signed);
+                eligible(signed) && clocks.past(at) && at > clocks.device
+            });
             let mut destinations: Vec<_> = details
                 .iter()
                 .copied()
-                .filter(|signed| {
-                    let Body::PaymentPeriodDetails(detail) = signed.body() else {
-                        return false;
-                    };
-                    detail.payment_endpoints.is_some()
-                        && now < detail.expires_at
-                        && destination_app_permitted(&body, signed.cert().app_id())
-                        && named.is_none_or(|id| id == signed.message().msg_id)
-                })
+                .filter(|signed| eligible(signed) && !clocks.past(expires_at(signed)))
                 .collect();
             destinations.sort_by(|a, b| period_details_order(a.message(), b.message()));
             destinations
@@ -1293,7 +1350,7 @@ impl Paykit {
             price,
         } = loop {
             let Some(candidate) = destinations.pop() else {
-                return Err(unavailable);
+                return Err(with_clock_note(unavailable, device_clock_behind));
             };
             // For a later destination its own signed details must supply any per-period rate.
             let (rates, named) = if per_period_destination {
@@ -1392,11 +1449,13 @@ impl Paykit {
             proof_msg_id: None,
             restored: false,
             journaled_at_ms: self.now(),
+            allowance_expires_at_ms: None,
             carrier: None,
             carrier_record: None,
             attempt_proof: None,
             failed_by_method: false,
             never_dispatched: false,
+            user_paid: false,
             request: Some(KeptMessage::of(&stored)),
             record_held: false,
             transfer_bound: Some(bound),

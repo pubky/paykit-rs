@@ -26,7 +26,7 @@ pub struct WalletRestoreState {
     pub alarm: Option<SwitchAlarm>,
 }
 
-#[uniffi::export(async_runtime = "tokio")]
+#[uniffi::export]
 impl WalletHost {
     /// Ask the user about the source device first (Switch spec 12.4). A lost or stolen
     /// device requires revoking the old app and enrolling new keys.
@@ -38,38 +38,44 @@ impl WalletHost {
         bytes: Vec<u8>,
         source_device: BackupDevice,
     ) -> Result<Arc<NativeWallet>, WalletError> {
-        if matches!(source_device, BackupDevice::UnaccountedFor) {
-            return Err(WalletError::SourceDeviceUnaccountedFor);
-        }
-        let id = fixed(app_id, "app id")?;
-        let backup = PaykitBackup::from_bytes(&bytes)?;
-        self.open_wallet(id, async |env| {
-            Ok(Paykit::restore(
-                env,
-                Default::default(),
-                &backup,
-                self.rail.clone(),
-                self.timer.clone(),
-            )
-            .await?)
+        let this = self.clone();
+        crate::runtime::run(async move {
+            if matches!(source_device, BackupDevice::UnaccountedFor) {
+                return Err(WalletError::SourceDeviceUnaccountedFor);
+            }
+            let id = fixed(app_id, "app id")?;
+            let backup = PaykitBackup::from_bytes(&bytes)?;
+            this.open_wallet(id, async |env| {
+                Ok(Paykit::restore(
+                    env,
+                    Default::default(),
+                    &backup,
+                    this.rail.clone(),
+                    this.timer.clone(),
+                )
+                .await?)
+            })
+            .await
         })
         .await
     }
 }
 
-#[uniffi::export(async_runtime = "tokio")]
+#[uniffi::export]
 impl NativeWallet {
     /// Inspect the installed state before or after a foreground read, including after reopening.
     pub async fn restore_state(&self) -> Result<WalletRestoreState, WalletError> {
-        self.with_wallet(async |wallet| {
-            let app = wallet.app_mut();
-            // Local inspection reloads a failed commit without handing duties to the host.
-            app.pending_duty_events().await?;
-            Ok(WalletRestoreState {
-                reconciling: app.reconcile_mode(),
-                cursor: app.restore_held_cursor().map(Into::into),
-                registrations: app.restore_question(),
-                alarm: app.alarm().cloned().map(Into::into),
+        self.with_wallet(move |wallet| {
+            Box::pin(async move {
+                let app = wallet.app_mut();
+                // Local inspection reloads a failed commit without handing duties to the host.
+                app.pending_duty_events().await?;
+                Ok(WalletRestoreState {
+                    reconciling: app.reconcile_mode(),
+                    cursor: app.restore_held_cursor().map(Into::into),
+                    registrations: app.restore_question(),
+                    alarm: app.alarm().cloned().map(Into::into),
+                })
             })
         })
         .await
@@ -80,10 +86,12 @@ impl NativeWallet {
         &self,
         registrations: Vec<u64>,
     ) -> Result<(), WalletError> {
-        self.with_wallet(async |app| {
-            Ok(app
-                .confirm_restored_registrations(&registrations, UserConfirmed::new())
-                .await?)
+        self.with_wallet(move |app| {
+            Box::pin(async move {
+                Ok(app
+                    .confirm_restored_registrations(&registrations, UserConfirmed::new())
+                    .await?)
+            })
         })
         .await
     }
@@ -94,7 +102,9 @@ impl NativeWallet {
         &self,
         registrations: Vec<u64>,
     ) -> Result<(), WalletError> {
-        self.with_wallet(async |app| Ok(app.refuse_restored_registrations(&registrations).await?))
-            .await
+        self.with_wallet(move |app| {
+            Box::pin(async move { Ok(app.refuse_restored_registrations(&registrations).await?) })
+        })
+        .await
     }
 }

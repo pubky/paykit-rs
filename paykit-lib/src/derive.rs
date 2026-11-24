@@ -9,8 +9,9 @@
 //! Security: obligation IDs, record keys and settlement and occurrence tags are blinded with
 //! the naming key of the identity whose switch holds them, so the service can't tell which
 //! counterparty, request or settlement they name, and no payer can aim a settlement at a
-//! bucket or a tag. The obligation of a payment without a request is the one exception: it
-//! derives from the attempt ID alone and names no payee.
+//! bucket or a tag. The obligation of a payment without a request blinds its attempt ID the
+//! same way: one who holds only the attempt ID, such as the payee from the proof, can't
+//! compute its claim key. It names no payee.
 
 use pubky_switch_core::enc::{derive, hash, lp, u64be};
 use pubky_switch_core::ident::NamingKey;
@@ -111,17 +112,23 @@ pub fn request_obligation_blinded(
     )
 }
 
-/// The key material of a payment without a request's obligation: `lp("payment", attempt
-/// ID)` (Paykit wire 1.5).
-pub fn payment_obligation_material(attempt_id: &AttemptId) -> Vec<u8> {
-    lp(&[b"payment", &attempt_id.to_bytes()])
+/// The key material of a payment without a request's obligation: `lp("payment",
+/// blind(attempt ID))`, blinded with the payer's naming key (Paykit wire 1.5).
+pub fn payment_obligation_material(naming_key: &NamingKey, attempt_id: &AttemptId) -> Vec<u8> {
+    lp(&[b"payment", &naming_key.blind(&attempt_id.to_bytes())])
 }
 
 /// The obligation ID of a payment without a request (Paykit wire 1.5):
-/// `derive("paykit/v1/obligation", "payment", attempt ID)`. It names no payee and isn't
-/// blinded, so a former holder of the naming key can't test guesses of the payee against it.
-pub fn payment_obligation(attempt_id: &AttemptId) -> [u8; 32] {
-    derive(OBLIGATION_LABEL, &[b"payment", &attempt_id.to_bytes()])
+/// `derive("paykit/v1/obligation", "payment", blind(attempt ID))` under the payer's naming
+/// key. It names no payee, so a holder of the naming key can't test guesses of the payee
+/// against it.
+pub fn payment_obligation(naming_key: &NamingKey, attempt_id: &AttemptId) -> [u8; 32] {
+    payment_obligation_blinded(&naming_key.blind(&attempt_id.to_bytes()))
+}
+
+/// [`payment_obligation`] from the attempt ID already blinded with the payer's naming key.
+pub fn payment_obligation_blinded(blinded_attempt_id: &[u8; 32]) -> [u8; 32] {
+    derive(OBLIGATION_LABEL, &[b"payment", blinded_attempt_id])
 }
 
 /// Paykit's natural keys (Paykit wire 1.5, Switch spec 13.3): the inputs, blinded with the
@@ -237,98 +244,17 @@ pub fn occurrence_tag_blinded(blinded: &[u8; 32]) -> [u8; OCCURRENCE_TAG_LEN] {
     out
 }
 
-/// Prefix of the fake rail's settlement IDs (Paykit wire 1.5).
-pub const FAKE_RAIL_PREFIX: &str = "fake:";
-
-/// A reader of a payment proof's `proof` object that gives its settlement ID (Paykit wire
-/// 1.5), as [`settlement_id`] does for the methods this crate knows: a payment method's
-/// own reader names the settlements of its own proofs.
-pub type SettlementIdReader<'a> = dyn Fn(&Map<String, Value>) -> Option<Vec<u8>> + 'a;
-
-/// The settlement ID of a payment proof's `proof` object (Paykit wire 1.5): the bytes its
-/// payment method defines to name one settlement, in that method's one spelling.
-///
-/// The methods the wire format fixes are `bitcoin-txid`, whose settlement ID is its `txid`,
-/// 64 lower-case hex characters, as its UTF-8 text; and the prototype's fake rail,
-/// `{ "rail": "fake", "tx": ... }` without a `type`, whose settlement ID is `fake:` followed by
-/// its `tx` text, `tx` not empty, so it never equals another method's: a settlement's mark
-/// derives from its settlement ID alone. `None` for a proof in another spelling, or of a method this crate doesn't
-/// know: such a proof isn't credited as a payment without a request.
-pub fn settlement_id(proof: &Map<String, Value>) -> Option<Vec<u8>> {
-    // A `null` type reads as a missing one (Paykit wire, Conventions).
-    let typed = proof.get("type").filter(|t| !t.is_null());
-    if typed.is_none() && proof.get("rail").and_then(Value::as_str) == Some("fake") {
-        let tx = proof.get("tx")?.as_str()?;
-        return (!tx.is_empty()).then(|| [FAKE_RAIL_PREFIX.as_bytes(), tx.as_bytes()].concat());
-    }
-    match typed?.as_str()? {
-        "bitcoin-txid" => {
-            let txid = proof.get("txid")?.as_str()?;
-            let spelled = txid.len() == 64
-                && txid
-                    .bytes()
-                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
-            spelled.then(|| txid.as_bytes().to_vec())
-        }
-        _ => None,
-    }
-}
+/// A reader of the settlement ID of a payment proof (Paykit wire 1.5), from the Payment
+/// Endpoint Identifier paid and the proof's `proof` object: the payment method's own reader,
+/// from the rail the host supplies. Paykit defines no settlement ID and reads no proof
+/// itself; the bytes are the method's, and `None` is a proof that names none, which isn't
+/// credited as a payment without a request.
+pub type SettlementIdReader<'a> =
+    dyn Fn(&PaymentEndpointIdentifier, &Map<String, Value>) -> Option<Vec<u8>> + 'a;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
-
-    fn proof(value: Value) -> Map<String, Value> {
-        value.as_object().cloned().unwrap()
-    }
-
-    #[test]
-    fn test_settlement_id_of_a_bitcoin_txid() {
-        let txid = "4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b";
-        let id = settlement_id(&proof(
-            json!({ "type": "bitcoin-txid", "txid": txid, "vout": 1 }),
-        ));
-        assert_eq!(id, Some(txid.as_bytes().to_vec()));
-    }
-
-    #[test]
-    fn test_settlement_id_of_the_fake_rail() {
-        let id = settlement_id(&proof(json!({ "rail": "fake", "tx": "t1" })));
-        assert_eq!(id, Some(b"fake:t1".to_vec()));
-        // A null type reads as none.
-        let id = settlement_id(&proof(json!({ "type": null, "rail": "fake", "tx": "t1" })));
-        assert_eq!(id, Some(b"fake:t1".to_vec()));
-        // A tx spelled as a txid still names another settlement than that txid.
-        let txid = "4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b";
-        assert_ne!(
-            settlement_id(&proof(json!({ "rail": "fake", "tx": txid }))),
-            settlement_id(&proof(json!({ "type": "bitcoin-txid", "txid": txid })))
-        );
-        for bad in [
-            json!({ "rail": "fake" }),
-            json!({ "rail": "fake", "tx": "" }),
-            json!({ "rail": "fake", "tx": 1 }),
-            json!({ "rail": "fake", "tx": null }),
-            json!({ "rail": "other", "tx": "t1" }),
-        ] {
-            assert_eq!(settlement_id(&proof(bad.clone())), None, "{bad}");
-        }
-    }
-
-    #[test]
-    fn test_settlement_id_refuses_other_spellings_and_methods() {
-        let upper = "4A5E1E4BAAB89F3A32518A88C31BC87F618F76673E2CC77AB2127B7AFDEDA33B";
-        for bad in [
-            json!({ "type": "bitcoin-txid", "txid": upper }),
-            json!({ "type": "bitcoin-txid", "txid": "4a5e" }),
-            json!({ "type": "bitcoin-txid" }),
-            json!({ "type": "bitcoin-bolt11-preimage", "data": "00" }),
-            json!({ "rail": "fake", "tx": "t1", "type": "bitcoin-txid" }),
-        ] {
-            assert_eq!(settlement_id(&proof(bad.clone())), None, "{bad}");
-        }
-    }
 
     #[test]
     fn test_obligations_differ_by_period_and_by_kind() {
@@ -341,8 +267,23 @@ mod tests {
         );
         let attempt = AttemptId::from_bytes([3; 16]);
         assert_eq!(
-            payment_obligation(&attempt),
-            blake3_derive(&payment_obligation_material(&attempt))
+            payment_obligation(&nk, &attempt),
+            blake3_derive(&payment_obligation_material(&nk, &attempt))
+        );
+        // Another payer's key or another attempt names another claim, and the attempt ID
+        // alone names none of them.
+        let other = NamingKey::from_bytes([8; 32]);
+        assert_ne!(
+            payment_obligation(&nk, &attempt),
+            payment_obligation(&other, &attempt)
+        );
+        assert_ne!(
+            payment_obligation(&nk, &attempt),
+            payment_obligation(&nk, &AttemptId::from_bytes([4; 16]))
+        );
+        assert_ne!(
+            payment_obligation(&nk, &attempt),
+            derive(OBLIGATION_LABEL, &[b"payment", &attempt.to_bytes()])
         );
     }
 
@@ -355,38 +296,35 @@ mod tests {
         assert_ne!(request_obligation_blinded(&[1; 32], &[2; 32], 5), blinded);
     }
 
-    const TXID: &str = "4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b";
+    /// A settlement ID as some payment method names it: Paykit reads only its bytes.
+    const SETTLEMENT: &[u8] = b"an example settlement";
 
     #[test]
     fn test_settlement_tag_derives_from_the_settlement_id_alone() {
         let nk = NamingKey::from_bytes([7; 32]);
-        let tag = settlement_tag(&nk, TXID.as_bytes());
+        let tag = settlement_tag(&nk, SETTLEMENT);
         assert_eq!(
             tag,
-            derive(
-                SETTLEMENT_LABEL,
-                &[b"tag", &nk.blind(&lp(&[TXID.as_bytes()]))]
-            )
+            derive(SETTLEMENT_LABEL, &[b"tag", &nk.blind(&lp(&[SETTLEMENT]))])
         );
         assert_eq!(
-            settlement_tag_blinded(&nk.blind(&settlement_tag_material(TXID.as_bytes()))),
+            settlement_tag_blinded(&nk.blind(&settlement_tag_material(SETTLEMENT))),
             tag
         );
         // Blinded under another identity's naming key, or unblinded, it is another tag.
         assert_ne!(
-            settlement_tag(&NamingKey::from_bytes([8; 32]), TXID.as_bytes()),
+            settlement_tag(&NamingKey::from_bytes([8; 32]), SETTLEMENT),
             tag
         );
-        assert_ne!(settlement_tag_blinded(&hash(TXID.as_bytes())), tag);
+        assert_ne!(settlement_tag_blinded(&hash(SETTLEMENT)), tag);
         assert_ne!(settlement_tag(&nk, b"another settlement"), tag);
     }
 
     #[test]
     fn test_settlement_tag_is_one_across_endpoints() {
-        // One transaction paid to two endpoints names two payee records but one settlement,
+        // One settlement paid to two endpoints names two payee records but one settlement,
         // so its mark is one (Paykit wire 1.5).
-        let nk = NamingKey::from_bytes([7; 32]);
-        let id = settlement_id(&proof(json!({ "type": "bitcoin-txid", "txid": TXID }))).unwrap();
+        let id = SETTLEMENT.to_vec();
         let (a, b) = (
             PaymentEndpointIdentifier::parse("btc-bitcoin-p2wpkh").unwrap(),
             PaymentEndpointIdentifier::parse("btc-bitcoin-p2tr").unwrap(),
@@ -395,11 +333,6 @@ mod tests {
             natural_key::payee_payment_record(&a, &id),
             natural_key::payee_payment_record(&b, &id)
         );
-        let vout = settlement_id(&proof(
-            json!({ "type": "bitcoin-txid", "txid": TXID, "vout": 3 }),
-        ))
-        .unwrap();
-        assert_eq!(settlement_tag(&nk, &vout), settlement_tag(&nk, &id));
     }
 
     #[test]

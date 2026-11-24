@@ -25,8 +25,9 @@ pub enum Refusal {
     /// label it holds (Paykit spec 3.1, 8.1).
     #[error("Paykit spec 3.1: {0}")]
     Label(String),
-    /// The request was rejected by this identity (Paykit spec 8.1).
-    #[error("the request was rejected")]
+    /// The request was rejected by this identity (Paykit spec 8.1), or the Allowance by
+    /// either side (Paykit spec 8.3): nothing more is done under it.
+    #[error("the request or Allowance was rejected")]
     Rejected,
     /// Restored from a backup, or past a `missed` item, the app holds the request: the payee
     /// may have cancelled it since the backup, or among the entries the service deleted. It
@@ -43,9 +44,9 @@ pub enum Refusal {
     /// The request was cancelled by either side (Paykit spec 8.1).
     #[error("the request was cancelled")]
     Cancelled,
-    /// The Allowance has ended, by either side or by its proposal's withdrawal, or this app
-    /// keeps the counterparty's end as its stop: nothing more is done under it (Paykit spec
-    /// 8.3).
+    /// The Allowance has ended, by either side, by its proposal's withdrawal or when its
+    /// terms expire, or this app keeps the counterparty's end as its stop: nothing more is
+    /// done under it, and no later call changes that (Paykit spec 8.3).
     #[error("Paykit spec 8.3: the Allowance has ended")]
     AllowanceEnded,
     /// The Allowance is conflicted: a second, different proposal or response came, so
@@ -53,6 +54,30 @@ pub enum Refusal {
     /// "Conflicted").
     #[error("Paykit spec 8.3: the Allowance is conflicted")]
     AllowanceConflicted,
+    /// The user must confirm this Allowance again before this app pays under it: after a
+    /// `missed` item, or a restore until it is judged clean or the user confirms, an
+    /// executor pays under no Allowance on its consent list until the user has confirmed it
+    /// again, since an end may be among what was lost (Paykit spec 8.3, "Ends reach the
+    /// executor"). After a provider loss, an Allowance this app executes that the user last
+    /// confirmed before the loss gets it too: confirming writes its grant at the current
+    /// generation, but automatic payments under it don't resume in this version, which
+    /// doesn't repair its usage: they answer [`Refusal::NotNow`] with that reason, and the
+    /// user who wants them ends the Allowance and sets up a new one (Paykit spec 8.3, "After
+    /// provider loss"). It is
+    /// returned only where confirming lifts it, so not while the Allowance
+    /// is ended, expired, executed by another app or its counterparty blocked. The host shows
+    /// the Allowance `hold` names and, once the user confirms, calls
+    /// [`crate::Paykit::confirm_allowance_executor`] with `hold`; if that answers
+    /// [`Refusal::NotNow`], it keeps the confirmation with `hold` and calls again later,
+    /// except for the repair after a provider loss, which no confirmation lifts. The
+    /// confirmation counts only for the hold it was given under: after a newer restore,
+    /// `missed` item or provider loss the call answers this refusal again, with the new hold,
+    /// and the host asks the user again.
+    #[error("Paykit spec 8.3: the user must confirm this Allowance again")]
+    AllowanceConfirmationNeeded {
+        /// The Allowance to confirm, with the hold in force when it was shown.
+        hold: crate::AllowanceHold,
+    },
     /// A payee activity record lost credit history to a delete. A new receipt cannot
     /// be issued for this occurrence, including by hand (Paykit spec 6).
     #[error("Paykit spec 6: the payee record lost credit history to a delete")]
@@ -109,6 +134,17 @@ pub enum Refusal {
         "Paykit spec 8.4: whether this payment is credited to another occurrence can't be told now"
     )]
     MaybeCredited,
+    /// The payment method verified the payment, but its verified payment time, `paid_at_ms`,
+    /// lies outside what the occurrence allows: before the request's time less the method's
+    /// declared tolerance, after the occurrence's deadline, or outside the validity of the
+    /// destination or the rates it was paid by (Paykit spec 7.1, 8.2). Nothing is
+    /// credited or receipted on this evidence: the occurrence stays unpaid, and the funds
+    /// are the payee's received funds, for its user to settle with the payer.
+    #[error("Paykit spec 7.1: the verified payment time lies outside what the request allows")]
+    PaymentTimeOutside {
+        /// The verified payment time, in Unix milliseconds.
+        paid_at_ms: u64,
+    },
     /// The settlement mark cannot be stored. A receipt without it leaves other
     /// occurrences at risk of a second credit (Paykit wire 5.7, Full).
     #[error("Paykit wire 5.7: bucket {bucket} cannot store the mark; this payment may be credited again")]
@@ -131,12 +167,28 @@ pub enum Refusal {
     /// start").
     #[error("Paykit spec 8.2: the Billing Period hasn't started")]
     PeriodNotStarted,
-    /// The occurrence carries a manual-only mark or is funded under an Allowance.
-    #[error("Paykit spec 8.2, 8.3: this occurrence cannot be paid by the wallet's own policy")]
+    /// Not paid by this call's automatic payer (Paykit spec 8.2, 8.3), in one of three cases:
+    /// - the occurrence carries a manual-only mark: no wallet's policy and no Allowance's
+    ///   executor pays it automatically, and it is left for the user;
+    /// - asked of the wallet's own policy ([`crate::Paykit::pay_period_automatically`]), the
+    ///   Billing Period is funded under an Allowance: it is left for that Allowance's executor
+    ///   ([`crate::Paykit::pay_period_under_allowance`]);
+    /// - asked of an executor ([`crate::Paykit::pay_period_under_allowance`]), the Billing
+    ///   Period is funded under no Allowance: it is left for the wallet's own policy or the
+    ///   user.
+    #[error("Paykit spec 8.2, 8.3: this occurrence cannot be paid by this automatic payer")]
     ManualOnly,
-    /// The authenticated subscription and service time do not authorize this automatic
-    /// Billing Period. At an open attempt's first dispatch this is an [`Self::AttemptFailed`].
-    #[error("Paykit spec 8.2: not paid automatically: {0}")]
+    /// Not paid automatically, for good: the authenticated subscription and service time
+    /// don't authorize this automatic Billing Period (Paykit spec 8.2); the request or
+    /// Billing Period doesn't qualify under the Allowance it is paid under, outside its terms
+    /// or with its lifetime limit used up and nothing reserved or to release; the Allowance
+    /// the payment was reserved under expired before its first dispatch; or the Allowance was
+    /// set up before a provider loss and never granted here, so it can't be granted now and
+    /// the user can end it and set up a new one (Paykit spec 8.3, "After provider loss"); or,
+    /// after a provider loss, the request is one-time, under the shared post-loss hold
+    /// (Paykit spec 8.1). The user may still pay it by hand. At an open
+    /// attempt's first dispatch this is an [`Self::AttemptFailed`].
+    #[error("Paykit spec 8.2, 8.3: not paid automatically: {0}")]
     NotAutomatic(String),
     /// The request record lists 16 Billing Periods that may have an open attempt and none of
     /// them has finished: no attempt is made on another period until one does (Paykit spec
@@ -174,11 +226,33 @@ pub enum Refusal {
     /// `paykit.private_payment_list_request`; the payee can't be forced to answer, so the
     /// user is told the app is waiting for the payee's list. The user may choose to pay to
     /// the payee's public endpoints instead ([`crate::PaymentMode::Public`]); the app never
-    /// switches on its own.
-    #[error("Paykit spec 8.4: waiting for the payee's Private Payment List")]
-    WaitingForList,
-    /// The payment method would transfer another amount or asset, an amount it can't tell, or
-    /// a fee above the app's cap, and the user didn't choose it (Paykit spec 7.2 step 1).
+    /// switches on its own. A list in [`crate::Paykit::held_lists`] waits too, because its
+    /// record was deleted, doesn't read, or is absent: no held list's record is created over
+    /// an absent key, which can be a delete the service forgot (Paykit spec 6; wire 5). After
+    /// a delete, or over an absent key, it can wait indefinitely, and the payee's public
+    /// endpoints or a request's own destination remain the way to pay.
+    #[error(
+        "Paykit spec 8.4: waiting for the payee's Private Payment List{}",
+        if *device_clock_behind { "; a list expired by the service's time: the device clock is behind it" } else { "" }
+    )]
+    WaitingForList {
+        /// Whether a list of the payee's has expired only by the service's time: its expiry
+        /// is at or before the highest service time verified, but after the device clock,
+        /// which is behind the service's time. The user is told so (Paykit spec 7.2, check
+        /// the destination).
+        device_clock_behind: bool,
+    },
+    /// The client gave up this counterparty's current Private Payment List with an
+    /// unknown outcome. If it was a withdrawal, the counterparty may keep paying the
+    /// earlier list; if not, it may lack the list. Nothing more is sent on its own: only
+    /// the user, shown this value, can authorize another version
+    /// ([`crate::Paykit::send_list_again`]; Paykit spec 8.4, 9). Unlike other refusals, the
+    /// call that returns it may have recorded the host's choice first:
+    /// [`crate::Paykit::withdraw_list_from`] records the counterparty as withdrawn.
+    #[error("Paykit spec 9: the delivery of the counterparty's current list is unknown")]
+    ListDeliveryUnknown(Box<crate::UnknownListDelivery>),
+    /// The payment method would transfer another amount or asset, or an amount it can't tell,
+    /// and the user didn't choose it (Paykit spec 7.2 step 1).
     /// `quote` is what it would transfer, to show the user; paying it anyway carries it back
     /// ([`crate::PayOptions::with_transfer_confirmed`]).
     #[error("Paykit spec 7.2 step 1: {reason}")]
@@ -229,6 +303,15 @@ pub enum Refusal {
     /// or the clocks disagreeing (Switch spec 10.1, 12.4).
     #[error("not now: {0}")]
     NotNow(String),
+    /// The identity's block floor was seen divergent, and nothing can show what the hidden
+    /// upload held: no raise of the floor can be written, so an unblock or a widening that
+    /// needs one waits, and no automatic one-time payment goes (Paykit wire 5.6, Divergent
+    /// floor). Payments by hand, Billing Periods and payments without a request go on under
+    /// their own rules. Retrying changes nothing until the shared post-loss hold stands too,
+    /// when the unblock or widening goes without the raise (Unblocking under the divergence
+    /// hold).
+    #[error("Paykit wire 5.6: the block floor is held after it was seen divergent, so no raise of it can be written and this waits until the shared post-loss hold stands too; each request can still be paid by hand, and Billing Periods and payments without a request go on")]
+    FloorHeld,
     /// A value the caller gave breaks a rule: the text names it.
     #[error("usage: {0}")]
     Usage(String),
@@ -372,6 +455,12 @@ impl PaykitError {
     /// The SDK's own state in the store doesn't read.
     pub(crate) fn corrupt() -> Self {
         Self::Client(AppError::Store(StoreError::Corrupt))
+    }
+
+    /// Whether this is a value of the app's own state that doesn't read
+    /// ([`PaykitError::corrupt`]).
+    pub(crate) fn is_corrupt_state(&self) -> bool {
+        matches!(self, Self::Client(AppError::Store(StoreError::Corrupt)))
     }
 }
 

@@ -7,7 +7,7 @@
 //! lists and invite codes, the directory, peer copies of `identity.json` and the inbox. The
 //! identities admit each other as real apps do: a payer invites the payee it buys from (a
 //! conversation it starts, as at a checkout), and the first message an app sends a
-//! counterparty writes its conversation entry, so the counterparty's replies are admitted
+//! counterparty writes its reply grant, so the counterparty's replies are admitted
 //! (Paykit spec 1, Switch spec 7).
 
 use std::sync::Arc;
@@ -166,6 +166,9 @@ pub struct World {
     pub carol: TestSigner,
     pub router: Arc<Router>,
     pub rail: Arc<FakeRail>,
+    /// The values another own app wrote over records a provider loss then left divergent,
+    /// by record key, so a test can write one of them again as the record's successor.
+    pub competing: std::sync::Mutex<std::collections::BTreeMap<[u8; 32], Vec<u8>>>,
 }
 
 /// The host's timer in the tests: its sleep moves the test clock on and resolves at once.
@@ -225,6 +228,7 @@ impl World {
             carol,
             router,
             rail,
+            competing: Default::default(),
         }
     }
 
@@ -340,6 +344,15 @@ impl World {
         .unwrap();
         app.receive(None).await.unwrap();
         app
+    }
+
+    /// A device clock of its own, at `ms`, for an app loaded with [`World::load_on_clock`]:
+    /// the way to model a device clock that is wrong. The world's clock is the switches'
+    /// service time, so moving it back makes every switch answer earlier than it did before,
+    /// which the client takes as the service's clock going backwards; a wrong device clock
+    /// moves this one instead.
+    pub fn device_clock(&self, ms: u64) -> Arc<TestClock> {
+        Arc::new(TestClock::new(ms))
     }
 
     /// Load app `app_id` of `signer` from `store`, its device clock `clock` instead of the
@@ -461,6 +474,8 @@ pub struct FailingRecordReads {
     capped_record: std::sync::Mutex<Option<String>>,
     /// While set, every journal entry reads back as bytes that don't read.
     corrupt_journal: std::sync::atomic::AtomicBool,
+    /// While set, every listing of the held records fails.
+    scans_armed: std::sync::atomic::AtomicBool,
 }
 
 impl FailingRecordReads {
@@ -484,9 +499,17 @@ impl FailingRecordReads {
         self.armed.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
+    /// Fail every listing of the held records from now on.
+    pub fn arm_scans(&self) {
+        self.scans_armed
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
     /// The store heals: reads pass again.
     pub fn heal(&self) {
         self.armed.store(false, std::sync::atomic::Ordering::SeqCst);
+        self.scans_armed
+            .store(false, std::sync::atomic::Ordering::SeqCst);
         self.countdown.store(0, std::sync::atomic::Ordering::SeqCst);
     }
 
@@ -561,6 +584,10 @@ impl StateStore for FailingRecordReads {
         limit: u32,
     ) -> Result<Vec<pubky_switch_client::store::KeyValue>, pubky_switch_client::error::StoreError>
     {
+        if prefix.starts_with(b"rec/") && self.scans_armed.load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(pubky_switch_client::error::StoreError::Unavailable);
+        }
         self.inner.scan(ns, prefix, after, limit)
     }
 
@@ -1181,6 +1208,51 @@ impl Transport for SlowSwitch {
                 }
             }
             self.inner.send(request).await
+        })
+    }
+}
+
+/// The world's switches, where the next answer to an operation batch (`/ops`), once armed,
+/// takes `ms` on the clock: the call returns after the batch was applied, the clock moved on.
+pub struct SlowOps {
+    pub inner: Arc<Router>,
+    delay: std::sync::Mutex<Option<(Arc<TestClock>, u64)>>,
+}
+
+impl SlowOps {
+    pub fn new(inner: Arc<Router>) -> Self {
+        Self {
+            inner,
+            delay: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// The next batch's answer takes `ms` on `clock`.
+    pub fn delay_next(&self, clock: Arc<TestClock>, ms: u64) {
+        *self.delay.lock().unwrap() = Some((clock, ms));
+    }
+}
+
+impl Transport for SlowOps {
+    fn send(
+        &self,
+        request: pubky_switch_client::transport::Request,
+    ) -> pubky_switch_client::transport::BoxFuture<
+        '_,
+        Result<
+            pubky_switch_client::transport::Response,
+            pubky_switch_client::error::TransportError,
+        >,
+    > {
+        let ops = request.method == "POST" && request.path_and_query.ends_with("/ops");
+        Box::pin(async move {
+            let answer = self.inner.send(request).await;
+            if ops {
+                if let Some((clock, ms)) = self.delay.lock().unwrap().take() {
+                    clock.advance_ms(ms);
+                }
+            }
+            answer
         })
     }
 }

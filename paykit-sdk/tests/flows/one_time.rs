@@ -413,9 +413,12 @@ async fn test_one_time_payee_activity_store_failure_is_an_error() {
     request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
     wallet.receive(None).await.unwrap();
     assert_eq!(shop.payee_activity().await.unwrap().len(), 1);
-    // The collection lists, but its record can't be read again: the store failure is the
-    // answer, never a list that silently leaves the record out.
+    // The list reads each record once, from its listing: a record that couldn't be read
+    // again is still listed.
     failing.arm();
+    assert_eq!(shop.payee_activity().await.unwrap().len(), 1);
+    // A listing that fails is the answer, never a list that silently leaves records out.
+    failing.arm_scans();
     let error = shop.payee_activity().await.unwrap_err();
     assert!(
         matches!(
@@ -651,6 +654,20 @@ async fn record_uncancelled(wallet: &paykit_sdk::Paykit, request: &paykit_sdk::R
         value["cancellation"].is_null(),
         "the cancellation was placed"
     );
+}
+
+#[tokio::test]
+async fn test_one_time_kept_stop_reads_its_record_again_only_with_a_kept_copy() {
+    // The request's view reads the record for a kept stop only when a kept copy exists: here
+    // one does, so the list binds the record twice, and shows the request cancelled.
+    let w = World::new();
+    let (wallet, request) = cancelled_unplaced(&w, crate::common::store()).await;
+    record_uncancelled(&wallet, &request).await;
+    let before = wallet.activity_binds();
+    let shown = wallet.requests().await.unwrap();
+    assert_eq!(wallet.activity_binds() - before, 2);
+    assert_eq!(shown.len(), 1);
+    assert_eq!(shown[0].status, RequestStatus::Cancelled);
 }
 
 #[tokio::test]
@@ -2658,4 +2675,64 @@ async fn test_one_time_credit_requires_the_fixed_endpoint_owner() {
             if correct_owner { 2 } else { 0 }
         );
     }
+}
+
+#[tokio::test]
+async fn test_one_time_cancellation_kept_after_an_old_backup_survives_its_in_place_restore() {
+    // The wallet is backed up, and over a month later bob's cancellation of a request it
+    // holds no record of yet arrives: the installation keeps it as the stop. Restored in
+    // place from the month-old backup, the stop keeps the time it was accepted at, a month
+    // after the backup, so it isn't given up as stale at the first read: once the request
+    // is delivered it is cancelled, never payable (Paykit spec 8.1).
+    let w = World::new();
+    let storage = crate::common::store();
+    let mut wallet = w.wallet_on("wallet", std::sync::Arc::clone(&storage)).await;
+    let _shop = w.shop().await;
+    wallet.receive(None).await.unwrap();
+    let backup = wallet.backup().await.unwrap();
+    w.clock.advance_ms(31 * 24 * crate::common::HOUR_MS);
+    let (request, hash) = unsent_request(&w);
+    let cancellation = cancel_to(&w, &[wallet.app_id()], hash);
+    let got = wallet.receive(None).await.unwrap();
+    assert!(got.applied.contains(&cancellation), "{got:?}");
+    wallet.app_mut().flush_cursor().await.unwrap();
+    drop(wallet);
+    let mut wallet = paykit_sdk::Paykit::restore(
+        w.env(&w.alice, storage),
+        paykit_sdk::PaykitConfig::default(),
+        &backup,
+        std::sync::Arc::clone(&w.rail) as std::sync::Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    wallet.receive(None).await.unwrap();
+    // The device ran after the backup: its key registrations since are its own.
+    wallet
+        .app_mut()
+        .confirm_restored_registrations(pubky_switch_client::app::UserConfirmed::new())
+        .await
+        .unwrap();
+    wallet.reconcile().await.unwrap();
+    wallet
+        .end_reconcile(pubky_switch_client::app::UserConfirmed::new())
+        .await
+        .unwrap();
+    w.deliver(&w.bob, "shop", &w.alice, &[wallet.app_id()], &request);
+    wallet.receive(None).await.unwrap();
+    let request = paykit_sdk::RequestRef {
+        payee: w.bob_id(),
+        request_hash: hash,
+    };
+    assert_eq!(
+        wallet.request(&request).await.unwrap().status,
+        RequestStatus::Cancelled
+    );
+    let options = crate::common::over_hold(&wallet, &request).await;
+    let refused = wallet.pay_request(&request, options).await.outcome;
+    assert!(
+        !matches!(refused, Ok(PayOutcome::Paid { .. })),
+        "paid a cancelled request: {refused:?}"
+    );
+    assert!(w.rail.all_executions().is_empty());
 }

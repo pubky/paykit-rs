@@ -33,22 +33,30 @@
 //! | `off/<attempt_id>` | the original batch ID for an unresolved offline recording, committed with its signed operations before first submission (Paykit spec 8.4) | yes |
 //! | `j/<attempt_id>` | the payment journal: one payment, from before its `attempt` | yes |
 //! | `side/<msg_id>` | the side a cancellation is sent from, kept with the batch that queues it | |
+//! | `ex/<msg_id>` | why an acceptance this app sent may go while sends to its payee are held: a payment dispatched, or the user's confirmation of that blocked subscription, bound to its payee and request; kept before or with the batch that queues it (`send_holds.rs`) | |
+//! | `qs/<msg_id>` | a rejection or payer's cancellation this app queued: its payee, request, signed hash and `created_at`, written in the commit that queues it, so the receive step ends its outbox copy past 30 days, telling the host as its request record decides, with that decision; gone once neither the outbox nor a report of its end the host hasn't acknowledged names it (`send_holds.rs`); restored whole, since a restored outbox can hold the copy and a restored client an unacknowledged report of its end | |
 //! | `ar/<payee>/<app_id>` | a payee app's records that took part in its comparison, for its public endpoints | |
 //! | `ct` | the acceptance time of the last Paykit entry the receive step passed | |
 //! | `rh` | the cursor verdict, earlier holds and block windows for restored requests (`hold.rs`) | |
-//! | `hc/<record key>` | the user confirmed the current hold on a request | |
-//! | `hb/<record key>` | the backup's confirmation of an earlier hold | |
+//! | `hc/<record key>/<hold identifier>` | the user confirmed a held request under that hold (`he`) | |
+//! | `hb/<record key>/<hold identifier>` | the restore under that hold carried the backup's confirmation of an earlier hold | |
 //! | `rsc/<record key>` | an Allowance whose consent this restore marked for confirmation, until the held cursor settles it | |
+//! | `xr/<record key>` | an approval for execution a restore carried, which counts once its verdict is clean | |
+//! | `xa/<record key>/<hold identifier>` | the user approved automatic execution of an Allowance under that hold; only the current hold's approval lets a first grant go without a new confirmation | |
 //! | `pl` | the latest provider-loss boundary followed, retained across restore (`loss.rs`, Paykit spec 7.3) | |
+//! | `rl` | the newest provider loss this app recorded, by the generation recovered at: written with `pl`, never lowered, and kept from the installation over an in-place restore; the shared post-loss hold stands while it is set (`loss.rs`, Paykit spec 8.1) | |
 //! | `pn/<obligation>` | the user states this obligation was not paid before the kept loss; a newer loss clears these statements | |
 //! | `mh` | the hold a `missed` item set on the open requests, bounded by a time: the item's last acceptance time, or, for an item whose end isn't known, a service time verified after the read that handed it (`hold.rs`) | |
 //! | `mu` | set by a `missed` item whose end isn't known: every open request is held, as after a restore, until a read that completes bounds the hold by the service time verified then, into `mh`, and clears it (`hold.rs`) | |
 //! | `ml` | set by a `missed` item: the shared records aren't listed by Paykit since, so a record's absence means nothing yet; cleared by Paykit's next listing (`hold.rs`); never restored | |
 //! | `lp/<recipient>/<generation>/<message hash>` | outstanding original publication batch IDs, kept atomically before submission and retained across restore | yes |
-//! | `lres/<recipient>` | the applied list, its publisher and original signed message, first non-delivery, prior offers' latest possible expiry, and the interval of an outstanding withdrawal | yes |
-//! | `lh/<record key>` | a Private Payment List held because its `payment_lists` record doesn't read: never written over it, which could drop its single-use marks, until the record reads | |
+//! | `lres/<recipient>` | the applied list, its publisher and original signed message, its first delivery outcome (open, undelivered or unknown) and any kept confirmation of another version, prior offers' latest possible expiry, and the interval of an outstanding withdrawal | yes |
+//! | `lh/<record key>` | a Private Payment List held because its `payment_lists` record doesn't read or bind, or was seen deleted (`lgone/`): never written over it, which could drop its single-use marks, until the record reads and binds, never created over an absent key; deleted once the record holds the list | |
+//! | `lgone/<record key>` | set in the commit in which this app sees the `payment_lists` record deleted, or reads a value there carrying `lost_to_delete` (`LostListRecord`): no later value or absence of it places a list held there; never cleared, and a restore keeps the union of the installation's and the backup's | yes |
+//! | `lur/<record key>` | set once a list was held over the `payment_lists` record because it didn't read or bind: a later absence keeps the list held, as what that value held stays unknown; cleared only by a delete seen (`lgone/`), which holds the list anyway, and a restore keeps the union of the installation's and the backup's | yes |
 //! | `kc/<record key>/<certificate hash>/<feed generation>` | a payee's cancellation of a request, kept until it is placed in the payer's request record | |
 //! | `peer/<pubky>` | a counterparty with Paykit activity, and when | |
+//! | `sv` | the highest service time the app verified, as the receive step and a flush last saw it, for the delivery hook's window of a held message, which judges by it, by the device clock only while none is kept; written also before every delivery Paykit starts. The client's own window for a message it queues again from signed plaintext, which ends a held answer released from its record, takes the later of the device clock and the service time instead, so under a fast device clock such an answer can be given up while a queued stop still goes (`send_holds.rs`, Paykit spec 8.1); never restored, a restore's first read writing it again | |
 //! | `lr` | when the app last read the lists, on the device clock; absent before the first read and after a due read failed, when new activity waits (Paykit wire 4.1); never restored, so a restored app reads the deny list again before any payment | |
 //! | `spam/<pubky>` | how many messages from a blocked or flagged sender only were counted (Paykit wire 4.1) | |
 //! | `rs/<pubky>/<msg_id>` | when a message was last re-sent to a requester | |
@@ -59,13 +67,14 @@
 //! | `ha/<payee>/<msg_id>` | the wallet's held answer and request. A backup marks it restored so it cannot authorize delivery | |
 //! | `pp` | set by a restore: a payer pass is owed, so no new attempt is made and nothing is dispatched; cleared only after a reconcile under `paykit_pay` ran that pass (`hold.rs`); never restored | |
 //! | `lq/<payee>[/<app_id>]` | a `private_payment_list_request` asked of a payee's app, or of none: the version it named and when (Paykit spec 8.4) | |
-//! | `nt/outgoing/<recipient>/<msg_id>/<hash>` | the disposition of an exact original delivery is unknown after restore. Acknowledgment is retained for repeated imports | |
-//! | `nt/<attempt_id>/<kind>`, `nt/<sender>/<msg_id>` | a notice for the host about a payment, or a message given up, until acknowledged (`notices.rs`) | |
+//! | `nt/outgoing/<recipient>/<msg_id>/<hash>` | the disposition of an exact original delivery is unknown: after restore, or a counterparty's current list given up with an unknown outcome. Acknowledgment is retained for repeated imports; a list's notice goes once a newer version supersedes it | |
+//! | `nt/<attempt_id>/<kind>`, `nt/<sender>/<msg_id>`, `nt/<tag>` | a notice for the host about a payment, a message given up, or the identity as a whole, until acknowledged (`notices.rs`); an identity-wide one is never restored and is told again at each load while what it tells stands | |
 //! | `xm/<sender>/<msg_id>` | an extension message from `sender` of a kind the host registered, kept from its receive step until the host takes it (`extensions.rs`, Paykit spec 3.3); at most 64 per sender and 128 in all | yes |
 //! | `dl` | the deny list as the app last read it, with this app's blocks kept unanswered (`bk/`), for the views and a payment the user starts (Paykit spec 8.1) | |
 //! | `fg` | the flagged senders as the app last read them, at most `MAX_FLAGGED_COPY`; absent while not known, which holds the asks of block marks (`marks.rs`); never restored | |
 //! | `bf` | the raise of the identity's block floor this app owes: the latest of the latest times of the block marks gone for the bound or their own expiry, and of a restore's first read of the lists; written to the shared `block_floor` record before the block marks ask and with any ask, and deleted in that batch; applied as a floor meanwhile (`crate::floor`) | yes |
-//! | `fd` | unresolved deletion of the identity's block floor (Paykit wire 5.6) | yes |
+//! | `fk` | what this app keeps of the identity's block floor: the highest floor it has seen and whether it has seen the record divergent, the durable divergence hold; both only grow, and an in-place restore keeps the higher of the backup's and the installation's (`crate::floor::FloorKept`, Paykit wire 5.6) | yes |
+//! | `rr` | the block floor raises this app owes, tried and left unwritten for a cause other than the divergence hold: how many such tries in a row (`tries`) and the last one's time on this device's clock (`tried_at_ms`); each raise owed then, named apart from its time (`tried`: the unblocks' raise as one, each widening by its hold or restore, window and floor); the floor record held then, named by its state and the exact write the next write builds on (`floor`); and which parts the floor needs to read were there (`ready`: the scope keys, the listing, an open value). The wait is derived from the tries. Only a hint: one that doesn't read is taken as none (`crate::floor::RaiseRetry`, Paykit wire 5.6, Raising); never restored | |
 //! | `fo/<record key>` | a request record a read opened without `manual_only`, checked against the block floor once the read is done and marked if dated before it (`crate::floor`); never restored | |
 //! | `bk/<pubky>` | this app's block or unblock of `pubky` not yet shown by the list (`OwnBlockMark`): a block from before the switch is asked, an unblock only with the batch the client keeps; a block counts until a read of the list shows it, and is written again at a receive while the client neither keeps nor applied its batch, a restored one too, since the kept batch stays with the device that kept it; an unblock counts for payments and held sends only while the client still keeps its batch, never for the spam rule, and isn't restored (Paykit spec 8.1) | |
 //! | `ra/<sender>` | signed recovery requests for dropped replies, their first-delivery outcomes and any unresolved original missing from a restore | |
@@ -96,7 +105,7 @@
 //! | `end/<msg_id>` | origin of the exact signed Allowance end and its target and references, written before submission and retained through its delivery lifetime | |
 
 use paykit_lib::bodies::ResendRequest;
-use paykit_lib::derive::{natural_key, request_obligation_blinded};
+use paykit_lib::derive::natural_key;
 use paykit_lib::scopes::verify_certificate;
 use paykit_lib::{AttemptId, Body};
 use pubky_switch_client::app::{LocalView, LocalWrite, ReceiveContext, RecordTarget};
@@ -242,6 +251,28 @@ impl Paykit {
         })
     }
 
+    /// [`Paykit::local_scan`], leaving out a value that doesn't read or bind to its key: for
+    /// a scan that gathers hints across counterparties, where one entry's damage must not
+    /// stop the action for another.
+    pub(crate) async fn local_scan_readable<T: BoundRead>(
+        &self,
+        prefix: &str,
+    ) -> Result<Vec<(String, T)>> {
+        let held = self
+            .app
+            .protocol_scan(crate::protocol::BACKUP_NAME, prefix.as_bytes())
+            .await?;
+        self.binding(|binder| {
+            Ok(held
+                .iter()
+                .filter_map(|(key, value)| {
+                    let rest = rest_of(key, prefix.as_bytes())?;
+                    bound(key, value, binder).ok().map(|v| (rest, v))
+                })
+                .collect())
+        })
+    }
+
     pub(crate) async fn publication_batches(
         &self,
         recipient: &[u8; 32],
@@ -290,6 +321,16 @@ impl Paykit {
     }
 
     /// Delete one record and commit it.
+    /// Whether a value is kept at `key`, unread: for one that only paces work and is
+    /// deleted whether or not it reads.
+    pub(crate) async fn local_holds(&self, key: &str) -> Result<bool> {
+        Ok(self
+            .app
+            .protocol_get(crate::protocol::BACKUP_NAME, key.as_bytes())
+            .await?
+            .is_some())
+    }
+
     pub(crate) async fn local_delete(&mut self, key: &str) -> Result<()> {
         let mut tx = Tx::default();
         tx.delete(key);
@@ -532,8 +573,36 @@ impl Stored for [u8; 16] {
 
     fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
         match family {
-            StateKey::OfflineBatch(_) | StateKey::EndBatch(_) | StateKey::FloorBatch => Ok(()),
+            StateKey::OfflineBatch(_)
+            | StateKey::EndBatch(_)
+            | StateKey::FloorBatch
+            | StateKey::GrantBatch(_) => Ok(()),
             _ => corrupt(),
+        }
+    }
+}
+
+impl sealed::Sealed for crate::floor::FloorKept {}
+
+impl Stored for crate::floor::FloorKept {
+    fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
+        // No writer keeps an empty one.
+        if matches!(family, StateKey::FloorKept) && !self.is_empty() {
+            Ok(())
+        } else {
+            corrupt()
+        }
+    }
+}
+
+impl sealed::Sealed for crate::floor::RaiseRetry {}
+
+impl Stored for crate::floor::RaiseRetry {
+    fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
+        if matches!(family, StateKey::RaiseRetry) && self.reads() {
+            Ok(())
+        } else {
+            corrupt()
         }
     }
 }
@@ -593,7 +662,11 @@ impl Stored for u64 {
             | StateKey::Spam(_)
             | StateKey::Resent { .. }
             | StateKey::ResentDay { .. }
-            | StateKey::ListsRead => Ok(()),
+            | StateKey::ListsRead
+            | StateKey::ListsReadUnder
+            | StateKey::ServiceTime => Ok(()),
+            // A generation recovered at follows another.
+            StateKey::LossRecorded if *self > 0 => Ok(()),
             _ => corrupt(),
         }
     }
@@ -688,6 +761,95 @@ impl Stored for OwnBlockMark {
     }
 }
 
+/// That this app saw a `payment_lists` record deleted, or read a value at its key carrying
+/// `lost_to_delete` (`lgone/<record key>`; Paykit spec 6, "Visible deletion without a
+/// copy"; Paykit wire 5, "A visible delete without a copy" and "Incomplete
+/// protected-record contract"): the newest such version, and the delete's item hash. While
+/// it is kept, no value at that key is taken, and no list of that payee app is used, for
+/// any list version and whatever marks a value holds: a later authorization over a delete
+/// needs the Switch's lineage proof and its Paykit mapping, which this revision lacks, so
+/// wire 5 withholds it. An absence of the record keeps its list held too.
+///
+/// It is never removed: removing it would let a later absence of the record, or a value
+/// without the marks the delete took, read as a record never deleted, since no backup
+/// carries the client's own mark of what it saw, nor does a fresh store hold it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LostListRecord {
+    /// The record version of the newest delete seen, or of a write naming one: a report of
+    /// it again, or of an older one, as a covering read or a restore's listing gives,
+    /// changes nothing.
+    deleted: [u64; 2],
+    /// That delete's item hash, as the client reports a delete it verified (Switch wire
+    /// 6.6), which tells two deletes at one version apart, as a recovery can upload them
+    /// (Paykit spec 6); `None` when no report gave it, or two deletes at the version were
+    /// seen. Only an exact match is the same delete: any other at its version is merged.
+    #[serde(deserialize_with = "Option::deserialize")]
+    item: Option<[u8; 32]>,
+}
+
+impl LostListRecord {
+    /// The delete at record version `deleted`, of item hash `item` if the report gave it,
+    /// or a value carrying `lost_to_delete` written at that version: it names a delete that
+    /// lost content, which this app may never have seen (Paykit spec 6; wire 5).
+    pub(crate) fn over(
+        deleted: pubky_switch_core::ops::RecordVersion,
+        item: Option<[u8; 32]>,
+    ) -> Self {
+        Self {
+            deleted: [deleted.generation, deleted.version],
+            item,
+        }
+    }
+
+    /// Whether the newest delete kept is the one at `version`, known by its item hash: one
+    /// kept without it can't be told from another delete at that version.
+    pub(crate) fn deleted_at(&self, version: pubky_switch_core::ops::RecordVersion) -> bool {
+        self.deleted == [version.generation, version.version] && self.item.is_some()
+    }
+
+    /// The entry after `seen`, a delete seen now, is kept with it: the same delete, by its
+    /// item hash, or an older one, reported again changes nothing; a newer one, or another
+    /// at the same version, is merged in.
+    pub(crate) fn then(self, seen: Self) -> Self {
+        match seen.deleted.cmp(&self.deleted) {
+            std::cmp::Ordering::Less => self,
+            std::cmp::Ordering::Equal if self.item.is_some() && self.item == seen.item => self,
+            _ => self.merge(seen),
+        }
+    }
+
+    /// Both kept, as after a restore: the newer version, with its item hash, and none for
+    /// two different deletes at one version.
+    pub(crate) fn merge(self, other: Self) -> Self {
+        let item = match self.deleted.cmp(&other.deleted) {
+            std::cmp::Ordering::Greater => self.item,
+            std::cmp::Ordering::Less => other.item,
+            std::cmp::Ordering::Equal => self.item.filter(|_| self.item == other.item),
+        };
+        Self {
+            deleted: std::cmp::max(self.deleted, other.deleted),
+            item,
+        }
+    }
+}
+
+impl sealed::Sealed for LostListRecord {}
+
+/// Its delete's version is one a delete has: a write's, of a generation of at least 1
+/// (Switch wire 1.7, 3.3, 6.3).
+impl Stored for LostListRecord {
+    fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
+        const MAX_INT: u64 = (1 << 53) - 1;
+        let [generation, seq] = self.deleted;
+        let valid = (1..=MAX_INT).contains(&seq) && (1..=MAX_INT).contains(&generation);
+        match family {
+            StateKey::ListRecordLost(_) if valid => Ok(()),
+            _ => corrupt(),
+        }
+    }
+}
+
 impl sealed::Sealed for bool {}
 
 /// A mark, which every writer sets `true`.
@@ -700,12 +862,14 @@ impl Stored for bool {
             | StateKey::MissedEndUnknown
             | StateKey::MissedConsents
             | StateKey::PayerPassOwed
-            | StateKey::HoldConfirmed(_)
-            | StateKey::HoldConfirmedBefore(_)
+            | StateKey::HoldConfirmed { .. }
+            | StateKey::HoldConfirmedBefore { .. }
             | StateKey::RestoreConsent(_)
+            | StateKey::ExecutionApproval { .. }
+            | StateKey::RestoreApproval(_)
             | StateKey::NotPaidBeforeLoss(_)
-            | StateKey::FloorDeleted
             | StateKey::FloorOpened(_)
+            | StateKey::ListRecordUnread(_)
             | StateKey::Taken(_)
                 if *self =>
             {
@@ -794,6 +958,30 @@ impl Stored for KeptSide {
     fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
         match family {
             StateKey::Side(msg_id) if self.msg_id == *msg_id => Ok(()),
+            _ => corrupt(),
+        }
+    }
+}
+
+impl sealed::Sealed for crate::send_holds::QueuedStop {}
+
+/// A stop this app queued: of the message its key names.
+impl Stored for crate::send_holds::QueuedStop {
+    fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
+        match family {
+            StateKey::QueuedStop(msg_id) if self.msg_id == *msg_id => Ok(()),
+            _ => corrupt(),
+        }
+    }
+}
+
+impl sealed::Sealed for crate::send_holds::SendExemption {}
+
+/// Why an acceptance may go while sends are held: of the message its key names.
+impl Stored for crate::send_holds::SendExemption {
+    fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
+        match family {
+            StateKey::SendExemption(msg_id) if self.msg_id == *msg_id => Ok(()),
             _ => corrupt(),
         }
     }
@@ -1156,8 +1344,9 @@ impl sealed::Sealed for JournalEntry {}
 
 /// A journal entry (Paykit spec 7.2), checked as a restore checks it
 /// ([`JournalEntry::check_restored`]): of the attempt its key names; its claim key the one
-/// its payee, request and Billing Period blind to; the request it keeps that payee's request of that hash,
-/// amount, reference and label; its carrier verified for the payee; its acceptance this
+/// its payee, request and Billing Period blind to, or, for a payment without a request, its
+/// attempt ID; the request it keeps that payee's request of that hash, amount, reference
+/// and label; its carrier verified for the payee; its acceptance this
 /// app's, of that request, at the `msg_id` it keeps; and its record the payer's record of
 /// that request, or, for a payment without a request, of this app's attempt the key names.
 /// An entry naming another attempt, claim, record or message would read and write one
@@ -1177,9 +1366,7 @@ impl Stored for JournalEntry {
         }
         let blind = binder.blind()?;
         let cert = binder.cert.ok_or_else(PaykitError::corrupt)?;
-        self.check_restored(&binder.own, cert, |payee, request_hash, start| {
-            request_obligation_blinded(&blind(payee), &blind(request_hash), start)
-        })?;
+        self.check_restored(&binder.own, cert, |input| blind(input))?;
         if self.request_hash()?.is_none()
             && self.natural_key != natural_key::payer_payment_record(&binder.own, attempt)
         {
@@ -1818,12 +2005,19 @@ pub(crate) mod key {
     pub(crate) const HOLD_EPOCH: &str = "he";
     pub(crate) const MISSED_HOLD: &str = "mh";
     pub(crate) const LOSS_BOUNDARY: &str = "pl";
+    /// The newest provider loss this app recorded, by the generation recovered at
+    /// (`crate::loss`, the shared post-loss hold).
+    pub(crate) const LOSS_RECORDED: &str = "rl";
+    /// A floor raise tried and left unwritten (`crate::floor::RaiseRetry`).
+    pub(crate) const RAISE_RETRY: &str = "rr";
     pub(crate) const NOT_PAID_BEFORE_LOSS: &str = "pn/";
     /// A `missed` item's hold whose end isn't known yet (`Paykit::bound_missed_hold`).
     pub(crate) const MISSED_END_UNKNOWN: &str = "mu";
     pub(crate) const HOLD_CONFIRMED: &str = "hc/";
     pub(crate) const HOLD_CONFIRMED_BEFORE: &str = "hb/";
     pub(crate) const RESTORE_CONSENTS: &str = "rsc/";
+    pub(crate) const EXECUTION_APPROVALS: &str = "xa/";
+    pub(crate) const RESTORE_APPROVALS: &str = "xr/";
     pub(crate) const LIST_SETTINGS: &str = "list";
     pub(crate) const PUBLICATIONS: &str = "lp/";
     pub(crate) const LIST_RESERVATIONS: &str = "lres/";
@@ -1831,13 +2025,23 @@ pub(crate) mod key {
     pub(crate) const LIST_RECIPIENTS: &str = "lrec/";
     pub(crate) const LIST_DISCOVERY: &str = "ld";
     pub(crate) const LISTS_READ: &str = "lr";
+    /// The provider loss the lists were last read under: its lost generation plus one, or 0
+    /// for none ([`crate::receive::lists_read_counts`]).
+    pub(crate) const LISTS_READ_UNDER: &str = "lu";
+    pub(crate) const SERVICE_TIME: &str = "sv";
     pub(crate) const HELD_LISTS: &str = "lh/";
+    pub(crate) const LISTS_LOST: &str = "lgone/";
+    pub(crate) const LISTS_UNREAD: &str = "lur/";
     pub(crate) const RECORDS_UNLISTED: &str = "nl";
     pub(crate) const MISSED_UNLISTED: &str = "ml";
     pub(crate) const MISSED_CONSENTS: &str = "mc";
     pub(crate) const PAYER_PASS_OWED: &str = "pp";
     pub(crate) const OWN_RESEND_OWED: &str = "ro";
     pub(crate) const HELD_ANSWERS: &str = "ha/";
+    /// `qs/<msg_id>`: the rejections and payer's cancellations this app queued.
+    pub(crate) const QUEUED_STOPS: &str = "qs/";
+    /// `ex/<msg_id>`: why an outgoing acceptance may go while sends are held.
+    pub(crate) const SEND_EXEMPTIONS: &str = "ex/";
     pub(crate) const LISTED_CERT: &str = "lc";
     pub(crate) const NOTICES: &str = "nt/";
     pub(crate) const RESTORED_DELIVERIES: &str = "nt/outgoing/";
@@ -1855,7 +2059,8 @@ pub(crate) mod key {
     pub(crate) const FLAGGED: &str = "fg";
     /// The raise of the block floor this app owes (`crate::floor`).
     pub(crate) const FLOOR_BATCH: &str = "fb";
-    pub(crate) const FLOOR_DELETED: &str = "fd";
+    /// What this app keeps of the block floor (`crate::floor::FloorKept`).
+    pub(crate) const FLOOR_KEPT: &str = "fk";
     pub(crate) const BLOCK_FLOOR: &str = "bf";
     /// The request records this read opened without `manual_only`, to check against the
     /// block floor once it is done (`crate::floor`).
@@ -1988,6 +2193,12 @@ pub(crate) mod key {
         format!("{EXECUTOR_CHECKPOINTS}{}", b64(record))
     }
 
+    /// The batch ID of this app's first grant of the Allowance at `record`, while the client
+    /// keeps it to send again; the batch deletes it when it applies.
+    pub(crate) fn grant_batch(record: &[u8; 32]) -> String {
+        format!("gb/{}", b64(record))
+    }
+
     /// Staged complete values and the native batches that actually submitted them.
     pub(crate) const LEDGER_PROPOSALS: &str = "lw/";
     pub(crate) const LEDGER_BATCHES: &str = "lb/";
@@ -2106,6 +2317,11 @@ pub(crate) mod key {
     }
 
     /// The notice of `kind` about `attempt`.
+    /// The identity-wide notice of `kind` (`crate::notices`).
+    pub(crate) fn identity_notice(kind: crate::notices::NoticeKind) -> String {
+        format!("{NOTICES}{}", kind.tag())
+    }
+
     pub(crate) fn notice(attempt: &AttemptId, kind: crate::notices::NoticeKind) -> String {
         format!("{NOTICES}{}", crate::notices::notice_id(attempt, kind))
     }
@@ -2144,6 +2360,14 @@ pub(crate) mod key {
         format!("side/{msg_id}")
     }
 
+    pub(crate) fn send_exemption(msg_id: &str) -> String {
+        format!("ex/{msg_id}")
+    }
+
+    pub(crate) fn queued_stop(msg_id: &str) -> String {
+        format!("{QUEUED_STOPS}{msg_id}")
+    }
+
     pub(crate) fn seen_records(payee: &[u8; 32], app_id: &[u8; 16]) -> String {
         format!("ar/{}/{}", b64(payee), b64(app_id))
     }
@@ -2152,12 +2376,41 @@ pub(crate) mod key {
         format!("{FLOOR_OPENED}{}", b64(record_key))
     }
 
-    pub(crate) fn hold_confirmed(record_key: &[u8; 32]) -> String {
-        format!("{HOLD_CONFIRMED}{}", b64(record_key))
+    pub(crate) fn hold_confirmed(record_key: &[u8; 32], epoch: &crate::hold::HoldEpoch) -> String {
+        format!(
+            "{HOLD_CONFIRMED}{}/{}",
+            b64(record_key),
+            b64(epoch.as_bytes())
+        )
     }
 
-    pub(crate) fn hold_confirmed_before(record_key: &[u8; 32]) -> String {
-        format!("{HOLD_CONFIRMED_BEFORE}{}", b64(record_key))
+    pub(crate) fn hold_confirmed_before(
+        record_key: &[u8; 32],
+        epoch: &crate::hold::HoldEpoch,
+    ) -> String {
+        format!(
+            "{HOLD_CONFIRMED_BEFORE}{}/{}",
+            b64(record_key),
+            b64(epoch.as_bytes())
+        )
+    }
+
+    /// `xa/<record key>/<hold identifier>`: the user approved automatic execution of the
+    /// Allowance at `record_key` under that hold (`he`), or `none` before any hold.
+    pub(crate) fn execution_approval(
+        record_key: &[u8; 32],
+        hold: Option<&crate::hold::HoldEpoch>,
+    ) -> String {
+        format!(
+            "{EXECUTION_APPROVALS}{}/{}",
+            b64(record_key),
+            hold.map_or_else(|| String::from("none"), |hold| b64(hold.as_bytes()))
+        )
+    }
+
+    /// `xr/<record key>`: an approval for execution a restore carried, until its verdict.
+    pub(crate) fn restore_approval(record_key: &[u8; 32]) -> String {
+        format!("{RESTORE_APPROVALS}{}", b64(record_key))
     }
 
     pub(crate) fn restore_consent(record_key: &[u8; 32]) -> String {
@@ -2166,6 +2419,19 @@ pub(crate) mod key {
 
     pub(crate) fn held_list(record_key: &[u8; 32]) -> String {
         format!("{HELD_LISTS}{}", b64(record_key))
+    }
+
+    /// Set once this app has seen the `payment_lists` record at `record_key` deleted
+    /// ([`LostListRecord`]), and never cleared.
+    pub(crate) fn list_record_lost(record_key: &[u8; 32]) -> String {
+        format!("{LISTS_LOST}{}", b64(record_key))
+    }
+
+    /// Set while a list is held over the `payment_lists` record at `record_key` because
+    /// the record didn't read or bind, so a later absence keeps the list held; cleared by a
+    /// value that reads and binds, or by a delete seen ([`list_record_lost`]).
+    pub(crate) fn list_record_unread(record_key: &[u8; 32]) -> String {
+        format!("{LISTS_UNREAD}{}", b64(record_key))
     }
 
     /// This app's block or unblock of `pubky` not yet shown by a read of the lists
@@ -2345,18 +2611,53 @@ pub(crate) enum StateKey {
         payee: [u8; 32],
         msg_id: String,
     },
-    /// `hc/<record key>`: the user's confirmation of a held request.
-    HoldConfirmed([u8; 32]),
-    /// A request confirmation carried from before the restore.
-    HoldConfirmedBefore([u8; 32]),
+    /// `hc/<record key>/<hold identifier>`: the user's confirmation of a held request,
+    /// under the hold identifier it was given under.
+    HoldConfirmed {
+        /// The request's record key.
+        record: [u8; 32],
+        /// The hold identifier (`he`) the confirmation was given under.
+        epoch: [u8; 16],
+    },
+    /// `hb/<record key>/<hold identifier>`: a request confirmation carried from before the
+    /// restore, under the identifier of the restore that carried it.
+    HoldConfirmedBefore {
+        /// The request's record key.
+        record: [u8; 32],
+        /// The hold identifier the restore set.
+        epoch: [u8; 16],
+    },
     /// An Allowance consent held specifically by this restore.
     RestoreConsent([u8; 32]),
+    /// `xr/<record key>`: an approval for execution a restore carried from its backup,
+    /// which counts only once the restore's verdict is clean.
+    RestoreApproval([u8; 32]),
+    /// `xa/<record key>/<hold identifier>`: the user's approval of automatic execution of
+    /// an Allowance, under the hold it was given under (`None` before any hold).
+    ExecutionApproval {
+        /// The Allowance record's key.
+        record: [u8; 32],
+        /// The hold identifier the approval was given under.
+        hold: Option<[u8; 16]>,
+    },
     /// `lr`: when the lists were last read.
     ListsRead,
+    /// `lu`: the provider loss the lists were last read under.
+    ListsReadUnder,
+    /// `sv`: the highest service time verified, for the delivery hook.
+    ServiceTime,
     /// `lh/<record key>`: a list held over a record that didn't read.
     HeldList([u8; 32]),
+    /// `lgone/<record key>`: a `payment_lists` record seen deleted ([`LostListRecord`]).
+    ListRecordLost([u8; 32]),
+    /// `lur/<record key>`: a `payment_lists` record a list is held over that didn't read.
+    ListRecordUnread([u8; 32]),
     /// `side/<msg_id>`: the side of a message the app sent.
     Side(String),
+    /// `ex/<msg_id>`: why an acceptance the app sent may go while sends are held.
+    SendExemption(String),
+    /// `qs/<msg_id>`: a rejection or payer's cancellation the app queued.
+    QueuedStop(String),
     /// `ar/<payee>/<app>`: a payee app's records a reader has seen.
     SeenRecords {
         payee: [u8; 32],
@@ -2413,8 +2714,14 @@ pub(crate) enum StateKey {
     Flagged,
     /// `bf`: the raise of the block floor this app owes.
     BlockFloor,
-    /// A deletion of the identity's block floor still needs a verified protective write.
-    FloorDeleted,
+    /// `fk`: what this app keeps of the block floor.
+    FloorKept,
+    /// `nt/<tag>`: an identity-wide notice of the kind the tag names.
+    IdentityNotice(crate::notices::NoticeKind),
+    /// `rl`: the newest provider loss this app recorded.
+    LossRecorded,
+    /// `rr`: a floor raise tried and left unwritten.
+    RaiseRetry,
     /// The local identifier of an unanswered floor write.
     FloorBatch,
     /// `fo/<record key>`: a request record a read opened without `manual_only`, to check
@@ -2527,6 +2834,8 @@ pub(crate) enum StateKey {
     EndOrigin(String),
     /// The unresolved native batch that will record an automatic end before queueing.
     EndBatch(String),
+    /// The unresolved native batch of this app's first grant of an Allowance.
+    GrantBatch([u8; 32]),
 }
 
 impl StateKey {
@@ -2563,6 +2872,8 @@ impl StateKey {
             "he" => Self::HoldEpoch,
             "mh" => Self::MissedHold,
             "pl" => Self::LossBoundary,
+            "rl" => Self::LossRecorded,
+            "rr" => Self::RaiseRetry,
             "mu" => Self::MissedEndUnknown,
             "nl" => Self::RecordsUnlisted,
             "ml" => Self::MissedUnlisted,
@@ -2571,9 +2882,11 @@ impl StateKey {
             "ro" => Self::OwnResendOwed,
             "lc" => Self::ListedCert,
             "lr" => Self::ListsRead,
+            "lu" => Self::ListsReadUnder,
+            "sv" => Self::ServiceTime,
             "dl" => Self::Denied,
             "fg" => Self::Flagged,
-            "fd" => Self::FloorDeleted,
+            "fk" => Self::FloorKept,
             "bf" => Self::BlockFloor,
             "fb" => Self::FloorBatch,
             _ => {
@@ -2670,13 +2983,36 @@ impl StateKey {
                         }
                     }
                     "bk" => Self::OwnBlock(b64_32(rest)?),
-                    "hc" => Self::HoldConfirmed(b64_32(rest)?),
-                    "hb" => Self::HoldConfirmedBefore(b64_32(rest)?),
+                    "hc" | "hb" => {
+                        let (record, epoch) = rest.split_once('/')?;
+                        let (record, epoch) = (b64_32(record)?, b64_16(epoch)?);
+                        if family == "hc" {
+                            Self::HoldConfirmed { record, epoch }
+                        } else {
+                            Self::HoldConfirmedBefore { record, epoch }
+                        }
+                    }
                     "rsc" => Self::RestoreConsent(b64_32(rest)?),
+                    "xr" => Self::RestoreApproval(b64_32(rest)?),
+                    "xa" => {
+                        let (record, hold) = rest.split_once('/')?;
+                        Self::ExecutionApproval {
+                            record: b64_32(record)?,
+                            hold: if hold == "none" {
+                                None
+                            } else {
+                                Some(b64_16(hold)?)
+                            },
+                        }
+                    }
                     "pn" => Self::NotPaidBeforeLoss(b64_32(rest)?),
                     "fo" => Self::FloorOpened(b64_32(rest)?),
                     "lh" => Self::HeldList(b64_32(rest)?),
+                    "lgone" => Self::ListRecordLost(b64_32(rest)?),
+                    "lur" => Self::ListRecordUnread(b64_32(rest)?),
                     "side" => Self::Side(msg_id(rest)?),
+                    "ex" => Self::SendExemption(msg_id(rest)?),
+                    "qs" => Self::QueuedStop(msg_id(rest)?),
                     "ha" => {
                         let (payee, id) = rest.split_once('/')?;
                         Self::HeldAnswer {
@@ -2733,6 +3069,7 @@ impl StateKey {
                     "en" => Self::NoticeTarget(msg_id(rest)?),
                     "end" => Self::EndOrigin(msg_id(rest)?),
                     "eb" => Self::EndBatch(msg_id(rest)?),
+                    "gb" => Self::GrantBatch(b64_32(rest)?),
                     "eo" => Self::OwedEnd(b64_32(rest)?),
                     "rs" => {
                         let (requester, id) = rest.split_once('/')?;
@@ -2823,6 +3160,9 @@ impl StateKey {
                         }
                     }
                     "nt" => {
+                        if let Some(kind) = crate::notices::NoticeKind::identity_from_tag(rest) {
+                            return Some(Self::IdentityNotice(kind));
+                        }
                         if let Some(subject) = rest.strip_prefix("settlement/") {
                             return crate::notices::SettlementSubject::parse(subject)
                                 .map(Self::SettlementNotice);
@@ -3079,6 +3419,13 @@ mod tests {
     }
 
     #[test]
+    fn test_loss_recorded_binds_a_generation_after_another_only() {
+        assert!(reads::<u64>(key::LOSS_RECORDED, serde_json::json!(2)));
+        assert!(!reads::<u64>(key::LOSS_RECORDED, serde_json::json!(0)));
+        assert!(!reads::<u64>(key::DENIED, serde_json::json!(2)));
+    }
+
+    #[test]
     fn test_loss_current_boundary_requires_exact_members() {
         let loss = serde_json::json!({
             "generation": 2, "declared_at_ms": 5, "uncertain_until_ms": 9
@@ -3106,6 +3453,31 @@ mod tests {
     }
 
     #[test]
+    fn test_floor_kept_binds_to_its_key_and_is_never_empty() {
+        use crate::floor::FloorKept;
+        let kept = serde_json::json!({ "seen_ms": 70, "live_in": 2, "divergent": true });
+        assert!(reads::<FloorKept>(key::FLOOR_KEPT, kept.clone()));
+        assert!(reads::<FloorKept>(
+            key::FLOOR_KEPT,
+            serde_json::json!({ "seen_ms": null, "live_in": null, "divergent": true })
+        ));
+        assert!(!reads::<FloorKept>(key::BLOCK_FLOOR, kept.clone()));
+        assert!(!reads::<FloorKept>(
+            key::FLOOR_KEPT,
+            serde_json::json!({ "seen_ms": null, "live_in": null, "divergent": false })
+        ));
+        // Every member is present: none missing, none unknown.
+        for member in ["seen_ms", "live_in", "divergent"] {
+            let mut missing = kept.clone();
+            missing.as_object_mut().unwrap().remove(member);
+            assert!(!reads::<FloorKept>(key::FLOOR_KEPT, missing), "{member}");
+        }
+        let mut unknown = kept;
+        unknown["extra"] = serde_json::json!(true);
+        assert!(!reads::<FloorKept>(key::FLOOR_KEPT, unknown));
+    }
+
+    #[test]
     fn test_hold_epoch_is_bound_to_its_key() {
         let epoch = crate::hold::HoldEpoch::new().unwrap();
         let body = serde_json::to_value(epoch).unwrap();
@@ -3118,6 +3490,40 @@ mod tests {
             key::HOLD_EPOCH,
             serde_json::json!("short")
         ));
+    }
+
+    #[test]
+    fn test_hold_epoch_confirmations_are_keyed_by_their_hold() {
+        let record = [7; 32];
+        let epoch = crate::hold::HoldEpoch::new().unwrap();
+        for (key, family) in [
+            (
+                key::hold_confirmed(&record, &epoch),
+                StateKey::HoldConfirmed {
+                    record,
+                    epoch: *epoch.as_bytes(),
+                },
+            ),
+            (
+                key::hold_confirmed_before(&record, &epoch),
+                StateKey::HoldConfirmedBefore {
+                    record,
+                    epoch: *epoch.as_bytes(),
+                },
+            ),
+        ] {
+            assert_eq!(StateKey::parse(key.as_bytes()), Some(family));
+            assert!(reads::<bool>(&key, serde_json::json!(true)));
+            assert!(!reads::<crate::hold::HoldEpoch>(
+                &key,
+                serde_json::to_value(epoch).unwrap()
+            ));
+        }
+        // A key per record with no hold identifier is not a key the SDK writes.
+        for prefix in [key::HOLD_CONFIRMED, key::HOLD_CONFIRMED_BEFORE] {
+            let bare = format!("{prefix}{}", pubky_switch_core::enc::b64(&record));
+            assert_eq!(StateKey::parse(bare.as_bytes()), None);
+        }
     }
 
     #[test]
@@ -3260,6 +3666,91 @@ mod tests {
     }
 
     #[test]
+    fn test_state_lost_list_record_bound_to_a_delete_version() {
+        let at = key::list_record_lost(&[1; 32]);
+        let lost = serde_json::json!({ "deleted": [1, 4], "item": null });
+        assert!(reads::<LostListRecord>(&at, lost.clone()));
+        assert!(reads::<LostListRecord>(
+            &at,
+            serde_json::json!({ "deleted": [1, 4], "item": vec![6u8; 32] })
+        ));
+        // A delete's version is a write's: never `{0, 0}`, a version or a generation 0, or
+        // past the integers.
+        for deleted in [
+            serde_json::json!([0, 0]),
+            serde_json::json!([1, 0]),
+            serde_json::json!([0, 5]),
+            serde_json::json!([1, 9_007_199_254_740_992u64]),
+        ] {
+            let at_version = serde_json::json!({ "deleted": deleted, "item": null });
+            assert!(!reads::<LostListRecord>(&at, at_version));
+        }
+        // Every member is written, no other is, and a bare mark is no value of this family.
+        assert!(!reads::<LostListRecord>(
+            &at,
+            serde_json::json!({ "deleted": [1, 4] })
+        ));
+        assert!(!reads::<LostListRecord>(
+            &at,
+            serde_json::json!({ "deleted": [1, 4], "item": null, "copy": null })
+        ));
+        assert!(!reads::<bool>(&at, serde_json::json!(true)));
+        assert!(!reads::<LostListRecord>(&key::held_list(&[1; 32]), lost));
+    }
+
+    /// The entry for a delete at version `deleted` of generation 1, with item hash `item`.
+    fn lost_at(deleted: u64, item: Option<u8>) -> LostListRecord {
+        LostListRecord {
+            deleted: [1, deleted],
+            item: item.map(|byte| [byte; 32]),
+        }
+    }
+
+    #[test]
+    fn test_state_lost_list_record_keeps_the_newest_delete() {
+        // A restore keeps the newer delete, whichever side holds it.
+        assert_eq!(
+            lost_at(4, Some(1)).merge(lost_at(6, Some(2))),
+            lost_at(6, Some(2))
+        );
+        assert_eq!(
+            lost_at(6, Some(2)).merge(lost_at(4, Some(1))),
+            lost_at(6, Some(2))
+        );
+        // A delete reported again by its item, or an older one, changes nothing; a newer
+        // one is kept.
+        assert_eq!(
+            lost_at(6, Some(2)).then(lost_at(6, Some(2))),
+            lost_at(6, Some(2))
+        );
+        assert_eq!(
+            lost_at(6, Some(2)).then(lost_at(5, None)),
+            lost_at(6, Some(2))
+        );
+        assert_eq!(lost_at(6, Some(2)).then(lost_at(7, None)), lost_at(7, None));
+        let at = key::list_record_lost(&[1; 32]);
+        let value = serde_json::to_value(lost_at(7, None)).expect("a lost record serializes");
+        assert!(reads::<LostListRecord>(&at, value));
+    }
+
+    #[test]
+    fn test_state_lost_list_record_tells_deletes_at_one_version_apart_by_item() {
+        let one = lost_at(4, Some(1));
+        // Another delete at the same version, as a recovery can upload, or one whose item
+        // isn't known, is merged: the entry no longer names one delete (Paykit spec 6).
+        for other in [lost_at(4, Some(2)), lost_at(4, None)] {
+            assert_eq!(one.clone().then(other), lost_at(4, None));
+        }
+        // Only a delete known by its item is the one a later report may name again.
+        let version = pubky_switch_core::ops::RecordVersion {
+            generation: 1,
+            version: 4,
+        };
+        assert!(one.deleted_at(version));
+        assert!(!lost_at(4, None).deleted_at(version));
+    }
+
+    #[test]
     fn test_state_marks_bound_to_their_sender_with_times_not_crossed() {
         let mark = |sender: u8, earliest: u64, latest: u64| {
             serde_json::json!({
@@ -3340,6 +3831,34 @@ mod tests {
     }
 
     #[test]
+    fn test_state_send_exemption_bound_to_its_message() {
+        let id = "123e4567-e89b-42d3-a456-426614174000";
+        let other = "223e4567-e89b-42d3-a456-426614174000";
+        // Why an acceptance may go while sends are held, of the message its key names, read
+        // at runtime and at a restore alike.
+        let binder = Binder::unblinded([1; 32]);
+        for exemption in [
+            crate::send_holds::SendExemption::dispatched(id),
+            crate::send_holds::SendExemption::confirmed_while_blocked(id, [3; 32], [4; 32]),
+        ] {
+            let bytes = encode(&exemption).unwrap();
+            let read = |key: &str| {
+                (
+                    bound::<crate::send_holds::SendExemption>(key.as_bytes(), &bytes, &binder),
+                    restored::<crate::send_holds::SendExemption>(key.as_bytes(), &bytes, &binder),
+                )
+            };
+            let (runtime, restore) = read(&key::send_exemption(id));
+            assert_eq!(runtime.unwrap(), exemption);
+            assert_eq!(restore.unwrap(), exemption);
+            for key in [key::send_exemption(other), key::side(id)] {
+                let (runtime, restore) = read(&key);
+                assert!(runtime.is_err() && restore.is_err(), "{key}");
+            }
+        }
+    }
+
+    #[test]
     fn test_state_values_bound_to_their_family_and_key() {
         let pubky = [3u8; 32];
         let id = "123e4567-e89b-42d3-a456-426614174000";
@@ -3396,7 +3915,8 @@ mod tests {
         assert!(!reads::<QueuedAsk>(&key::ask(&pubky, 5), ask(6)));
         assert!(!reads::<QueuedAsk>(&key::ask(&[4; 32], 5), ask(5)));
         // A side of the message its key names.
-        let side = |msg_id: &str| serde_json::json!({ "msg_id": msg_id, "side": "payer" });
+        let side =
+            |msg_id: &str| serde_json::json!({ "msg_id": msg_id, "side": "payer", "label": null });
         assert!(reads::<KeptSide>(&key::side(id), side(id)));
         assert!(!reads::<KeptSide>(&key::side(id), side(other)));
         // A held answer of the payee and message its key names.
@@ -3601,6 +4121,7 @@ mod tests {
     #[test]
     fn test_state_key_every_builder_parses_to_its_family() {
         let pubky = [3u8; 32];
+        let hold = crate::hold::HoldEpoch::new().unwrap();
         let app = [4u8; 16];
         let attempt = AttemptId::from_bytes([5; 16]);
         let id = "123e4567-e89b-42d3-a456-426614174000";
@@ -3655,16 +4176,45 @@ mod tests {
             (key::PAYER_PASS_OWED.into(), StateKey::PayerPassOwed),
             (key::OWN_RESEND_OWED.into(), StateKey::OwnResendOwed),
             (key::LISTED_CERT.into(), StateKey::ListedCert),
-            (key::hold_confirmed(&pubky), StateKey::HoldConfirmed(pubky)),
             (
-                key::hold_confirmed_before(&pubky),
-                StateKey::HoldConfirmedBefore(pubky),
+                key::hold_confirmed(&pubky, &crate::hold::HoldEpoch::from_bytes([4; 16])),
+                StateKey::HoldConfirmed {
+                    record: pubky,
+                    epoch: [4; 16],
+                },
+            ),
+            (
+                key::hold_confirmed_before(&pubky, &crate::hold::HoldEpoch::from_bytes([4; 16])),
+                StateKey::HoldConfirmedBefore {
+                    record: pubky,
+                    epoch: [4; 16],
+                },
             ),
             (
                 key::restore_consent(&pubky),
                 StateKey::RestoreConsent(pubky),
             ),
+            (
+                key::restore_approval(&pubky),
+                StateKey::RestoreApproval(pubky),
+            ),
+            (
+                key::execution_approval(&pubky, None),
+                StateKey::ExecutionApproval {
+                    record: pubky,
+                    hold: None,
+                },
+            ),
+            (
+                key::execution_approval(&pubky, Some(&hold)),
+                StateKey::ExecutionApproval {
+                    record: pubky,
+                    hold: Some(*hold.as_bytes()),
+                },
+            ),
             (key::LISTS_READ.into(), StateKey::ListsRead),
+            (key::LISTS_READ_UNDER.into(), StateKey::ListsReadUnder),
+            (key::SERVICE_TIME.into(), StateKey::ServiceTime),
             (key::DENIED.into(), StateKey::Denied),
             (key::own_block(&pubky), StateKey::OwnBlock(pubky)),
             (
@@ -3672,7 +4222,17 @@ mod tests {
                 StateKey::Taken(format!("{}-7", "05".repeat(16))),
             ),
             (key::held_list(&pubky), StateKey::HeldList(pubky)),
+            (
+                key::list_record_lost(&pubky),
+                StateKey::ListRecordLost(pubky),
+            ),
+            (
+                key::list_record_unread(&pubky),
+                StateKey::ListRecordUnread(pubky),
+            ),
             (key::side(id), StateKey::Side(id.into())),
+            (key::send_exemption(id), StateKey::SendExemption(id.into())),
+            (key::queued_stop(id), StateKey::QueuedStop(id.into())),
             (
                 key::held_answer(&pubky, id),
                 StateKey::HeldAnswer {
@@ -3761,7 +4321,21 @@ mod tests {
                     from_ms: 7,
                 },
             ),
-            (key::FLOOR_DELETED.into(), StateKey::FloorDeleted),
+            (key::FLOOR_KEPT.into(), StateKey::FloorKept),
+            (
+                key::identity_notice(crate::notices::NoticeKind::BlockFloorHeld),
+                StateKey::IdentityNotice(crate::notices::NoticeKind::BlockFloorHeld),
+            ),
+            (
+                key::identity_notice(crate::notices::NoticeKind::FloorRaiseWaiting),
+                StateKey::IdentityNotice(crate::notices::NoticeKind::FloorRaiseWaiting),
+            ),
+            (
+                key::identity_notice(crate::notices::NoticeKind::AutomaticPaymentsHeld),
+                StateKey::IdentityNotice(crate::notices::NoticeKind::AutomaticPaymentsHeld),
+            ),
+            (key::LOSS_RECORDED.into(), StateKey::LossRecorded),
+            (key::RAISE_RETRY.into(), StateKey::RaiseRetry),
             (key::BLOCK_FLOOR.into(), StateKey::BlockFloor),
             (key::FLOOR_BATCH.into(), StateKey::FloorBatch),
             (key::floor_opened(&pubky), StateKey::FloorOpened(pubky)),
@@ -3868,6 +4442,7 @@ mod tests {
             (key::notice_target(id), StateKey::NoticeTarget(id.into())),
             (key::end_origin(id), StateKey::EndOrigin(id.into())),
             (key::end_batch(id), StateKey::EndBatch(id.into())),
+            (key::grant_batch(&pubky), StateKey::GrantBatch(pubky)),
         ];
         for (built, family) in cases {
             assert_eq!(StateKey::parse(built.as_bytes()), Some(family), "{built}");

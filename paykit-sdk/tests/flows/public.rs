@@ -103,7 +103,7 @@ fn fails_with(list: &PublicPaymentList, app: [u8; 16], rules: &[&str]) -> bool {
         })
 }
 
-fn tip_jar() -> Value {
+pub(crate) fn tip_jar() -> Value {
     json!({
         "capabilities": { "endpoint_identifiers": ["btc-lightning-bolt12"] },
         "public_endpoints": { "btc-lightning-bolt12": "lno1tips" }
@@ -223,6 +223,57 @@ async fn test_public_expired_or_stale_record_refused() {
         "{refused:?}"
     );
     assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_public_record_expired_by_the_service_time_alone_is_refused() {
+    // The wallet's device clock runs ten seconds behind the service. Once the service time
+    // it verified reaches the record's expiry, by its own expires_at and by its updated_at
+    // plus the record age limit alike, the record has expired, and the refusal says the
+    // device clock is behind (Paykit spec 7.2, check the destination).
+    for age_limit in [false, true] {
+        let w = World::new();
+        let wallet_store = crate::common::store();
+        let wallet = w
+            .wallet_on("wallet", std::sync::Arc::clone(&wallet_store))
+            .await;
+        let app_id = wallet.app_id();
+        drop(wallet);
+        let _shop = w.shop().await;
+        let expires = if age_limit {
+            // A null expires_at lasts until updated_at plus the 90-day age limit.
+            publish(&w, tip_jar(), None);
+            w.clock.now_ms() + 90 * DAY_MS
+        } else {
+            publish(&w, tip_jar(), Some(w.clock.now_ms() + HOUR_MS));
+            w.clock.now_ms() + HOUR_MS
+        };
+        w.clock.set_ms(expires);
+        let behind =
+            std::sync::Arc::new(pubky_switch_client::clock::TestClock::new(expires - 10_000));
+        let mut wallet = w
+            .load_on_clock(&w.alice, wallet_store, app_id, behind)
+            .await;
+        wallet.receive(None).await.unwrap();
+        assert!(wallet
+            .app()
+            .highest_service_time()
+            .is_some_and(|at| at >= expires));
+        let refused = wallet
+            .pay_without_request(public_to_bob(&w))
+            .await
+            .outcome
+            .unwrap_err();
+        assert!(
+            matches!(refused.refusal(), Some(Refusal::NoDestination(_))),
+            "{age_limit}: {refused:?}"
+        );
+        assert!(
+            format!("{refused:?}").contains("the device clock is behind"),
+            "{age_limit}: {refused:?}"
+        );
+        assert!(w.rail.all_executions().is_empty(), "{age_limit}");
+    }
 }
 
 #[tokio::test]
@@ -1244,4 +1295,1133 @@ async fn test_public_same_identifier_from_two_apps_pays_the_first_by_app_id() {
         pubky_switch_core::enc::zbase32_encode(&first),
         "{value}"
     );
+}
+
+#[tokio::test]
+async fn test_public_record_past_its_age_limit_on_the_device_clock_names_no_clock_behind() {
+    // The record's updated_at plus the 90-day age limit has passed on the device clock too;
+    // only its later expires_at is passed by the service's time alone. The device clock
+    // shows the record expired, so the refusal says nothing of a clock behind (Paykit spec
+    // 7.2, check the destination).
+    let w = World::new();
+    let wallet_store = crate::common::store();
+    let wallet = w
+        .wallet_on("wallet", std::sync::Arc::clone(&wallet_store))
+        .await;
+    let app_id = wallet.app_id();
+    drop(wallet);
+    let _shop = w.shop().await;
+    let expires = w.clock.now_ms() + 90 * DAY_MS + HOUR_MS;
+    publish(&w, tip_jar(), Some(expires));
+    w.clock.set_ms(expires);
+    let behind = std::sync::Arc::new(pubky_switch_client::clock::TestClock::new(expires - 10_000));
+    let mut wallet = w
+        .load_on_clock(&w.alice, wallet_store, app_id, behind)
+        .await;
+    wallet.receive(None).await.unwrap();
+    let refused = wallet
+        .pay_without_request(public_to_bob(&w))
+        .await
+        .outcome
+        .unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::NoDestination(_))),
+        "{refused:?}"
+    );
+    let shown = format!("{refused:?}");
+    assert!(shown.contains("record age limit"), "{shown}");
+    assert!(!shown.contains("the device clock is behind"), "{shown}");
+    assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_public_record_read_again_before_dispatch_keeps_the_clock_note() {
+    // The device clock runs 10 s behind the service. Bob's identity.json and record are read
+    // 10 minutes 20 s before the record's age limit, and the payment is planned 9 minutes
+    // later on that copy. Just after the attempt is recorded both clocks reach the limit: the
+    // copy is no longer fresh, the record is read again before dispatch, and only the
+    // service's time has reached the limit, so the refusal says the device clock is behind
+    // (Paykit spec 7.2, check the destination).
+    let w = World::new();
+    let base = std::sync::Arc::new(crate::period_payments::StageStore::default());
+    let wallet = w
+        .wallet_on(
+            "wallet",
+            std::sync::Arc::clone(&base)
+                as std::sync::Arc<dyn pubky_switch_client::store::StateStore>,
+        )
+        .await;
+    let app_id = wallet.app_id();
+    drop(wallet);
+    let _shop = w.shop().await;
+    publish(&w, tip_jar(), None);
+    let expires = w.clock.now_ms() + 90 * DAY_MS;
+    let read = expires - 10 * 60_000 - 20_000;
+    w.clock.set_ms(read);
+    let device = std::sync::Arc::new(pubky_switch_client::clock::TestClock::new(read - 10_000));
+    let mut wallet = w
+        .load_on_clock(
+            &w.alice,
+            std::sync::Arc::clone(&base)
+                as std::sync::Arc<dyn pubky_switch_client::store::StateStore>,
+            app_id,
+            std::sync::Arc::clone(&device),
+        )
+        .await;
+    wallet.receive(None).await.unwrap();
+    assert!(wallet.public_endpoints(&w.bob_id(), None).await.is_ok());
+    w.clock.set_ms(read + 9 * 60_000);
+    device.set_ms(read + 9 * 60_000 - 10_000);
+    let service = std::sync::Arc::clone(&w.clock);
+    let moved = std::sync::Arc::clone(&device);
+    base.on_stage("recorded", move || {
+        service.set_ms(expires);
+        moved.set_ms(expires - 10_000);
+    });
+    let refused = wallet
+        .pay_without_request(public_to_bob(&w))
+        .await
+        .outcome
+        .unwrap_err();
+    assert!(
+        matches!(
+            refused.refusal(),
+            Some(Refusal::AttemptFailed(inner)) if matches!(&**inner, Refusal::Destination(_))
+        ),
+        "{refused:?}"
+    );
+    assert!(
+        format!("{refused:?}").contains("the device clock is behind"),
+        "{refused:?}"
+    );
+    assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_public_record_past_its_age_limit_at_dispatch_names_no_clock_behind() {
+    // The record's age limit falls 20 s before its expires_at, and the device clock runs
+    // 10 s behind the service. Planned a minute before either, just after the attempt is
+    // recorded the device clock passes the age limit and only the service's time passes
+    // expires_at. The device clock shows the record expired, so the refusal before dispatch
+    // says nothing of a clock behind (Paykit spec 4, 7.2).
+    let w = World::new();
+    let base = std::sync::Arc::new(crate::period_payments::StageStore::default());
+    let wallet = w
+        .wallet_on(
+            "wallet",
+            std::sync::Arc::clone(&base)
+                as std::sync::Arc<dyn pubky_switch_client::store::StateStore>,
+        )
+        .await;
+    let app_id = wallet.app_id();
+    drop(wallet);
+    let _shop = w.shop().await;
+    let age_limit = w.clock.now_ms() + 90 * DAY_MS;
+    publish(&w, tip_jar(), Some(age_limit + 20_000));
+    w.clock.set_ms(age_limit - 60_000);
+    let device = std::sync::Arc::new(pubky_switch_client::clock::TestClock::new(
+        age_limit - 70_000,
+    ));
+    let mut wallet = w
+        .load_on_clock(
+            &w.alice,
+            std::sync::Arc::clone(&base)
+                as std::sync::Arc<dyn pubky_switch_client::store::StateStore>,
+            app_id,
+            std::sync::Arc::clone(&device),
+        )
+        .await;
+    wallet.receive(None).await.unwrap();
+    let service = std::sync::Arc::clone(&w.clock);
+    base.on_stage("recorded", move || {
+        service.set_ms(age_limit + 25_000);
+        device.set_ms(age_limit + 15_000);
+    });
+    let refused = wallet
+        .pay_without_request(public_to_bob(&w))
+        .await
+        .outcome
+        .unwrap_err();
+    assert!(
+        matches!(
+            refused.refusal(),
+            Some(Refusal::AttemptFailed(inner)) if matches!(&**inner, Refusal::Destination(_))
+        ),
+        "{refused:?}"
+    );
+    let shown = format!("{refused:?}");
+    assert!(shown.contains("record age limit"), "{shown}");
+    assert!(!shown.contains("the device clock is behind"), "{shown}");
+    assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_public_older_record_after_an_older_in_place_restore_not_used() {
+    // The wallet sees bob's record, is backed up, then sees a newer record that replaces the
+    // endpoint. Restored in place from the older backup, the records the installation has
+    // seen are kept: a stale copy of the older record served again never replaces the newer
+    // one, and the payment goes to the newer record's endpoint (Switch spec 4.2).
+    let w = World::new();
+    let storage = crate::common::store();
+    let mut wallet = w.wallet_on("wallet", std::sync::Arc::clone(&storage)).await;
+    let mut shop = w.shop().await;
+    shop.app_mut().invite(&w.alice_id()).await.unwrap();
+    let t0 = w.clock.now_ms();
+    let expiry = Some(t0 + 30 * DAY_MS);
+    let older = publish_at(
+        &w,
+        one_endpoint("btc-lightning-bolt11", "lnbc1old"),
+        t0,
+        expiry,
+    );
+    assert_eq!(listed(&mut wallet, &w).await, ["btc-lightning-bolt11"]);
+    let backup = wallet.backup().await.unwrap();
+    publish_at(
+        &w,
+        one_endpoint("btc-lightning-bolt12", "lno1new"),
+        t0 + 1000,
+        expiry,
+    );
+    assert_eq!(listed(&mut wallet, &w).await, ["btc-lightning-bolt12"]);
+    drop(wallet);
+    let mut wallet = paykit_sdk::Paykit::restore(
+        w.env(&w.alice, storage),
+        paykit_sdk::PaykitConfig::default(),
+        &backup,
+        std::sync::Arc::clone(&w.rail) as std::sync::Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    // Before any receive, the first read already refuses the stale copy.
+    serve(&w, &older);
+    assert_eq!(listed(&mut wallet, &w).await, ["btc-lightning-bolt12"]);
+    wallet.receive(None).await.unwrap();
+    wallet.reconcile().await.unwrap();
+    wallet.end_reconcile(UserConfirmed::new()).await.unwrap();
+    assert_eq!(listed(&mut wallet, &w).await, ["btc-lightning-bolt12"]);
+    // A record newer than both is used as usual.
+    publish_at(
+        &w,
+        one_endpoint("btc-bitcoin-p2wpkh", "bc1qnewest"),
+        t0 + 2000,
+        expiry,
+    );
+    assert_eq!(listed(&mut wallet, &w).await, ["btc-bitcoin-p2wpkh"]);
+}
+
+#[tokio::test]
+async fn test_public_conflict_seen_after_the_backup_kept_across_an_in_place_restore() {
+    // The wallet sees bob's record and is backed up; then it sees a second, different record
+    // at the same time, a conflict, so neither is used. Restored in place from the older
+    // backup, the installation's seen records are merged with the backup's, the conflict
+    // with them: the first record served again alone is still not used (Switch spec 4.2).
+    let w = World::new();
+    let storage = crate::common::store();
+    let mut wallet = w.wallet_on("wallet", std::sync::Arc::clone(&storage)).await;
+    let mut shop = w.shop().await;
+    shop.app_mut().invite(&w.alice_id()).await.unwrap();
+    let t0 = w.clock.now_ms();
+    let expiry = Some(t0 + 30 * DAY_MS);
+    let first = publish_at(
+        &w,
+        one_endpoint("btc-lightning-bolt11", "lnbc1first"),
+        t0,
+        expiry,
+    );
+    assert_eq!(listed(&mut wallet, &w).await, ["btc-lightning-bolt11"]);
+    let backup = wallet.backup().await.unwrap();
+    publish_at(
+        &w,
+        one_endpoint("btc-lightning-bolt12", "lno1second"),
+        t0,
+        expiry,
+    );
+    let conflicted = listed(&mut wallet, &w).await;
+    drop(wallet);
+    let mut wallet = paykit_sdk::Paykit::restore(
+        w.env(&w.alice, storage),
+        paykit_sdk::PaykitConfig::default(),
+        &backup,
+        std::sync::Arc::clone(&w.rail) as std::sync::Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    // Before any receive, the first read already sees the conflict.
+    serve(&w, &first);
+    assert_eq!(listed(&mut wallet, &w).await, conflicted);
+    wallet.receive(None).await.unwrap();
+    wallet.reconcile().await.unwrap();
+    wallet.end_reconcile(UserConfirmed::new()).await.unwrap();
+    assert_eq!(listed(&mut wallet, &w).await, conflicted);
+    assert_ne!(conflicted, ["btc-lightning-bolt11"]);
+}
+
+#[tokio::test]
+async fn test_public_conflict_evicted_ahead_of_the_clock_not_bypassed_once_it_goes_back() {
+    // Bob's two records at one time are a conflict. The payer's clock runs a day ahead, and
+    // it reads more of bob's records than the history keeps, which drops the conflict. Once
+    // the clock goes back, a side of that conflict served again is never used (Switch spec
+    // 4.2).
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let _shop = w.shop().await;
+    let t0 = w.clock.now_ms();
+    let expiry = Some(t0 + 30 * DAY_MS);
+    let first = publish_at(
+        &w,
+        one_endpoint("btc-lightning-bolt11", "lnbc1a"),
+        t0,
+        expiry,
+    );
+    assert_eq!(listed(&mut wallet, &w).await, ["btc-lightning-bolt11"]);
+    publish_at(
+        &w,
+        one_endpoint("btc-lightning-bolt12", "lno1b"),
+        t0,
+        expiry,
+    );
+    assert!(listed(&mut wallet, &w).await.is_empty());
+    w.clock.set_ms(t0 + DAY_MS);
+    for i in 1..=63u64 {
+        publish_at(
+            &w,
+            one_endpoint("btc-bitcoin-p2wpkh", &format!("bc1q{i}")),
+            t0 + DAY_MS + i,
+            expiry,
+        );
+        assert_eq!(listed(&mut wallet, &w).await, ["btc-bitcoin-p2wpkh"], "{i}");
+    }
+    w.clock.set_ms(t0);
+    serve(&w, &first);
+    // No record later than the floor is held to answer for it: the app's endpoints wait for one.
+    let shop = w.bob.identity().app_keys("shop").app_id_bytes();
+    for _ in 0..2 {
+        let list = read(&mut wallet, &w).await;
+        assert!(ids(&list).is_empty());
+        assert!(
+            fails_with(
+                &list,
+                shop,
+                &[&format!(
+                    "unusable until a record of it after {} ms can be used",
+                    floor_of(&wallet).await.unwrap()
+                )]
+            ),
+            "{list:?}"
+        );
+    }
+}
+
+/// As [`publish_at`], with a `pad` protocol member of `pad` bytes beside the Paykit member.
+fn publish_padded(
+    w: &World,
+    member: Value,
+    pad: usize,
+    updated_at: u64,
+    expires_at: Option<u64>,
+) -> Vec<u8> {
+    let keys = w.bob.identity().app_keys("shop");
+    let app_id = keys.app_id_bytes();
+    let held = w.bob.switch().app(&app_id).record.unwrap();
+    let mut body = AppRecord::verify(&held, &w.bob_id())
+        .unwrap()
+        .body()
+        .clone();
+    let (Value::Object(member), Value::Object(padding)) = (member, json!({ "x": "a".repeat(pad) }))
+    else {
+        unreachable!()
+    };
+    body.protocols.insert("paykit".into(), member);
+    body.protocols.insert("pad".into(), padding);
+    body.updated_at = updated_at;
+    body.expires_at = expires_at;
+    let record = AppRecord::sign(&keys, body).unwrap();
+    let bytes = serde_json::to_vec(record.signed()).unwrap();
+    w.homeserver
+        .put(w.bob_id(), &app_record_path(&app_id), bytes.clone());
+    bytes
+}
+
+/// The wallet's kept comparison of bob's records (`ar/`), as stored.
+async fn seen_of(wallet: &paykit_sdk::Paykit) -> Vec<(Vec<u8>, Vec<u8>)> {
+    let seen = wallet.app().protocol_scan("paykit", b"ar/").await.unwrap();
+    assert_eq!(seen.len(), 1);
+    seen
+}
+
+/// Put `seen` back as the wallet's kept comparison, as an installation older than its backup.
+async fn put_seen(wallet: &mut paykit_sdk::Paykit, seen: Vec<(Vec<u8>, Vec<u8>)>) {
+    let writes: Vec<_> = seen
+        .into_iter()
+        .map(|(key, value)| pubky_switch_client::app::LocalWrite::Put { key, value })
+        .collect();
+    wallet
+        .app_mut()
+        .protocol_commit("paykit", &writes)
+        .await
+        .unwrap();
+}
+
+/// The floor of the wallet's kept comparison of bob's records (`ar/`).
+async fn floor_of(wallet: &paykit_sdk::Paykit) -> Option<u64> {
+    let seen = seen_of(wallet).await;
+    let value: Value = serde_json::from_slice(&seen[0].1).unwrap();
+    value["d"]["dropped_at"].as_u64()
+}
+
+/// `backup` restored in place over the installation on `storage`, before any receive.
+async fn restored_over(
+    w: &World,
+    storage: std::sync::Arc<dyn pubky_switch_client::store::StateStore>,
+    backup: &paykit_sdk::PaykitBackup,
+) -> paykit_sdk::Paykit {
+    paykit_sdk::Paykit::restore(
+        w.env(&w.alice, storage),
+        paykit_sdk::PaykitConfig::default(),
+        backup,
+        std::sync::Arc::clone(&w.rail) as std::sync::Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap()
+}
+
+/// Bob's record with E0 is seen, then withdrawn by a large record, then two records at one
+/// time conflict, which drops the withdrawal and the record before it from the history.
+/// Returns E0's record and the last side of the conflict.
+async fn withdrawn_then_conflicted(
+    w: &World,
+    wallet: &mut paykit_sdk::Paykit,
+    t0: u64,
+    expiry: Option<u64>,
+) -> (Vec<u8>, Vec<u8>) {
+    let first = publish_at(
+        w,
+        one_endpoint("btc-lightning-bolt11", "lnbc1old"),
+        t0,
+        expiry,
+    );
+    assert_eq!(listed(wallet, w).await, ["btc-lightning-bolt11"]);
+    publish_padded(
+        w,
+        json!({ "public_endpoints": {} }),
+        3_900_000,
+        t0 + 1000,
+        expiry,
+    );
+    assert!(listed(wallet, w).await.is_empty());
+    let side = |id: &str, payload: &str| {
+        publish_padded(w, one_endpoint(id, payload), 2_200_000, t0 + 2000, expiry)
+    };
+    side("btc-lightning-bolt12", "lno1a");
+    assert_eq!(listed(wallet, w).await, ["btc-lightning-bolt12"]);
+    let last = side("btc-bitcoin-p2wpkh", "bc1qb");
+    assert!(listed(wallet, w).await.is_empty());
+    // An ordinary read never goes back to the withdrawn record.
+    serve(w, &first);
+    assert!(listed(wallet, w).await.is_empty());
+    serve(w, &last);
+    (first, last)
+}
+
+#[tokio::test]
+async fn test_public_withdrawn_record_not_back_under_a_conflict_after_an_older_in_place_restore() {
+    // Backed up when bob's record offered E0; the installation then sees E0 withdrawn and a
+    // conflict that drops the withdrawal from its history. Restored in place from the older
+    // backup, E0's record is never the fallback under the conflict (Switch spec 4.2); a
+    // newer record of bob's is used as usual.
+    let w = World::new();
+    let storage = crate::common::store();
+    let mut wallet = w.wallet_on("wallet", std::sync::Arc::clone(&storage)).await;
+    let _shop = w.shop().await;
+    let t0 = w.clock.now_ms();
+    let expiry = Some(t0 + 30 * DAY_MS);
+    publish_at(
+        &w,
+        one_endpoint("btc-lightning-bolt11", "lnbc1old"),
+        t0,
+        expiry,
+    );
+    assert_eq!(listed(&mut wallet, &w).await, ["btc-lightning-bolt11"]);
+    let backup = wallet.backup().await.unwrap();
+    withdrawn_then_conflicted(&w, &mut wallet, t0, expiry).await;
+    drop(wallet);
+    let mut wallet = restored_over(&w, storage, &backup).await;
+    assert!(listed(&mut wallet, &w).await.is_empty());
+    publish_at(
+        &w,
+        one_endpoint("btc-bitcoin-p2wpkh", "bc1qnew"),
+        t0 + 3000,
+        expiry,
+    );
+    assert_eq!(listed(&mut wallet, &w).await, ["btc-bitcoin-p2wpkh"]);
+}
+
+#[tokio::test]
+async fn test_public_withdrawn_record_not_back_under_a_conflict_after_a_newer_in_place_restore() {
+    // The backup holds the conflict that dropped bob's withdrawal; the installation holds
+    // only E0's record. Restored in place, the backup's history is never weakened: E0's
+    // record is never the fallback under the conflict (Switch spec 4.2).
+    let w = World::new();
+    let storage = crate::common::store();
+    let mut wallet = w.wallet_on("wallet", std::sync::Arc::clone(&storage)).await;
+    let _shop = w.shop().await;
+    let t0 = w.clock.now_ms();
+    let expiry = Some(t0 + 30 * DAY_MS);
+    publish_at(
+        &w,
+        one_endpoint("btc-lightning-bolt11", "lnbc1old"),
+        t0,
+        expiry,
+    );
+    assert_eq!(listed(&mut wallet, &w).await, ["btc-lightning-bolt11"]);
+    let older = seen_of(&wallet).await;
+    withdrawn_then_conflicted(&w, &mut wallet, t0, expiry).await;
+    let backup = wallet.backup().await.unwrap();
+    put_seen(&mut wallet, older).await;
+    drop(wallet);
+    let mut wallet = restored_over(&w, storage, &backup).await;
+    assert!(listed(&mut wallet, &w).await.is_empty());
+    publish_at(
+        &w,
+        one_endpoint("btc-bitcoin-p2wpkh", "bc1qnew"),
+        t0 + 3000,
+        expiry,
+    );
+    assert_eq!(listed(&mut wallet, &w).await, ["btc-bitcoin-p2wpkh"]);
+}
+
+/// Bob's two records at `t0` conflict. Returns a side of the conflict.
+async fn conflict_at(
+    w: &World,
+    wallet: &mut paykit_sdk::Paykit,
+    t0: u64,
+    expiry: Option<u64>,
+) -> Vec<u8> {
+    let first = publish_at(
+        w,
+        one_endpoint("btc-lightning-bolt11", "lnbc1a"),
+        t0,
+        expiry,
+    );
+    assert_eq!(listed(wallet, w).await, ["btc-lightning-bolt11"]);
+    publish_at(w, one_endpoint("btc-lightning-bolt12", "lno1b"), t0, expiry);
+    assert!(listed(wallet, w).await.is_empty());
+    first
+}
+
+/// The payer's clock runs a day past `t0` and it reads more of bob's records than the
+/// history keeps, which drops the records at `t0`.
+async fn read_ahead(w: &World, wallet: &mut paykit_sdk::Paykit, t0: u64, expiry: Option<u64>) {
+    w.clock.set_ms(t0 + DAY_MS);
+    for i in 1..=63u64 {
+        publish_at(
+            w,
+            one_endpoint("btc-bitcoin-p2wpkh", &format!("bc1q{i}")),
+            t0 + DAY_MS + i,
+            expiry,
+        );
+        assert_eq!(listed(wallet, w).await, ["btc-bitcoin-p2wpkh"], "{i}");
+    }
+}
+
+#[tokio::test]
+async fn test_public_conflict_dropped_ahead_of_the_clock_kept_by_an_older_in_place_restore() {
+    // Backed up holding bob's conflict at t0; the installation's clock then runs ahead and
+    // drops it from the history. Restored in place with the clock back at t0, a side of the
+    // conflict served again is never used (Switch spec 4.2); a newer record is.
+    let w = World::new();
+    let storage = crate::common::store();
+    let mut wallet = w.wallet_on("wallet", std::sync::Arc::clone(&storage)).await;
+    let _shop = w.shop().await;
+    let t0 = w.clock.now_ms();
+    let expiry = Some(t0 + 30 * DAY_MS);
+    let first = conflict_at(&w, &mut wallet, t0, expiry).await;
+    let backup = wallet.backup().await.unwrap();
+    read_ahead(&w, &mut wallet, t0, expiry).await;
+    drop(wallet);
+    w.clock.set_ms(t0);
+    let mut wallet = restored_over(&w, storage, &backup).await;
+    // The merge keeps the floor of the copy that dropped the conflict.
+    assert!(
+        floor_of(&wallet).await >= Some(t0),
+        "{:?}",
+        floor_of(&wallet).await
+    );
+    serve(&w, &first);
+    assert!(listed(&mut wallet, &w).await.is_empty());
+    w.clock.set_ms(t0 + DAY_MS + 100);
+    publish_at(
+        &w,
+        one_endpoint("btc-lightning-bolt11", "lnbc1new"),
+        t0 + DAY_MS + 100,
+        expiry,
+    );
+    assert_eq!(listed(&mut wallet, &w).await, ["btc-lightning-bolt11"]);
+}
+
+#[tokio::test]
+async fn test_public_conflict_dropped_ahead_of_the_clock_kept_by_a_newer_in_place_restore() {
+    // The installation holds bob's conflict at t0; a backup taken while the clock ran ahead
+    // holds the records that dropped it. Restored in place with the clock back at t0, a side
+    // of the conflict served again is never used (Switch spec 4.2).
+    let w = World::new();
+    let storage = crate::common::store();
+    let mut wallet = w.wallet_on("wallet", std::sync::Arc::clone(&storage)).await;
+    let _shop = w.shop().await;
+    let t0 = w.clock.now_ms();
+    let expiry = Some(t0 + 30 * DAY_MS);
+    let first = conflict_at(&w, &mut wallet, t0, expiry).await;
+    let conflicted = seen_of(&wallet).await;
+    read_ahead(&w, &mut wallet, t0, expiry).await;
+    let backup = wallet.backup().await.unwrap();
+    put_seen(&mut wallet, conflicted).await;
+    drop(wallet);
+    w.clock.set_ms(t0);
+    let mut wallet = restored_over(&w, storage, &backup).await;
+    // The merge keeps the floor of the copy that dropped the conflict.
+    assert!(
+        floor_of(&wallet).await >= Some(t0),
+        "{:?}",
+        floor_of(&wallet).await
+    );
+    serve(&w, &first);
+    assert!(listed(&mut wallet, &w).await.is_empty());
+}
+
+#[tokio::test]
+async fn test_public_floor_ahead_of_the_clock_holds_only_the_public_endpoints() {
+    // The payer's clock runs a day fast and it reads more of bob's records, dated within it,
+    // than the history keeps, which raises the floor a day ahead. Back at real time bob's
+    // record from before them is at or before the floor and isn't used, until the clock
+    // reaches the floor and he publishes a newer one; a payment to his Private Payment List
+    // goes as usual (Switch spec 4.2; Paykit spec 4).
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let t0 = w.clock.now_ms();
+    let expiry = Some(t0 + 30 * DAY_MS);
+    w.clock.set_ms(t0 + DAY_MS);
+    for i in 1..=65u64 {
+        publish_at(
+            &w,
+            one_endpoint("btc-bitcoin-p2wpkh", &format!("bc1q{i}")),
+            t0 + DAY_MS + i,
+            expiry,
+        );
+        assert_eq!(listed(&mut wallet, &w).await, ["btc-bitcoin-p2wpkh"], "{i}");
+    }
+    w.clock.set_ms(t0);
+    publish_at(
+        &w,
+        one_endpoint("btc-lightning-bolt11", "lnbc1now"),
+        t0 + 1000,
+        expiry,
+    );
+    let shop_id = w.bob.identity().app_keys("shop").app_id_bytes();
+    for _ in 0..2 {
+        let list = read(&mut wallet, &w).await;
+        assert!(ids(&list).is_empty());
+        assert!(
+            fails_with(
+                &list,
+                shop_id,
+                &[&format!(
+                    "unusable until a record of it after {} ms can be used",
+                    floor_of(&wallet).await.unwrap()
+                )]
+            ),
+            "{list:?}"
+        );
+    }
+    w.list_to_alice(
+        &mut shop,
+        &[wallet.app_id()],
+        crate::common::list_version(1, 1),
+    )
+    .await;
+    wallet.receive(None).await.unwrap();
+    let paid = wallet
+        .pay_without_request(UnrequestedPayment::new(w.bob_id(), btc("1")))
+        .await
+        .outcome
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    // So does a request carrying its own destination.
+    let request = crate::common::request_from(
+        &mut shop,
+        w.alice_id(),
+        crate::common::draft("1", w.clock.now_ms()),
+    )
+    .await;
+    wallet.receive(None).await.unwrap();
+    let paid = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .outcome
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    w.clock.set_ms(t0 + DAY_MS + 100);
+    publish_at(
+        &w,
+        one_endpoint("btc-lightning-bolt12", "lno1new"),
+        t0 + DAY_MS + 100,
+        expiry,
+    );
+    assert_eq!(listed(&mut wallet, &w).await, ["btc-lightning-bolt12"]);
+}
+
+#[tokio::test]
+async fn test_public_stale_copy_of_a_dropped_record_still_answered_from_the_newest() {
+    // The wallet has read more of bob's records than the history keeps, so the oldest is
+    // dropped. The floor refuses no more than before: a stale copy of the dropped record
+    // served again is answered from the newest record seen, as for any older copy (Switch
+    // spec 4.2).
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let _shop = w.shop().await;
+    let t0 = w.clock.now_ms();
+    let expiry = Some(t0 + 30 * DAY_MS);
+    let oldest = publish_at(
+        &w,
+        one_endpoint("btc-lightning-bolt11", "lnbc1old"),
+        t0,
+        expiry,
+    );
+    assert_eq!(listed(&mut wallet, &w).await, ["btc-lightning-bolt11"]);
+    for i in 1..=64u64 {
+        publish_at(
+            &w,
+            one_endpoint("btc-bitcoin-p2wpkh", &format!("bc1q{i}")),
+            t0 + i,
+            expiry,
+        );
+        assert_eq!(listed(&mut wallet, &w).await, ["btc-bitcoin-p2wpkh"], "{i}");
+    }
+    serve(&w, &oldest);
+    assert_eq!(listed(&mut wallet, &w).await, ["btc-bitcoin-p2wpkh"]);
+    assert_eq!(listed(&mut wallet, &w).await, ["btc-bitcoin-p2wpkh"]);
+}
+
+#[tokio::test]
+async fn test_public_conflict_kept_across_a_restore_of_itself_after_a_small_clock_step() {
+    // One device, its clock never fast: bob's records dated within the clock tolerance are
+    // read, and one is dropped from the history, so the floor sits up to the tolerance
+    // ahead. The clock then steps back three minutes, a routine correction, and bob's two
+    // records at one time conflict. Restoring a backup of this very state in place keeps
+    // the conflict: a side of it served again is never used (Switch spec 4.2).
+    let w = World::new();
+    let storage = crate::common::store();
+    let mut wallet = w.wallet_on("wallet", std::sync::Arc::clone(&storage)).await;
+    let _shop = w.shop().await;
+    let t0 = w.clock.now_ms();
+    let tolerance = pubky_switch_core::records::CLOCK_TOLERANCE_MS;
+    let expiry = Some(t0 + 30 * DAY_MS);
+    for at in [t0 + tolerance - 1, t0 + tolerance] {
+        publish_padded(
+            &w,
+            one_endpoint("btc-bitcoin-p2wpkh", "bc1qahead"),
+            3_400_000,
+            at,
+            expiry,
+        );
+        listed(&mut wallet, &w).await;
+    }
+    w.clock.set_ms(t0 - 3 * 60_000);
+    let now = w.clock.now_ms();
+    let first = publish_at(
+        &w,
+        one_endpoint("btc-lightning-bolt11", "lnbc1a"),
+        now,
+        expiry,
+    );
+    listed(&mut wallet, &w).await;
+    publish_at(
+        &w,
+        one_endpoint("btc-lightning-bolt12", "lno1b"),
+        now,
+        expiry,
+    );
+    assert!(listed(&mut wallet, &w).await.is_empty());
+    serve(&w, &first);
+    assert!(listed(&mut wallet, &w).await.is_empty());
+    let backup = wallet.backup().await.unwrap();
+    drop(wallet);
+    let mut wallet = restored_over(&w, storage, &backup).await;
+    serve(&w, &first);
+    assert!(listed(&mut wallet, &w).await.is_empty());
+}
+
+#[tokio::test]
+async fn test_public_record_dated_beyond_the_tolerance_never_moves_the_floor() {
+    // Records served once dated a day ahead, one large enough to fill the history, take part
+    // in nothing, so they move no floor: bob's next record is used as soon as he publishes
+    // it (Paykit spec 4).
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let _shop = w.shop().await;
+    let t0 = w.clock.now_ms();
+    let expiry = Some(t0 + 30 * DAY_MS);
+    publish_at(
+        &w,
+        one_endpoint("btc-lightning-bolt11", "lnbc1a"),
+        t0,
+        expiry,
+    );
+    assert_eq!(listed(&mut wallet, &w).await, ["btc-lightning-bolt11"]);
+    publish_at(
+        &w,
+        one_endpoint("btc-lightning-bolt12", "lno1far"),
+        t0 + DAY_MS,
+        expiry,
+    );
+    assert!(listed(&mut wallet, &w).await.is_empty());
+    publish_padded(
+        &w,
+        one_endpoint("btc-lightning-bolt12", "lno1wide"),
+        9_000_000,
+        t0 + DAY_MS + 1,
+        expiry,
+    );
+    assert!(listed(&mut wallet, &w).await.is_empty());
+    assert_eq!(floor_of(&wallet).await, None);
+    w.clock.advance_ms(1000);
+    publish_at(
+        &w,
+        one_endpoint("btc-bitcoin-p2wpkh", "bc1qnext"),
+        t0 + 1000,
+        expiry,
+    );
+    assert_eq!(listed(&mut wallet, &w).await, ["btc-bitcoin-p2wpkh"]);
+}
+
+#[tokio::test]
+async fn test_public_payment_after_the_clock_steps_back_judges_again() {
+    // Bob's record is read and its endpoint listed. The clock then steps back so that the
+    // record is ahead of it: a public payment judges the record again at that clock and pays
+    // nothing to it (Switch spec 4.2; Paykit spec 4).
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let _shop = w.shop().await;
+    let t0 = w.clock.now_ms();
+    let expiry = Some(t0 + 30 * DAY_MS);
+    publish_at(&w, tip_jar(), t0, expiry);
+    assert_eq!(listed(&mut wallet, &w).await, ["btc-lightning-bolt12"]);
+    w.clock
+        .set_ms(t0 - pubky_switch_core::records::CLOCK_TOLERANCE_MS - 60_000);
+    let paid = wallet.pay_without_request(public_to_bob(&w)).await;
+    assert!(
+        !matches!(paid.outcome, Ok(PayOutcome::Paid { .. })),
+        "{:?}",
+        paid.outcome
+    );
+    assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_public_repeat_never_pays_a_record_the_comparison_left_behind() {
+    // A public payment to bob's record is in flight on a method that is idempotent and keeps
+    // no history. Bob then publishes a later record, which the wallet reads: the record paid
+    // is no longer the one used. The resume's repeat judges the record against the
+    // comparison kept now and isn't made (Switch spec 4.2; Paykit spec 4).
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let _shop = w.shop().await;
+    let t0 = w.clock.now_ms();
+    let expiry = Some(t0 + 30 * DAY_MS);
+    publish_at(&w, tip_jar(), t0, expiry);
+    assert_eq!(listed(&mut wallet, &w).await, ["btc-lightning-bolt12"]);
+    w.rail.next(paykit_sdk::rail::Behaviour::Hang);
+    let pending = wallet
+        .pay_without_request(public_to_bob(&w))
+        .await
+        .outcome
+        .unwrap();
+    let PayOutcome::Pending { attempt_id, .. } = pending else {
+        panic!("{pending:?}");
+    };
+    w.rail.set_declaration(
+        paykit_sdk::RailDeclaration::new(
+            paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
+            paykit_sdk::rail::FAKE_PAYMENT_TIME_TOLERANCE_MS,
+        )
+        .with_idempotent(true),
+    );
+    w.clock.advance_ms(1000);
+    publish_at(
+        &w,
+        one_endpoint("btc-lightning-bolt11", "lnbc1later"),
+        t0 + 1000,
+        expiry,
+    );
+    assert_eq!(listed(&mut wallet, &w).await, ["btc-lightning-bolt11"]);
+    let _ = wallet.resume_payments().await;
+    assert_eq!(w.rail.pay_calls(&attempt_id), 1);
+}
+
+#[tokio::test]
+async fn test_public_unkept_group_beside_a_later_record_answered_from_it_after_a_restore() {
+    // The installation was served a group at T too large to keep; a copy that went on to read
+    // bob's later record is restored in place over it, so the merge holds both the unkept
+    // time and the later record. A copy of the group served again is answered from the later
+    // record, which stays usable (Switch spec 4.2; Paykit spec 4).
+    let w = World::new();
+    let storage = crate::common::store();
+    let mut wallet = w.wallet_on("wallet", std::sync::Arc::clone(&storage)).await;
+    let _shop = w.shop().await;
+    let t0 = w.clock.now_ms();
+    let expiry = Some(t0 + 30 * DAY_MS);
+    publish_at(
+        &w,
+        one_endpoint("btc-lightning-bolt11", "lnbc1a"),
+        t0,
+        expiry,
+    );
+    listed(&mut wallet, &w).await;
+    let wide = publish_padded(
+        &w,
+        one_endpoint("btc-lightning-bolt12", "lno1wide"),
+        9_000_000,
+        t0,
+        expiry,
+    );
+    assert!(listed(&mut wallet, &w).await.is_empty());
+    let unkept = seen_of(&wallet).await;
+    w.clock.advance_ms(1000);
+    publish_at(
+        &w,
+        one_endpoint("btc-bitcoin-p2wpkh", "bc1qlater"),
+        t0 + 1000,
+        expiry,
+    );
+    assert_eq!(listed(&mut wallet, &w).await, ["btc-bitcoin-p2wpkh"]);
+    let backup = wallet.backup().await.unwrap();
+    put_seen(&mut wallet, unkept).await;
+    drop(wallet);
+    let mut wallet = restored_over(&w, storage, &backup).await;
+    serve(&w, &wide);
+    assert_eq!(listed(&mut wallet, &w).await, ["btc-bitcoin-p2wpkh"]);
+}
+
+/// Bob's records dated a day ahead are read while the wallet's clock runs a day fast, more
+/// than the history keeps, so the floor sits a day ahead; the clock is then corrected, bob
+/// publishes a record at the corrected time, and a backup of that state is restored in place
+/// over it. Returns the wallet, that record and the corrected time.
+async fn floor_a_day_ahead_restored(w: &World) -> (paykit_sdk::Paykit, Vec<u8>, u64) {
+    let storage = crate::common::store();
+    let mut wallet = w.wallet_on("wallet", std::sync::Arc::clone(&storage)).await;
+    let _shop = w.shop().await;
+    let t0 = w.clock.now_ms();
+    let expiry = Some(t0 + 30 * DAY_MS);
+    w.clock.set_ms(t0 + DAY_MS);
+    for i in 1..=65u64 {
+        publish_at(
+            w,
+            one_endpoint("btc-bitcoin-p2wpkh", &format!("bc1q{i}")),
+            t0 + DAY_MS + i,
+            expiry,
+        );
+        listed(&mut wallet, w).await;
+    }
+    w.clock.set_ms(t0);
+    let current = publish_at(
+        w,
+        one_endpoint("btc-lightning-bolt11", "lnbc1now"),
+        t0 + 1000,
+        expiry,
+    );
+    assert!(listed(&mut wallet, w).await.is_empty());
+    let backup = wallet.backup().await.unwrap();
+    drop(wallet);
+    let wallet = restored_over(w, storage, &backup).await;
+    (wallet, current, t0)
+}
+
+#[tokio::test]
+async fn test_public_floor_far_ahead_of_the_corrected_clock_holds_across_an_in_place_restore() {
+    // The floor is a day ahead of the corrected clock, far more than the clock tolerance:
+    // after the restore, bob's record at the corrected time is still not used, and the
+    // failure names the floor (Paykit spec 4).
+    let w = World::new();
+    let (mut wallet, current, t0) = floor_a_day_ahead_restored(&w).await;
+    let floor = floor_of(&wallet).await.unwrap();
+    assert!(floor > t0 + pubky_switch_core::records::CLOCK_TOLERANCE_MS);
+    serve(&w, &current);
+    let shop = w.bob.identity().app_keys("shop").app_id_bytes();
+    let list = read(&mut wallet, &w).await;
+    assert!(ids(&list).is_empty());
+    assert!(
+        fails_with(
+            &list,
+            shop,
+            &[&format!(
+                "unusable until a record of it after {floor} ms can be used"
+            )]
+        ),
+        "{list:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_public_later_record_after_the_floor_brings_the_endpoints_back_after_a_restore() {
+    // Past the floor, once the clock reaches it, bob's next record is used as usual
+    // (Paykit spec 4).
+    let w = World::new();
+    let (mut wallet, _, t0) = floor_a_day_ahead_restored(&w).await;
+    let floor = floor_of(&wallet).await.unwrap();
+    let later = t0 + DAY_MS + 100;
+    assert!(later > floor);
+    w.clock.set_ms(later);
+    publish_at(
+        &w,
+        one_endpoint("btc-lightning-bolt12", "lno1later"),
+        later,
+        Some(t0 + 30 * DAY_MS),
+    );
+    assert_eq!(listed(&mut wallet, &w).await, ["btc-lightning-bolt12"]);
+}
+
+#[tokio::test]
+async fn test_public_small_record_at_a_group_too_large_to_keep_names_the_floor() {
+    // Bob's record at T is followed by a second body at T too large to keep. A small third
+    // body served at T is refused naming T, the time a later record must pass, not as one
+    // over the history bound (Paykit spec 4).
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let _shop = w.shop().await;
+    let t0 = w.clock.now_ms();
+    let expiry = Some(t0 + 30 * DAY_MS);
+    publish_at(
+        &w,
+        one_endpoint("btc-lightning-bolt11", "lnbc1a"),
+        t0,
+        expiry,
+    );
+    listed(&mut wallet, &w).await;
+    publish_padded(
+        &w,
+        one_endpoint("btc-lightning-bolt12", "lno1wide"),
+        9_000_000,
+        t0,
+        expiry,
+    );
+    assert!(listed(&mut wallet, &w).await.is_empty());
+    publish_at(
+        &w,
+        one_endpoint("btc-bitcoin-p2wpkh", "bc1qsmall"),
+        t0,
+        expiry,
+    );
+    let shop = w.bob.identity().app_keys("shop").app_id_bytes();
+    let list = read(&mut wallet, &w).await;
+    assert!(ids(&list).is_empty());
+    assert!(
+        fails_with(
+            &list,
+            shop,
+            &[&format!("up to {t0} ms left the history a reader keeps")]
+        ),
+        "{list:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_public_group_refusal_after_a_restore_names_the_later_floor() {
+    // The installation holds a group at T too large to keep; a backup taken while the clock
+    // ran a day ahead holds a floor past T. Restored in place with the clock back, the floor
+    // is past the group's time: a record served at T is refused naming the floor, not the
+    // group's time, as the time a later record must pass (Paykit spec 4).
+    let w = World::new();
+    let storage = crate::common::store();
+    let mut wallet = w.wallet_on("wallet", std::sync::Arc::clone(&storage)).await;
+    let _shop = w.shop().await;
+    let t0 = w.clock.now_ms();
+    let expiry = Some(t0 + 30 * DAY_MS);
+    let first = publish_at(
+        &w,
+        one_endpoint("btc-lightning-bolt11", "lnbc1a"),
+        t0,
+        expiry,
+    );
+    listed(&mut wallet, &w).await;
+    publish_padded(
+        &w,
+        one_endpoint("btc-lightning-bolt12", "lno1wide"),
+        9_000_000,
+        t0,
+        expiry,
+    );
+    assert!(listed(&mut wallet, &w).await.is_empty());
+    let unkept = seen_of(&wallet).await;
+    read_ahead(&w, &mut wallet, t0, expiry).await;
+    // Two more than the history keeps: the earliest read ahead is dropped too.
+    for i in 64..=65u64 {
+        publish_at(
+            &w,
+            one_endpoint("btc-bitcoin-p2wpkh", &format!("bc1q{i}")),
+            t0 + DAY_MS + i,
+            expiry,
+        );
+        listed(&mut wallet, &w).await;
+    }
+    let backup = wallet.backup().await.unwrap();
+    put_seen(&mut wallet, unkept).await;
+    drop(wallet);
+    w.clock.set_ms(t0);
+    let mut wallet = restored_over(&w, storage, &backup).await;
+    let floor = floor_of(&wallet).await.unwrap();
+    assert!(floor > t0);
+    serve(&w, &first);
+    let shop = w.bob.identity().app_keys("shop").app_id_bytes();
+    let list = read(&mut wallet, &w).await;
+    assert!(ids(&list).is_empty());
+    assert!(
+        fails_with(&list, shop, &[&format!("up to {floor} ms")]),
+        "{list:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_public_restored_history_over_the_bound_never_brings_back_a_dropped_fallback() {
+    // A backup holds bob's record at T0 and 64 distinct bodies at T1, more than a reader
+    // keeps, with no floor: no reader writes that. Restored, the history is kept as a read
+    // keeps it, so the record at T0 is dropped and is never the fallback under the conflict
+    // at T1 (Switch spec 4.2; Paykit spec 4).
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let _shop = w.shop().await;
+    let t0 = w.clock.now_ms();
+    let expiry = Some(t0 + 30 * DAY_MS);
+    let first = publish_at(
+        &w,
+        one_endpoint("btc-lightning-bolt11", "lnbc1a"),
+        t0,
+        expiry,
+    );
+    assert_eq!(listed(&mut wallet, &w).await, ["btc-lightning-bolt11"]);
+    let mut records = vec![serde_json::from_slice::<Value>(&first).unwrap()];
+    let mut last = Vec::new();
+    for i in 0..64 {
+        last = publish_at(
+            &w,
+            one_endpoint("btc-lightning-bolt12", &format!("lno1b{i}")),
+            t0 + 1000,
+            expiry,
+        );
+        records.push(serde_json::from_slice(&last).unwrap());
+    }
+    let mut seen = seen_of(&wallet).await;
+    let mut value: Value = serde_json::from_slice(&seen[0].1).unwrap();
+    value["d"]["records"] = Value::Array(records);
+    value["d"]["unkept_at"] = Value::Null;
+    value["d"]["dropped_at"] = Value::Null;
+    seen[0].1 = serde_json::to_vec(&value).unwrap();
+    put_seen(&mut wallet, seen).await;
+    let backup = wallet.backup().await.unwrap();
+    drop(wallet);
+    let mut wallet = restored_over(&w, crate::common::store(), &backup).await;
+    serve(&w, &last);
+    assert!(listed(&mut wallet, &w).await.is_empty());
 }

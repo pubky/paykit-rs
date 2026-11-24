@@ -11,12 +11,13 @@ pub use ledger::with_early_ledger_compaction;
 mod outcomes;
 pub use outcomes::ReservedByOtherApp;
 mod preparation;
+pub(crate) use evidence::OwnWrite;
 pub(crate) use preparation::LedgerProposal;
 mod restore;
 mod spend;
 pub(crate) use checkpoint::ExecutorHistory;
 pub(crate) use compaction::LedgerCompaction;
-pub(crate) use spend::{AllowanceReservation, JournalAllowance};
+pub(crate) use spend::{standing, AllowanceReservation, JournalAllowance, Standing};
 
 use std::collections::{HashMap, HashSet};
 
@@ -26,7 +27,11 @@ use paykit_lib::AttemptId;
 use crate::rail::{AllowanceDispatch, Rail, RailOutcome};
 
 /// The proposal must belong to the Allower's surviving history as of the grant.
-fn in_grant_history(proposed: u64, grant_generation: u64, recovery_from: Option<u64>) -> bool {
+pub(crate) fn in_grant_history(
+    proposed: u64,
+    grant_generation: u64,
+    recovery_from: Option<u64>,
+) -> bool {
     proposed > recovery_from.unwrap_or(0) && proposed <= grant_generation
 }
 

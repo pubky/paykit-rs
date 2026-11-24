@@ -64,7 +64,7 @@ async fn test_protocols_payee_that_also_chats_request_recorded() {
             "paykit_contacts",
             "chat",
         ],
-        &[Permission::ListsRead, Permission::ConversationAdd],
+        &[Permission::ListsRead, Permission::ReplyAdd],
     )
     .await;
     assert!(!dropped);

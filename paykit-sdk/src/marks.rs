@@ -633,7 +633,7 @@ impl Paykit {
         let family = MarkFamily::Blocked;
         let now = self.now();
         let fresh_copy = self
-            .local_get::<u64>(key::LISTS_READ)
+            .lists_read_at()
             .await?
             .is_some_and(|read| crate::receive::lists_read_is_fresh(read, now));
         let kept_flagged = self.local_get::<Vec<[u8; 32]>>(key::FLAGGED).await?;
@@ -643,12 +643,16 @@ impl Paykit {
             if !self.block_mark_ready(&mark).await? {
                 continue;
             }
-            // A fresh copy that still holds the sender spares the read for it.
+            // A fresh copy that still holds the sender spares the read for it, as does a floor
+            // raise owed that holds its ask while no read is due for that raise, such as one the
+            // divergence hold keeps from being written (`Paykit::raise_owed`).
             let held_by_fresh_copy = fresh_copy
                 && (self.denied_as_last_read(&mark.sender).await?
                     || kept_flagged
                         .as_ref()
-                        .is_some_and(|flagged| flagged.contains(&mark.sender)));
+                        .is_some_and(|flagged| flagged.contains(&mark.sender))
+                    || (self.raise_holds_asks_to(&mark.sender).await?
+                        && !self.raise_owed().await?));
             needs_read |= !held_by_fresh_copy;
         }
         let read = needs_read && Box::pin(self.read_lists_now()).await?;
@@ -778,14 +782,18 @@ impl Paykit {
             if let Some(owed) = hold.earlier_widening.take() {
                 let mut tx = crate::state::Tx::default();
                 tx.put(key::RESTORE_HOLD, &hold)?;
-                self.commit_restore_widening(&owed, tx).await?;
+                if !self.commit_restore_widening(&owed, tx).await? {
+                    return Ok(());
+                }
             }
             if let Some(owed) = hold.widening_owed() {
                 hold.widening_from_ms = None;
                 hold.widening_read = None;
                 let mut tx = crate::state::Tx::default();
                 tx.put(key::RESTORE_HOLD, &hold)?;
-                self.commit_restore_widening(&owed, tx).await?;
+                if !self.commit_restore_widening(&owed, tx).await? {
+                    return Ok(());
+                }
             }
         }
         let widenings = self
@@ -816,13 +824,25 @@ impl Paykit {
                     if self.holds("paykit_pay") && self.first_read_pending() {
                         return Err(crate::floor::unreadable_floor());
                     }
-                    self.commit_with_floor(window.floor_ms, tx).await?;
+                    if !raised(self.commit_with_floor(window.floor_ms, tx).await)? {
+                        return Ok(());
+                    }
                 } else {
                     self.local_commit(tx).await?;
                 }
             }
         }
         Ok(())
+    }
+
+    /// Whether a `missed` item's widening waits for its read of the lists (Paykit wire 5.6,
+    /// Raising), whatever this app's scopes.
+    pub(crate) async fn missed_widening_unread(&self) -> Result<bool> {
+        Ok(self
+            .local_scan::<MissedWidening>(key::BLOCKED_WIDENINGS)
+            .await?
+            .iter()
+            .any(|(_, widening)| widening.deny.is_none()))
     }
 
     /// Retain the first list that follows each missed item before any floor write.
@@ -846,15 +866,16 @@ impl Paykit {
         self.local_commit(tx).await
     }
 
-    /// A restore that lost entries raises the floor even when its list was empty.
+    /// A restore that lost entries raises the floor even when its list was empty. Whether
+    /// the widening applied: one whose raise can't be written stays owed ([`raised`]).
     async fn commit_restore_widening(
         &mut self,
         owed: &crate::hold::OwedWidening,
         mut tx: crate::state::Tx,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         self.stage_widening(&owed.read.deny, owed.from_ms, owed.read.at_ms, &mut tx)
             .await?;
-        self.commit_with_floor(owed.read.at_ms, tx).await
+        raised(self.commit_with_floor(owed.read.at_ms, tx).await)
     }
 
     /// Return whether this window made a mark. A missed item whose speculative marks
@@ -1001,7 +1022,9 @@ impl Paykit {
                 {
                     return Err(PaykitError::corrupt());
                 }
-                let _ = self.send_message(msg_id).await;
+                if let Err(error) = self.send_message(msg_id).await {
+                    crate::pay::unless_stop(error)?;
+                }
             }
             match self.app.delivery(msg_id).await? {
                 Some(Delivery::Queued { .. }) => return Ok(0),
@@ -1097,7 +1120,9 @@ impl Paykit {
         self.app
             .queue_signed_with(crate::protocol::BACKUP_NAME, signed, &tx.into_writes())
             .await?;
-        let _ = self.send_message(&msg_id).await;
+        if let Err(error) = self.send_message(&msg_id).await {
+            crate::pay::unless_stop(error)?;
+        }
         if matches!(
             self.app.delivery(&msg_id).await?,
             Some(Delivery::Accepted { .. })
@@ -1250,6 +1275,19 @@ pub(crate) fn tell_lost_if_unasked(
         )?;
     }
     Ok(())
+}
+
+/// Whether a widening's commit with its raise applied: a raise that can't be written, for
+/// now or while the divergence hold stands, or that still conflicts after its retry, leaves
+/// the widening owed, its marks and their asks unapplied, to be tried again at the next read
+/// of the lists (Paykit wire 5.6, Raising: a widening whose raise isn't applied isn't applied
+/// either). It never fails the read of the lists.
+fn raised(commit: Result<()>) -> Result<bool> {
+    match commit {
+        Ok(()) => Ok(true),
+        Err(error) if crate::floor::is_raise_left_owed(&error) => Ok(false),
+        Err(error) => Err(error),
+    }
 }
 
 #[cfg(test)]

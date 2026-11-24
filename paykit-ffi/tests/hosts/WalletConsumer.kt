@@ -1,6 +1,6 @@
-package com.synonym.paykit.v2.tests
+package com.synonym.paykit.tests
 
-import com.synonym.paykit.v2.*
+import com.synonym.paykit.*
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
@@ -102,20 +102,35 @@ internal class EnrollmentStore : WalletStore {
     }
 }
 
+/// The failure behind a categorized wallet error; null for the enrollment, restore and store
+/// answers, which keep their own variants.
+internal val WalletException.categorized: WalletFailure?
+    get() = when (this) {
+        is WalletException.NeedsUser -> failure
+        is WalletException.RetryLater -> failure
+        is WalletException.OutcomeUnknown -> failure
+        is WalletException.NotSent -> failure
+        is WalletException.Permanent -> failure
+        is WalletException.Recovery -> failure
+        else -> null
+    }
+
+/// What the test method declares to `WalletHost`, once.
+internal val testDeclaration = MethodDeclaration(true, null, true, null, true, 3600000uL, 0uL)
+internal val testEndpoints = listOf(EndpointSupport("btc-lightning-bolt11", 8u))
+
 internal open class ReceiptReader : WalletHomeserver, PaymentMethod {
     var transfers = 0
     override suspend fun get(identity: ByteArray, path: String): ByteArray? = null
     override suspend fun put(identity: ByteArray, path: String, bytes: ByteArray) = error("unexpected public write")
     override suspend fun delete(identity: ByteArray, path: String) = error("unexpected public delete")
-    override fun declaration() = MethodDeclaration(true, null, true, null, true, 3600000uL)
     override fun selectEndpoints(candidates: List<EndpointCandidate>, amount: Amount?): SelectedEndpoints {
         val (unavailable, usable) = candidates.partition { it.identifier == "btc-lightning-bolt12" }
         return SelectedEndpoints(usable.asReversed().map { it.id }, unavailable.map {
-            EndpointFailure(it.id, MethodException.Unavailable("route unavailable"))
+            EndpointFailure(it.id, MethodException.Unknown("route unavailable"))
         })
     }
-    override fun transfer(endpoint: String, payload: String, amount: Amount) = MethodTransfer(amount, null)
-    override fun fractionDigits(endpoint: String): UInt? = 8u
+    override fun transfer(endpoint: String, payload: String, amount: Amount) = MethodTransfer(amount)
     override suspend fun pay(payment: MethodPayment): MethodOutcome {
         transfers += 1
         error("a receipted payment cannot be dispatched again")
@@ -123,7 +138,7 @@ internal open class ReceiptReader : WalletHomeserver, PaymentMethod {
     override suspend fun payment(attemptId: String): MethodOutcome? = null
     override suspend fun allowanceHistory(payer: ByteArray): List<MethodDispatch>? = null
     override suspend fun verify(proof: MethodProof): ULong? = null
-    override fun settlementId(proofJson: ByteArray): ByteArray? = null
+    override fun settlementId(endpoint: String, proofJson: ByteArray): ByteArray? = null
 }
 
 private fun walletRows(issuer: String, mode: String): List<String> {
@@ -137,28 +152,29 @@ private suspend fun resumeRefusal(issuer: String, left: Boolean, request: Reques
     val values = walletRows(issuer, if (left) "departed-wallet" else "wallet-awaiting-identity")
     val store = EnrollmentStore().apply { reopen(values[1], values.drop(2)) }
     val method = ReceiptReader()
-    WalletHost(store, method, method, listOf("btc-lightning-bolt11")).use { host ->
+    WalletHost(store, method, method, testDeclaration, testEndpoints).use { host ->
         host.load(Base64.getDecoder().decode(values[0])).use { wallet ->
             if (!left) {
                 try {
                     wallet.requestReceipts(request)
                     error("read receipts before the restored records were listed")
-                } catch (error: WalletException.Refused) {
-                    error.refusal.use { check(it.kind() is RefusalKind.NotNow) }
+                } catch (error: WalletException.NeedsUser) {
+                    check(error.failure.code() == "not_now")
+                    checkNotNull(error.failure.refusal()).use { check(it.kind() is RefusalKind.NotNow) }
                 }
             }
             try {
                 wallet.resumePayments()
                 error("resumed a held wallet")
-            } catch (error: WalletException.Refused) {
-                check(!left)
-                error.refusal.use { refusal ->
+            } catch (error: WalletException.RetryLater) {
+                check(!left && error.failure.code() == "identity_unavailable")
+                checkNotNull(error.failure.refusal()).use { refusal ->
                     check(refusal.kind() is RefusalKind.IdentityUnavailable)
                     check(refusal.attemptedFailure() == null)
                 }
-            } catch (error: WalletException.Operation) {
-                check(left && error.kind == WalletFailureKind.CLIENT)
-                checkNotNull(error.switchRefusal).use { check(it.kind() is SwitchRefusalKind.Left) }
+            } catch (error: WalletException.Recovery) {
+                check(left && error.failure.code() == "left")
+                checkNotNull(error.failure.switchRefusal()).use { check(it.kind() is SwitchRefusalKind.Left) }
             }
             check(method.transfers == 0)
             wallet.shutdown()
@@ -175,7 +191,7 @@ private suspend fun recoverReceipt(issuer: String): RequestId {
     val request = RequestId(bytes(2), bytes(3))
     val original = EnrollmentStore().apply { reopen(values[6], values.drop(7)) }
     val method = ReceiptReader()
-    WalletHost(original, method, method, listOf("btc-lightning-bolt11")).use { device ->
+    WalletHost(original, method, method, testDeclaration, testEndpoints).use { device ->
         device.load(app).use { wallet ->
             check(wallet.appId().contentEquals(app) && wallet.identity().contentEquals(identity))
             check(wallet.backup().isNotEmpty())
@@ -188,15 +204,11 @@ private suspend fun recoverReceipt(issuer: String): RequestId {
                 EndpointCandidate(9u, entry.endpoint, "invoice"),
             ), entry.amount)
             val failure = selection.failures.single()
-            val unavailable = failure.error as MethodException.Unavailable
+            val unavailable = failure.error as MethodException.Unknown
             check(selection.payable == listOf(9u, 6u) && failure.id == 2u && unavailable.reason == "route unavailable")
             check(unavailable.message == "MethodException(<redacted>)")
-            val walletError = WalletException.Operation(WalletFailureKind.CLIENT, "operation failed", null, byteArrayOf(1), null)
-            check(walletError.message == "WalletException(<redacted>)" && walletError.detail == "operation failed")
-            val unsaved = WalletException.SettlementNoticeUnavailable(1u, StorageException.Unavailable(), "warning unsaved", null, byteArrayOf(1), null)
-            check(unsaved.message == "WalletException(<redacted>)" && unsaved.bucket == 1.toUShort() && unsaved.storage is StorageException.Unavailable)
-            val unknown: WalletException = WalletException.UnknownMethod()
-            check(unknown is WalletException.UnknownMethod && unknown.toString() == "WalletException(<redacted>)")
+            val walletError: WalletException = WalletException.InvalidInput("amount")
+            check(walletError.message == "WalletException(<redacted>)" && walletError.toString() == "WalletException(<redacted>)")
             val descriptions: List<Pair<Any, String>> = listOf(
                 entry to "PaymentEntry", receipt to "Receipt", request to "RequestId", entry.amount to "Amount",
                 BillingPeriod(1uL, 2uL) to "BillingPeriod",
@@ -205,7 +217,8 @@ private suspend fun recoverReceipt(issuer: String): RequestId {
                 periodUsage to "AllowancePeriodUsage",
                 AllowanceUsage(entry.amount.value, listOf(periodUsage), 0uL, 1uL, 0uL) to "AllowanceUsage",
                 selection to "SelectedEndpoints", failure to "EndpointFailure", unavailable to "MethodException",
-                method.declaration() to "MethodDeclaration", walletError to "WalletException",
+                testDeclaration to "MethodDeclaration", testEndpoints.single() to "EndpointSupport",
+                walletError to "WalletException",
             )
             for ((value, name) in descriptions) check(value.toString() == "$name(<redacted>)")
             check(entry.amount.value == "7" && entry.attemptId == values[4])
@@ -253,7 +266,7 @@ private suspend fun acknowledgeRecovery(issuer: String, cleared: Boolean) {
     val duty = Base64.getDecoder().decode(values[4])
     val store = EnrollmentStore().apply { reopen(values[5], values.drop(6)) }
     val method = ReceiptReader()
-    WalletHost(store, method, method, listOf("btc-lightning-bolt11")).use { host ->
+    WalletHost(store, method, method, testDeclaration, testEndpoints).use { host ->
         host.load(app).use { wallet ->
             val event = wallet.unacknowledgedEvents().single { it.id.contentEquals(duty) }
             check(event.owners == listOf("paykit"))

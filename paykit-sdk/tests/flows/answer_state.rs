@@ -245,7 +245,7 @@ async fn held_with_contacts(w: &World, family: Family, contacts: bool) -> Held {
         let value: Value = serde_json::from_slice(&result.bytes).unwrap();
         assert_eq!(
             value["d"],
-            json!({"msg_id": result.sent_id, "side": if result.alice { "payer" } else { "payee" }})
+            json!({"msg_id": result.sent_id, "side": if result.alice { "payer" } else { "payee" }, "label": null})
         );
     }
     result

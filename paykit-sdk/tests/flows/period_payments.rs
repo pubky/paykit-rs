@@ -177,7 +177,7 @@ fn period_natural(request: &RequestRef, period: PeriodRef) -> Vec<u8> {
 }
 
 /// The shared record key of `request`'s period record of `period`, as `app` keys it.
-fn period_key(app: &Paykit, request: &RequestRef, period: PeriodRef) -> [u8; 32] {
+pub(super) fn period_key(app: &Paykit, request: &RequestRef, period: PeriodRef) -> [u8; 32] {
     app.app()
         .record_key(&natural_target(&period_natural(request, period)))
         .unwrap()
@@ -505,20 +505,34 @@ async fn confirm_period_settlement(terms: SettlementTerms, after_start_ms: u64, 
         let period = &activity[0].periods[0];
         assert_eq!(period.billing_period, january());
         assert!(period.paid);
-        assert_eq!(
-            seller_wallet.verify_payment(&period.record).await.unwrap(),
-            credited.then_some(paid_at)
-        );
-        let receipt = seller_wallet.confirm_payment(&period.record).await.unwrap();
+        // A payment verified at a time the period doesn't allow is flagged, never credited.
+        let outside = Refusal::PaymentTimeOutside {
+            paid_at_ms: paid_at,
+        };
+        let verified = seller_wallet.verify_payment(&period.record).await;
+        let receipt = if credited {
+            assert_eq!(verified.unwrap(), Some(paid_at));
+            seller_wallet.confirm_payment(&period.record).await.unwrap()
+        } else {
+            assert_eq!(verified.unwrap_err().refusal(), Some(&outside));
+            let refused = seller_wallet
+                .confirm_payment(&period.record)
+                .await
+                .unwrap_err();
+            assert_eq!(refused.refusal(), Some(&outside));
+            None
+        };
         assert_eq!(receipt.is_some(), credited);
         if let Some(previous) = &issued {
             assert_eq!(receipt.as_ref(), Some(previous));
         }
         issued = receipt;
-        assert_eq!(
-            seller_wallet.confirm_payment(&period.record).await.unwrap(),
-            issued
-        );
+        if credited {
+            assert_eq!(
+                seller_wallet.confirm_payment(&period.record).await.unwrap(),
+                issued
+            );
+        }
         let activity = seller_wallet.payee_activity().await.unwrap();
         assert_eq!(activity[0].periods[0].credited, credited);
         assert_eq!(
@@ -626,6 +640,109 @@ async fn test_period_payments_later_period_with_per_period_endpoints_has_no_dest
         .await
         .unwrap();
     assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
+}
+
+#[tokio::test]
+async fn test_period_payments_details_expired_by_the_service_time_at_planning_say_so() {
+    // The wallet's device clock runs ten seconds behind the service, whose time it verified
+    // has reached February's period details' expiry before the payment is planned. Their
+    // destination isn't used, and the refusal says the device clock is behind (Paykit spec
+    // 7.2, check the destination).
+    let w = World::new();
+    let base = Arc::new(StageStore::default());
+    let mut shop = w.shop().await;
+    let mut wallet = w
+        .wallet_on("wallet", Arc::clone(&base) as Arc<dyn StateStore>)
+        .await;
+    let app_id = wallet.app_id();
+    let (request, sale) = subscribed_to(
+        &w,
+        &mut shop,
+        &mut wallet,
+        monthly().with_per_period_endpoints(),
+    )
+    .await;
+    let period = february();
+    w.clock.set_ms(period.starts_at);
+    let expires = period.starts_at + 120_000;
+    shop.send_period_details(&sale, details(period, "lnbc1february", expires))
+        .await
+        .unwrap();
+    wallet.receive(None).await.unwrap();
+    drop(wallet);
+    w.clock.set_ms(expires);
+    let behind = Arc::new(pubky_switch_client::clock::TestClock::new(expires - 10_000));
+    let mut wallet = w
+        .load_on_clock(
+            &w.alice,
+            Arc::clone(&base) as Arc<dyn StateStore>,
+            app_id,
+            behind,
+        )
+        .await;
+    wallet.receive(None).await.unwrap();
+    let refused = by_user(&mut wallet, &request, period, PayOptions::default())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(refusal(&refused), Refusal::NoDestination(why) if why.contains("the device clock is behind")),
+        "{refused:?}"
+    );
+    assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_period_payments_details_expired_by_the_attempt_answer_not_paid() {
+    // The wallet's device clock runs ten seconds behind the service. February is paid only
+    // to its period details' destination. The service time first reaches their expiry in
+    // the attempt's answer: the attempt is written failed before dispatch, with no payment
+    // method call, and the refusal says the device clock is behind (Paykit spec 7.2, check
+    // the destination, the last time immediately before dispatch).
+    let w = World::new();
+    let base = Arc::new(StageStore::default());
+    let mut shop = w.shop().await;
+    let mut wallet = w
+        .wallet_on("wallet", Arc::clone(&base) as Arc<dyn StateStore>)
+        .await;
+    let app_id = wallet.app_id();
+    let (request, sale) = subscribed_to(
+        &w,
+        &mut shop,
+        &mut wallet,
+        monthly().with_per_period_endpoints(),
+    )
+    .await;
+    let period = february();
+    w.clock.set_ms(period.starts_at);
+    let expires = period.starts_at + 120_000;
+    shop.send_period_details(&sale, details(period, "lnbc1february", expires))
+        .await
+        .unwrap();
+    wallet.receive(None).await.unwrap();
+    drop(wallet);
+    w.clock.set_ms(expires - 5_000);
+    let behind = Arc::new(pubky_switch_client::clock::TestClock::new(expires - 15_000));
+    let mut wallet = w
+        .load_on_clock(
+            &w.alice,
+            Arc::clone(&base) as Arc<dyn StateStore>,
+            app_id,
+            behind,
+        )
+        .await;
+    let clock = Arc::clone(&w.clock);
+    base.on_stage("recorded", move || clock.set_ms(expires));
+    let refused = by_user(&mut wallet, &request, period, PayOptions::default())
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{refused:?}").contains("the device clock is behind"),
+        "{refused:?}"
+    );
+    assert!(w.rail.all_executions().is_empty());
+    let payment = wallet.payments().await.unwrap().remove(0);
+    assert_eq!(payment.stage, paykit_sdk::Stage::Finished);
+    assert_eq!(w.rail.pay_calls(&payment.attempt_id), 0);
 }
 
 #[tokio::test]
@@ -1534,8 +1651,11 @@ async fn test_period_payments_standing_rate_policy_checks_each_occurrence_and_ke
 ) {
     let w = World::new();
     w.rail.set_declaration(
-        paykit_sdk::RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
-            .with_idempotent(true),
+        paykit_sdk::RailDeclaration::new(
+            paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
+            paykit_sdk::rail::FAKE_PAYMENT_TIME_TOLERANCE_MS,
+        )
+        .with_idempotent(true),
     );
     let base = store();
     let mut wallet = w.wallet_on("wallet", base.clone()).await;
@@ -1699,7 +1819,12 @@ async fn test_period_payments_quote_for_leaves_restore_and_list_requests_to_the_
     let payment = by_policy(&mut wallet, &request, january())
         .await
         .unwrap_err();
-    assert_eq!(refusal(&payment), Refusal::WaitingForList);
+    assert_eq!(
+        refusal(&payment),
+        Refusal::WaitingForList {
+            device_clock_behind: false
+        }
+    );
     assert!(wallet
         .app()
         .sent_to(&request.payee, 0, u64::MAX)
@@ -1752,8 +1877,11 @@ async fn test_period_payments_a_rate_quote_cannot_override_automatic_holds() {
 async fn test_period_payments_priced_repeat_requires_unexpired_selected_rates() {
     let (w, _shop, mut wallet, request, _) = Box::pin(priced_period_on(false, store(), None)).await;
     w.rail.set_declaration(
-        paykit_sdk::RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
-            .with_idempotent(true),
+        paykit_sdk::RailDeclaration::new(
+            paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
+            paykit_sdk::rail::FAKE_PAYMENT_TIME_TOLERANCE_MS,
+        )
+        .with_idempotent(true),
     );
     let shown = crate::conversion::priced_of(
         &by_user(&mut wallet, &request, january(), PayOptions::default())
@@ -1902,8 +2030,11 @@ async fn test_period_payments_recorded_attempt_rechecks_the_period_rate_issuer()
 async fn test_period_payments_priced_repeat_preserves_selected_rate_and_amount() {
     let (w, _shop, mut wallet, request, _) = Box::pin(priced_period_on(false, store(), None)).await;
     w.rail.set_declaration(
-        paykit_sdk::RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
-            .with_idempotent(true),
+        paykit_sdk::RailDeclaration::new(
+            paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
+            paykit_sdk::rail::FAKE_PAYMENT_TIME_TOLERANCE_MS,
+        )
+        .with_idempotent(true),
     );
     let shown = crate::conversion::priced_of(
         &by_user(&mut wallet, &request, january(), PayOptions::default())
@@ -2196,14 +2327,19 @@ type StageHook = Box<dyn FnOnce() + Send>;
 /// A store that runs a hook once, right after the commit of the first journal write at a
 /// stage.
 #[derive(Default)]
-struct StageStore {
+pub(crate) struct StageStore {
     inner: MemoryStore,
     hook: std::sync::Mutex<Option<(&'static str, StageHook)>>,
 }
 
 impl StageStore {
-    fn on_stage(&self, stage: &'static str, hook: impl FnOnce() + Send + 'static) {
+    pub(crate) fn on_stage(&self, stage: &'static str, hook: impl FnOnce() + Send + 'static) {
         *self.hook.lock().unwrap() = Some((stage, Box::new(hook)));
+    }
+
+    /// Whether the hook armed last has run.
+    pub(super) fn fired(&self) -> bool {
+        self.hook.lock().unwrap().is_none()
     }
 }
 
@@ -2378,6 +2514,7 @@ async fn seller_stop_after_attempt(stop_at: StopAt) {
                             tablet.app().naming_key(),
                             &key,
                             None,
+                            &|_, proof| paykit_sdk::rail::fake_settlement_id(proof),
                         )
                         .unwrap();
                         record.manual_only = true;
@@ -2461,21 +2598,10 @@ async fn seller_stop_after_attempt(stop_at: StopAt) {
     assert_eq!(w.rail.all_executions().len(), 1);
 }
 
-#[tokio::test]
-async fn test_period_payments_period_record_divergent_after_the_paying_commit_holds_it() {
-    // Right after the wallet journals January's `Paying` by hand, a view shows January's
-    // period record divergent: the dispatch is held, nothing paid, as the check before it
-    // judges every pause after its last read (Paykit spec 6).
-    let w = World::new();
-    let base = Arc::new(StageStore::default());
-    let mut shop = w.shop().await;
-    let mut wallet = w
-        .wallet_on("wallet", Arc::clone(&base) as Arc<dyn StateStore>)
-        .await;
-    let (request, _) = subscribed(&w, &mut shop, &mut wallet).await;
-    let record = period_key(&wallet, &request, january());
-    let store = Arc::clone(&base) as Arc<dyn StateStore>;
-    let app = wallet.app_id();
+/// Right after the first journal write at `Paying`, a view shows `record` divergent, as a
+/// conflicting write would: the stage hook marks it in `app`'s namespace of `base`.
+pub(super) fn diverge_at_paying(base: &Arc<StageStore>, app: [u8; 16], record: [u8; 32]) {
+    let store = Arc::clone(base) as Arc<dyn StateStore>;
     base.on_stage("paying", move || {
         let ns = pubky_switch_client::store::client_namespace(&app);
         let key = format!("rcdiv/{}", pubky_switch_core::enc::b64(&record));
@@ -2485,11 +2611,39 @@ async fn test_period_payments_period_record_divergent_after_the_paying_commit_ho
             .unwrap();
         store.commit(batch).unwrap();
     });
-    let outcome = by_user(&mut wallet, &request, january(), PayOptions::default())
-        .await
+}
+
+#[tokio::test]
+async fn test_period_payments_period_record_divergent_after_the_paying_commit_holds_it() {
+    // Right after the wallet journals January's `Paying`, by hand or by its policy, a view
+    // shows January's period record divergent: the dispatch is held, nothing paid, as the
+    // check before it judges every pause after its last read (Paykit spec 6).
+    for automatic in [false, true] {
+        let w = World::new();
+        let base = Arc::new(StageStore::default());
+        let mut shop = w.shop().await;
+        let mut wallet = w
+            .wallet_on("wallet", Arc::clone(&base) as Arc<dyn StateStore>)
+            .await;
+        let (request, _) = subscribed(&w, &mut shop, &mut wallet).await;
+        let record = period_key(&wallet, &request, january());
+        diverge_at_paying(&base, wallet.app_id(), record);
+        let outcome = if automatic {
+            by_policy(&mut wallet, &request, january()).await
+        } else {
+            by_user(&mut wallet, &request, january(), PayOptions::default()).await
+        }
         .unwrap();
-    assert!(matches!(outcome, PayOutcome::Pending { .. }), "{outcome:?}");
-    assert!(w.rail.all_executions().is_empty());
+        assert!(
+            matches!(outcome, PayOutcome::Pending { .. }),
+            "automatic {automatic}: {outcome:?}"
+        );
+        assert!(w.rail.all_executions().is_empty(), "automatic {automatic}");
+        assert!(
+            base.fired(),
+            "automatic {automatic}: the record diverged after Paying"
+        );
+    }
 }
 
 #[tokio::test]
@@ -2556,8 +2710,11 @@ async fn resumed_period_repeat(
     between: impl AsyncFnOnce(&mut Paykit, [u8; 32]),
 ) -> (u64, PayOutcome) {
     w.rail.set_declaration(
-        paykit_sdk::RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
-            .with_idempotent(true),
+        paykit_sdk::RailDeclaration::new(
+            paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
+            paykit_sdk::rail::FAKE_PAYMENT_TIME_TOLERANCE_MS,
+        )
+        .with_idempotent(true),
     );
     let mut shop = w.shop().await;
     let mut wallet = w
@@ -2605,8 +2762,11 @@ async fn resume_marked_subscription(
     after_mark: impl AsyncFnOnce(&mut Paykit, [u8; 32]),
 ) -> (paykit_lib::AttemptId, Vec<PayOutcome>, ActivityRecord) {
     w.rail.set_declaration(
-        paykit_sdk::RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
-            .with_idempotent(idempotent),
+        paykit_sdk::RailDeclaration::new(
+            paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
+            paykit_sdk::rail::FAKE_PAYMENT_TIME_TOLERANCE_MS,
+        )
+        .with_idempotent(idempotent),
     );
     let storage = store();
     let mut wallet = w
@@ -3273,8 +3433,11 @@ async fn test_period_payments_by_policy_repeat_completes_past_the_window() {
     // dispatch (Paykit spec 8.2).
     let w = World::new();
     w.rail.set_declaration(
-        paykit_sdk::RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
-            .with_idempotent(true),
+        paykit_sdk::RailDeclaration::new(
+            paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
+            paykit_sdk::rail::FAKE_PAYMENT_TIME_TOLERANCE_MS,
+        )
+        .with_idempotent(true),
     );
     let mut shop = w.shop().await;
     let mut wallet = w
@@ -3338,8 +3501,11 @@ async fn test_period_payments_by_policy_reads_the_deny_list_fresh() {
 async fn test_period_payments_by_policy_resume_honors_a_new_manual_only_mark() {
     let w = World::new();
     w.rail.set_declaration(
-        paykit_sdk::RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
-            .with_idempotent(true),
+        paykit_sdk::RailDeclaration::new(
+            paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
+            paykit_sdk::rail::FAKE_PAYMENT_TIME_TOLERANCE_MS,
+        )
+        .with_idempotent(true),
     );
     let mut shop = w.shop().await;
     let mut wallet = w
@@ -3794,4 +3960,121 @@ async fn test_period_payments_required_app_rejects_explicit_other_same_asset_det
 #[tokio::test]
 async fn test_period_payments_required_app_rejects_explicit_other_priced_details() {
     Box::pin(required_app_period(true, false, true)).await;
+}
+
+#[tokio::test]
+async fn test_period_payments_lists_bind_each_record_once() {
+    // A subscription with one paid period: each list binds the request record and the
+    // period record once each, and shows the period with its request.
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let mut wallet = w.wallet("wallet").await;
+    let (request, _) = subscribed(&w, &mut shop, &mut wallet).await;
+    let outcome = by_user(&mut wallet, &request, january(), PayOptions::default())
+        .await
+        .unwrap();
+    assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
+    shop.receive(None).await.unwrap();
+
+    let before = wallet.activity_binds();
+    let shown = wallet.requests().await.unwrap();
+    assert_eq!(wallet.activity_binds() - before, 2);
+    assert_eq!(shown.len(), 1);
+    assert_eq!(shown[0].periods.len(), 1, "{shown:?}");
+
+    let before = shop.activity_binds();
+    let sales = shop.payee_activity().await.unwrap();
+    assert_eq!(shop.activity_binds() - before, 2);
+    assert_eq!(sales.len(), 1);
+    assert_eq!(sales[0].periods.len(), 1, "{sales:?}");
+}
+
+/// Alice's wallet, its device clock 10 s behind the service, which has verified February's
+/// expiry `expires`: it holds `request`, paid per period, and the period details `sent`
+/// the shop sent before. The rail pays only Lightning invoices.
+async fn behind_at_february_expiry(
+    required_seller_wallet: bool,
+    sent: impl FnOnce(u64) -> Vec<PeriodDetails>,
+) -> (World, Paykit, RequestRef, u64) {
+    let w = World::new();
+    w.rail
+        .set_endpoint_identifiers(vec![endpoint("btc-lightning-bolt11")]);
+    let disk = store();
+    let mut shop = w.shop().await;
+    let seller_wallet = w
+        .join(
+            &w.bob,
+            "seller-wallet",
+            paykit_sdk::AppScopes::new().request().build().unwrap(),
+        )
+        .await;
+    let mut wallet = w.wallet_on("wallet", Arc::clone(&disk)).await;
+    let app_id = wallet.app_id();
+    let draft = if required_seller_wallet {
+        monthly_requiring(seller_wallet.app_id())
+    } else {
+        monthly()
+    }
+    .with_per_period_endpoints();
+    let (request, sale) = subscribed_to(&w, &mut shop, &mut wallet, draft).await;
+    let period = february();
+    w.clock.set_ms(period.starts_at);
+    let expires = period.starts_at + 120_000;
+    for details in sent(expires) {
+        shop.send_period_details(&sale, details).await.unwrap();
+    }
+    wallet.receive(None).await.unwrap();
+    drop(wallet);
+    w.clock.set_ms(expires);
+    let behind = Arc::new(pubky_switch_client::clock::TestClock::new(expires - 10_000));
+    let mut wallet = w.load_on_clock(&w.alice, disk, app_id, behind).await;
+    wallet.receive(None).await.unwrap();
+    (w, wallet, request, expires)
+}
+
+#[tokio::test]
+async fn test_period_payments_clock_note_only_for_details_the_destination_filter_takes() {
+    // The request takes period destinations only from bob's seller wallet; February's
+    // details come from his shop, and only the service's time has passed their expiry.
+    // They were never an eligible destination: the refusal says nothing of a clock behind
+    // (Paykit spec 7.2, 8.2).
+    let (w, mut wallet, request, _) = behind_at_february_expiry(true, |expires| {
+        vec![details(february(), "lnbc1shop", expires)]
+    })
+    .await;
+    let refused = by_user(&mut wallet, &request, february(), PayOptions::default())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(refusal(&refused), Refusal::NoDestination(why) if !why.contains("the device clock is behind")),
+        "{refused:?}"
+    );
+    assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_period_payments_clock_note_kept_when_another_destination_fails() {
+    // February has two eligible details: a Lightning invoice whose expiry only the service's
+    // time has passed, and an on-chain address, current, that the rail can't pay. The last
+    // destination tried fails for its own reason; the refusal still says the device clock
+    // is behind, which is why the invoice wasn't used (Paykit spec 7.2, 8.2).
+    let (w, mut wallet, request, _) = behind_at_february_expiry(false, |expires| {
+        let mut onchain = details(february(), "bc1qfebruary", expires + DAY_MS);
+        let mut endpoints = BTreeMap::new();
+        endpoints.insert(
+            endpoint("btc-bitcoin-p2wpkh"),
+            PaymentEndpointPayload::new("bc1qfebruary").unwrap(),
+        );
+        onchain.payment_endpoints = Some(endpoints);
+        vec![details(february(), "lnbc1february", expires), onchain]
+    })
+    .await;
+    let refused = by_user(&mut wallet, &request, february(), PayOptions::default())
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{refused:?}").contains("the device clock is behind"),
+        "{refused:?}"
+    );
+    assert!(w.rail.all_executions().is_empty());
 }

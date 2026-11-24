@@ -1,8 +1,9 @@
-//! `periods.json`: Billing Periods (Paykit spec 8.2, Paykit wire 4.4) and `details_rates`
-//! (Paykit wire 4.9).
+//! `periods.json`: Billing Periods (Paykit spec 8.2, Paykit wire 4.4), `details_rates`
+//! (Paykit wire 4.9) and `destination_expiry` (Paykit spec 7.2, check the destination).
 
 use paykit_lib::periods::{
-    evidence_seconds, payer_may_use_rates, rates_apply, BillingPeriod, PeriodRef, Recurrence,
+    destination_expired, evidence_seconds, payer_may_use_rates, rates_apply, BillingPeriod,
+    PeriodRef, Recurrence,
 };
 use pubky_switch_core::time::rfc3339;
 use serde_json::{json, Value};
@@ -39,14 +40,17 @@ pub(crate) fn check() {
         );
     }
     check_details_rates(&v);
+    check_destination_expiry(&v);
 }
 
 /// The cases paykit-lib generates in `periods.json` (README "How the files were
 /// generated"), compared with the file, and written into the set by the regeneration driver
-/// (`regenerate.rs`): [`period_members`] and [`details_rates_members`].
+/// (`regenerate.rs`): [`period_members`], [`details_rates_members`] and
+/// [`destination_expiry_members`].
 pub(crate) fn generate(_keys: &Keys) {
     let mut cases = period_members();
     cases.extend(details_rates_members());
+    cases.extend(destination_expiry_members());
     generated("periods.json", &cases);
 }
 
@@ -201,4 +205,113 @@ fn check_details_rates(v: &Value) {
         serde_json::from_str(st(&message("payment_period_details"), "json")).unwrap();
     let exp = st(&details["body"], "expires_at");
     assert_eq!(rfc3339(time(exp)), exp);
+}
+
+/// The expiry of `destination_expiry`.
+const DESTINATION_EXPIRES_AT: &str = "2026-03-01T00:00:00.500Z";
+
+/// The cases of `destination_expiry`: a name, the payer's device clock, the highest service
+/// time it has verified (`None` for none), and whether the destination has expired. Each
+/// clock at the expiry and a millisecond before it, with the other clock behind, ahead or
+/// absent.
+const DESTINATION_EXPIRY_CASES: [(&str, &str, Option<&str>, bool); 8] = [
+    (
+        "device_at_expiry_no_service_time",
+        "2026-03-01T00:00:00.500Z",
+        None,
+        true,
+    ),
+    (
+        "device_before_expiry_no_service_time",
+        "2026-03-01T00:00:00.499Z",
+        None,
+        false,
+    ),
+    (
+        "device_behind_service_at_expiry",
+        "2026-03-01T00:00:00.000Z",
+        Some("2026-03-01T00:00:00.500Z"),
+        true,
+    ),
+    (
+        "device_behind_service_past_expiry",
+        "2026-03-01T00:00:00.000Z",
+        Some("2026-03-01T00:00:01.000Z"),
+        true,
+    ),
+    (
+        "device_behind_service_before_expiry",
+        "2026-03-01T00:00:00.000Z",
+        Some("2026-03-01T00:00:00.499Z"),
+        false,
+    ),
+    (
+        "service_behind_device_at_expiry",
+        "2026-03-01T00:00:00.500Z",
+        Some("2026-03-01T00:00:00.000Z"),
+        true,
+    ),
+    (
+        "service_behind_device_before_expiry",
+        "2026-03-01T00:00:00.499Z",
+        Some("2026-03-01T00:00:00.000Z"),
+        false,
+    ),
+    (
+        "both_clocks_before_expiry",
+        "2026-03-01T00:00:00.499Z",
+        Some("2026-03-01T00:00:00.499Z"),
+        false,
+    ),
+];
+
+/// The payer's two clocks of a `destination_expiry` case.
+fn expiry_clocks(device: &str, service: Option<&str>) -> (u64, Option<u64>) {
+    (time(device), service.map(time))
+}
+
+/// `destination_expiry` as paykit-lib generates it (vectors README "How the files were
+/// generated"): the expiry, the cases, each with whether the destination has expired as
+/// paykit-lib computes it, and the description.
+fn destination_expiry_members() -> Vec<(Place<'static>, Value)> {
+    let expires_at = time(DESTINATION_EXPIRES_AT);
+    let cases: Vec<Value> = DESTINATION_EXPIRY_CASES
+        .iter()
+        .map(|(name, device, service, expected)| {
+            let (device_time, service_time) = expiry_clocks(device, *service);
+            let expired = destination_expired(expires_at, device_time, service_time);
+            assert_eq!(expired, *expected, "{name}: the destination has expired");
+            json!({ "device_time": device, "expired": expired, "name": name,
+                "service_time": service })
+        })
+        .collect();
+    vec![(
+        Place::Member("/destination_expiry"),
+        json!({
+            "cases": cases,
+            "description": "A destination has expired once its expiry is at or before the later of the payer's device clock and the highest service time it has verified for its own account at its current service, compared at millisecond precision (spec 7.2, check the destination; Switch wire 1.6). A null service_time is a payer that has verified none, which judges by its device clock alone. The expiry is a public record's finite expires_at or its updated_at plus the record age limit, a Private Payment List's expires_at or 30 days after its acceptance, or period details' expires_at.",
+            "expires_at": DESTINATION_EXPIRES_AT,
+        }),
+    )]
+}
+
+fn check_destination_expiry(v: &Value) {
+    let de = &v["destination_expiry"];
+    let expires_at = time(st(de, "expires_at"));
+    let cases = arr(de, "cases");
+    assert_eq!(cases.len(), DESTINATION_EXPIRY_CASES.len());
+    for case in cases {
+        let name = st(case, "name");
+        let service = match &case["service_time"] {
+            Value::Null => None,
+            Value::String(t) => Some(t.as_str()),
+            other => panic!("{name}: service_time is {other}"),
+        };
+        let (device_time, service_time) = expiry_clocks(st(case, "device_time"), service);
+        assert_eq!(
+            destination_expired(expires_at, device_time, service_time),
+            case["expired"].as_bool().unwrap(),
+            "{name}"
+        );
+    }
 }

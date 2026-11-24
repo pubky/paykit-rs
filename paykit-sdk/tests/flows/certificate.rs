@@ -21,7 +21,11 @@ use crate::common::{store, World};
 /// `paykit_pay` with one switch permission its scopes don't derive: the Switch takes such a
 /// certificate, and Paykit refuses it (Paykit wire 3.1).
 fn refused_scopes() -> RequestedScopes {
-    let mut scopes = AppScopes::new().pay().build().unwrap();
+    refused(AppScopes::new().pay().build().unwrap())
+}
+
+/// `scopes` with one switch permission they don't derive, which Paykit refuses.
+pub(crate) fn refused(mut scopes: RequestedScopes) -> RequestedScopes {
     let extra = Permission::ALL
         .into_iter()
         .find(|p| !scopes.permissions.contains(p))
@@ -46,16 +50,28 @@ pub(crate) fn renew(
     scopes: &RequestedScopes,
     after_ms: u64,
 ) -> AppCert {
-    let keys = w.alice.identity().app_keys("wallet");
+    renew_for(w, &w.alice, "wallet", app_id, scopes, after_ms)
+}
+
+/// [`renew`] for `signer`'s app `name`.
+pub(crate) fn renew_for(
+    w: &World,
+    signer: &pubky_switch_client::testing::TestSigner,
+    name: &str,
+    app_id: [u8; 16],
+    scopes: &RequestedScopes,
+    after_ms: u64,
+) -> AppCert {
+    let keys = signer.identity().app_keys(name);
     let names: Vec<&str> = scopes.scopes.iter().map(String::as_str).collect();
     let renewed = issue_cert(
-        w.alice.identity().key(),
+        signer.identity().key(),
         &keys,
         &AppSpec::new(&names).with_permissions(&scopes.permissions),
         w.clock.now_ms() + after_ms,
     )
     .unwrap();
-    w.alice
+    signer
         .switch()
         .signer_op(OpKind::CertPut {
             target_app_id: app_id,
@@ -67,7 +83,17 @@ pub(crate) fn renew(
 
 /// Alice's next `identity.json` lists `renewed` for the app, renewing `old`.
 pub(crate) fn list(w: &World, app_id: [u8; 16], old: &AppCert, renewed: &AppCert) {
-    w.alice
+    list_for(&w.alice, app_id, old, renewed);
+}
+
+/// [`list`] in `signer`'s next `identity.json`.
+pub(crate) fn list_for(
+    signer: &pubky_switch_client::testing::TestSigner,
+    app_id: [u8; 16],
+    old: &AppCert,
+    renewed: &AppCert,
+) {
+    signer
         .next_doc(|body| {
             body.apps.retain(|a| a.app_id != app_id);
             body.apps.push(ListedApp {
@@ -2003,16 +2029,6 @@ async fn test_certificate_wider_without_keys_holds_a_new_payment_and_a_reconcile
         .await
         .unwrap_err();
     assert!(waits_for_keys(&refused), "{refused:?}");
-    // A list placed over a record the app can't open would drop its single-use marks.
-    let refused = wallet
-        .place_held_list_without_marks(
-            &w.bob_id(),
-            &[9; 16],
-            pubky_switch_client::app::UserConfirmed::new(),
-        )
-        .await
-        .unwrap_err();
-    assert!(waits_for_keys(&refused), "{refused:?}");
     assert_eq!(w.rail.all_executions().len(), 1);
 }
 
@@ -2062,9 +2078,18 @@ async fn test_certificate_wider_without_the_pay_key_writes_nothing_and_journals_
 
 /// The signer stores `cert`'s key bundle for app `me`, every data epoch up to the current.
 pub(crate) fn store_bundle(w: &World, me: [u8; 16], cert: &AppCert) {
-    let epoch = w.alice.switch().identity_doc().unwrap().data_epoch();
+    store_bundle_for(&w.alice, me, cert);
+}
+
+/// [`store_bundle`] by `signer`, for its app `me`.
+pub(crate) fn store_bundle_for(
+    signer: &pubky_switch_client::testing::TestSigner,
+    me: [u8; 16],
+    cert: &AppCert,
+) {
+    let epoch = signer.switch().identity_doc().unwrap().data_epoch();
     let parts = pubky_switch_core::records::seal_bundle_parts(
-        w.alice.identity().key(),
+        signer.identity().key(),
         cert,
         1,
         epoch,
@@ -2072,7 +2097,7 @@ pub(crate) fn store_bundle(w: &World, me: [u8; 16], cert: &AppCert) {
     )
     .unwrap();
     for part in parts {
-        w.alice
+        signer
             .switch()
             .signer_op(OpKind::KeyBundlePut(pubky_switch_core::ops::KeyBundlePut {
                 target_app_id: me,
@@ -3670,4 +3695,128 @@ async fn test_restore_keeps_records_unlisted_until_the_last_page_after_reload() 
         .await
         .unwrap()
         .is_none());
+}
+
+#[tokio::test]
+async fn test_certificate_keys_awaited_after_a_restore_raise_no_floor_alarm() {
+    // Paykit wire 5.6, Seen floor and permanence: the wallet saw the floor live and is renewed
+    // to read more, the new scope's keys not given yet, then restored on a fresh device. It
+    // holds `paykit_pay` but lists nothing while it waits for those keys, so the floor it
+    // doesn't hold is no absence: no rollback alarm.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let me = wallet.app_id();
+    let floor = pubky_switch_client::app::RecordTarget::new(
+        pubky_switch_client::app::Collection::new(
+            "block_floor",
+            paykit_lib::collections::Collection::BlockFloor.fixed_policy(),
+        ),
+        &paykit_lib::derive::natural_key::block_floor(&w.alice_id()),
+    );
+    wallet
+        .app_mut()
+        .put_record(
+            &floor,
+            &paykit_lib::records::BlockFloorRecord::new(1)
+                .to_json()
+                .unwrap(),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+    wallet.receive(None).await.unwrap();
+    let first = wallet.app().cert().clone();
+    let wider = renew(
+        &w,
+        me,
+        &AppScopes::new().pay().request().build().unwrap(),
+        1_000,
+    );
+    let _ = wallet.receive(None).await;
+    list(&w, me, &first, &wider);
+    let _ = wallet.receive(None).await;
+    assert!(wallet
+        .app()
+        .cert()
+        .scopes()
+        .iter()
+        .any(|s| s == "paykit_request"));
+    let backup = wallet.backup().await.unwrap();
+    drop(wallet);
+    let mut restored = Box::pin(Paykit::restore(
+        w.env(&w.alice, store()),
+        PaykitConfig::default(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    ))
+    .await
+    .unwrap();
+    for _ in 0..3 {
+        let _ = restored.receive(None).await;
+    }
+    assert!(restored
+        .app()
+        .shared_record(&restored.app().record_key(&floor).unwrap())
+        .await
+        .unwrap()
+        .is_none());
+    // A backup keeps what the app holds of the floor first, as a receive's end does.
+    let _ = restored.backup().await;
+    assert!(restored.app().alarm().is_none());
+}
+
+#[tokio::test]
+async fn test_certificate_renewed_without_pay_raises_no_floor_alarm_after_a_restore() {
+    // Paykit wire 5.6, Seen floor and permanence: the wallet saw the floor live, is renewed
+    // without `paykit_pay` and restored on a fresh device. Its listing doesn't read the floor,
+    // so the floor's absence from what it holds is no absence: no rollback alarm.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let me = wallet.app_id();
+    let floor = pubky_switch_client::app::RecordTarget::new(
+        pubky_switch_client::app::Collection::new(
+            "block_floor",
+            paykit_lib::collections::Collection::BlockFloor.fixed_policy(),
+        ),
+        &paykit_lib::derive::natural_key::block_floor(&w.alice_id()),
+    );
+    wallet
+        .app_mut()
+        .put_record(
+            &floor,
+            &paykit_lib::records::BlockFloorRecord::new(1)
+                .to_json()
+                .unwrap(),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+    wallet.receive(None).await.unwrap();
+    let first = wallet.app().cert().clone();
+    let reduced = renew(&w, me, &AppScopes::new().contacts().build().unwrap(), 1_000);
+    let _ = wallet.receive(None).await;
+    list(&w, me, &first, &reduced);
+    wallet.receive(None).await.unwrap();
+    assert!(!wallet
+        .app()
+        .cert()
+        .scopes()
+        .iter()
+        .any(|s| s == "paykit_pay"));
+    let backup = wallet.backup().await.unwrap();
+    drop(wallet);
+    let mut restored = Box::pin(Paykit::restore(
+        w.env(&w.alice, store()),
+        PaykitConfig::default(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    ))
+    .await
+    .unwrap();
+    for _ in 0..3 {
+        restored.receive(None).await.unwrap();
+    }
+    assert!(restored.app().alarm().is_none());
 }

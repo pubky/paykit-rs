@@ -1,6 +1,8 @@
 //! The approving app's first grant from its retained original acceptance.
 
 mod enrolled;
+mod refusals;
+mod regrant;
 
 use paykit_lib::allowances::{AllowanceTerms, Ledger};
 use paykit_lib::records::AllowanceRecord;
@@ -11,7 +13,7 @@ use pubky_switch_core::ops::{Condition, OpKind, RecordVersion, SignedOp};
 use pubky_switch_core::shared::ApplicationRef;
 use serde_json::json;
 
-use crate::common::{draft, request_from, World};
+use crate::common::{draft, request_from, World, HOUR_MS};
 use pubky_switch_client::clock::Clock;
 
 async fn applied_put(
@@ -63,15 +65,23 @@ async fn first_grant_in(
     store: std::sync::Arc<dyn pubky_switch_client::store::StateStore>,
     terms: AllowanceTerms,
 ) -> (World, paykit_sdk::Paykit, paykit_sdk::Paykit, [u8; 32]) {
-    let world = World::new();
-    let mut payer = Box::pin(world.join_with(
-        &world.alice,
-        "wallet",
-        AppScopes::new().allowance_execute().build().unwrap(),
-        Default::default(),
+    Box::pin(first_grant_as(
         store,
+        terms,
+        AppScopes::new().allowance_execute().build().unwrap(),
     ))
-    .await;
+    .await
+}
+
+/// The first grant, the payer's wallet joined with `scopes`.
+async fn first_grant_as(
+    store: std::sync::Arc<dyn pubky_switch_client::store::StateStore>,
+    terms: AllowanceTerms,
+    scopes: paykit_sdk::RequestedScopes,
+) -> (World, paykit_sdk::Paykit, paykit_sdk::Paykit, [u8; 32]) {
+    let world = World::new();
+    let mut payer =
+        Box::pin(world.join_with(&world.alice, "wallet", scopes, Default::default(), store)).await;
     let mut shop = Box::pin(world.join(
         &world.bob,
         "shop",
@@ -166,11 +176,12 @@ async fn first_grant_in(
     assert_eq!(view.executor_app_id, Some(payer.app_id()));
     assert!(view.consented);
     let shop_record = shop.allowances().await.unwrap().pop().unwrap().record;
-    assert!(
-        Box::pin(shop.confirm_allowance_executor(&shop_record, UserConfirmed::new()))
-            .await
-            .is_err()
-    );
+    assert!(Box::pin(shop.confirm_allowance_executor(
+        &shop.allowance(&shop_record).await.unwrap().hold,
+        UserConfirmed::new()
+    ))
+    .await
+    .is_err());
     let granted = payer
         .app()
         .shared_record(&key)
@@ -306,9 +317,12 @@ async fn test_unanswered_owner_resolution_advances_the_reserved_ledger_once() {
     ))
     .await;
     Box::pin(finish_restored_reconciliation(&mut second)).await;
-    Box::pin(second.confirm_allowance_executor(&key, UserConfirmed::new()))
-        .await
-        .unwrap();
+    Box::pin(second.confirm_allowance_executor(
+        &second.allowance(&key).await.unwrap().hold,
+        UserConfirmed::new(),
+    ))
+    .await
+    .unwrap();
     let next_id = Box::pin(open_funded_request(
         &world,
         &mut second,
@@ -572,11 +586,12 @@ async fn test_first_grant_confirmation_refuses_a_rewritten_initial_ledger() {
     assert!(Box::pin(payer.resume_allowance_executor(&key))
         .await
         .is_err());
-    assert!(
-        Box::pin(payer.confirm_allowance_executor(&key, UserConfirmed::new()))
-            .await
-            .is_err()
-    );
+    assert!(Box::pin(payer.confirm_allowance_executor(
+        &payer.allowance(&key).await.unwrap().hold,
+        UserConfirmed::new()
+    ))
+    .await
+    .is_err());
     assert_eq!(
         payer
             .app()
@@ -640,9 +655,12 @@ async fn test_first_grant_restores_its_complete_original_after_reconciliation() 
     Box::pin(restored.resume_allowance_executor(&key))
         .await
         .unwrap();
-    Box::pin(restored.confirm_allowance_executor(&key, UserConfirmed::new()))
-        .await
-        .unwrap();
+    Box::pin(restored.confirm_allowance_executor(
+        &restored.allowance(&key).await.unwrap().hold,
+        UserConfirmed::new(),
+    ))
+    .await
+    .unwrap();
     assert_eq!(
         restored
             .app()
@@ -974,11 +992,12 @@ async fn restore_grant_proof_order(installed_verified: bool, evidence: RestoredG
         assert!(Box::pin(restored.resume_allowance_executor(&key))
             .await
             .is_err());
-        assert!(
-            Box::pin(restored.confirm_allowance_executor(&key, UserConfirmed::new()))
-                .await
-                .is_err()
-        );
+        assert!(Box::pin(restored.confirm_allowance_executor(
+            &restored.allowance(&key).await.unwrap().hold,
+            UserConfirmed::new()
+        ))
+        .await
+        .is_err());
     } else {
         if matches!(evidence, RestoredGrantEvidence::LaterReservations) {
             // The backup predates both received requests. Confirm the existing Allowance
@@ -993,9 +1012,12 @@ async fn restore_grant_proof_order(installed_verified: bool, evidence: RestoredG
                 .await
                 .unwrap();
         }
-        Box::pin(restored.confirm_allowance_executor(&key, UserConfirmed::new()))
-            .await
-            .unwrap();
+        Box::pin(restored.confirm_allowance_executor(
+            &restored.allowance(&key).await.unwrap().hold,
+            UserConfirmed::new(),
+        ))
+        .await
+        .unwrap();
         assert!(restored.allowance(&key).await.unwrap().consented);
         if matches!(evidence, RestoredGrantEvidence::LaterReservations) {
             world.rail.set_history_payer(shop.identity());
@@ -1055,11 +1077,12 @@ async fn test_restore_holds_a_gap_between_two_noninitial_allowance_ledgers() {
         .await
         .unwrap()
         .is_none());
-    assert!(
-        Box::pin(restored.confirm_allowance_executor(&key, UserConfirmed::new()))
-            .await
-            .is_err()
-    );
+    assert!(Box::pin(restored.confirm_allowance_executor(
+        &restored.allowance(&key).await.unwrap().hold,
+        UserConfirmed::new()
+    ))
+    .await
+    .is_err());
     assert!(world.rail.all_executions().is_empty());
 }
 
@@ -1112,20 +1135,18 @@ async fn test_first_grant_restore_holds_evidence_without_the_original_grant() {
     }
 }
 
+/// After the Allowance at `record` was withdrawn: the executor's resume and a payment under
+/// it are both refused, and nothing is written. Returns the two refusals.
 pub(super) async fn attempt_after_withdrawal(
     world: &World,
     payer: &mut paykit_sdk::Paykit,
     shop: &mut paykit_sdk::Paykit,
     record: &[u8; 32],
-) -> paykit_sdk::PaykitError {
+) -> (paykit_sdk::PaykitError, paykit_sdk::PaykitError) {
     let writes = world.record_writes(&world.alice, record);
     let grant = Box::pin(payer.resume_allowance_executor(record))
         .await
         .unwrap_err();
-    assert!(
-        matches!(grant.refusal(), Some(paykit_sdk::Refusal::NotNow(_))),
-        "{grant:?}"
-    );
 
     world.rail.set_history_payer(payer.identity());
     let request = Box::pin(request_from(
@@ -1140,7 +1161,7 @@ pub(super) async fn attempt_after_withdrawal(
         .outcome
         .unwrap_err();
     assert_eq!(world.record_writes(&world.alice, record), writes);
-    refused
+    (grant, refused)
 }
 
 #[tokio::test]
@@ -1225,7 +1246,7 @@ async fn test_executor_pays_the_period_of_its_accepted_subscription() {
         .outcome
         .unwrap_err();
     assert!(
-        matches!(excess.refusal(), Some(Refusal::NotNow(reason)) if reason.contains("lifetime")),
+        matches!(excess.refusal(), Some(Refusal::NotAutomatic(reason)) if reason.contains("lifetime")),
         "{excess:?}"
     );
     assert_eq!(world.rail.all_executions().len(), 1);
@@ -2211,11 +2232,154 @@ async fn write_owner_failure(
 }
 
 #[tokio::test]
-async fn test_compacted_failure_paid_by_receipt_survives_reopen_and_restore() {
-    paykit_sdk::with_early_ledger_compaction(Box::pin(compacted_failure_paid_by_receipt())).await;
+async fn test_executor_restores_applied_batch_after_predecessor_key_retirement() {
+    use paykit_lib::allowances::EntryOutcome;
+    use pubky_switch_client::testing::Fault;
+
+    let store = crate::common::store();
+    let (world, mut payer, mut shop, key) = Box::pin(first_grant_in(store.clone(), terms())).await;
+    world.rail.set_history_payer(payer.identity());
+    for amount in ["5", "7"] {
+        Box::pin(open_funded_request(
+            &world, &mut payer, &mut shop, &key, amount,
+        ))
+        .await;
+    }
+    let (opened, _) = only_ledger(&payer).await;
+    Box::pin(write_owner_failure(&world, &mut payer, &opened.entries[0])).await;
+    let second = Box::pin(crate::allowances::advance_allowance_generation(
+        &world, &mut payer,
+    ))
+    .await;
+    let (base, predecessor) = only_ledger(&payer).await;
+    assert_eq!(base.entries[0].outcome, Some(EntryOutcome::Failed));
+    assert_eq!(predecessor.generation, second.generation());
+    let ledger = payer.app().records_of("allowance_ledgers").await.unwrap()[0].key;
+    let (_, base_revision) = applied_put(payer.app(), ledger, predecessor).await;
+
+    let third = Box::pin(change_dropping(&world, &second, &mut payer, &[], [75; 32])).await;
+    Box::pin(write_owner_failure(&world, &mut payer, &opened.entries[1])).await;
+    third.fail_next(Fault::LoseAnswer {
+        path: "/ops".into(),
+    });
+    Box::pin(payer.receive(None)).await.unwrap();
+    let markers = payer.app().protocol_scan("paykit", b"lb/").await.unwrap();
+    assert_eq!(markers.len(), 1);
+    let pending = Box::pin(payer.backup()).await.unwrap();
+    let app_id = payer.app_id();
+    drop(payer);
+
+    let mut payer =
+        Box::pin(world.load_on_clock(&world.alice, store.clone(), app_id, world.clock.clone()))
+            .await;
+    Box::pin(crate::common::finish_listing(&mut payer)).await;
+    let usage = Box::pin(payer.reconcile_allowance(&key))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!((usage.spent(), usage.reserved()), (2, 0));
+    let (_, installed) = only_ledger(&payer).await;
+    assert_eq!(installed.generation, third.generation());
+    let (write, installed_revision) = applied_put(payer.app(), ledger, installed).await;
+    assert_eq!(markers[0].1.as_slice(), write.body().batch.id.as_slice());
+    let follows = |revision| Condition::RecordCurrent {
+        key: ledger,
+        revision,
+        deleted: false,
+    };
+    assert!(write.body().conditions.contains(&follows(base_revision)));
+    assert!(payer
+        .app()
+        .protocol_scan("paykit", b"lb/")
+        .await
+        .unwrap()
+        .is_empty());
+    let accepted = Box::pin(payer.backup()).await.unwrap();
+    drop(payer);
+
+    // A second installation advances the service one write beyond the installed batch.
+    let mut other = Box::pin(restored_across_a_change(
+        &world,
+        &accepted,
+        crate::common::store(),
+        &key,
+    ))
+    .await;
+    world.rail.next(paykit_sdk::rail::Behaviour::Hang);
+    let result = Box::pin(pays_under(&world, &mut shop, &mut other, &key, "1")).await;
+    assert!(
+        matches!(result.outcome, Ok(paykit_sdk::PayOutcome::Pending { .. })),
+        "{result:?}"
+    );
+    let (_, successor) = only_ledger(&other).await;
+    let (write, _) = applied_put(other.app(), ledger, successor).await;
+    assert!(write
+        .body()
+        .conditions
+        .contains(&follows(installed_revision)));
+    let _moved = Box::pin(change_dropping(
+        &world,
+        &third,
+        &mut other,
+        &[predecessor.generation],
+        [76; 32],
+    ))
+    .await;
+    drop(other);
+    let mut restored = Box::pin(paykit_sdk::Paykit::restore(
+        world.env(&world.alice, store),
+        Default::default(),
+        &pending,
+        world.rail.clone(),
+        world.timer(),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(
+        restored
+            .app()
+            .protocol_scan("paykit", b"lb/")
+            .await
+            .unwrap(),
+        markers
+    );
+    restored.app_mut().refresh_identity().await.unwrap();
+    assert!(restored
+        .app()
+        .own_identity()
+        .service_key_of(predecessor.generation)
+        .is_none());
+    Box::pin(crate::common::finish_listing(&mut restored)).await;
+    let usage = Box::pin(restored.reconcile_allowance(&key))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (usage.lifetime().as_str(), usage.spent(), usage.reserved()),
+        ("13", 2, 1)
+    );
+    assert_eq!(only_ledger(&restored).await.1, successor);
+    assert!(restored
+        .app()
+        .protocol_scan("paykit", b"lb/")
+        .await
+        .unwrap()
+        .is_empty());
 }
 
-async fn compacted_failure_paid_by_receipt() {
+#[tokio::test]
+async fn test_compacted_failure_paid_by_receipt_survives_reopen_and_restore() {
+    paykit_sdk::with_early_ledger_compaction(Box::pin(compacted_failure_paid_by_receipt(false)))
+        .await;
+}
+
+#[tokio::test]
+async fn test_executor_pays_after_copied_outcome_key_retirement() {
+    paykit_sdk::with_early_ledger_compaction(Box::pin(compacted_failure_paid_by_receipt(true)))
+        .await;
+}
+
+async fn compacted_failure_paid_by_receipt(retire_copy_key: bool) {
     use paykit_lib::allowances::EntryOutcome;
     use paykit_sdk::rail::{Behaviour, RailOutcome};
     use paykit_sdk::Rail;
@@ -2315,6 +2479,17 @@ async fn compacted_failure_paid_by_receipt() {
         .await
         .unwrap();
     let before_copy = Box::pin(payer.backup()).await.unwrap();
+    // Only the copy into paid totals needs to be written in this generation.
+    let copy_service = if retire_copy_key {
+        Some(
+            Box::pin(crate::allowances::advance_allowance_generation(
+                &world, &mut payer,
+            ))
+            .await,
+        )
+    } else {
+        None
+    };
     world.rail.set_history_payer(identity);
     let inventory = world
         .rail
@@ -2354,6 +2529,38 @@ async fn compacted_failure_paid_by_receipt() {
         .unwrap();
     assert_eq!(usage.lifetime().as_str(), "8");
     assert_eq!(usage.spent() + done.count, 2);
+    if let Some(service) = copy_service {
+        assert_eq!(version.generation, service.generation());
+        assert_compaction_receipt(
+            &payer,
+            compacted_version.generation,
+            version.generation,
+            false,
+        )
+        .await;
+        let next = Box::pin(change_dropping(&world, &service, &mut payer, &[], [75; 32])).await;
+        Box::pin(assert_pays_under(&world, &mut shop, &mut payer, &key, "2")).await;
+        assert_eq!(only_ledger(&payer).await.1.generation, next.generation());
+        let _moved = Box::pin(change_dropping(
+            &world,
+            &next,
+            &mut payer,
+            &[version.generation],
+            [76; 32],
+        ))
+        .await;
+        Box::pin(assert_pays_under(&world, &mut shop, &mut payer, &key, "3")).await;
+        assert_eq!(
+            Box::pin(payer.reconcile_allowance(&key))
+                .await
+                .unwrap()
+                .unwrap()
+                .lifetime()
+                .as_str(),
+            "13"
+        );
+        return;
+    }
     drop(payer);
     let mut reopened =
         Box::pin(world.load_on_clock(&world.alice, store, app_id, world.clock.clone())).await;
@@ -2591,6 +2798,22 @@ async fn confirm_foreign_failure(case: ForeignFailure) {
         draft("9", world.clock.now_ms()),
     ))
     .await;
+    // A larger request, sent now while the shop's certificate holds, paid only later.
+    let lasting = |value: &str| {
+        draft(value, world.clock.now_ms())
+            .with_proposal_expires_at_ms(world.clock.now_ms() + 3_650 * 24 * HOUR_MS)
+    };
+    let larger = if case != ForeignFailure::LostRelease {
+        Some(Box::pin(request_from(&mut shop, payer.identity(), lasting("95"))).await)
+    } else {
+        None
+    };
+    // One that couldn't fit even with the failed attempt released.
+    let too_large = if case == ForeignFailure::BeforeDispatch {
+        Some(Box::pin(request_from(&mut shop, payer.identity(), lasting("105"))).await)
+    } else {
+        None
+    };
     Box::pin(payer.receive(None)).await.unwrap();
     if case == ForeignFailure::AfterDispatch {
         world.rail.next(paykit_sdk::rail::Behaviour::Hang);
@@ -2676,6 +2899,47 @@ async fn confirm_foreign_failure(case: ForeignFailure) {
             .as_str(),
         "9"
     );
+    if let Some(larger) = larger.as_ref() {
+        // The failed attempt holds 9 of the 100 the lifetime limit allows. Ended before
+        // dispatch, the user can release it, so a payment of 95 waits; dispatched, it can't
+        // be released, so the payment is refused for good.
+        // The shop's certificate is renewed too, so its destination checks.
+        let shop_old = shop.app().cert().clone();
+        let shop_id = shop.app_id();
+        let shop_scopes = AppScopes::new().allowance().request().build().unwrap();
+        let shop_renewed =
+            crate::certificate::renew_for(&world, &world.bob, "shop", shop_id, &shop_scopes, 0);
+        crate::certificate::list_for(&world.bob, shop_id, &shop_old, &shop_renewed);
+        for _ in 0..2 {
+            Box::pin(shop.receive(None)).await.unwrap();
+        }
+        assert_eq!(shop.app().cert().hash(), shop_renewed.hash());
+        let waits = Box::pin(payer.pay_under_allowance(larger, &key))
+            .await
+            .outcome
+            .unwrap_err();
+        let expected = if case == ForeignFailure::BeforeDispatch {
+            paykit_sdk::Refusal::NotNow(
+                "the lifetime limit has no room while another app's failed attempt holds it: the user can release that attempt (reserved_by_other_apps)".into(),
+            )
+        } else {
+            paykit_sdk::Refusal::NotAutomatic("the lifetime limit has no room".into())
+        };
+        assert_eq!(waits.refusal(), Some(&expected), "{waits:?}");
+        if let Some(too_large) = too_large.as_ref() {
+            let refused = Box::pin(payer.pay_under_allowance(too_large, &key))
+                .await
+                .outcome
+                .unwrap_err();
+            assert_eq!(
+                refused.refusal(),
+                Some(&paykit_sdk::Refusal::NotAutomatic(
+                    "the lifetime limit has no room".into()
+                )),
+                "{refused:?}"
+            );
+        }
+    }
     let before_release = if case == ForeignFailure::BeforeDispatch {
         Some(Box::pin(payer.backup()).await.unwrap())
     } else {
@@ -2924,9 +3188,12 @@ async fn test_allowance_refuses_an_earlier_failed_attempt_outside_its_ledger() {
 
 fn repeat_without_method_history(world: &World) {
     world.rail.set_declaration(
-        paykit_sdk::RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
-            .with_idempotent(true)
-            .with_idempotency_retention_ms(86_400_000),
+        paykit_sdk::RailDeclaration::new(
+            paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
+            paykit_sdk::rail::FAKE_PAYMENT_TIME_TOLERANCE_MS,
+        )
+        .with_idempotent(true)
+        .with_idempotency_retention_ms(86_400_000),
     );
 }
 
@@ -3194,9 +3461,12 @@ async fn test_started_allowance_payment_requires_both_confirmations_after_an_inb
     repeat_without_method_history(&world);
     Box::pin(payer.resume_payments()).await.unwrap();
     assert_eq!(world.rail.pay_calls(&attempt_id), 1);
-    Box::pin(payer.confirm_allowance_executor(&key, UserConfirmed::new()))
-        .await
-        .unwrap();
+    Box::pin(payer.confirm_allowance_executor(
+        &payer.allowance(&key).await.unwrap().hold,
+        UserConfirmed::new(),
+    ))
+    .await
+    .unwrap();
     assert!(payer.allowance(&key).await.unwrap().consented);
     // A restored or interrupted local store must still establish the original consent.
     use pubky_switch_client::app::LocalWrite;
@@ -3275,11 +3545,12 @@ async fn test_payer_requires_combined_confirmation_before_proposing_or_accepting
     assert!(Box::pin(payer.resume_allowance_executor(&offer.record))
         .await
         .is_err());
-    assert!(
-        Box::pin(payer.confirm_allowance_executor(&offer.record, UserConfirmed::new()))
-            .await
-            .is_err()
-    );
+    assert!(Box::pin(payer.confirm_allowance_executor(
+        &payer.allowance(&offer.record).await.unwrap().hold,
+        UserConfirmed::new()
+    ))
+    .await
+    .is_err());
     Box::pin(shop.receive(None)).await.unwrap();
     assert_eq!(
         shop.allowance(&proposal.record).await.unwrap().status,
@@ -3420,4 +3691,2252 @@ async fn resume_seller_proposal(lose_answer: bool) {
     let granted = payer.allowance(&key).await.unwrap();
     assert_eq!(granted.executor_app_id, Some(app_id));
     assert!(granted.consented);
+}
+
+/// A payer wallet that proposed an Allowance with automatic execution, approved by its
+/// user, and the shop's acceptance read, the first grant not made yet.
+async fn accepted_not_granted(
+    store: std::sync::Arc<dyn pubky_switch_client::store::StateStore>,
+) -> (World, paykit_sdk::Paykit, paykit_sdk::Paykit, [u8; 32]) {
+    Box::pin(accepted_not_granted_with(
+        store,
+        AppScopes::new().allowance_execute().build().unwrap(),
+    ))
+    .await
+}
+
+/// As [`accepted_not_granted`], the payer's app holding `scopes`.
+async fn accepted_not_granted_with(
+    store: std::sync::Arc<dyn pubky_switch_client::store::StateStore>,
+    scopes: paykit_sdk::RequestedScopes,
+) -> (World, paykit_sdk::Paykit, paykit_sdk::Paykit, [u8; 32]) {
+    let world = World::new();
+    let mut payer =
+        Box::pin(world.join_with(&world.alice, "wallet", scopes, Default::default(), store)).await;
+    let mut shop = Box::pin(world.join(
+        &world.bob,
+        "shop",
+        AppScopes::new().allowance().request().build().unwrap(),
+    ))
+    .await;
+    payer.app_mut().invite(&shop.identity()).await.unwrap();
+    shop.app_mut().invite(&payer.identity()).await.unwrap();
+    Box::pin(payer.propose_executable_allowance(shop.identity(), terms(), UserConfirmed::new()))
+        .await
+        .unwrap();
+    Box::pin(shop.receive(None)).await.unwrap();
+    let offer = shop.allowances().await.unwrap().pop().unwrap();
+    Box::pin(shop.accept_allowance(&offer.record))
+        .await
+        .unwrap();
+    Box::pin(payer.receive(None)).await.unwrap();
+    let key = payer.allowances().await.unwrap().pop().unwrap().record;
+    (world, payer, shop, key)
+}
+
+/// Whether `payer` holds its first grant's checkpoint (`lv/`) for the Allowance at
+/// `record`: the local write of the grant's batch, applied when the batch is.
+async fn granted(payer: &paykit_sdk::Paykit, record: &[u8; 32]) -> bool {
+    let key = format!("lv/{}", pubky_switch_core::enc::b64(record));
+    payer
+        .app()
+        .protocol_get("paykit", key.as_bytes())
+        .await
+        .unwrap()
+        .is_some()
+}
+
+async fn missed_item(world: &World, payer: &mut paykit_sdk::Paykit) {
+    let now = world.clock.now_ms();
+    world.alice.switch().push_missed(1, now - 1_000, now);
+    Box::pin(payer.receive(None)).await.unwrap();
+    // The copy of the shared records counts as listed again from the next receive's listing.
+    Box::pin(payer.receive(None)).await.unwrap();
+}
+
+#[tokio::test]
+async fn test_executor_approval_before_a_missed_item_needs_a_new_confirmation() {
+    // Every Allowance is held at a `missed` item, one approved but not granted yet among
+    // them (Paykit spec 7.2): its first grant waits for the user to confirm again.
+    let (world, mut payer, _shop, key) =
+        Box::pin(accepted_not_granted(crate::common::store())).await;
+    Box::pin(missed_item(&world, &mut payer)).await;
+    Box::pin(payer.resume_allowance_executor(&key))
+        .await
+        .expect_err("the approval was given before the missed item");
+    assert!(!payer.allowance(&key).await.unwrap().consented);
+    Box::pin(payer.confirm_allowance_executor(
+        &payer.allowance(&key).await.unwrap().hold,
+        UserConfirmed::new(),
+    ))
+    .await
+    .unwrap();
+    assert!(payer.allowance(&key).await.unwrap().consented);
+}
+
+#[tokio::test]
+async fn test_executor_kept_first_grant_landing_after_a_missed_item_consents_nothing() {
+    // The first grant's batch goes unanswered and is kept; a `missed` item is read before it
+    // lands. The grant applies, but the batch carries no consent, and the approval it was
+    // made on is the earlier hold's: the Allowance waits for the user to confirm it again.
+    use pubky_switch_client::testing::Fault;
+    let (world, mut payer, _shop, key) =
+        Box::pin(accepted_not_granted(crate::common::store())).await;
+    world.alice.switch().fail_next(Fault::Unanswered {
+        path: "/ops".into(),
+        after: 0,
+    });
+    Box::pin(payer.resume_allowance_executor(&key))
+        .await
+        .expect_err("the grant's batch is unanswered");
+    world.clock.advance_ms(1_000);
+    // The kept batch can't be sent while the item is read.
+    world.alice.switch().fail_next(Fault::Unreachable {
+        path: "/ops".into(),
+        after: 0,
+    });
+    let now = world.clock.now_ms();
+    world.alice.switch().push_missed(1, now - 1_000, now);
+    Box::pin(payer.receive(None)).await.unwrap();
+    assert!(
+        !Box::pin(granted(&payer, &key)).await,
+        "the grant's batch is still kept"
+    );
+    Box::pin(payer.receive(None)).await.unwrap();
+    assert!(
+        Box::pin(granted(&payer, &key)).await,
+        "the kept batch landed after the missed item"
+    );
+    Box::pin(payer.receive(None)).await.unwrap();
+    let view = payer.allowance(&key).await.unwrap();
+    assert_eq!(
+        view.executor_app_id,
+        Some(payer.app_id()),
+        "the grant applied"
+    );
+    assert!(!view.consented, "{view:?}");
+    Box::pin(payer.resume_allowance_executor(&key))
+        .await
+        .expect_err("no consent without a confirmation under the current hold");
+    assert!(!payer.allowance(&key).await.unwrap().consented);
+    Box::pin(payer.confirm_allowance_executor(
+        &payer.allowance(&key).await.unwrap().hold,
+        UserConfirmed::new(),
+    ))
+    .await
+    .unwrap();
+    assert!(payer.allowance(&key).await.unwrap().consented);
+}
+
+#[tokio::test]
+async fn test_executor_notice_before_the_consent_step_is_kept_as_a_removal() {
+    // The first grant's batch goes unanswered and is kept. Another own app ends the
+    // Allowance, and its notice is read once the kept batch applied, before the consent is
+    // written. The notice is kept as a removal, so a later resume consents nothing, although
+    // the record still shows the Allowance running (Paykit spec 8.3).
+    use pubky_switch_client::testing::Fault;
+    let (world, mut payer, _shop, key) =
+        Box::pin(accepted_not_granted(crate::common::store())).await;
+    let _phone = Box::pin(world.join(
+        &world.alice,
+        "phone",
+        AppScopes::new().allowance().build().unwrap(),
+    ))
+    .await;
+    world.alice.switch().fail_next(Fault::Unanswered {
+        path: "/ops".into(),
+        after: 0,
+    });
+    Box::pin(payer.resume_allowance_executor(&key))
+        .await
+        .expect_err("the grant's batch is unanswered");
+    Box::pin(payer.receive(None)).await.unwrap();
+    let view = payer.allowance(&key).await.unwrap();
+    assert_eq!(
+        view.executor_app_id,
+        Some(payer.app_id()),
+        "the grant applied"
+    );
+    assert!(!view.consented, "{view:?}");
+    crate::allowances::notice(&world, &world.alice, "phone", payer.app_id(), &key, "ended");
+    Box::pin(payer.receive(None)).await.unwrap();
+    assert_eq!(
+        Box::pin(crate::allowances::consent_entry(&payer, &key)).await,
+        Some(json!({ "removed": { "reason": "ended" } }))
+    );
+    Box::pin(payer.resume_allowance_executor(&key))
+        .await
+        .expect_err("the notice removed the Allowance");
+    assert!(!payer.allowance(&key).await.unwrap().consented);
+}
+
+#[tokio::test]
+async fn test_executor_refused_confirmation_leaves_no_approval() {
+    // After a `missed` item the user confirms the Allowance while its counterparty is
+    // blocked: the confirmation is refused and leaves no approval behind, so once unblocked
+    // a resume alone doesn't grant it (Paykit spec 7.2, 8.3).
+    let (world, mut payer, shop, key) = Box::pin(accepted_not_granted_with(
+        crate::common::store(),
+        AppScopes::new()
+            .allowance_execute()
+            .manage_contacts()
+            .build()
+            .unwrap(),
+    ))
+    .await;
+    Box::pin(missed_item(&world, &mut payer)).await;
+    // The user is shown the Allowance, then it is blocked before the confirmation.
+    Box::pin(crate::common::finish_listing(&mut payer)).await;
+    let shown = payer.allowance(&key).await.unwrap().hold;
+    payer.block(&shop.identity()).await.unwrap();
+    let refused = Box::pin(payer.confirm_allowance_executor(&shown, UserConfirmed::new()))
+        .await
+        .expect_err("the counterparty is blocked");
+    assert_eq!(
+        refused.refusal(),
+        Some(&paykit_sdk::Refusal::NotNow(
+            "the counterparty is blocked".into()
+        )),
+        "{refused:?}"
+    );
+    payer.unblock(&shop.identity()).await.unwrap();
+    Box::pin(payer.receive(None)).await.unwrap();
+    Box::pin(payer.resume_allowance_executor(&key))
+        .await
+        .expect_err("the refused confirmation approved nothing");
+    let view = payer.allowance(&key).await.unwrap();
+    assert_eq!(view.executor_app_id, None, "{view:?}");
+    assert!(!view.consented);
+    Box::pin(payer.confirm_allowance_executor(
+        &payer.allowance(&key).await.unwrap().hold,
+        UserConfirmed::new(),
+    ))
+    .await
+    .unwrap();
+    assert!(payer.allowance(&key).await.unwrap().consented);
+}
+
+#[tokio::test]
+async fn test_executor_refused_resume_after_a_restore_consents_nothing() {
+    // The first grant's batch is kept and applies before its consent is written, and a
+    // backup is taken then, after the request it pays was read, so its restore is clean.
+    // The original pays under the Allowance, so the ledger moves on. Restored from that
+    // backup, the executor can't reconcile the ledger without the method's complete
+    // history: its resume and its confirmation are refused at the ledger check, and leave
+    // no consent behind (Paykit spec 8.3, "A grant implies a ledger").
+    use paykit_sdk::PayOutcome;
+    use pubky_switch_client::testing::Fault;
+    let (world, mut payer, mut shop, key) =
+        Box::pin(accepted_not_granted(crate::common::store())).await;
+    world.rail.set_history_payer(payer.identity());
+    let request = Box::pin(request_from(
+        &mut shop,
+        world.alice_id(),
+        draft("5", world.clock.now_ms()),
+    ))
+    .await;
+    Box::pin(payer.receive(None)).await.unwrap();
+    world.alice.switch().fail_next(Fault::Unanswered {
+        path: "/ops".into(),
+        after: 0,
+    });
+    Box::pin(payer.resume_allowance_executor(&key))
+        .await
+        .expect_err("the grant's batch is unanswered");
+    Box::pin(payer.receive(None)).await.unwrap();
+    assert!(Box::pin(granted(&payer, &key)).await, "the grant applied");
+    let backup = payer.backup().await.unwrap();
+    Box::pin(payer.resume_allowance_executor(&key))
+        .await
+        .unwrap();
+    let paid = Box::pin(payer.pay_under_allowance(&request, &key))
+        .await
+        .outcome
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    drop(payer);
+    // The method's history of that payment is gone: the ledger can't be reconciled.
+    world.rail.forget_history(&paid.attempt_id());
+    let mut restored = Box::pin(restored_clean(&world, &backup)).await;
+    Box::pin(restored.receive(None)).await.unwrap();
+    Box::pin(reconciled(&mut restored)).await;
+    Box::pin(restored.end_reconcile(UserConfirmed::new()))
+        .await
+        .unwrap();
+    assert_eq!(
+        Box::pin(approvals(&restored)).await.len(),
+        1,
+        "the clean restore kept the approval, so the ledger check is what refuses"
+    );
+    Box::pin(restored.resume_allowance_executor(&key))
+        .await
+        .expect_err("the ledger can't be reconciled");
+    assert_eq!(
+        Box::pin(crate::allowances::consent_entry(&restored, &key)).await,
+        None
+    );
+    Box::pin(restored.confirm_allowance_executor(
+        &restored.allowance(&key).await.unwrap().hold,
+        UserConfirmed::new(),
+    ))
+    .await
+    .expect_err("a confirmation doesn't reconcile the ledger either");
+    assert_eq!(
+        Box::pin(crate::allowances::consent_entry(&restored, &key)).await,
+        None
+    );
+}
+
+/// Run `reconcile` until its listing of the shared records completes.
+async fn reconciled(app: &mut paykit_sdk::Paykit) {
+    for _ in 0..8 {
+        match Box::pin(app.reconcile()).await {
+            Ok(_) => return,
+            Err(error) => assert!(
+                matches!(
+                    error.refusal(),
+                    Some(paykit_sdk::Refusal::NotNow(reason)) if reason.contains("Call reconcile again")
+                ),
+                "{error:?}"
+            ),
+        }
+    }
+    panic!("the listing didn't complete");
+}
+
+/// `payer`'s approvals of automatic execution (`xa/`), raw.
+async fn approvals(payer: &paykit_sdk::Paykit) -> Vec<(Vec<u8>, Vec<u8>)> {
+    payer.app().protocol_scan("paykit", b"xa/").await.unwrap()
+}
+
+/// `backup` restored into a new store, with a cursor the service reports clean.
+async fn restored_clean(world: &World, backup: &paykit_sdk::PaykitBackup) -> paykit_sdk::Paykit {
+    paykit_sdk::Paykit::restore(
+        world.env(&world.alice, crate::common::store()),
+        paykit_sdk::PaykitConfig::default(),
+        backup,
+        std::sync::Arc::clone(&world.rail) as std::sync::Arc<dyn paykit_sdk::Rail>,
+        world.timer(),
+    )
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn test_executor_restored_approval_dropped_by_a_missed_item_before_the_verdict() {
+    // A restore carries the backup's approval to the verdict. A `missed` item read before a
+    // clean verdict holds every Allowance (Paykit spec 7.2): the carried approval is dropped
+    // with it, and a resume doesn't grant without a new confirmation.
+    let (world, mut payer, _shop, key) =
+        Box::pin(accepted_not_granted(crate::common::store())).await;
+    let backup = payer.backup().await.unwrap();
+    drop(payer);
+    let mut restored = Box::pin(restored_clean(&world, &backup)).await;
+    Box::pin(missed_item(&world, &mut restored)).await;
+    Box::pin(reconciled(&mut restored)).await;
+    Box::pin(restored.end_reconcile(UserConfirmed::new()))
+        .await
+        .unwrap();
+    Box::pin(restored.resume_allowance_executor(&key))
+        .await
+        .expect_err("the approval was given before the missed item");
+    assert!(!restored.allowance(&key).await.unwrap().consented);
+}
+
+#[tokio::test]
+async fn test_executor_backup_approval_under_an_older_hold_is_not_carried() {
+    // An approval kept under a hold that a `missed` item ended, still in the backup, is not
+    // the backup's own hold's: a clean restore carries nothing from it (Paykit spec 7.2).
+    let (world, mut payer, _shop, key) =
+        Box::pin(accepted_not_granted(crate::common::store())).await;
+    let before = Box::pin(approvals(&payer)).await;
+    assert_eq!(before.len(), 1, "one approval under the first hold");
+    Box::pin(missed_item(&world, &mut payer)).await;
+    assert!(Box::pin(approvals(&payer)).await.is_empty());
+    let (stale, value) = before.into_iter().next().unwrap();
+    payer
+        .app_mut()
+        .protocol_commit(
+            "paykit",
+            &[pubky_switch_client::app::LocalWrite::Put { key: stale, value }],
+        )
+        .await
+        .unwrap();
+    let backup = payer.backup().await.unwrap();
+    drop(payer);
+    let mut restored = Box::pin(restored_clean(&world, &backup)).await;
+    Box::pin(restored.receive(None)).await.unwrap();
+    Box::pin(restored.reconcile()).await.unwrap();
+    Box::pin(restored.end_reconcile(UserConfirmed::new()))
+        .await
+        .unwrap();
+    Box::pin(restored.resume_allowance_executor(&key))
+        .await
+        .expect_err("the approval was under an older hold");
+    assert!(!restored.allowance(&key).await.unwrap().consented);
+}
+
+/// The grants the Allowance record at `record` holds, as the payer reads it.
+async fn grants(payer: &paykit_sdk::Paykit, record: &[u8; 32]) -> usize {
+    let held = payer.app().shared_record(record).await.unwrap().unwrap();
+    AllowanceRecord::read(held.content.value().unwrap(), &payer.identity())
+        .unwrap()
+        .grants
+        .len()
+}
+
+#[tokio::test]
+async fn test_executor_resume_retried_without_a_read_lands_a_kept_grant() {
+    // The first grant's batch applies at the service and its answer is lost, or never
+    // reaches it. The host retries the resume, with no read in between: the retry sends
+    // the kept batch again, builds no second grant, and consents (Paykit spec 8.3).
+    use pubky_switch_client::testing::Fault;
+    for applied in [true, false] {
+        let (world, mut payer, mut shop, key) =
+            Box::pin(accepted_not_granted(crate::common::store())).await;
+        world.alice.switch().fail_next(if applied {
+            Fault::LoseAnswer {
+                path: "/ops".into(),
+            }
+        } else {
+            Fault::Unreachable {
+                path: "/ops".into(),
+                after: 0,
+            }
+        });
+        Box::pin(payer.resume_allowance_executor(&key))
+            .await
+            .expect_err("the grant's batch is kept");
+        assert!(!Box::pin(granted(&payer, &key)).await, "{applied}");
+        // A request arrives meanwhile: the read that lands the grant takes it, and the
+        // host's next receive still tells of it.
+        Box::pin(request_from(
+            &mut shop,
+            world.alice_id(),
+            draft("1", world.clock.now_ms()),
+        ))
+        .await;
+        Box::pin(payer.resume_allowance_executor(&key))
+            .await
+            .unwrap_or_else(|error| panic!("{applied}: {error:?}"));
+        assert!(Box::pin(granted(&payer, &key)).await, "{applied}");
+        assert!(payer.allowance(&key).await.unwrap().consented, "{applied}");
+        assert_eq!(Box::pin(grants(&payer, &key)).await, 1, "{applied}");
+        let report = Box::pin(payer.receive(None)).await.unwrap();
+        assert!(
+            crate::allowances::received(&report, "paykit.payment_request"),
+            "{applied}: {report:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_executor_notice_while_the_grant_batch_is_kept_is_kept_as_a_removal() {
+    // The first grant's batch applies and its answer is lost. Another own app ends the
+    // Allowance; its notice is read while the batch can't be sent again, before the grant's
+    // checkpoint exists. The notice is kept as a removal all the same: once the batch lands,
+    // a resume consents nothing (Paykit spec 8.3, "even before it has added it").
+    use pubky_switch_client::testing::Fault;
+    let (world, mut payer, _shop, key) =
+        Box::pin(accepted_not_granted(crate::common::store())).await;
+    let _phone = Box::pin(world.join(
+        &world.alice,
+        "phone",
+        AppScopes::new().allowance().build().unwrap(),
+    ))
+    .await;
+    world.alice.switch().fail_next(Fault::LoseAnswer {
+        path: "/ops".into(),
+    });
+    Box::pin(payer.resume_allowance_executor(&key))
+        .await
+        .expect_err("the grant's answer is lost");
+    crate::allowances::notice(&world, &world.alice, "phone", payer.app_id(), &key, "ended");
+    world.alice.switch().fail_next(Fault::Unreachable {
+        path: "/ops".into(),
+        after: 0,
+    });
+    Box::pin(payer.receive(None)).await.unwrap();
+    assert!(
+        !Box::pin(granted(&payer, &key)).await,
+        "the batch is still kept"
+    );
+    assert_eq!(
+        Box::pin(crate::allowances::consent_entry(&payer, &key)).await,
+        Some(json!({ "removed": { "reason": "ended" } }))
+    );
+    Box::pin(payer.receive(None)).await.unwrap();
+    assert!(Box::pin(granted(&payer, &key)).await, "the batch landed");
+    Box::pin(payer.resume_allowance_executor(&key))
+        .await
+        .expect_err("the notice removed the Allowance");
+    assert_eq!(
+        Box::pin(crate::allowances::consent_entry(&payer, &key)).await,
+        Some(json!({ "removed": { "reason": "ended" } }))
+    );
+}
+
+#[tokio::test]
+async fn test_executor_end_seen_before_the_consent_is_kept_as_a_removal() {
+    // The first grant's batch applies and its answer is lost. The shop ends the Allowance,
+    // and the wallet's next read both lands the kept grant and reads the end, before any
+    // consent exists. The end is kept as a removal: a resume consents nothing (Paykit spec
+    // 8.3, "even before it has added it").
+    use pubky_switch_client::testing::Fault;
+    let (world, mut payer, mut shop, key) =
+        Box::pin(accepted_not_granted(crate::common::store())).await;
+    world.alice.switch().fail_next(Fault::LoseAnswer {
+        path: "/ops".into(),
+    });
+    Box::pin(payer.resume_allowance_executor(&key))
+        .await
+        .expect_err("the grant's answer is lost");
+    let accepted = shop.allowances().await.unwrap().pop().unwrap();
+    Box::pin(shop.end_allowance(&accepted.record))
+        .await
+        .unwrap();
+    Box::pin(payer.receive(None)).await.unwrap();
+    assert!(
+        Box::pin(granted(&payer, &key)).await,
+        "the kept grant landed"
+    );
+    assert_eq!(
+        Box::pin(crate::allowances::consent_entry(&payer, &key)).await,
+        Some(json!({ "removed": { "reason": "ended" } }))
+    );
+    Box::pin(payer.resume_allowance_executor(&key))
+        .await
+        .expect_err("the Allowance ended");
+    assert_eq!(
+        Box::pin(crate::allowances::consent_entry(&payer, &key)).await,
+        Some(json!({ "removed": { "reason": "ended" } }))
+    );
+}
+
+async fn restored_approval(clean: bool) -> bool {
+    let storage = crate::common::store();
+    let (world, mut payer, _shop, key) = Box::pin(accepted_not_granted(storage)).await;
+    let backup = payer.backup().await.unwrap();
+    drop(payer);
+    let mut restored = paykit_sdk::Paykit::restore(
+        world.env(&world.alice, crate::common::store()),
+        paykit_sdk::PaykitConfig::default(),
+        &backup,
+        std::sync::Arc::clone(&world.rail) as std::sync::Arc<dyn paykit_sdk::Rail>,
+        world.timer(),
+    )
+    .await
+    .unwrap();
+    if clean {
+        Box::pin(restored.receive(None)).await.unwrap();
+    } else {
+        crate::common::restore_with_unknown_cursor(&mut restored).await;
+    }
+    Box::pin(restored.reconcile()).await.unwrap();
+    Box::pin(restored.end_reconcile(UserConfirmed::new()))
+        .await
+        .unwrap();
+    Box::pin(restored.resume_allowance_executor(&key))
+        .await
+        .is_ok()
+        && restored.allowance(&key).await.unwrap().consented
+}
+
+#[tokio::test]
+async fn test_executor_clean_restore_keeps_the_approval() {
+    assert!(Box::pin(restored_approval(true)).await);
+}
+
+#[tokio::test]
+async fn test_executor_restore_that_isnt_clean_needs_a_new_confirmation() {
+    assert!(!Box::pin(restored_approval(false)).await);
+}
+
+/// After a first grant, the consent list's entry for it is `consent`; a resume, which turns
+/// an approval into consent, leaves the entry exactly as it is.
+async fn promote_keeps(consent: serde_json::Value) {
+    use pubky_switch_client::app::LocalWrite;
+    let (_world, mut payer, _shop, key) = Box::pin(first_grant()).await;
+    let at = format!("ac/{}", pubky_switch_core::enc::b64(&key));
+    let held = payer
+        .app()
+        .protocol_get("paykit", at.as_bytes())
+        .await
+        .unwrap()
+        .unwrap();
+    let mut entry: serde_json::Value = serde_json::from_slice(&held).unwrap();
+    entry["d"]["consent"] = consent;
+    let bytes = serde_json::to_vec(&entry).unwrap();
+    payer
+        .app_mut()
+        .protocol_commit(
+            "paykit",
+            &[LocalWrite::Put {
+                key: at.as_bytes().to_vec(),
+                value: bytes.clone(),
+            }],
+        )
+        .await
+        .unwrap();
+    let _ = Box::pin(payer.resume_allowance_executor(&key)).await;
+    assert_eq!(
+        payer
+            .app()
+            .protocol_get("paykit", at.as_bytes())
+            .await
+            .unwrap(),
+        Some(bytes)
+    );
+    assert!(!payer.allowance(&key).await.unwrap().consented);
+}
+
+#[tokio::test]
+async fn test_executor_consent_never_replaces_a_removal() {
+    Box::pin(promote_keeps(json!({ "removed": { "reason": "ended" } }))).await;
+}
+
+#[tokio::test]
+async fn test_executor_consent_never_replaces_a_newer_decision() {
+    Box::pin(promote_keeps(json!({ "held": { "confirm_again": true } }))).await;
+}
+
+/// An Allowance that expires at `expires`, its reservation written 5 s before and its batch's
+/// answer taking `delay_ms`, so the first dispatch is judged at `expires - 5_000 + delay_ms`.
+/// Returns the payment's outcome, the executions and the ledger entry's outcome.
+async fn dispatch_at_expiry(delay_ms: u64) -> (paykit_sdk::PayResult, usize, String) {
+    Box::pin(dispatch_at_expiry_on(delay_ms, false)).await
+}
+
+/// As [`dispatch_at_expiry`]; with `device_stopped`, the payer's device clock stays at the
+/// reservation's time while the service's runs on, so only the verified service time can
+/// pass the expiry.
+async fn dispatch_at_expiry_on(
+    delay_ms: u64,
+    device_stopped: bool,
+) -> (paykit_sdk::PayResult, usize, String) {
+    let expires = pubky_switch_client::testing::START_MS + 60 * 60_000;
+    let terms = AllowanceTerms::from_json(&json!({
+        "asset": "btc", "lifetime_amount_limit": "100", "period_limits": [],
+        "per_payment_amount": null, "active_from": null,
+        "expires_at": pubky_switch_core::time::rfc3339(expires),
+        "allowed_payment_endpoint_identifiers": null
+    }))
+    .unwrap();
+    let storage = crate::common::store();
+    let (world, payer, mut shop, key) = Box::pin(first_grant_in(storage.clone(), terms)).await;
+    world.rail.set_history_payer(payer.identity());
+    let app_id = payer.app_id();
+    drop(payer);
+    let slow = std::sync::Arc::new(crate::common::SlowOps::new(std::sync::Arc::clone(
+        &world.router,
+    )));
+    world.clock.set_ms(expires - 5_000);
+    let mut env = world.env(&world.alice, storage);
+    env.transport = std::sync::Arc::clone(&slow)
+        as std::sync::Arc<dyn pubky_switch_client::transport::Transport>;
+    if device_stopped {
+        env.clock = std::sync::Arc::new(pubky_switch_client::clock::TestClock::new(expires - 5_000))
+            as std::sync::Arc<dyn pubky_switch_client::clock::Clock>;
+    }
+    let mut payer = paykit_sdk::Paykit::load(
+        env,
+        paykit_sdk::PaykitConfig::default(),
+        app_id,
+        std::sync::Arc::clone(&world.rail) as std::sync::Arc<dyn paykit_sdk::Rail>,
+        world.timer(),
+    )
+    .await
+    .unwrap();
+    let request = Box::pin(request_from(
+        &mut shop,
+        payer.identity(),
+        draft("1", world.clock.now_ms()),
+    ))
+    .await;
+    Box::pin(payer.receive(None)).await.unwrap();
+    slow.delay_next(std::sync::Arc::clone(&world.clock), delay_ms);
+    let result = Box::pin(payer.pay_under_allowance(&request, &key)).await;
+    let executions = world.rail.all_executions().len();
+    let (ledger, _) = only_ledger(&payer).await;
+    let outcome = format!("{:?}", ledger.entries.last().unwrap().outcome);
+    (result, executions, outcome)
+}
+
+#[tokio::test]
+async fn test_executor_expiry_after_the_reservation_refuses_the_first_dispatch() {
+    // The reservation is written 5 s before the expiry and its batch's answer takes 10 s:
+    // the first dispatch comes after the expiry, pays nothing, and the attempt is failed.
+    let (result, executions, outcome) = Box::pin(dispatch_at_expiry(10_000)).await;
+    let refused = result.outcome.unwrap_err();
+    assert!(
+        format!("{refused:?}").contains("the Allowance expired before dispatch"),
+        "{refused:?}"
+    );
+    assert_eq!(executions, 0);
+    assert!(outcome.contains("Failed"), "{outcome}");
+}
+
+#[tokio::test]
+async fn test_executor_dispatch_at_the_expiry_is_refused() {
+    let (result, executions, outcome) = Box::pin(dispatch_at_expiry(5_000)).await;
+    let refused = result.outcome.unwrap_err();
+    assert!(
+        format!("{refused:?}").contains("the Allowance expired before dispatch"),
+        "{refused:?}"
+    );
+    assert_eq!(executions, 0);
+    assert!(outcome.contains("Failed"), "{outcome}");
+}
+
+#[tokio::test]
+async fn test_executor_dispatch_refused_by_the_service_time_alone() {
+    // The device clock stays 5 s before the expiry. The reservation's answer takes 5 s on
+    // the service's clock, so the reads after it carry a service time at the expiry. The
+    // later of the two clocks has reached the expiry, so the first dispatch pays nothing; a
+    // millisecond earlier it pays.
+    let (result, executions, outcome) = Box::pin(dispatch_at_expiry_on(5_000, true)).await;
+    let refused = result.outcome.unwrap_err();
+    assert!(
+        format!("{refused:?}").contains("the Allowance expired before dispatch"),
+        "{refused:?}"
+    );
+    assert_eq!(executions, 0);
+    assert!(outcome.contains("Failed"), "{outcome}");
+    let (result, executions, _) = Box::pin(dispatch_at_expiry_on(4_999, true)).await;
+    assert!(
+        matches!(result.outcome, Ok(paykit_sdk::PayOutcome::Paid { .. })),
+        "{:?}",
+        result.outcome
+    );
+    assert_eq!(executions, 1);
+}
+
+#[tokio::test]
+async fn test_executor_dispatch_a_millisecond_before_the_expiry_pays() {
+    let (result, executions, _) = Box::pin(dispatch_at_expiry(4_999)).await;
+    assert!(
+        matches!(result.outcome, Ok(paykit_sdk::PayOutcome::Paid { .. })),
+        "{:?}",
+        result.outcome
+    );
+    assert_eq!(executions, 1);
+}
+
+#[tokio::test]
+async fn test_executor_expired_allowance_repeats_no_dispatch() {
+    // The first call went out and hung. The method then keeps no history for it, and its
+    // idempotency lets the SDK repeat the call. Once the Allowance has expired, a resume
+    // makes no further call: nothing more is paid under an expired Allowance (Paykit spec
+    // 8.3). The attempt stays open as possibly paid, and its ledger entry stays reserved.
+    use paykit_sdk::rail::Behaviour;
+    use paykit_sdk::PayOutcome;
+    let start = pubky_switch_client::testing::START_MS;
+    let expires = start + 60 * 60_000;
+    let terms = AllowanceTerms::from_json(&json!({
+        "asset": "btc", "lifetime_amount_limit": "100", "period_limits": [],
+        "per_payment_amount": null, "active_from": null,
+        "expires_at": pubky_switch_core::time::rfc3339(expires),
+        "allowed_payment_endpoint_identifiers": null
+    }))
+    .unwrap();
+    let (world, mut payer, mut shop, key) =
+        Box::pin(first_grant_in(crate::common::store(), terms)).await;
+    world.rail.set_history_payer(payer.identity());
+    world.clock.set_ms(expires - 30_000);
+    let request = Box::pin(request_from(
+        &mut shop,
+        payer.identity(),
+        draft("1", world.clock.now_ms()),
+    ))
+    .await;
+    Box::pin(payer.receive(None)).await.unwrap();
+    world.rail.next(Behaviour::Hang);
+    let PayOutcome::Pending { attempt_id, .. } =
+        Box::pin(payer.pay_under_allowance(&request, &key))
+            .await
+            .outcome
+            .unwrap()
+    else {
+        panic!("the Allowance payment was not pending")
+    };
+    assert_eq!(world.rail.pay_calls(&attempt_id), 1);
+    // The method's history can't tell whether the call went, and its idempotency allows a
+    // repeat: only the Allowance's expiry stops it.
+    world.rail.forget_history(&attempt_id);
+    repeat_without_method_history(&world);
+    world.clock.set_ms(expires + 1);
+    let resumed = Box::pin(payer.resume_payments()).await.unwrap();
+    assert_eq!(world.rail.pay_calls(&attempt_id), 1, "{resumed:?}");
+    assert!(
+        resumed.iter().any(|outcome| matches!(
+            outcome,
+            PayOutcome::Uncertain { attempt_id: id, .. } if *id == attempt_id
+        )),
+        "{resumed:?}"
+    );
+    let payment = payer
+        .payments()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|p| p.attempt_id == attempt_id)
+        .unwrap();
+    assert_ne!(payment.stage, paykit_sdk::Stage::Finished);
+    let ledger = payer
+        .app()
+        .records_of("allowance_ledgers")
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    let ledger = Ledger::from_json(ledger.content.value().unwrap()).unwrap();
+    let entry = ledger
+        .entries
+        .iter()
+        .find(|entry| entry.attempt_id == attempt_id)
+        .unwrap();
+    assert_eq!(entry.outcome, None);
+}
+
+#[tokio::test]
+async fn test_executor_holds_a_period_whose_record_diverges_after_paying_is_journaled() {
+    use crate::period_payments::{diverge_at_paying, period_key, StageStore};
+    use paykit_lib::periods::{AnchoredRule, PeriodRef, Recurrence, Unit};
+
+    // Right after the executor journals the period's `Paying`, a view shows its period
+    // record divergent: the dispatch is held and the rail is never called (Paykit spec 6).
+    let base = std::sync::Arc::new(StageStore::default());
+    let storage =
+        std::sync::Arc::clone(&base) as std::sync::Arc<dyn pubky_switch_client::store::StateStore>;
+    let (world, mut payer, mut shop, key) = Box::pin(first_grant_in(storage, terms())).await;
+    world.rail.set_history_payer(payer.identity());
+    let start = world.clock.now_ms() / 1_000 * 1_000;
+    let schedule = Recurrence::new(
+        AnchoredRule::new(start, 1, Unit::Hour).unwrap(),
+        start,
+        None,
+    )
+    .unwrap();
+    let period = PeriodRef::from(schedule.periods(1).unwrap()[0]);
+    let req = Box::pin(request_from(
+        &mut shop,
+        payer.identity(),
+        draft("70", start).with_recurrence(schedule),
+    ))
+    .await;
+    Box::pin(payer.receive(None)).await.unwrap();
+    Box::pin(payer.accept_subscription_under_allowance(&req, &key))
+        .await
+        .unwrap();
+    Box::pin(shop.receive(None)).await.unwrap();
+    let record = period_key(&payer, &req, period);
+    diverge_at_paying(&base, payer.app_id(), record);
+    let outcome = Box::pin(payer.pay_period_under_allowance(&req, &period))
+        .await
+        .outcome
+        .unwrap();
+    assert!(
+        matches!(outcome, paykit_sdk::PayOutcome::Pending { .. }),
+        "{outcome:?}"
+    );
+    assert!(world.rail.all_executions().is_empty());
+    assert!(base.fired(), "the record diverged after Paying");
+}
+
+#[tokio::test]
+async fn test_executor_restored_dispatch_resolved_with_no_claim_keeps_the_allowance_usable() {
+    // The executor's attempt is written to the claim but its answer is lost, so the payment
+    // method is never called. Once the executor's certificate has expired, another own app
+    // writes the attempt failed, and the executor, renewed, sees it and is backed up. Past
+    // the claim's window the service drops the claim. Restored from the backup at the same
+    // service, the attempt is open with no claim showing it, the method's history no longer
+    // keeps it, and the user resolves it as not paid. The Allowance is then read and pays
+    // (Paykit spec 7.2, 8.3, 8.4).
+    let storage = crate::common::store();
+    let (world, mut payer, mut shop, key) =
+        Box::pin(first_grant_in(storage.clone(), terms())).await;
+    world.rail.set_history_payer(payer.identity());
+    let original = payer.app().cert().clone();
+    world
+        .clock
+        .set_ms(original.expires_at() - paykit_sdk::PRE_DISPATCH_BUDGET_MS - 120_000);
+    let mut other = Box::pin(world.wallet("second wallet")).await;
+    let request = Box::pin(request_from(
+        &mut shop,
+        payer.identity(),
+        draft("9", world.clock.now_ms()),
+    ))
+    .await;
+    Box::pin(payer.receive(None)).await.unwrap();
+    world
+        .alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::LoseAnswer {
+            path: "/ops".into(),
+        });
+    let lost = Box::pin(payer.pay_under_allowance(&request, &key))
+        .await
+        .outcome
+        .unwrap_err();
+    assert!(lost.kept_batch().is_some(), "{lost:?}");
+    Box::pin(payer.receive(None)).await.unwrap();
+    let (held, _) = only_ledger(&payer).await;
+    let (obligation, attempt) = (held.entries[0].obligation, held.entries[0].attempt_id);
+    world.clock.set_ms(original.expires_at() + 1);
+    Box::pin(other.receive(None)).await.unwrap();
+    Box::pin(other.resolve_attempt(
+        &obligation,
+        attempt,
+        paykit_sdk::Resolution::Failed,
+        UserConfirmed::new(),
+    ))
+    .await
+    .unwrap();
+    let scopes = AppScopes::new().allowance_execute().build().unwrap();
+    let id = payer.app_id();
+    let renewed = crate::certificate::renew(&world, id, &scopes, 0);
+    crate::certificate::list(&world, id, &original, &renewed);
+    Box::pin(payer.receive(None)).await.unwrap();
+    Box::pin(payer.reconcile_allowance(&key)).await.unwrap();
+    // The shop's certificate, issued with the payer's, is renewed too.
+    let shop_scopes = AppScopes::new().allowance().request().build().unwrap();
+    let shop_cert = shop.app().cert().clone();
+    let shop_renewed =
+        crate::certificate::renew_for(&world, &world.bob, "shop", shop.app_id(), &shop_scopes, 0);
+    crate::certificate::list_for(&world.bob, shop.app_id(), &shop_cert, &shop_renewed);
+    Box::pin(shop.receive(None)).await.unwrap();
+    let backup = payer.backup().await.unwrap();
+    drop(payer);
+    // By the restore, the method's history keeps a dispatch a week: it no longer tells.
+    let declared = |retention: Option<u64>| {
+        let declaration = paykit_sdk::RailDeclaration::new(
+            paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
+            paykit_sdk::rail::FAKE_PAYMENT_TIME_TOLERANCE_MS,
+        )
+        .with_history(true)
+        .with_history_survives_restore(true);
+        match retention {
+            Some(ms) => declaration.with_history_retention_ms(ms),
+            None => declaration,
+        }
+    };
+    world
+        .rail
+        .set_declaration(declared(Some(7 * 24 * crate::common::HOUR_MS)));
+    world
+        .clock
+        .advance_ms(2 * 24 * crate::common::HOUR_MS + pubky_switch_core::claims::RECONCILIATION_MS);
+    let mut restored = Box::pin(paykit_sdk::Paykit::restore(
+        world.env(&world.alice, crate::common::store()),
+        Default::default(),
+        &backup,
+        world.rail.clone(),
+        world.timer(),
+    ))
+    .await
+    .unwrap();
+    Box::pin(crate::common::finish_listing(&mut restored)).await;
+    // Reconciliation lists the shared records in pages, asked again until done.
+    let mut reconciled = Box::pin(restored.reconcile()).await;
+    for _ in 0..8 {
+        let Err(error) = &reconciled else { break };
+        assert!(
+            matches!(error.refusal(), Some(paykit_sdk::Refusal::NotNow(_))),
+            "{error}"
+        );
+        reconciled = Box::pin(restored.reconcile()).await;
+    }
+    reconciled.unwrap();
+    Box::pin(restored.end_reconcile(UserConfirmed::new()))
+        .await
+        .unwrap();
+    assert!(restored
+        .app_mut()
+        .read_claim(&obligation)
+        .await
+        .unwrap()
+        .is_none());
+    Box::pin(restored.resolve_attempt(
+        &obligation,
+        attempt,
+        paykit_sdk::Resolution::Failed,
+        UserConfirmed::new(),
+    ))
+    .await
+    .unwrap();
+    // A history kept for good again, the Allowance is read and pays.
+    world.rail.set_declaration(declared(None));
+    assert!(Box::pin(restored.reconcile_allowance(&key))
+        .await
+        .unwrap()
+        .is_some());
+    let next = Box::pin(request_from(
+        &mut shop,
+        restored.identity(),
+        draft("2", world.clock.now_ms()),
+    ))
+    .await;
+    Box::pin(restored.receive(None)).await.unwrap();
+    let paid = Box::pin(restored.pay_under_allowance(&next, &key))
+        .await
+        .outcome
+        .unwrap();
+    assert!(
+        matches!(paid, paykit_sdk::PayOutcome::Paid { .. }),
+        "{paid:?}"
+    );
+}
+
+/// A one-time request from the shop for `value` btc, its hold confirmed if it is held,
+/// paid under the Allowance at `key`.
+async fn pays_under(
+    world: &World,
+    shop: &mut paykit_sdk::Paykit,
+    payer: &mut paykit_sdk::Paykit,
+    key: &[u8; 32],
+    value: &str,
+) -> paykit_sdk::PayResult {
+    let request = Box::pin(request_from(
+        shop,
+        payer.identity(),
+        draft(value, world.clock.now_ms()),
+    ))
+    .await;
+    Box::pin(payer.receive(None)).await.unwrap();
+    if let Some(held) = payer.request(&request).await.unwrap().held {
+        Box::pin(payer.confirm_possibly_cancelled(&request, &held, UserConfirmed::new()))
+            .await
+            .unwrap();
+    }
+    Box::pin(payer.pay_under_allowance(&request, key)).await
+}
+
+#[tokio::test]
+async fn test_executor_grant_before_an_orderly_generation_change_still_pays() {
+    // The service's generation changes in an orderly way, with nothing declared lost: the
+    // Allowance's grant and ledger, written in the earlier generation, keep their evidence,
+    // so it goes on paying automatically, and after a `missed` item the user's confirmation
+    // lands (Paykit spec 8.3, "After provider loss" pauses only after a loss; Pubky Switch
+    // spec, Section 12.5).
+    let (world, mut payer, mut shop, key) = Box::pin(first_grant()).await;
+    world.rail.set_history_payer(payer.identity());
+    let paid = Box::pin(pays_under(&world, &mut shop, &mut payer, &key, "1")).await;
+    assert!(
+        matches!(paid.outcome, Ok(paykit_sdk::PayOutcome::Paid { .. })),
+        "{paid:?}"
+    );
+    let before = payer.app().own_identity().generation();
+    let service = Box::pin(crate::allowances::advance_allowance_generation(
+        &world, &mut payer,
+    ))
+    .await;
+    assert!(payer.app().own_identity().generation() > before);
+    let paid = Box::pin(pays_under(&world, &mut shop, &mut payer, &key, "2")).await;
+    assert!(
+        matches!(paid.outcome, Ok(paykit_sdk::PayOutcome::Paid { .. })),
+        "{paid:?}"
+    );
+
+    // A `missed` item at the service of the new generation holds the Allowance.
+    let now = world.clock.now_ms();
+    service.push_missed(1, now - 1_000, now);
+    Box::pin(crate::common::finish_listing(&mut payer)).await;
+    assert!(!payer.allowance(&key).await.unwrap().consented);
+    let hold = payer.allowance(&key).await.unwrap().hold;
+    Box::pin(payer.confirm_allowance_executor(&hold, UserConfirmed::new()))
+        .await
+        .unwrap();
+    let paid = Box::pin(pays_under(&world, &mut shop, &mut payer, &key, "3")).await;
+    assert!(
+        matches!(paid.outcome, Ok(paykit_sdk::PayOutcome::Paid { .. })),
+        "{paid:?}"
+    );
+}
+
+/// A subscription from the shop, accepted under the Allowance at `key`: its refusal. After a
+/// provider loss a one-time request is held for good under any Allowance (Paykit spec 8.1),
+/// so a Billing Period shows the Allowance's own state.
+async fn subscription_refused(
+    world: &World,
+    shop: &mut paykit_sdk::Paykit,
+    payer: &mut paykit_sdk::Paykit,
+    key: &[u8; 32],
+) -> paykit_sdk::Refusal {
+    use paykit_lib::periods::{AnchoredRule, Recurrence, Unit};
+    let start = world.clock.now_ms() / 1_000 * 1_000;
+    let schedule = Recurrence::new(
+        AnchoredRule::new(start, 1, Unit::Hour).unwrap(),
+        start,
+        None,
+    )
+    .unwrap();
+    let request = Box::pin(request_from(
+        shop,
+        payer.identity(),
+        draft("1", start).with_recurrence(schedule),
+    ))
+    .await;
+    Box::pin(payer.receive(None)).await.unwrap();
+    Box::pin(payer.accept_subscription_under_allowance(&request, key))
+        .await
+        .unwrap_err()
+        .refusal()
+        .cloned()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn test_executor_grant_before_a_provider_loss_pays_nothing() {
+    // A provider loss is no orderly change: the Allowance's grant and ledger from before it
+    // pay nothing automatically on the replacement service (Paykit spec 8.3, "After
+    // provider loss").
+    let (world, mut payer, mut shop, key) = Box::pin(first_grant()).await;
+    world.rail.set_history_payer(payer.identity());
+    let _service = crate::provider_loss::declare_loss(&world);
+    let uncertain_until = Box::pin(crate::provider_loss::follow_loss(&mut payer)).await;
+    payer.app_mut().invite(&shop.identity()).await.unwrap();
+    world
+        .clock
+        .set_ms(uncertain_until.max(world.clock.now_ms()) + pubky_switch_client::app::DOC_CACHE_MS);
+    // The grant from before the loss pays nothing: the user confirms the Allowance again
+    // under the loss's hold, and its usage waits for repair (Paykit spec 8.3, "After
+    // provider loss").
+    let refused = Box::pin(subscription_refused(&world, &mut shop, &mut payer, &key)).await;
+    let hold = payer.allowance(&key).await.unwrap().hold;
+    assert_eq!(
+        refused,
+        paykit_sdk::Refusal::AllowanceConfirmationNeeded { hold }
+    );
+    assert!(world.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_executor_open_attempt_across_an_orderly_generation_change_still_accounts() {
+    // An attempt opened before an orderly generation change is still open after it: its
+    // claim, of the earlier generation, still accounts for its reservation, and the
+    // Allowance goes on paying (Pubky Switch spec, Sections 4.3 and 12.5).
+    let (world, mut payer, mut shop, key) = Box::pin(first_grant()).await;
+    world.rail.set_history_payer(payer.identity());
+    world.rail.next(paykit_sdk::rail::Behaviour::Hang);
+    let open = Box::pin(pays_under(&world, &mut shop, &mut payer, &key, "5")).await;
+    assert!(open.outcome.is_ok(), "{open:?}");
+    let _service = Box::pin(crate::allowances::advance_allowance_generation(
+        &world, &mut payer,
+    ))
+    .await;
+    assert!(
+        Box::pin(payer.reconcile_allowance(&key))
+            .await
+            .unwrap()
+            .is_some(),
+        "the open attempt of the earlier generation accounts"
+    );
+    let paid = Box::pin(pays_under(&world, &mut shop, &mut payer, &key, "1")).await;
+    assert!(
+        matches!(paid.outcome, Ok(paykit_sdk::PayOutcome::Paid { .. })),
+        "{paid:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_executor_compacted_ledger_across_an_orderly_generation_change_still_pays() {
+    paykit_sdk::with_early_ledger_compaction(Box::pin(compacted_across_a_change())).await;
+}
+
+/// A failed attempt compacted into the ledger's totals before an orderly generation
+/// change: the ledger written at the new generation still reads, payment after payment.
+async fn compacted_across_a_change() {
+    let (world, mut payer, mut shop, key) = Box::pin(first_grant()).await;
+    world.rail.set_history_payer(payer.identity());
+    world.rail.next(paykit_sdk::rail::Behaviour::Fail);
+    let failed = Box::pin(pays_under(&world, &mut shop, &mut payer, &key, "7")).await;
+    assert!(
+        matches!(failed.outcome, Ok(paykit_sdk::PayOutcome::Failed { .. })),
+        "{failed:?}"
+    );
+    world.clock.advance_ms(60_001);
+    let paid = Box::pin(pays_under(&world, &mut shop, &mut payer, &key, "1")).await;
+    assert!(
+        matches!(paid.outcome, Ok(paykit_sdk::PayOutcome::Paid { .. })),
+        "{paid:?}"
+    );
+    assert_eq!(only_ledger(&payer).await.0.failed.len(), 1, "compacted");
+    let _service = Box::pin(crate::allowances::advance_allowance_generation(
+        &world, &mut payer,
+    ))
+    .await;
+    for value in ["2", "3"] {
+        let paid = Box::pin(pays_under(&world, &mut shop, &mut payer, &key, value)).await;
+        assert!(
+            matches!(paid.outcome, Ok(paykit_sdk::PayOutcome::Paid { .. })),
+            "{value}: {paid:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_executor_failed_attempt_across_an_orderly_generation_change_still_accounts() {
+    // An attempt that failed before an orderly generation change: its outcome, of the
+    // earlier generation, still accounts, and the Allowance goes on paying.
+    let (world, mut payer, mut shop, key) = Box::pin(first_grant()).await;
+    world.rail.set_history_payer(payer.identity());
+    world.rail.next(paykit_sdk::rail::Behaviour::Fail);
+    let failed = Box::pin(pays_under(&world, &mut shop, &mut payer, &key, "5")).await;
+    assert!(
+        matches!(failed.outcome, Ok(paykit_sdk::PayOutcome::Failed { .. })),
+        "{failed:?}"
+    );
+    let _service = Box::pin(crate::allowances::advance_allowance_generation(
+        &world, &mut payer,
+    ))
+    .await;
+    assert!(Box::pin(payer.reconcile_allowance(&key))
+        .await
+        .unwrap()
+        .is_some());
+    let paid = Box::pin(pays_under(&world, &mut shop, &mut payer, &key, "1")).await;
+    assert!(
+        matches!(paid.outcome, Ok(paykit_sdk::PayOutcome::Paid { .. })),
+        "{paid:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_executor_lost_generation_key_still_listed_pays_nothing() {
+    // The next `identity.json` after a provider loss still lists the lost generation's key:
+    // its writes verify, but nothing from before the loss counts, so the Allowance granted
+    // then pays nothing (Paykit spec 8.3, "After provider loss").
+    let (world, mut payer, mut shop, key) = Box::pin(first_grant()).await;
+    world.rail.set_history_payer(payer.identity());
+    let _service = crate::provider_loss::declare_loss_keeping_key(&world);
+    let uncertain_until = Box::pin(crate::provider_loss::follow_loss(&mut payer)).await;
+    payer.app_mut().invite(&shop.identity()).await.unwrap();
+    world
+        .clock
+        .set_ms(uncertain_until.max(world.clock.now_ms()) + pubky_switch_client::app::DOC_CACHE_MS);
+    // The grant from before the loss pays nothing: the user confirms the Allowance again
+    // under the loss's hold, and its usage waits for repair (Paykit spec 8.3, "After
+    // provider loss").
+    // The earlier grant's evidence verifies under the still-listed key, but is from before
+    // the loss: reconciliation establishes nothing from it.
+    assert!(granted(&payer, &key).await);
+    assert!(payer.reconcile_allowance(&key).await.unwrap().is_none());
+    let refused = Box::pin(subscription_refused(&world, &mut shop, &mut payer, &key)).await;
+    let hold = payer.allowance(&key).await.unwrap().hold;
+    assert_eq!(
+        refused,
+        paykit_sdk::Refusal::AllowanceConfirmationNeeded { hold }
+    );
+    assert!(world.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_executor_attempt_answered_by_the_earlier_generation_is_not_acted_on() {
+    // After an orderly generation change, a reservation answered by the earlier
+    // generation's service authorizes nothing: the answer, under the earlier key, isn't
+    // taken, and no money moves (Pubky Switch spec, Section 12.5).
+    let (world, mut payer, mut shop, key) = Box::pin(first_grant()).await;
+    world.rail.set_history_payer(payer.identity());
+    let earlier = std::sync::Arc::clone(world.alice.switch());
+    let service = Box::pin(crate::allowances::advance_allowance_generation(
+        &world, &mut payer,
+    ))
+    .await;
+    let request = Box::pin(request_from(
+        &mut shop,
+        payer.identity(),
+        draft("1", world.clock.now_ms()),
+    ))
+    .await;
+    Box::pin(payer.receive(None)).await.unwrap();
+    world
+        .router
+        .add_switch(crate::common::ALICE_ORIGIN, &earlier);
+    let answered = Box::pin(payer.pay_under_allowance(&request, &key)).await;
+    assert!(
+        !matches!(answered.outcome, Ok(paykit_sdk::PayOutcome::Paid { .. })),
+        "{answered:?}"
+    );
+    assert!(world.rail.all_executions().is_empty());
+    world
+        .router
+        .add_switch(crate::common::ALICE_ORIGIN, &service);
+}
+
+#[tokio::test]
+async fn test_executor_reservation_whose_answer_was_lost_counts_across_a_change() {
+    // A payment's reservation applies at the service and its answer is lost, so the app's
+    // checkpoint lacks it; the service's generation then changes in an orderly way. Later
+    // reads count that reservation from its opening, as evidence of what happened, and the
+    // Allowance goes on paying (Pubky Switch spec, Section 12.5).
+    use pubky_switch_client::testing::Fault;
+    let (world, mut payer, mut shop, key) = Box::pin(first_grant()).await;
+    world.rail.set_history_payer(payer.identity());
+    let request = Box::pin(request_from(
+        &mut shop,
+        payer.identity(),
+        draft("1", world.clock.now_ms()),
+    ))
+    .await;
+    Box::pin(payer.receive(None)).await.unwrap();
+    world.alice.switch().fail_next(Fault::LoseAnswer {
+        path: "/ops".into(),
+    });
+    let lost = Box::pin(payer.pay_under_allowance(&request, &key)).await;
+    assert!(lost.outcome.is_err(), "{lost:?}");
+    let _service = Box::pin(crate::allowances::advance_allowance_generation(
+        &world, &mut payer,
+    ))
+    .await;
+    let _ = Box::pin(payer.resume_payments()).await;
+    Box::pin(payer.receive(None)).await.unwrap();
+    assert!(Box::pin(payer.reconcile_allowance(&key))
+        .await
+        .unwrap()
+        .is_some());
+    let paid = Box::pin(pays_under(&world, &mut shop, &mut payer, &key, "2")).await;
+    assert!(
+        matches!(paid.outcome, Ok(paykit_sdk::PayOutcome::Paid { .. })),
+        "{paid:?}"
+    );
+}
+
+/// Restore the payer's `backup` over `storage`, list and reconcile, and confirm the
+/// Allowance at `key` again, as a restore that isn't clean asks.
+async fn restored_across_a_change(
+    world: &World,
+    backup: &paykit_sdk::PaykitBackup,
+    storage: std::sync::Arc<dyn pubky_switch_client::store::StateStore>,
+    key: &[u8; 32],
+) -> paykit_sdk::Paykit {
+    let mut restored = Box::pin(paykit_sdk::Paykit::restore(
+        world.env(&world.alice, storage),
+        Default::default(),
+        backup,
+        world.rail.clone(),
+        world.timer(),
+    ))
+    .await
+    .unwrap();
+    Box::pin(crate::common::finish_listing(&mut restored)).await;
+    Box::pin(finish_restored_reconciliation(&mut restored)).await;
+    let hold = restored.allowance(key).await.unwrap().hold;
+    Box::pin(restored.confirm_allowance_executor(&hold, UserConfirmed::new()))
+        .await
+        .unwrap();
+    assert!(restored.allowance(key).await.unwrap().consented);
+    restored
+}
+
+#[tokio::test]
+async fn test_executor_restore_after_an_orderly_generation_change_still_pays() {
+    // A backup taken after an orderly generation change, restored on a new device: the
+    // grant and ledger the earlier generation wrote are read back with no copy held here,
+    // and still count as evidence of their own generation (Paykit spec 8.3; Pubky Switch
+    // spec, Section 12.5).
+    let (world, mut payer, mut shop, key) = Box::pin(first_grant()).await;
+    world.rail.set_history_payer(payer.identity());
+    let paid = Box::pin(pays_under(&world, &mut shop, &mut payer, &key, "1")).await;
+    assert!(
+        matches!(paid.outcome, Ok(paykit_sdk::PayOutcome::Paid { .. })),
+        "{paid:?}"
+    );
+    let _service = Box::pin(crate::allowances::advance_allowance_generation(
+        &world, &mut payer,
+    ))
+    .await;
+    let backup = payer.backup().await.unwrap();
+    drop(payer);
+    let mut restored = Box::pin(restored_across_a_change(
+        &world,
+        &backup,
+        crate::common::store(),
+        &key,
+    ))
+    .await;
+    let paid = Box::pin(pays_under(&world, &mut shop, &mut restored, &key, "4")).await;
+    assert!(
+        matches!(paid.outcome, Ok(paykit_sdk::PayOutcome::Paid { .. })),
+        "{paid:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_executor_in_place_restore_across_an_orderly_generation_change_still_pays() {
+    // A backup taken before an orderly generation change, restored in place after two
+    // payments in the new generation: the installation's newer checkpoint pins the ledger
+    // write after the backup's, across the change (Paykit spec 8.3; Pubky Switch spec,
+    // Section 12.5).
+    let storage = crate::common::store();
+    let (world, mut payer, mut shop, key) =
+        Box::pin(first_grant_in(storage.clone(), terms())).await;
+    world.rail.set_history_payer(payer.identity());
+    let backup = payer.backup().await.unwrap();
+    let _service = Box::pin(crate::allowances::advance_allowance_generation(
+        &world, &mut payer,
+    ))
+    .await;
+    for value in ["1", "2"] {
+        let paid = Box::pin(pays_under(&world, &mut shop, &mut payer, &key, value)).await;
+        assert!(
+            matches!(paid.outcome, Ok(paykit_sdk::PayOutcome::Paid { .. })),
+            "{paid:?}"
+        );
+    }
+    drop(payer);
+    // The executor's own reads show it: its history is selected again and the user's
+    // confirmation lands.
+    let mut restored = Box::pin(restored_across_a_change(&world, &backup, storage, &key)).await;
+    assert!(Box::pin(restored.reconcile_allowance(&key))
+        .await
+        .unwrap()
+        .is_some());
+}
+
+#[tokio::test]
+async fn test_executor_started_payment_repeats_after_a_conflict_across_a_change() {
+    // A payment started in the new generation under a grant of the earlier one, then the
+    // Allowance conflicted, written in the new generation: the record moving to a later
+    // generation and sequence is no stale instance, so the started payment repeats as it
+    // does without a change (Paykit spec 8.3, "Conflicted"; Pubky Switch spec, Section 12.5).
+    use paykit_sdk::rail::Behaviour;
+    use paykit_sdk::PayOutcome;
+    let store = crate::common::store();
+    let (world, mut payer, mut shop, key) = Box::pin(first_grant_in(store.clone(), terms())).await;
+    world.rail.set_history_payer(payer.identity());
+    let service = Box::pin(crate::allowances::advance_allowance_generation(
+        &world, &mut payer,
+    ))
+    .await;
+    let request = Box::pin(request_from(
+        &mut shop,
+        world.alice_id(),
+        draft("5", world.clock.now_ms()),
+    ))
+    .await;
+    Box::pin(payer.receive(None)).await.unwrap();
+    world.rail.next(Behaviour::Hang);
+    let PayOutcome::Pending { attempt_id, .. } =
+        Box::pin(payer.pay_under_allowance(&request, &key))
+            .await
+            .outcome
+            .unwrap()
+    else {
+        panic!("the Allowance payment was not pending")
+    };
+    let held = payer.app().shared_record(&key).await.unwrap().unwrap();
+    let record = paykit_lib::records::AllowanceRecord::read(
+        held.content.value().unwrap(),
+        &payer.identity(),
+    )
+    .unwrap();
+    let rejection = world.sign_as(
+        &world.bob,
+        "shop",
+        &world.alice,
+        "paykit.allowance_rejection",
+        vec![record.proposal.hash()],
+        json!({"allowance_id": record.allowance_id.as_str()})
+            .as_object()
+            .cloned()
+            .unwrap(),
+    );
+    let keys = world.bob.identity().app_keys("shop");
+    let cert = world.bob.switch().app(&keys.app_id_bytes()).cert.unwrap();
+    service
+        .send_plaintext(
+            world.bob.identity().public(),
+            &cert,
+            &rejection,
+            &[payer.app_id()],
+        )
+        .unwrap();
+    Box::pin(payer.receive(None)).await.unwrap();
+    assert_eq!(
+        payer.allowance(&key).await.unwrap().status,
+        AllowanceStatus::Conflicted
+    );
+    let app_id = payer.app_id();
+    drop(payer);
+    let mut payer =
+        Box::pin(world.load_on_clock(&world.alice, store, app_id, world.clock.clone())).await;
+    repeat_without_method_history(&world);
+    Box::pin(payer.resume_payments()).await.unwrap();
+    assert_eq!(world.rail.pay_calls(&attempt_id), 2);
+    assert_eq!(world.rail.executions(&attempt_id), 1);
+}
+
+#[tokio::test]
+async fn test_executor_first_grant_kept_across_an_orderly_generation_change_lands() {
+    // The first grant's batch is kept unapplied over an orderly generation change and sent
+    // again to the new generation's service: the grant it carries was confirmed in the
+    // earlier generation, which is in its history, so it is accepted and pays (Paykit spec
+    // 8.3, "After provider loss" pauses only after a loss).
+    use pubky_switch_client::testing::Fault;
+    let (world, mut payer, mut shop, key) =
+        Box::pin(accepted_not_granted(crate::common::store())).await;
+    world.rail.set_history_payer(payer.identity());
+    world.alice.switch().fail_next(Fault::Unanswered {
+        path: "/ops".into(),
+        after: 0,
+    });
+    Box::pin(payer.resume_allowance_executor(&key))
+        .await
+        .expect_err("the grant's batch is unanswered");
+    let _service = Box::pin(crate::allowances::advance_allowance_generation(
+        &world, &mut payer,
+    ))
+    .await;
+    for _ in 0..3 {
+        if Box::pin(payer.resume_allowance_executor(&key))
+            .await
+            .is_ok()
+        {
+            break;
+        }
+        Box::pin(crate::common::finish_listing(&mut payer)).await;
+    }
+    assert!(payer.allowance(&key).await.unwrap().consented);
+    let paid = Box::pin(pays_under(&world, &mut shop, &mut payer, &key, "1")).await;
+    assert!(
+        matches!(paid.outcome, Ok(paykit_sdk::PayOutcome::Paid { .. })),
+        "{paid:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_executor_acceptance_applied_before_an_orderly_generation_change_is_taken_up() {
+    // The acceptance's batch applies and its answer is lost before an orderly generation
+    // change: read back after the change, it is evidence of its own generation, and the
+    // executor takes the Allowance up (Paykit spec 8.3; Pubky Switch spec, Section 12.5).
+    use pubky_switch_client::testing::Fault;
+    let world = World::new();
+    let mut payer = Box::pin(world.join_with(
+        &world.alice,
+        "wallet",
+        AppScopes::new().allowance_execute().build().unwrap(),
+        Default::default(),
+        crate::common::store(),
+    ))
+    .await;
+    let mut shop = Box::pin(world.join(
+        &world.bob,
+        "shop",
+        AppScopes::new().allowance().request().build().unwrap(),
+    ))
+    .await;
+    world.rail.set_history_payer(payer.identity());
+    payer.app_mut().invite(&shop.identity()).await.unwrap();
+    shop.app_mut().invite(&payer.identity()).await.unwrap();
+    Box::pin(payer.propose_executable_allowance(shop.identity(), terms(), UserConfirmed::new()))
+        .await
+        .unwrap();
+    Box::pin(shop.receive(None)).await.unwrap();
+    let offer = shop.allowances().await.unwrap().pop().unwrap();
+    Box::pin(shop.accept_allowance(&offer.record))
+        .await
+        .unwrap();
+    world.alice.switch().fail_next(Fault::LoseAnswer {
+        path: "/ops".into(),
+    });
+    let _ = Box::pin(payer.receive(None)).await;
+    let _service = Box::pin(crate::allowances::advance_allowance_generation(
+        &world, &mut payer,
+    ))
+    .await;
+    let key = payer.allowances().await.unwrap().pop().unwrap().record;
+    assert_eq!(
+        payer.allowance(&key).await.unwrap().status,
+        AllowanceStatus::Accepted
+    );
+    Box::pin(payer.resume_allowance_executor(&key))
+        .await
+        .unwrap();
+    let paid = Box::pin(pays_under(&world, &mut shop, &mut payer, &key, "1")).await;
+    assert!(
+        matches!(paid.outcome, Ok(paykit_sdk::PayOutcome::Paid { .. })),
+        "{paid:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_executor_acceptance_kept_across_an_orderly_generation_change_is_taken_up() {
+    // The acceptance's batch is kept unapplied over an orderly generation change, and the
+    // client signs it again for the new generation: it is still the acceptance the user
+    // approved, and the executor takes the Allowance up (Paykit spec 8.3; Pubky Switch spec,
+    // Section 12.5).
+    use pubky_switch_client::testing::Fault;
+    let world = World::new();
+    let mut payer = Box::pin(world.join_with(
+        &world.alice,
+        "wallet",
+        AppScopes::new().allowance_execute().build().unwrap(),
+        Default::default(),
+        crate::common::store(),
+    ))
+    .await;
+    let mut shop = Box::pin(world.join(
+        &world.bob,
+        "shop",
+        AppScopes::new().allowance().request().build().unwrap(),
+    ))
+    .await;
+    world.rail.set_history_payer(payer.identity());
+    payer.app_mut().invite(&shop.identity()).await.unwrap();
+    shop.app_mut().invite(&payer.identity()).await.unwrap();
+    Box::pin(payer.propose_executable_allowance(shop.identity(), terms(), UserConfirmed::new()))
+        .await
+        .unwrap();
+    Box::pin(shop.receive(None)).await.unwrap();
+    let offer = shop.allowances().await.unwrap().pop().unwrap();
+    Box::pin(shop.accept_allowance(&offer.record))
+        .await
+        .unwrap();
+    world.alice.switch().fail_next(Fault::Unanswered {
+        path: "/ops".into(),
+        after: 0,
+    });
+    let _ = Box::pin(payer.receive(None)).await;
+    let _service = Box::pin(crate::allowances::advance_allowance_generation(
+        &world, &mut payer,
+    ))
+    .await;
+    let key = payer.allowances().await.unwrap().pop().unwrap().record;
+    assert_eq!(
+        payer.allowance(&key).await.unwrap().status,
+        AllowanceStatus::Accepted
+    );
+    Box::pin(payer.resume_allowance_executor(&key))
+        .await
+        .unwrap();
+    let paid = Box::pin(pays_under(&world, &mut shop, &mut payer, &key, "1")).await;
+    assert!(
+        matches!(paid.outcome, Ok(paykit_sdk::PayOutcome::Paid { .. })),
+        "{paid:?}"
+    );
+}
+
+/// An orderly change of `payer`'s generation whose new `identity.json` doesn't list the
+/// earlier generation's service key.
+async fn change_dropping_the_earlier_key(
+    w: &World,
+    payer: &mut paykit_sdk::Paykit,
+) -> std::sync::Arc<pubky_switch_client::testing::ScriptedSwitch> {
+    use crate::common::ALICE_ORIGIN;
+    use pubky_switch_core::records::Inbox;
+    let service = w.alice.switch().change_key_into([75; 32]);
+    w.router.add_switch(ALICE_ORIGIN, &service);
+    let doc = w
+        .alice
+        .sign_next(|body| {
+            body.generation += 1;
+            body.inbox = Inbox::new(ALICE_ORIGIN, service.service_key());
+        })
+        .unwrap();
+    service.deliver_identity(&doc).unwrap();
+    payer.app_mut().refresh_identity().await.unwrap();
+    Box::pin(crate::common::finish_listing(payer)).await;
+    service
+}
+
+/// `payer`'s `backup` restored on a new device, listed and reconciled.
+async fn restored_on_a_new_device(
+    world: &World,
+    backup: &paykit_sdk::PaykitBackup,
+) -> paykit_sdk::Paykit {
+    let mut restored = Box::pin(paykit_sdk::Paykit::restore(
+        world.env(&world.alice, crate::common::store()),
+        Default::default(),
+        backup,
+        world.rail.clone(),
+        world.timer(),
+    ))
+    .await
+    .unwrap();
+    Box::pin(crate::common::finish_listing(&mut restored)).await;
+    Box::pin(finish_restored_reconciliation(&mut restored)).await;
+    restored
+}
+
+#[tokio::test]
+async fn test_executor_restore_after_a_change_whose_key_is_no_longer_listed_pays_nothing() {
+    // The earlier generation's key is gone from `identity.json`: the app's own retained
+    // proof of its grant verifies with no listed key, so after a restore it vouches for
+    // nothing, and the Allowance pays nothing (Pubky Switch spec, Section 12.5).
+    let (world, mut payer, mut shop, key) = Box::pin(first_grant()).await;
+    world.rail.set_history_payer(payer.identity());
+    let _service = Box::pin(change_dropping_the_earlier_key(&world, &mut payer)).await;
+    let backup = payer.backup().await.unwrap();
+    drop(payer);
+    let mut restored = Box::pin(restored_on_a_new_device(&world, &backup)).await;
+    let hold = restored.allowance(&key).await.unwrap().hold;
+    assert_eq!(
+        Box::pin(restored.confirm_allowance_executor(&hold, UserConfirmed::new()))
+            .await
+            .unwrap_err()
+            .refusal(),
+        Some(&paykit_sdk::Refusal::NotNow(
+            "the executor cannot establish the original Allowance grant and ledger".into(),
+        ))
+    );
+    assert_eq!(
+        Box::pin(subscription_refused(&world, &mut shop, &mut restored, &key)).await,
+        paykit_sdk::Refusal::NotNow(
+            "the accepted executor grant, ledger or wallet history is unavailable".into(),
+        )
+    );
+    assert!(world.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_executor_restore_after_a_provider_loss_pays_nothing_under_the_earlier_grant() {
+    // After a provider loss whose `identity.json` still lists the lost generation's key, a
+    // restored app's own retained proof of its earlier grant verifies, but its generation
+    // is before the loss: it vouches for nothing (Paykit spec 8.3, "After provider loss").
+    let (world, mut payer, mut shop, key) = Box::pin(first_grant()).await;
+    world.rail.set_history_payer(payer.identity());
+    let _service = crate::provider_loss::declare_loss_keeping_key(&world);
+    let uncertain_until = Box::pin(crate::provider_loss::follow_loss(&mut payer)).await;
+    world
+        .clock
+        .set_ms(uncertain_until.max(world.clock.now_ms()) + pubky_switch_client::app::DOC_CACHE_MS);
+    let backup = payer.backup().await.unwrap();
+    drop(payer);
+    let mut restored = Box::pin(restored_on_a_new_device(&world, &backup)).await;
+    restored.app_mut().invite(&shop.identity()).await.unwrap();
+    // The earlier grant's evidence verifies under the still-listed key, but is from before
+    // the loss: reconciliation establishes nothing from it.
+    assert!(granted(&restored, &key).await);
+    assert!(restored.reconcile_allowance(&key).await.unwrap().is_none());
+    // Nothing written: the record isn't read as the grant's write needs yet.
+    let hold = restored.allowance(&key).await.unwrap().hold;
+    let before = Box::pin(regrant::confirmed(&restored, &key)).await;
+    let refused = Box::pin(restored.confirm_allowance_executor(&hold, UserConfirmed::new()))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        refused.refusal(),
+        Some(&paykit_sdk::Refusal::NotNow(
+            "the Allowance record isn't read as writing on it needs yet".into()
+        ))
+    );
+    assert_eq!(Box::pin(regrant::confirmed(&restored, &key)).await, before);
+    // Paid nothing: the user confirms the Allowance again under the loss's hold first.
+    let refused = Box::pin(subscription_refused(&world, &mut shop, &mut restored, &key)).await;
+    let hold = restored.allowance(&key).await.unwrap().hold;
+    assert_eq!(
+        refused,
+        paykit_sdk::Refusal::AllowanceConfirmationNeeded { hold }
+    );
+    assert!(world.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_executor_restore_of_a_backup_from_before_the_grant_across_a_change() {
+    // The backup was taken before the grant's write: the restored app retains no operation
+    // of its own to vouch for the grant read back after the change.
+    let (world, mut payer, mut shop, key) =
+        Box::pin(accepted_not_granted(crate::common::store())).await;
+    world.rail.set_history_payer(payer.identity());
+    let backup = payer.backup().await.unwrap();
+    Box::pin(payer.resume_allowance_executor(&key))
+        .await
+        .unwrap();
+    let _service = Box::pin(crate::allowances::advance_allowance_generation(
+        &world, &mut payer,
+    ))
+    .await;
+    drop(payer);
+    let mut restored = Box::pin(restored_on_a_new_device(&world, &backup)).await;
+    // Nothing establishes the grant here: confirming and resuming are held, and nothing is
+    // paid. The user can still end the Allowance.
+    assert!(!restored.allowance(&key).await.unwrap().consented);
+    let hold = restored.allowance(&key).await.unwrap().hold;
+    let expected = paykit_sdk::Refusal::NotNow(
+        "this app's grant is held, but its consent isn't on this device".into(),
+    );
+    for refused in [
+        Box::pin(restored.confirm_allowance_executor(&hold, UserConfirmed::new())).await,
+        Box::pin(restored.resume_allowance_executor(&key)).await,
+    ] {
+        assert_eq!(refused.unwrap_err().refusal(), Some(&expected));
+    }
+    let paid = Box::pin(pays_under(&world, &mut shop, &mut restored, &key, "1")).await;
+    assert_eq!(paid.outcome.unwrap_err().refusal(), Some(&expected));
+    assert!(world.rail.all_executions().is_empty());
+    Box::pin(restored.end_allowance(&key)).await.unwrap();
+    assert_eq!(
+        restored.allowance(&key).await.unwrap().status,
+        AllowanceStatus::Ended
+    );
+}
+
+#[tokio::test]
+async fn test_executor_first_grant_after_a_change_and_a_restore_lands() {
+    // The acceptance applied in the earlier generation; the backup holds it, and after the
+    // change the restored app reads the pending proposal's deletion with no copy held: its
+    // own retained deletion vouches for it, and the first grant lands (Paykit wire 5.9).
+    let (world, mut payer, mut shop, key) =
+        Box::pin(accepted_not_granted(crate::common::store())).await;
+    world.rail.set_history_payer(payer.identity());
+    let _service = Box::pin(crate::allowances::advance_allowance_generation(
+        &world, &mut payer,
+    ))
+    .await;
+    let backup = payer.backup().await.unwrap();
+    drop(payer);
+    let mut restored = Box::pin(restored_on_a_new_device(&world, &backup)).await;
+    let hold = restored.allowance(&key).await.unwrap().hold;
+    Box::pin(restored.confirm_allowance_executor(&hold, UserConfirmed::new()))
+        .await
+        .unwrap();
+    let paid = Box::pin(pays_under(&world, &mut shop, &mut restored, &key, "1")).await;
+    assert!(
+        matches!(paid.outcome, Ok(paykit_sdk::PayOutcome::Paid { .. })),
+        "{paid:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_executor_older_in_place_restore_keeps_a_kept_end_and_its_removal() {
+    // The executor is backed up with its Allowance granted. The shop then ends it: the
+    // executor reads the end, keeps it as the stop and removes the Allowance from its
+    // consent list, but the end's placement in the record doesn't reach the switch, and the
+    // read is acknowledged, so the inbox no longer holds the end. Restored in place from the
+    // older backup, with the shop sending nothing again, the installation's stop and
+    // removal stay: no payment goes under the ended Allowance (Paykit spec 8.3).
+    use pubky_switch_client::testing::Fault;
+    let storage = crate::common::store();
+    let (world, mut payer, mut shop, key) =
+        Box::pin(first_grant_in(storage.clone(), terms())).await;
+    world.rail.set_history_payer(payer.identity());
+    let request = Box::pin(request_from(
+        &mut shop,
+        payer.identity(),
+        draft("5", world.clock.now_ms()),
+    ))
+    .await;
+    Box::pin(payer.receive(None)).await.unwrap();
+    let backup = payer.backup().await.unwrap();
+    let accepted = shop.allowances().await.unwrap().pop().unwrap();
+    Box::pin(shop.end_allowance(&accepted.record))
+        .await
+        .unwrap();
+    for _ in 0..4 {
+        world.alice.switch().fail_next(Fault::Unreachable {
+            path: "/ops".into(),
+            after: 0,
+        });
+    }
+    let _ = Box::pin(payer.receive(None)).await;
+    assert_eq!(
+        Box::pin(crate::allowances::consent_entry(&payer, &key)).await,
+        Some(json!({ "removed": { "reason": "ended" } }))
+    );
+    // The read is acknowledged once the switch answers again.
+    let mut flushed = payer.app_mut().flush_cursor().await;
+    for _ in 0..4 {
+        if flushed.is_ok() {
+            break;
+        }
+        flushed = payer.app_mut().flush_cursor().await;
+    }
+    flushed.unwrap();
+    drop(payer);
+    let mut restored = Box::pin(paykit_sdk::Paykit::restore(
+        world.env(&world.alice, storage),
+        paykit_sdk::PaykitConfig::default(),
+        &backup,
+        std::sync::Arc::clone(&world.rail) as std::sync::Arc<dyn paykit_sdk::Rail>,
+        world.timer(),
+    ))
+    .await
+    .unwrap();
+    // Before any read: the installation's kept end and removal stand, with no mark of a
+    // consent this restore holds.
+    assert_eq!(
+        restored
+            .app()
+            .protocol_scan("paykit", b"ae/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        Box::pin(crate::allowances::consent_entry(&restored, &key)).await,
+        Some(json!({ "removed": { "reason": "ended" } }))
+    );
+    assert!(restored
+        .app()
+        .protocol_scan("paykit", b"rsc/")
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(restored
+        .app()
+        .protocol_scan("paykit", b"xr/")
+        .await
+        .unwrap()
+        .is_empty());
+    Box::pin(crate::common::finish_listing(&mut restored)).await;
+    let mut reconciled = Box::pin(restored.reconcile()).await;
+    for _ in 0..8 {
+        let Err(error) = &reconciled else { break };
+        assert!(
+            matches!(error.refusal(), Some(paykit_sdk::Refusal::NotNow(_))),
+            "{error}"
+        );
+        reconciled = Box::pin(restored.reconcile()).await;
+    }
+    reconciled.unwrap();
+    Box::pin(restored.end_reconcile(UserConfirmed::new()))
+        .await
+        .unwrap();
+    // No approval for execution of the removed Allowance came back with the restore.
+    assert!(restored
+        .app()
+        .protocol_scan("paykit", b"xa/")
+        .await
+        .unwrap()
+        .is_empty());
+    // The end is the stop the installation kept, and the ordinary passes place it in the
+    // Allowance record: the record shows it ended, with no stop left to place.
+    assert_eq!(
+        restored.allowance(&key).await.unwrap().status,
+        AllowanceStatus::Ended
+    );
+    assert!(restored
+        .app()
+        .protocol_scan("paykit", b"ae/")
+        .await
+        .unwrap()
+        .is_empty());
+    // The removal is the installation's: no confirmation of the user's brings the
+    // Allowance back.
+    assert_eq!(
+        Box::pin(crate::allowances::consent_entry(&restored, &key)).await,
+        Some(json!({ "removed": { "reason": "ended" } }))
+    );
+    let hold = restored.allowance(&key).await.unwrap().hold;
+    let confirmed =
+        Box::pin(restored.confirm_allowance_executor(&hold, UserConfirmed::new())).await;
+    assert!(confirmed.is_err(), "{confirmed:?}");
+    let paid = Box::pin(restored.pay_under_allowance(&request, &key))
+        .await
+        .outcome;
+    assert!(
+        !matches!(paid, Ok(paykit_sdk::PayOutcome::Paid { .. })),
+        "paid under an ended Allowance: {paid:?}"
+    );
+    assert!(world.rail.all_executions().is_empty());
+    // The ended Allowance stays ended. A new one, proposed to the shop and accepted, is
+    // granted and on the consent list.
+    let proposal = Box::pin(restored.propose_executable_allowance(
+        shop.identity(),
+        terms(),
+        UserConfirmed::new(),
+    ))
+    .await
+    .unwrap();
+    Box::pin(shop.receive(None)).await.unwrap();
+    let offer = shop
+        .allowances()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|a| a.allowance_id == proposal.allowance_id)
+        .unwrap();
+    Box::pin(shop.accept_allowance(&offer.record))
+        .await
+        .unwrap();
+    Box::pin(restored.receive(None)).await.unwrap();
+    Box::pin(restored.resume_allowance_executor(&proposal.record))
+        .await
+        .unwrap();
+    assert!(
+        restored
+            .allowance(&proposal.record)
+            .await
+            .unwrap()
+            .consented
+    );
+}
+
+#[tokio::test]
+async fn test_executor_pays_nothing_under_the_shared_post_loss_hold() {
+    // Paykit spec 8.1; Paykit wire 5.6, Shared post-loss hold: after a declared provider loss
+    // the executor pays no one-time request under the Allowance, one created long after the
+    // loss included. A confirmation of the executor after the loss writes the grant again at
+    // the current generation, and the shared hold still pays nothing.
+    let (world, mut payer, mut shop, key) = Box::pin(first_grant()).await;
+    world.clock.advance_ms(60_000);
+    crate::provider_loss::declare_loss(&world);
+    let until = Box::pin(crate::provider_loss::follow_loss(&mut payer)).await;
+    // The user's confirmation after the loss writes the grant once more, at the current
+    // generation; it establishes no usage authority, and the shared hold stays.
+    let hold = payer.allowance(&key).await.unwrap().hold;
+    let (_, grants) = Box::pin(regrant::confirmed(&payer, &key)).await;
+    Box::pin(payer.confirm_allowance_executor(&hold, UserConfirmed::new()))
+        .await
+        .unwrap();
+    Box::pin(payer.receive(None)).await.unwrap();
+    let generation = payer.app().own_identity().generation();
+    assert_eq!(
+        Box::pin(regrant::confirmed(&payer, &key)).await,
+        (generation, grants + 1)
+    );
+    let now = world.clock.now_ms();
+    world
+        .clock
+        .advance_ms(until.saturating_sub(now) + 3_600_000);
+    let request = Box::pin(request_from(
+        &mut shop,
+        payer.identity(),
+        draft("1", world.clock.now_ms()),
+    ))
+    .await;
+    Box::pin(payer.receive(None)).await.unwrap();
+    let refused = Box::pin(payer.pay_under_allowance(&request, &key))
+        .await
+        .outcome
+        .unwrap_err();
+    assert!(
+        matches!(
+            refused.refusal(),
+            Some(paykit_sdk::Refusal::NotAutomatic(why)) if why.contains("provider loss")
+        ),
+        "{refused}"
+    );
+    assert!(world.rail.all_pay_calls().is_empty());
+}
+
+/// An orderly change of `payer`'s generation whose new `identity.json` lists the earlier
+/// generations' keys except those of `dropped`, as the signer may once no current record or
+/// live claim needs them (Pubky Switch spec, Section 4.3, `service_keys`).
+async fn change_dropping(
+    w: &World,
+    from: &pubky_switch_client::testing::ScriptedSwitch,
+    payer: &mut paykit_sdk::Paykit,
+    dropped: &[u64],
+    secret: [u8; 32],
+) -> std::sync::Arc<pubky_switch_client::testing::ScriptedSwitch> {
+    use crate::common::ALICE_ORIGIN;
+    use pubky_switch_core::records::{Inbox, ServiceKeyEntry};
+    let previous = payer.app().own_identity().clone();
+    let service = from.change_key_into(secret);
+    w.router.add_switch(ALICE_ORIGIN, &service);
+    let doc = w
+        .alice
+        .sign_next(|body| {
+            body.service_keys.push(ServiceKeyEntry {
+                generation: previous.generation(),
+                key: previous.inbox().service_key,
+            });
+            body.service_keys
+                .retain(|entry| !dropped.contains(&entry.generation));
+            body.generation += 1;
+            body.inbox = Inbox::new(ALICE_ORIGIN, service.service_key());
+        })
+        .unwrap();
+    service.deliver_identity(&doc).unwrap();
+    payer.app_mut().refresh_identity().await.unwrap();
+    Box::pin(crate::common::finish_listing(payer)).await;
+    for generation in dropped {
+        assert!(payer
+            .app()
+            .own_identity()
+            .service_key_of(*generation)
+            .is_none());
+    }
+    service
+}
+
+#[tokio::test]
+async fn test_executor_pays_after_the_proposals_generation_key_is_dropped() {
+    Box::pin(proposal_across_a_move(true)).await;
+}
+
+#[tokio::test]
+async fn test_executor_requires_proposal_key_without_checkpoint() {
+    Box::pin(proposal_across_a_move(false)).await;
+}
+
+async fn proposal_across_a_move(establish: bool) {
+    // Acceptance supersedes the proposal in the next generation. Only its original
+    // placement needs the key dropped in the following move (Switch spec 4.3).
+    let world = World::new();
+    let mut payer = Box::pin(world.join_with(
+        &world.alice,
+        "wallet",
+        AppScopes::new().allowance_execute().build().unwrap(),
+        Default::default(),
+        crate::common::store(),
+    ))
+    .await;
+    let mut shop = Box::pin(world.join(
+        &world.bob,
+        "shop",
+        AppScopes::new().allowance().request().build().unwrap(),
+    ))
+    .await;
+    world.rail.set_history_payer(payer.identity());
+    payer.app_mut().invite(&shop.identity()).await.unwrap();
+    shop.app_mut().invite(&payer.identity()).await.unwrap();
+    let first = payer.app().own_identity().generation();
+    Box::pin(payer.propose_executable_allowance(shop.identity(), terms(), UserConfirmed::new()))
+        .await
+        .unwrap();
+    let second = Box::pin(crate::allowances::advance_allowance_generation(
+        &world, &mut payer,
+    ))
+    .await;
+    Box::pin(shop.receive(None)).await.unwrap();
+    let offer = shop.allowances().await.unwrap().pop().unwrap();
+    Box::pin(shop.accept_allowance(&offer.record))
+        .await
+        .unwrap();
+    Box::pin(payer.receive(None)).await.unwrap();
+    let key = payer.allowances().await.unwrap().pop().unwrap().record;
+    if establish {
+        Box::pin(payer.resume_allowance_executor(&key))
+            .await
+            .unwrap();
+        Box::pin(assert_pays_under(&world, &mut shop, &mut payer, &key, "1")).await;
+    }
+    assert_eq!(granted(&payer, &key).await, establish);
+    let _third = Box::pin(change_dropping(
+        &world,
+        &second,
+        &mut payer,
+        &[first],
+        [76; 32],
+    ))
+    .await;
+    if establish {
+        Box::pin(assert_pays_under(&world, &mut shop, &mut payer, &key, "2")).await;
+    } else {
+        let hold = payer.allowance(&key).await.unwrap().hold;
+        let refused = Box::pin(payer.confirm_allowance_executor(&hold, UserConfirmed::new()))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            refused.refusal(),
+            Some(&paykit_sdk::Refusal::NotNow(
+                "the executor cannot establish the original Allowance grant and ledger".into()
+            ))
+        );
+        assert!(!granted(&payer, &key).await);
+        assert!(
+            Box::pin(pays_under(&world, &mut shop, &mut payer, &key, "2"))
+                .await
+                .outcome
+                .is_err()
+        );
+        assert!(world.rail.all_pay_calls().is_empty());
+    }
+}
+
+async fn assert_pays_under(
+    world: &World,
+    shop: &mut paykit_sdk::Paykit,
+    payer: &mut paykit_sdk::Paykit,
+    key: &[u8; 32],
+    value: &str,
+) {
+    let paid = Box::pin(pays_under(world, shop, payer, key, value)).await;
+    assert!(
+        matches!(paid.outcome, Ok(paykit_sdk::PayOutcome::Paid { .. })),
+        "{paid:?}"
+    );
+}
+
+async fn assert_compaction_receipt(
+    payer: &paykit_sdk::Paykit,
+    before: u64,
+    after: u64,
+    opening: bool,
+) {
+    let rows = payer.app().protocol_scan("paykit", b"lx/").await.unwrap();
+    assert_eq!(rows.len(), 1);
+    let row: serde_json::Value = serde_json::from_slice(&rows[0].1).unwrap();
+    let receipt = &row["d"];
+    let generation = |field: &str| {
+        let kept: pubky_switch_client::app::KeptOp =
+            serde_json::from_value(receipt[field].clone()).unwrap();
+        TransitionProof::peek(&kept.proof.unwrap())
+            .unwrap()
+            .envelope()
+            .generation
+    };
+    assert_eq!((generation("before"), generation("after")), (before, after));
+    assert_eq!(!receipt.get("opening").unwrap().is_null(), opening);
+    if opening {
+        assert_eq!(generation("opening"), after);
+    }
+}
+
+#[tokio::test]
+async fn test_executor_pays_after_compacting_reservation_key_retirement() {
+    paykit_sdk::with_early_ledger_compaction(Box::pin(async {
+        let (world, mut payer, mut shop, key) = Box::pin(first_grant()).await;
+        world.rail.set_history_payer(payer.identity());
+        let second = Box::pin(crate::allowances::advance_allowance_generation(
+            &world, &mut payer,
+        ))
+        .await;
+        let generation = second.generation();
+        Box::pin(assert_pays_under(&world, &mut shop, &mut payer, &key, "7")).await;
+        world.clock.advance_ms(60_001);
+        Box::pin(assert_pays_under(&world, &mut shop, &mut payer, &key, "3")).await;
+        assert_compaction_receipt(&payer, generation, generation, true).await;
+        let (ledger, _) = only_ledger(&payer).await;
+        assert_eq!(ledger.count, 1);
+        let claim = payer
+            .app_mut()
+            .read_claim(&ledger.entries[0].obligation)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(claim.view.tombstone && claim.entries.is_empty());
+
+        // Supersede the ledger and both payer records before retiring their key (Switch spec 4.3).
+        let third = Box::pin(change_dropping(&world, &second, &mut payer, &[], [75; 32])).await;
+        Box::pin(crate::common::finish_listing(&mut shop)).await;
+        let sales = shop.payee_activity().await.unwrap();
+        assert_eq!(sales.len(), 2);
+        for sale in sales {
+            Box::pin(shop.confirm_payment(&sale.record))
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        Box::pin(crate::common::finish_listing(&mut payer)).await;
+        let activities = payer.app().records_of("payer_activity").await.unwrap();
+        assert_eq!(activities.len(), 2);
+        assert!(activities
+            .iter()
+            .all(|r| r.version.generation == third.generation()));
+        Box::pin(assert_pays_under(&world, &mut shop, &mut payer, &key, "2")).await;
+        assert_eq!(only_ledger(&payer).await.1.generation, third.generation());
+        let _moved = Box::pin(change_dropping(
+            &world,
+            &third,
+            &mut payer,
+            &[generation],
+            [76; 32],
+        ))
+        .await;
+        Box::pin(assert_pays_under(&world, &mut shop, &mut payer, &key, "1")).await;
+        assert_eq!(
+            Box::pin(payer.reconcile_allowance(&key))
+                .await
+                .unwrap()
+                .unwrap()
+                .lifetime()
+                .as_str(),
+            "13"
+        );
+    }))
+    .await;
 }
