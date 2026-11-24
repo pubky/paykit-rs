@@ -1393,7 +1393,7 @@ async fn kept_past_its_window_on(code: ErrorCode) {
     let w = World::new();
     let (mut wallet, _) = stored_receipt_aged(&w, paykit_sdk::KEPT_MESSAGE_MS).await;
     answer_next_write(&w.alice, code);
-    let _ = wallet.receive(None).await;
+    wallet.receive(None).await.unwrap();
     assert_eq!(kept(&wallet, "se/").await.len(), 1, "{code:?}");
     assert!(wallet.notices().await.unwrap().is_empty(), "{code:?}");
     // Once the switch's limit has passed, the next receive writes it.
@@ -1415,16 +1415,25 @@ async fn test_stored_stale_timestamp_note_kept_past_its_window_then_written() {
 }
 
 #[tokio::test]
-async fn test_stored_quota_exceeded_note_given_up_past_its_window() {
-    // The account's room, the case the window is for: counted, and given up past it.
+async fn test_stored_quota_exceeded_kept_write_waits_and_lands_once_room_frees() {
+    // The account is full: the client keeps the write's batch to send again once room frees.
+    // Past the window the message waits, uncounted, as long as the batch is held, and lands
+    // with it.
     let w = World::new();
     let (mut wallet, _) = stored_receipt_aged(&w, paykit_sdk::KEPT_MESSAGE_MS).await;
     answer_next_write(&w.alice, ErrorCode::QuotaExceeded);
     wallet.receive(None).await.unwrap();
+    assert_eq!(kept(&wallet, "se/").await.len(), 1);
+    assert_eq!(kept(&wallet, "hw/").await.len(), 1);
+    assert!(wallet.notices().await.unwrap().is_empty());
+    // Held, the write isn't sent again: no second batch is kept behind the first.
+    wallet.receive(None).await.unwrap();
+    assert!(wallet.notices().await.unwrap().is_empty());
+    w.clock.advance_ms(11 * 60_000);
+    wallet.receive(None).await.unwrap();
     assert!(kept(&wallet, "se/").await.is_empty());
-    let notices = wallet.notices().await.unwrap();
-    assert_eq!(notices.len(), 1, "{notices:?}");
-    assert_eq!(notices[0].kind, paykit_sdk::NoticeKind::MessageGivenUp);
+    assert!(kept(&wallet, "hw/").await.is_empty());
+    assert!(wallet.notices().await.unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -1449,7 +1458,7 @@ async fn test_stored_note_given_up_past_two_windows_whatever_the_answer() {
     let (mut wallet, _) =
         stored_receipt_aged(&w, paykit_sdk::KEPT_MESSAGE_MS.saturating_mul(2)).await;
     answer_next_write(&w.alice, ErrorCode::Conflict);
-    let _ = wallet.receive(None).await;
+    wallet.receive(None).await.unwrap();
     assert!(kept(&wallet, "se/").await.is_empty());
     let notices = wallet.notices().await.unwrap();
     assert_eq!(notices.len(), 1, "{notices:?}");
@@ -1491,7 +1500,7 @@ async fn test_stored_answer_to_an_earlier_kept_batch_counts_nothing() {
     wallet.app_mut().receive(None).await.unwrap();
     answer_next_write(&w.alice, ErrorCode::RateLimited);
     answer_next_write(&w.alice, ErrorCode::QuotaExceeded);
-    let _ = wallet.receive(None).await;
+    wallet.receive(None).await.unwrap();
     assert!(wallet.notices().await.unwrap().is_empty());
     w.clock.advance_ms(11 * 60_000);
     wallet.receive(None).await.unwrap();
@@ -1504,8 +1513,12 @@ async fn test_stored_answer_to_an_earlier_kept_batch_counts_nothing() {
     assert!(wallet.notices().await.unwrap().is_empty());
 }
 
-#[tokio::test]
-async fn test_stored_request_kept_by_the_client_keeps_its_cancellation() {
+/// Bob's open-ended request is stored unrecorded and his cancellation of it kept as a stop
+/// beside it. Past the bound the request's write is kept by the client on `code`. Given up
+/// then, the stop would go with it, and the client's replay would leave the request payable.
+/// It waits instead: once the batch lands, the cancellation is placed over it, and the
+/// request is never payable.
+async fn kept_request_keeps_its_cancellation(code: ErrorCode) {
     // Bob's open-ended request is stored unrecorded and his cancellation of it kept as a
     // stop beside it. Past the bound the request's write is kept by the client on a rate
     // limit. Given up then, the stop would go with it, and the client's replay would
@@ -1531,8 +1544,8 @@ async fn test_stored_request_kept_by_the_client_keeps_its_cancellation() {
     w.clock
         .advance_ms(paykit_sdk::KEPT_MESSAGE_MS.saturating_mul(2));
     wallet.app_mut().receive(None).await.unwrap();
-    answer_next_write(&w.alice, ErrorCode::RateLimited);
-    let _ = wallet.receive(None).await;
+    answer_next_write(&w.alice, code);
+    wallet.receive(None).await.unwrap();
     assert_eq!(kept(&wallet, "kc/").await.len(), 1);
     w.clock.advance_ms(11 * 60_000);
     wallet.receive(None).await.unwrap();
@@ -1547,6 +1560,76 @@ async fn test_stored_request_kept_by_the_client_keeps_its_cancellation() {
         .outcome
         .unwrap_err();
     assert_eq!(refused.refusal(), Some(&paykit_sdk::Refusal::Cancelled));
+}
+
+#[tokio::test]
+async fn test_stored_request_kept_by_the_client_keeps_its_cancellation() {
+    kept_request_keeps_its_cancellation(ErrorCode::RateLimited).await;
+}
+
+#[tokio::test]
+async fn test_stored_request_kept_over_quota_keeps_its_cancellation() {
+    // The account full past both bounds: the request waits with its cancellation, and lands
+    // under it once room frees.
+    kept_request_keeps_its_cancellation(ErrorCode::QuotaExceeded).await;
+}
+
+#[tokio::test]
+async fn test_stored_write_kept_after_a_preflight_failure_waits_and_lands() {
+    // The client keeps the write's batch, then the service time it reads before the first
+    // send is refused (`401 bad_signature`): the batch was never sent and stays kept, so the
+    // write may still land. Its note stays, no give-up is told, and the same batch applies at
+    // a later read.
+    let w = World::new();
+    let reads = std::sync::Arc::new(crate::common::ReadHook::new(std::sync::Arc::clone(
+        &w.router,
+    )));
+    let mut wallet = w
+        .join_through(
+            &w.alice,
+            "wallet",
+            AppScopes::new().pay().build().unwrap(),
+            PaykitConfig::default(),
+            store(),
+            std::sync::Arc::clone(&reads)
+                as std::sync::Arc<dyn pubky_switch_client::transport::Transport>,
+        )
+        .await;
+    wallet.app_mut().invite(&w.bob_id()).await.unwrap();
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), open_ended("1")).await;
+    refuse_writes(&w.alice, 2);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(kept(&wallet, "se/").await.len(), 1);
+    w.clock.advance_ms(paykit_sdk::KEPT_MESSAGE_MS);
+    wallet.app_mut().receive(None).await.unwrap();
+    // Right after the receive's own read, the held service time ages past a day, so the
+    // write's first send reads it again, and that read is refused.
+    let clock = std::sync::Arc::clone(&w.clock);
+    let switch = std::sync::Arc::clone(w.alice.switch());
+    reads.after_read("feed", move || {
+        clock.advance_ms(24 * 60 * 60 * 1000 + 1);
+        switch.fail_next(Fault::Error {
+            path: "feed".into(),
+            code: ErrorCode::BadSignature,
+            current: serde_json::Value::Null,
+        });
+    });
+    wallet.receive(None).await.unwrap();
+    assert!(reads.fired());
+    assert_eq!(kept(&wallet, "se/").await.len(), 1);
+    assert_eq!(kept(&wallet, "hw/").await.len(), 1);
+    assert!(wallet.notices().await.unwrap().is_empty());
+    // A later read sends the kept batch: the request is written, from that batch.
+    wallet.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert!(kept(&wallet, "se/").await.is_empty());
+    assert!(kept(&wallet, "hw/").await.is_empty());
+    assert!(wallet.notices().await.unwrap().is_empty());
+    assert_eq!(
+        wallet.request(&request).await.unwrap().status,
+        RequestStatus::Open
+    );
 }
 
 /// A request of `value` with no deadline of its own.

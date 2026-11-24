@@ -1279,10 +1279,10 @@ mod own_message_tests {
             crossing.contains(".submit_with_record(target, &next, queue, locals, owed.as_ref())")
         );
         // While sends are held the crossing end is recorded unqueued, with its owed mark
-        // (`eo/`) written in the same batch by `submit_with_record`, and sent from the record
+        // (`eo/`) written in the same batch by `submit_record_write`, and sent from the record
         // later (`send_owed_ends`).
         assert!(crossing.contains("owed = Some(OwedEnd {"));
-        let submit = body(allowances, "submit_with_record");
+        let submit = body(allowances, "submit_record_write");
         assert!(
             submit.contains("locals.push(state::local_put(&key::owed_end(&owed.record), owed)?);")
         );

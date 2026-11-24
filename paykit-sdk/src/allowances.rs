@@ -2410,8 +2410,24 @@ impl Paykit {
         target: &RecordTarget,
         next: &AllowanceRecord,
         queue: Vec<SignedMessage>,
+        locals: Vec<LocalWrite>,
+        owed: Option<&OwedEnd>,
+    ) -> Result<()> {
+        Box::pin(self.submit_record_write(target, next, queue, locals, owed, None)).await
+    }
+
+    /// [`Paykit::submit_with_record`], for the later write of the kept message `held`, when
+    /// given: the client saves the ID of the batch it keeps of it
+    /// ([`crate::stored::holding`]), and a batch kept is the error, for the later write's rule
+    /// to judge ([`crate::stored::submitted`]), never a write made.
+    async fn submit_record_write(
+        &mut self,
+        target: &RecordTarget,
+        next: &AllowanceRecord,
+        queue: Vec<SignedMessage>,
         mut locals: Vec<LocalWrite>,
         owed: Option<&OwedEnd>,
+        held: Option<&StoredMessage>,
     ) -> Result<()> {
         let before = Box::pin(self.held_allowance(&self.app.record_key(target)?)).await?;
         let mut queued: Vec<String> = queue.iter().map(|m| m.msg_id().to_owned()).collect();
@@ -2444,9 +2460,12 @@ impl Paykit {
         for message in queue {
             batch = batch.queue(message);
         }
+        if let Some(stored) = held {
+            batch = crate::stored::holding(batch, stored);
+        }
         match Box::pin(self.submit(batch)).await {
             Ok(_) => Ok(()),
-            Err(error) if error.kept_batch().is_some() => Ok(()),
+            Err(error) if error.kept_batch().is_some() && held.is_none() => Ok(()),
             Err(error) => {
                 if error.code() == Some(ErrorCode::Conflict) {
                     Box::pin(self.app.read_record(target)).await?;
@@ -3587,6 +3606,12 @@ impl Paykit {
         evidence: &KeptMessage,
         locals: Vec<LocalWrite>,
     ) -> Result<Placed> {
+        // A batch of this write the client still keeps may land: nothing more is written, and
+        // nothing is given up, until it applies or the client drops it.
+        if self.held_write_kept(&stored).await? {
+            return Ok(Placed::Waits);
+        }
+        let held = stored.clone();
         let order = evidence.order()?;
         let Some(allowance_id) = named_allowance(stored.body()).cloned() else {
             return Err(PaykitError::corrupt());
@@ -3708,7 +3733,17 @@ impl Paykit {
         let Some(next) = next else {
             return Ok(Placed::Not);
         };
-        written(Box::pin(self.submit_with_record(&target, &next, Vec::new(), locals, None)).await)
+        written(
+            Box::pin(self.submit_record_write(
+                &target,
+                &next,
+                Vec::new(),
+                locals,
+                None,
+                Some(&held),
+            ))
+            .await,
+        )
     }
 }
 
