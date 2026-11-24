@@ -226,7 +226,11 @@ pub enum Refusal {
     /// `paykit.private_payment_list_request`; the payee can't be forced to answer, so the
     /// user is told the app is waiting for the payee's list. The user may choose to pay to
     /// the payee's public endpoints instead ([`crate::PaymentMode::Public`]); the app never
-    /// switches on its own.
+    /// switches on its own. A list in [`crate::Paykit::held_lists`] waits too, because its
+    /// record was deleted, doesn't read, or is absent: no held list's record is created over
+    /// an absent key, which can be a delete the service forgot (Paykit spec 6; wire 5). After
+    /// a delete, or over an absent key, it can wait indefinitely, and the payee's public
+    /// endpoints or a request's own destination remain the way to pay.
     #[error(
         "Paykit spec 8.4: waiting for the payee's Private Payment List{}",
         if *device_clock_behind { "; a list expired by the service's time: the device clock is behind it" } else { "" }
