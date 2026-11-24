@@ -1,5 +1,5 @@
 import Foundation
-import PaykitV2
+import Paykit
 import XCTest
 
 /// Whether each store call and synchronous method callback ran on the main thread.

@@ -17,15 +17,15 @@ kotlin {
     compilerOptions.allWarningsAsErrors.set(true)
     sourceSets.main {
         kotlin.srcDirs(".", providers.gradleProperty("bindings").get())
-        kotlin.include("WalletConsumer.kt", "com/synonym/paykit/v2/paykit_v2.kt")
+        kotlin.include("WalletConsumer.kt", "com/synonym/paykit/paykit.kt")
         if (checkoutTest.get()) kotlin.include("CheckoutConsumer.kt")
     }
 }
 
 application {
     mainClass.set(checkoutTest.map { checkout ->
-        if (checkout) "com.synonym.paykit.v2.tests.CheckoutConsumer"
-        else "com.synonym.paykit.v2.tests.WalletConsumerKt"
+        if (checkout) "com.synonym.paykit.tests.CheckoutConsumer"
+        else "com.synonym.paykit.tests.WalletConsumerKt"
     })
     applicationDefaultJvmArgs = listOf("-Djna.library.path=" + providers.gradleProperty("nativeLibraryDir").get())
 }

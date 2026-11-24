@@ -1,10 +1,10 @@
-package com.synonym.paykit.v2.tests
+package com.synonym.paykit.tests
 
 import android.os.Looper
 import android.os.StrictMode
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
-import com.synonym.paykit.v2.*
+import com.synonym.paykit.*
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.launch

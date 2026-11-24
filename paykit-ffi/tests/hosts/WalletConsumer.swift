@@ -1,5 +1,5 @@
 import Foundation
-import PaykitV2
+import Paykit
 
 /// The signed enrollment request can be recovered by a different host handle.
 final class EnrollmentStore: WalletStore, @unchecked Sendable {

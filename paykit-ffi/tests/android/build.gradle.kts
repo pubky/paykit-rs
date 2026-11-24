@@ -7,7 +7,7 @@ plugins {
 }
 
 android {
-    namespace = "com.synonym.paykit.v2.tests"
+    namespace = "com.synonym.paykit.tests"
     compileSdk = 36
     defaultConfig {
         minSdk = 28

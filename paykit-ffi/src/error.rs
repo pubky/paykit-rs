@@ -80,8 +80,9 @@ pub enum WalletError {
         /// What failed.
         failure: Arc<WalletFailure>,
     },
-    /// Nothing took effect: the call was refused before anything was written or applied, and
-    /// is safe to make again once its cause is fixed.
+    /// No payment, message or other outside effect happened: the call was refused before
+    /// anything was sent or applied, and is safe to make again once its cause is fixed. An
+    /// `attempt_failed` may have stored its attempt, closed as failed, which pays nothing.
     #[error("not sent: {}", failure.code)]
     NotSent {
         /// What failed.
