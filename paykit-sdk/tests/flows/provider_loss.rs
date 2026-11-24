@@ -385,6 +385,17 @@ async fn test_provider_loss_activity_with_another_write_at_its_version_survives_
         .unwrap()
         .iter()
         .any(|r| r.record == key && r.paused));
+    // Confirming the record the refusal shows ends its pause (Paykit spec 6). The request
+    // was payable before the loss and isn't SETTLED at the new service, so a payment by hand
+    // still waits on that doubt (Paykit spec 7.3): nothing is paid.
+    pay_until_the_loss_doubt(&mut wallet, &request).await;
+    assert!(wallet
+        .divergent_records()
+        .await
+        .unwrap()
+        .iter()
+        .all(|r| r.record != key || !r.paused));
+    assert_eq!(executions(&w), 0);
 }
 
 #[tokio::test]
@@ -662,6 +673,17 @@ async fn test_provider_loss_restore_first_reads_the_current_activity() {
         .iter()
         .any(|r| r.record == key && r.paused));
     assert_eq!(executions(&w), 0);
+    // The user answers the restore's question, confirms the restore's hold and what the
+    // paused record shows (Switch spec 12.4; Paykit spec 6). A payment by hand then still
+    // waits on the loss's doubt (Paykit spec 7.3): nothing is paid.
+    pay_until_the_loss_doubt(&mut wallet, &request).await;
+    assert!(wallet
+        .divergent_records()
+        .await
+        .unwrap()
+        .iter()
+        .all(|r| r.record != key || !r.paused));
+    assert_eq!(executions(&w), 0);
 }
 
 #[tokio::test]
@@ -869,6 +891,91 @@ async fn test_provider_loss_disputed_request_keeps_its_known_payers_proof() {
         .await
         .unwrap()
         .is_empty());
+    // The user's way forward for the credit: the proof predates the loss, so a plain credit
+    // asks the user first; then, through each refusal the host shows and the user confirms,
+    // it goes once (Paykit spec 6, 8.1 step 4).
+    assert!(matches!(
+        shop.confirm_payment(&key).await.unwrap_err().refusal(),
+        Some(Refusal::MaybeCredited)
+    ));
+    let receipt = credit_as_a_host(&mut shop, &key).await;
+    let again = shop
+        .confirm_payment_with(
+            &key,
+            paykit_sdk::ReceiptDetails::default()
+                .with_maybe_credited_confirmed(UserConfirmed::new()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(again, Some(receipt));
+}
+
+/// Credit `key` as a host does after a provider loss: with the user's consent that the
+/// payment may be credited already, confirming each divergent refusal as it shows its
+/// records, and reading again until their kept writes are written. Returns the receipt.
+async fn credit_as_a_host(app: &mut Paykit, key: &[u8; 32]) -> String {
+    for _ in 0..4 {
+        let consent = paykit_sdk::ReceiptDetails::default()
+            .with_maybe_credited_confirmed(UserConfirmed::new());
+        match app.confirm_payment_with(key, consent).await {
+            Ok(Some(receipt)) => return receipt,
+            Ok(None) => panic!("no receipt for the credit"),
+            Err(refused) if matches!(refused.refusal(), Some(Refusal::Divergent { .. })) => {
+                crate::divergent::confirm_refused(app, &refused).await;
+                app.receive(None).await.unwrap();
+            }
+            Err(other) => panic!("{other:?}"),
+        }
+    }
+    panic!("the credit never went");
+}
+
+/// Pay `request` by hand as a host does after a provider loss, through each refusal the
+/// user is shown and decides on: it confirms what a divergent refusal shows and reads again,
+/// hands back the hold a restore set, and answers the restore's question. It stops at the
+/// loss's own doubt (Paykit spec 7.3), which it returns: whatever the user confirmed before,
+/// the payment doesn't go while the obligation may have been paid before the loss.
+async fn pay_until_the_loss_doubt(
+    app: &mut Paykit,
+    request: &paykit_sdk::RequestRef,
+) -> PaykitError {
+    use pubky_switch_client::app::Refusal as ClientRefusal;
+    let mut options = PayOptions::default();
+    for _ in 0..8 {
+        let refused = match app.pay_request(request, options.clone()).await.outcome {
+            Ok(paid) => panic!("paid while the loss leaves it in doubt: {paid:?}"),
+            Err(refused) => refused,
+        };
+        match refused.refusal() {
+            Some(Refusal::Divergent { .. }) => {
+                crate::divergent::confirm_refused(app, &refused).await;
+                app.receive(None).await.unwrap();
+            }
+            Some(Refusal::HeldAfterRestore { held }) => {
+                options = options.with_possibly_cancelled_confirmed((**held).clone());
+            }
+            Some(Refusal::MayBePaid {
+                doubt: Some(doubt), ..
+            }) if doubt.before_loss.is_some() => return refused,
+            _ if matches!(
+                refused,
+                PaykitError::Client(pubky_switch_client::app::AppError::Refused(
+                    ClientRefusal::RestoreQuestionOpen
+                ))
+            ) =>
+            {
+                app.app_mut()
+                    .confirm_restored_registrations(UserConfirmed::new())
+                    .await
+                    .unwrap();
+                app.reconcile().await.unwrap();
+                app.end_reconcile(UserConfirmed::new()).await.unwrap();
+                app.receive(None).await.unwrap();
+            }
+            _ => panic!("{refused:?}"),
+        }
+    }
+    panic!("the payment never reached the loss's doubt");
 }
 
 #[tokio::test]
@@ -1093,6 +1200,46 @@ async fn test_provider_loss_credit_uses_the_signed_payer_of_a_disputed_period() 
         confirm_reported_pauses(&mut shop).await;
         // The same period can take another signed set of details after both successors.
         shop.send_period_details(&sale, details).await.unwrap();
+        if same_payer || delete_parent {
+            // The held credit's way forward. Once successors clear the view and the user
+            // confirmed what the list showed, the sale isn't listed at all. The credit goes
+            // through the refusals the host shows and the user confirms, once (Paykit spec 6,
+            // 8.1 step 4).
+            assert!(shop
+                .divergent_records()
+                .await
+                .unwrap()
+                .iter()
+                .all(|r| r.record != sale));
+            let consent = || {
+                paykit_sdk::ReceiptDetails::default()
+                    .with_maybe_credited_confirmed(UserConfirmed::new())
+            };
+            if same_payer {
+                // The same payer's sale still holds it: its refusal names the sale, shown
+                // for a credit. Over a delete, the successor names the other payer and lets
+                // it go at once.
+                let refused = shop
+                    .confirm_payment_with(&credit, consent())
+                    .await
+                    .unwrap_err();
+                assert!(
+                    crate::divergent::shown_for_a_credit(&refused)
+                        && matches!(refused.refusal(), Some(Refusal::Divergent { records }) if records.iter().any(|r| r.record == sale)),
+                    "{refused:?}"
+                );
+            }
+            let receipt = if same_payer {
+                credit_as_a_host(&mut shop, &credit).await
+            } else {
+                shop.confirm_payment_with(&credit, consent())
+                    .await
+                    .unwrap()
+                    .expect("the successor names the other payer: the credit goes")
+            };
+            let again = shop.confirm_payment_with(&credit, consent()).await.unwrap();
+            assert_eq!(again, Some(receipt));
+        }
     }
 }
 
@@ -1172,50 +1319,68 @@ async fn test_provider_loss_restore_waits_for_the_parent_before_resending_period
     use crate::periods::{january_details, monthly, queued};
     use paykit_lib::collections::Collection;
     use paykit_sdk::AppScopes;
-    let w = World::new();
-    let scopes = AppScopes::new().request().build().unwrap();
-    let mut shop = w.join(&w.alice, "shop", scopes.clone()).await;
-    let mut phone = w.join(&w.alice, "phone", scopes).await;
-    let mut buyer = w
-        .join(&w.bob, "buyer", AppScopes::new().pay().build().unwrap())
-        .await;
-    buyer.app_mut().invite(&w.alice_id()).await.unwrap();
-    let now = w.clock.now_ms();
-    let subscription = request_from(&mut shop, w.bob_id(), monthly(now, None)).await;
-    buyer.receive(None).await.unwrap();
-    buyer.accept_subscription(&subscription).await.unwrap();
-    shop.receive(None).await.unwrap();
-    let target = activity_target(&subscription, Collection::PayeeActivity);
-    let key = shop.app().record_key(&target).unwrap();
-    let details = january_details(now + crate::common::HOUR_MS);
-    let period = period_target(
-        &subscription,
-        Collection::PayeeActivity,
-        &details.billing_period,
-    );
-    let sent = shop.send_period_details(&key, details).await.unwrap();
-    let backup = shop.backup().await.unwrap();
-    drop(shop);
-    let mut shop = restored(&w, &backup).await;
-    shop.app_mut().read_record(&period).await.unwrap().unwrap();
-    recover_activity_with_phone_write(&w, &mut shop, &mut phone, &target, false).await;
-    follow_loss(&mut shop).await;
-    assert!(shop
-        .app()
-        .protocol_get("paykit", b"ro")
-        .await
-        .unwrap()
-        .is_some());
-    assert!(!queued(&shop, &sent.msg_id).await);
-    accept_activity_successor(&w, &mut shop, &mut phone, &target).await;
-    shop.receive(None).await.unwrap();
-    assert!(crate::common::possibly_delivered(&shop, &sent.msg_id).await);
-    assert!(shop
-        .app()
-        .protocol_get("paykit", b"ro")
-        .await
-        .unwrap()
-        .is_none());
+    // Either way out ends the wait: a successor that shows no stop, or the user's
+    // confirmation of what the paused parent shows (Paykit spec 6, 7.2).
+    for by_confirmation in [false, true] {
+        let w = World::new();
+        let scopes = AppScopes::new().request().build().unwrap();
+        let mut shop = w.join(&w.alice, "shop", scopes.clone()).await;
+        let mut phone = w.join(&w.alice, "phone", scopes).await;
+        let mut buyer = w
+            .join(&w.bob, "buyer", AppScopes::new().pay().build().unwrap())
+            .await;
+        buyer.app_mut().invite(&w.alice_id()).await.unwrap();
+        let now = w.clock.now_ms();
+        let subscription = request_from(&mut shop, w.bob_id(), monthly(now, None)).await;
+        buyer.receive(None).await.unwrap();
+        buyer.accept_subscription(&subscription).await.unwrap();
+        shop.receive(None).await.unwrap();
+        let target = activity_target(&subscription, Collection::PayeeActivity);
+        let key = shop.app().record_key(&target).unwrap();
+        let details = january_details(now + crate::common::HOUR_MS);
+        let period = period_target(
+            &subscription,
+            Collection::PayeeActivity,
+            &details.billing_period,
+        );
+        let sent = shop.send_period_details(&key, details).await.unwrap();
+        let backup = shop.backup().await.unwrap();
+        drop(shop);
+        let mut shop = restored(&w, &backup).await;
+        shop.app_mut().read_record(&period).await.unwrap().unwrap();
+        recover_activity_with_phone_write(&w, &mut shop, &mut phone, &target, false).await;
+        follow_loss(&mut shop).await;
+        assert!(shop
+            .app()
+            .protocol_get("paykit", b"ro")
+            .await
+            .unwrap()
+            .is_some());
+        assert!(!queued(&shop, &sent.msg_id).await);
+        assert!(!crate::common::possibly_delivered(&shop, &sent.msg_id).await);
+        if by_confirmation {
+            assert!(shop
+                .divergent_records()
+                .await
+                .unwrap()
+                .iter()
+                .any(|r| r.record == key));
+            confirm_reported_pauses(&mut shop).await;
+        } else {
+            accept_activity_successor(&w, &mut shop, &mut phone, &target).await;
+        }
+        shop.receive(None).await.unwrap();
+        assert!(
+            crate::common::possibly_delivered(&shop, &sent.msg_id).await,
+            "by confirmation: {by_confirmation}"
+        );
+        assert!(shop
+            .app()
+            .protocol_get("paykit", b"ro")
+            .await
+            .unwrap()
+            .is_none());
+    }
 }
 
 #[tokio::test]
@@ -1284,7 +1449,8 @@ async fn test_provider_loss_kept_and_stored_details_wait_for_each_disputed_recor
     use crate::periods::{january_details, monthly};
     use pubky_switch_client::testing::Fault;
     use pubky_switch_core::http::ErrorCode;
-    for dispute_parent in [true, false] {
+    for (dispute_parent, confirmed) in [(true, false), (false, false), (true, true), (false, true)]
+    {
         let w = World::new();
         let mut wallet = w.wallet("wallet").await;
         let mut phone = w.wallet("phone").await;
@@ -1365,6 +1531,36 @@ async fn test_provider_loss_kept_and_stored_details_wait_for_each_disputed_recor
             .await
             .unwrap()
             .is_empty());
+        if confirmed {
+            // The user's way forward: once the user confirms what the divergent record
+            // shows, the details kept over it are written into the period record.
+            confirm_reported_pauses(&mut wallet).await;
+            wallet.receive(None).await.unwrap();
+            let held = wallet
+                .app_mut()
+                .read_record(&period)
+                .await
+                .unwrap()
+                .unwrap();
+            let stored = paykit_lib::records::ActivityRecord::read(
+                held.content.value().unwrap(),
+                &w.alice_id(),
+                paykit_lib::records::ActivitySide::Payer,
+            )
+            .unwrap();
+            let stored: Vec<String> = stored
+                .details()
+                .iter()
+                .map(|details| details.message().msg_id.clone())
+                .collect();
+            for msg_id in [&parked, &id] {
+                assert!(
+                    stored.contains(msg_id),
+                    "parent={dispute_parent}: the details are written once confirmed: {stored:?}"
+                );
+            }
+            continue;
+        }
         // The January record no longer takes these details. While its write is
         // disputed the original entries still have to be given up with their IDs.
         w.clock.advance_ms(paykit_sdk::KEPT_MESSAGE_MS);
