@@ -13,6 +13,7 @@ mod payee;
 mod payer;
 mod periods;
 mod public;
+mod reconcile;
 mod refusal;
 use crate::fixture_signer as signer;
 mod storage;

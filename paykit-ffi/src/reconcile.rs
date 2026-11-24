@@ -1,19 +1,56 @@
 use crate::{NativeWallet, PaymentOutcome, ProviderLossBoundary, WalletError};
+use paykit_lib::AttemptId;
+use std::sync::Arc;
 
-/// A payment whose protected reconstruction still needs host attention.
+/// An original attempt on the obligation shown in reconciliation (Paykit spec 7.3).
+#[derive(uniffi::Object)]
+pub struct DoubtfulAttempt {
+    obligation: [u8; 32],
+    id: AttemptId,
+}
+
+#[uniffi::export]
+impl DoubtfulAttempt {
+    /// The attempt ID as text for display (Paykit wire 1.3).
+    pub fn attempt_id(&self) -> String {
+        self.id.to_text()
+    }
+}
+
+/// A payment that may already have been made (Paykit spec 7.3).
 #[derive(uniffi::Record)]
 pub struct DoubtfulPayment {
-    /// The stable payment obligation.
+    /// The 32-byte claim key of this obligation (Paykit wire 1.5).
     pub obligation: Vec<u8>,
-    /// Every original attempt implicated by the current evidence.
-    pub attempts: Vec<String>,
-    /// The payee identity when available.
+    /// The unresolved attempts. A provider loss alone can leave this empty (Paykit spec 7.3).
+    pub attempts: Vec<Arc<DoubtfulAttempt>>,
+    /// The payee identity when the payer's records identify it (Paykit spec 7.3).
     pub payee: Option<Vec<u8>>,
-    /// The authenticated request hash when available.
+    /// The authenticated request hash when available (Paykit spec 7.3).
     pub request_hash: Option<Vec<u8>>,
-    /// The provider loss that still decides this payment, when known.
+    /// The provider loss that still decides this payment, when known (Paykit spec 7.3).
     pub before_loss: Option<ProviderLossBoundary>,
 }
+
+impl From<paykit_sdk::Doubtful> for DoubtfulPayment {
+    fn from(payment: paykit_sdk::Doubtful) -> Self {
+        let obligation = payment.obligation;
+        Self {
+            obligation: obligation.into(),
+            attempts: payment
+                .attempts
+                .into_iter()
+                .map(|id| Arc::new(DoubtfulAttempt { obligation, id }))
+                .collect(),
+            payee: payment.payee.map(Vec::from),
+            request_hash: payment.request_hash.map(Vec::from),
+            before_loss: payment
+                .before_loss
+                .map(|loss| ProviderLossBoundary::for_payment(obligation, loss)),
+        }
+    }
+}
+
 /// Results of the SDK's account-wide reconciliation on this wallet.
 #[derive(uniffi::Record)]
 pub struct WalletReconciliation {
@@ -28,36 +65,25 @@ pub struct WalletReconciliation {
 /// The outcome the user confirmed for an unresolved original attempt (Paykit spec 7.3).
 #[derive(uniffi::Enum)]
 pub enum ConfirmedResolution {
-    /// The attempt paid. Settle its original claim through reconciliation.
+    /// The attempt paid. Record it as paid (Paykit spec 7.3).
     Paid,
-    /// The outcome is still unknown. A subsequent attempt can duplicate the transfer.
+    /// The outcome is unknown. A later attempt can duplicate the transfer (Paykit spec 7.3).
     Unknown,
-    /// The payment definitively failed.
+    /// The attempt definitively failed (Paykit spec 7.3).
     Failed,
 }
 
 #[uniffi::export]
 impl NativeWallet {
-    /// Compare the durable journal, method history and authenticated shared records.
+    /// Reconcile the journal and claims against method history and shared records.
+    /// Return the outcomes and payments still in doubt (Paykit spec 7.3).
     pub async fn reconcile(&self) -> Result<WalletReconciliation, WalletError> {
         self.with_wallet(move |app| {
             Box::pin(async move {
                 let r = app.reconcile().await?;
                 Ok(WalletReconciliation {
                     resolved: r.resolved.into_iter().map(Into::into).collect(),
-                    doubtful: r
-                        .doubtful
-                        .into_iter()
-                        .map(|d| DoubtfulPayment {
-                            obligation: d.obligation.into(),
-                            attempts: d.attempts.iter().map(|i| i.to_text()).collect(),
-                            payee: d.payee.map(Vec::from),
-                            request_hash: d.request_hash.map(Vec::from),
-                            before_loss: d
-                                .before_loss
-                                .map(|loss| ProviderLossBoundary::for_payment(d.obligation, loss)),
-                        })
-                        .collect(),
+                    doubtful: r.doubtful.into_iter().map(Into::into).collect(),
                     payer_skipped: r.payer_skipped,
                 })
             })
@@ -118,30 +144,27 @@ impl NativeWallet {
         .await
     }
 
-    /// Apply the user's explicit decision to the original obligation and attempt in the report.
+    /// Record the user's decision for this reported attempt after showing that it may
+    /// already have paid. A paid decision also updates the payer's activity record.
+    /// If the claim has lost the attempt, only an open restored dispatch can still be
+    /// resolved as paid or failed. Call it only with the user's answer (Paykit spec 7.2, 7.3).
     pub async fn resolve_confirmed_attempt(
         &self,
-        obligation: Vec<u8>,
-        attempt_id: String,
+        attempt: Arc<DoubtfulAttempt>,
         resolution: ConfirmedResolution,
     ) -> Result<(), WalletError> {
-        let obligation = crate::fixed(obligation, "obligation")?;
-        let attempt = paykit_lib::AttemptId::parse(&attempt_id)
-            .map_err(|_| WalletError::invalid("attempt ID"))?;
+        use paykit_sdk::Resolution;
         let resolution = match resolution {
-            ConfirmedResolution::Paid => paykit_sdk::Resolution::Done,
-            ConfirmedResolution::Unknown => paykit_sdk::Resolution::Unknown,
-            ConfirmedResolution::Failed => paykit_sdk::Resolution::Failed,
+            ConfirmedResolution::Paid => Resolution::Done,
+            ConfirmedResolution::Unknown => Resolution::Unknown,
+            ConfirmedResolution::Failed => Resolution::Failed,
         };
+        // The call itself is the user's confirmed answer, as its name says.
+        let consent = paykit_sdk::UserConfirmed::new();
         self.with_wallet(move |app| {
             Box::pin(async move {
                 Ok(app
-                    .resolve_attempt(
-                        &obligation,
-                        attempt,
-                        resolution,
-                        paykit_sdk::UserConfirmed::new(),
-                    )
+                    .resolve_attempt(&attempt.obligation, attempt.id, resolution, consent)
                     .await?)
             })
         })
