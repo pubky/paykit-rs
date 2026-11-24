@@ -1458,6 +1458,28 @@ async fn test_stored_bare_conflict_given_up_past_its_window() {
 }
 
 #[tokio::test]
+async fn test_stored_dropped_batch_past_the_window_given_up_on_the_record() {
+    // Past its 30 days the write's batch is kept on a full account, so the message waits.
+    // The client then drops the batch, its resend refused for good: nothing is established,
+    // so the record decides. The record doesn't hold the message, and its write is refused
+    // again: it is given up, the host told (Paykit spec 8.1, Stored entries, Kept batch).
+    let w = World::new();
+    let (mut wallet, _) = stored_receipt_aged(&w, paykit_sdk::KEPT_MESSAGE_MS).await;
+    answer_next_write(&w.alice, ErrorCode::QuotaExceeded);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(kept(&wallet, "hw/").await.len(), 1);
+    assert!(wallet.notices().await.unwrap().is_empty());
+    answer_next_write(&w.alice, ErrorCode::PermissionMissing);
+    answer_next_write(&w.alice, ErrorCode::PermissionMissing);
+    wallet.receive(None).await.unwrap();
+    assert!(kept(&wallet, "se/").await.is_empty());
+    assert!(kept(&wallet, "hw/").await.is_empty());
+    let notices = wallet.notices().await.unwrap();
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert_eq!(notices[0].kind, paykit_sdk::NoticeKind::MessageGivenUp);
+}
+
+#[tokio::test]
 async fn test_stored_marker_of_no_kept_batch_swept_at_the_receive() {
     // A marker of a message no longer kept, naming a batch the client holds nothing of, as one
     // a message written another way leaves: the receive sweeps it.

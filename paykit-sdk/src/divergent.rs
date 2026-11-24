@@ -1886,10 +1886,16 @@ impl Paykit {
         // land (`Paykit::held_write_kept`); the marker of one it no longer keeps goes in the
         // same commit. Every give-up of a kept message goes through one of three functions,
         // this one, `Paykit::give_up_stored` and `Paykit::give_up`.
-        if self.held_write_kept(stored).await? {
-            return Ok(());
-        }
         let mut tx = Tx::default();
+        match self.held_give_up(stored, &mut tx).await? {
+            Some(crate::stored::Ended::Waits) => return Ok(()),
+            // Its write is in its record: placed, the kept copy gone, nothing told.
+            Some(_) => {
+                tx.delete(kept_key);
+                return self.local_commit(tx).await;
+            }
+            None => {}
+        }
         tx.delete(kept_key);
         tx.delete(&crate::stored::held_write(stored));
         let notice = key::message_notice(&stored.sender(), &stored.message().msg_id);
