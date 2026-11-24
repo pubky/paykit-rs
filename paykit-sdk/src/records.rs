@@ -347,8 +347,33 @@ impl KeptMessage {
     }
 }
 
+/// Whether the record's current content is disputed, so nothing Paykit reads there shows what
+/// the record holds until a later write settles it (Switch spec 12.6):
+/// - a recovery upload left the app's accepted contents and its next write at different
+///   signed operations of the same version (`different_write_at_held_version`);
+/// - or the client reports another write at the record's version, divergent (Switch wire
+///   7.4.14, as an honest lost service's recovery leaves it), over a delete or a value the
+///   app can't read. Such a record shows the user nothing to confirm, so it is held as the
+///   first case is. A divergent value it can read is shown instead, and paused until the
+///   user confirms it (Paykit spec 6, [`crate::divergent`]).
+///
+/// The checks that keep or protect a message over the record ask this: a cancellation's
+/// protection, a receipt kept over a delete, a restore's reading of its history. Kept so,
+/// a message is still given up with the host's notice once it is 30 days old. The checks
+/// that decide on the record, a credit, an answer or a write, take its pause instead,
+/// which the user's confirmation ends ([`activity_base_changed`]).
+pub(crate) fn content_disputed(record: &SharedRecord) -> bool {
+    record.different_write_at_held_version
+        || (record.divergent
+            && !matches!(
+                record.content,
+                pubky_switch_client::app::RecordContent::Value(_)
+            ))
+}
+
 /// A recovery upload can leave the app's accepted contents and its next write at
-/// different signed operations of the same version (Switch spec 12.6).
+/// different signed operations of the same version (Switch spec 12.6). A record seen
+/// divergent is paused instead, for the user's confirmation ([`crate::divergent`]).
 pub(crate) fn activity_base_changed(held: Option<&SharedRecord>) -> bool {
     held.is_some_and(|record| record.different_write_at_held_version)
 }

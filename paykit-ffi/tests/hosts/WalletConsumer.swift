@@ -199,7 +199,7 @@ class ReceiptReader: WalletHomeserver, PaymentMethod, @unchecked Sendable {
         return SelectedEndpoints(payable: payable, failures: failures)
     }
     func transfer(endpoint: String, payload: String, amount: Amount) throws -> MethodTransfer {
-        try! MethodTransfer(amount: amount, maxFee: nil)
+        try! MethodTransfer(amount: amount)
     }
     func pay(payment: MethodPayment) async throws -> MethodOutcome {
         lock.withLock { transfers += 1 }

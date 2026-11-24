@@ -194,8 +194,7 @@ mod tests {
             endpoint_id: id(),
             payload_hash: pubky_switch_core::enc::hash(payload().as_str().as_bytes()),
             amount: btc(),
-            transfer: Transfer::new(Some(btc()), None),
-            fee_cap: None,
+            transfer: Transfer::new(Some(btc())),
         };
         let mut endpoints = std::collections::BTreeMap::new();
         endpoints.insert(id(), payload());

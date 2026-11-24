@@ -1204,7 +1204,7 @@ impl Paykit {
                 let Some(label) = collection.policy_label(&record_held.policy) else {
                     continue;
                 };
-                if record_held.different_write_at_held_version {
+                if crate::records::content_disputed(&record_held) {
                     unread = true;
                     continue;
                 }
@@ -1561,9 +1561,15 @@ impl Paykit {
             paykit_lib::derive::natural_key::request_record(&self.identity(), &request_hash),
             label,
         );
-        if self
-            .activity_base_changed(&self.activity_key(&target)?)
+        let request_key = self.activity_key(&target)?;
+        if self.activity_base_changed(&request_key).await? {
+            return Ok(DetailsStop::Unknown);
+        }
+        // A request record seen divergent, not confirmed, whose upload may hold a rejection
+        // or a cancellation, can't show that no stop covers the details either (Paykit spec 6).
+        if Box::pin(self.pause_seen(&request_key))
             .await?
+            .adds_no_stop_waits()
         {
             return Ok(DetailsStop::Unknown);
         }

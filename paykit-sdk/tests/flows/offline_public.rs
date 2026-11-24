@@ -23,17 +23,15 @@ async fn test_offline_public_same_selection_pays_once_while_connected() {
 async fn test_offline_public_payment_rechecks_the_selected_transfer_before_dispatch() {
     let world = World::new();
     let mut wallet = world
-        .wallet_with(
-            "wallet",
-            store(),
-            crate::common::btc_fee_cap(PaykitConfig::default(), "0.00001"),
-        )
+        .wallet_with("wallet", store(), PaykitConfig::default())
         .await;
     let _shop = shop_with_endpoint(&world).await;
     wallet.receive(None).await.unwrap();
     world.router.remove(world.alice.origin());
-    let fee = paykit_lib::Decimal::new("0.0001").unwrap();
-    world.rail.next_max_fees(vec![None, Some(fee.clone())]);
+    // Planned at the amount paid, the method would transfer another just before dispatch.
+    world
+        .rail
+        .next_transfer_amounts(vec![Some(btc("0.001")), Some(btc("0.002"))]);
 
     let error = wallet
         .pay_without_request(payment(&world))
@@ -43,8 +41,7 @@ async fn test_offline_public_payment_rechecks_the_selected_transfer_before_dispa
     let Some(paykit_sdk::Refusal::Transfer { quote, .. }) = error.refusal() else {
         panic!("{error:?}");
     };
-    assert_eq!(quote.transfer.amount, Some(btc("0.001")));
-    assert_eq!(quote.transfer.max_fee, Some(fee));
+    assert_eq!(quote.transfer.amount, Some(btc("0.002")));
     assert!(world.rail.all_executions().is_empty());
 }
 

@@ -956,6 +956,10 @@ impl Paykit {
                 &request_hash,
             ));
             let parent_key = self.activity_key(&parent)?;
+            // The `done` is conditioned on the parent request's record too: paused after a
+            // view showed it divergent, it waits for the user's confirmation of that record
+            // as well (Paykit spec 6).
+            Box::pin(self.refuse_while_paused(&[parent_key])).await?;
             let base = self.activity_write_base(&parent_key).await?;
             let request = self.read_activity(&parent, base.as_ref());
             let proof = record.proof.as_ref().map(|stored| stored.body());

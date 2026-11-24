@@ -633,7 +633,7 @@ impl Paykit {
         let family = MarkFamily::Blocked;
         let now = self.now();
         let fresh_copy = self
-            .local_get::<u64>(key::LISTS_READ)
+            .lists_read_at()
             .await?
             .is_some_and(|read| crate::receive::lists_read_is_fresh(read, now));
         let kept_flagged = self.local_get::<Vec<[u8; 32]>>(key::FLAGGED).await?;

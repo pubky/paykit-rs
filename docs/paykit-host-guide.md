@@ -16,6 +16,13 @@ idempotency and must prevent duplicate execution of an attempt.
 For example, two wallets enrolled independently under the same payer identity
 use distinct App IDs and can both retrieve the seller's receipt for the same payment.
 
+> **Your payment method must limit fees.** Paykit configures, reports and checks no fee:
+> the amount it pays is checked, but whatever fee your payment method adds on top is
+> yours to bound. Set that limit in your payment method, most of all for payments made
+> without the user present, such as automatic payments and an Allowance's: fees don't
+> count against an Allowance's limits, and a payee can influence them through the
+> destination it chooses.
+
 ## Open a wallet and pay a one-time request
 
 Use `Paykit::join` with a signer-approved `JoinRequest` at enrollment. On an
@@ -387,10 +394,8 @@ shop, payable to its chosen BTC endpoint for at most 0.0002 BTC at a rate of at 
 0.00002 BTC per requested USD. Check the request, period, destination and both assets
 before comparing the decimal amounts. If either ceiling is exceeded, keep the payment
 waiting or show this quote to the user. The same standing policy can evaluate the next
-month's quote. The SDK checks the signed source, amount and payment method again. A fee
-above the configured cap still stops automatic payment. With no cap configured, the SDK
-makes no fee check and asks nothing for the fee: the payment method's own limit, if it
-has one, is the only bound on it. For a payment by hand, pass the
+month's quote. The SDK checks the signed source, amount and payment method again. The
+SDK makes no fee check: your payment method bounds the fee. For a payment by hand, pass the
 authorized quote through `PayOptions::with_rate_authorized`.
 
 The SDK checks the automatic payment window, the request and period records, and the
@@ -418,7 +423,11 @@ collections after the Switch has finished its feed read. An explicit `reconcile`
 read and retain committed duties from `wallet.app_mut().unacknowledged_events()`.
 Wait for a later successful `receive` so the SDK can process its duties, then
 acknowledge for `"paykit"` with `App::ack_events_for` up to the last duty in
-that successful report. Use the app-wide `App::ack_events` only after the
+that successful report. The SDK acknowledges each duty it takes by itself, so a duty left to the host
+never holds back one the SDK took. Show the host's duties, such as
+`AppEvent::ListsUnverified` after a restore or a provider loss (kept peers or
+reply grants not verified yet, or lists the backup left out), and acknowledge
+each once the user has seen it. Use the app-wide `App::ack_events` only after the
 other responsible protocols have handled their duties too. Keep the deletion
 notice and any surviving confirmed receipt together when showing a missing
 shared record.
@@ -511,7 +520,7 @@ The method declares `payment_time_tolerance_ms` with its declaration. The payee 
 | `Refusal::UnsupportedEndpoint` | Ask the user to choose a compatible endpoint or payment method. |
 | `Refusal::WaitingForList` | Show that a newer Private Payment List was requested. A public destination is a separate user choice. When `device_clock_behind` is set, a list expired by the service's time while the device clock is behind it: tell the user the device clock is behind. A list in `held_lists()` waits because its record was deleted, doesn't read, or is absent: the SDK never creates a held list's record over an absent key, since an absence can be a delete the service forgot. After a delete, or over an absent key, it can wait indefinitely; the payee's public endpoints or a request's own destination remain the way to pay. |
 | `Refusal::ListDeliveryUnknown` | Show the counterparty, whether the list was a withdrawal and how long the earlier or current list may be paid. `withdraw_list_from` has already recorded the counterparty as withdrawn. Pass the same value to `send_list_again` only after the user confirms another version. `Ok` means nothing of unknown outcome is left. `NotNow` keeps the confirmation: a later call or receive sends the list once it can, which for a nonempty list to a blocked counterparty is after the block ends; `lists_waiting_to_send_again` lists the counterparties still waiting. |
-| `Refusal::Transfer` | Show the actual transfer or fee quote and return that exact quote only on confirmation. The confirmation binds the fee shown when it is above the cap the quote was judged under, or when the method can't tell what it transfers; a quote judged under another cap is refused again with a new one. |
+| `Refusal::Transfer` | Show the actual transfer quote and return that exact quote only on confirmation; a quote that changed since is refused again with a new one, unless the transfer now passes the check on its own. |
 | `Refusal::PricedByRate` | Obtain authorization for this exact quote from the user or their bounded policy (Scheduling a Billing Period). |
 | `Refusal::IdentityUnavailable` | Refresh the required identity before retrying. |
 | `Refusal::IdentityUnconfirmed` | Ask for explicit confirmation before using a public destination without Switch confirmation. |
@@ -524,7 +533,7 @@ The method declares `payment_time_tolerance_ms` with its declaration. The payee 
 | `Refusal::CertificateRefused` | Seek a suitable certificate from the signer and keep Paykit actions paused meanwhile. |
 | `Refusal::SwitchUnavailable` | Show the own Switch as unavailable and keep payment actions waiting. From a payment, directly or as an `AttemptFailed` cause, it means nothing was paid, not a payment in flight: retry the payment once the switch answers. If the retry is refused with `PaymentInProgress`, call `Paykit::resume_payments` and retry once the earlier attempt is resolved; the resume records it failed when the switch takes that write. |
 | `Refusal::Blocked` | Show the blocked recipient and the exact payment to the user before any supported override. |
-| `Refusal::Divergent` | Show the returned records and the exact confirmation asked for. Run receive while the record still has writes waiting. |
+| `Refusal::Divergent` | Show the returned records and the exact confirmation asked for. Run receive while the record still has writes waiting. A credit refused this way is released only by confirming, with `confirm_divergent`, the records this refusal returns (`may_hold_credit`): a record confirmed as `divergent_records()` lists it doesn't count for a credit, and one still owed that confirmation may be missing from that list. Then ask for the credit again. |
 
 ## Wallet errors
 
@@ -606,6 +615,8 @@ Two rules override a code's case. A failure with a `keptBatch` comes as `Outcome
 | `kept_batches_ahead` | `AppRefusal::KeptBatchesAhead` | `OutcomeUnknown` | The call's own batch was kept unsent behind earlier kept batches, which the wallet sends in order over its next reads: follow `more` on `receive`, then reconcile. Don't make the call again. A restore doesn't carry kept batches, so after one, reconcile decides. |
 | `client_usage` | `AppRefusal::Usage`, `ClientError::Usage` | `NotSent` | A value given breaks a Switch rule: fix the call. |
 | `carried_too_large` | `AppRefusal::CarriedTooLarge` | `NotSent` | Acknowledge the duty events acted on, then restore again. |
+| `duties_too_large` | `AppRefusal::DutiesTooLarge` | `NotSent` | The backup wouldn't fit beside the duty events it carries: acknowledge the duty events acted on, then back up again. |
+| `deny_list_full` | `AppRefusal::DenyListFull` | `NeedsUser` | After a provider loss the new service's deny list has no room for `over` of the app's deny entries: ask the user which peers to unblock, then follow the recovery again. |
 | `wont_deliver` | `AppRefusal::WontDeliver` | `Permanent` | The message can no longer be delivered safely. |
 | `expired_unsent` | `AppError::ExpiredUnsent` | `NotSent` | The batch was retired before it was sent: make the call again. |
 | `store_after_kept` | `AppError::Store` behind a kept batch | `OutcomeUnknown` | The commit failed after the call's batch was kept: it may have applied. Reconcile before trying again. |

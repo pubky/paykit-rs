@@ -7,7 +7,7 @@
 //! lists and invite codes, the directory, peer copies of `identity.json` and the inbox. The
 //! identities admit each other as real apps do: a payer invites the payee it buys from (a
 //! conversation it starts, as at a checkout), and the first message an app sends a
-//! counterparty writes its conversation entry, so the counterparty's replies are admitted
+//! counterparty writes its reply grant, so the counterparty's replies are admitted
 //! (Paykit spec 1, Switch spec 7).
 
 use std::sync::Arc;
@@ -166,6 +166,9 @@ pub struct World {
     pub carol: TestSigner,
     pub router: Arc<Router>,
     pub rail: Arc<FakeRail>,
+    /// The values another own app wrote over records a provider loss then left divergent,
+    /// by record key, so a test can write one of them again as the record's successor.
+    pub competing: std::sync::Mutex<std::collections::BTreeMap<[u8; 32], Vec<u8>>>,
 }
 
 /// The host's timer in the tests: its sleep moves the test clock on and resolves at once.
@@ -225,6 +228,7 @@ impl World {
             carol,
             router,
             rail,
+            competing: Default::default(),
         }
     }
 
@@ -450,14 +454,6 @@ impl World {
 /// budget, would have them orphaned by then.
 pub fn day_window() -> PaykitConfig {
     PaykitConfig::default().with_orphan_after_s(86_400)
-}
-
-/// `config` with a fee cap of `cap` btc (Paykit spec 7.2 step 1).
-pub fn btc_fee_cap(config: PaykitConfig, cap: &str) -> PaykitConfig {
-    config.with_fee_cap(
-        paykit_lib::Asset::new("btc").unwrap(),
-        paykit_lib::Decimal::parse(cap).unwrap(),
-    )
 }
 
 pub fn store() -> Arc<dyn StateStore> {

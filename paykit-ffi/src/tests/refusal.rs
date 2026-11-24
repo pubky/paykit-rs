@@ -260,6 +260,61 @@ fn test_wallet_errors_categorize_each_failure_with_a_stable_code() {
 }
 
 #[test]
+fn test_switch_refusals_name_the_backup_and_deny_list_rules() {
+    use crate::SwitchRefusal;
+    assert!(matches!(
+        SwitchRefusal(AppRefusal::DutiesTooLarge { duty_events: 7 }).kind(),
+        SwitchRefusalKind::DutiesTooLarge { duty_events: 7 }
+    ));
+    assert!(matches!(
+        SwitchRefusal(AppRefusal::DenyListFull { over: 3 }).kind(),
+        SwitchRefusalKind::DenyListFull { over: 3 }
+    ));
+    // A rule the bindings don't name is held, never taken for one they do.
+    assert!(matches!(
+        SwitchRefusal(AppRefusal::NotNow("later".into())).kind(),
+        SwitchRefusalKind::NotNow
+    ));
+}
+
+#[test]
+fn test_switch_events_carry_the_lists_and_backup_evidence() {
+    use crate::{BackupRefusal, ListsLeftOut, WalletEventData};
+    use pubky_switch_client::app::{self as app, AppEvent};
+    let id = app::EventId::from_bytes(&[1; app::EVENT_ID_LEN]).unwrap();
+    let event = WalletEventData::from(AppEvent::ListsUnverified {
+        id,
+        kept: 2,
+        replies: 1,
+        contributed: true,
+        left_out: app::ListsLeftOut::KeptAndReplies,
+    });
+    assert!(matches!(
+        event,
+        WalletEventData::ListsUnverified {
+            kept: 2,
+            replies: 1,
+            contributed: true,
+            left_out: ListsLeftOut::KeptAndReplies,
+        }
+    ));
+    assert!(matches!(
+        WalletEventData::from(AppEvent::RecoveryDenyListFull {
+            generation: 3,
+            over: 4
+        }),
+        WalletEventData::RecoveryDenyListFull {
+            generation: 3,
+            over: 4
+        }
+    ));
+    assert!(matches!(
+        BackupRefusal::from(app::BackupRefusal::DutiesTooLarge { duty_events: 5 }),
+        BackupRefusal::DutiesTooLarge { duty_events: 5 }
+    ));
+}
+
+#[test]
 fn test_wallet_errors_carry_the_service_code_and_its_retry_time() {
     let (category, failure) =
         categorized(switch_answer(ErrorCode::RateLimited, Some(3)).into()).unwrap();
@@ -361,7 +416,6 @@ fn every_refusal_kind() -> Vec<RefusalKind> {
             payload_hash: Vec::new(),
             requested: amount(),
             amount: None,
-            max_fee: None,
         },
         RefusalKind::PricedByRate {
             request: request(),
@@ -634,6 +688,8 @@ fn test_wallet_errors_match_the_host_guide_table() {
             duty_events: 1,
             owed_calls: 0,
         },
+        AppRefusal::DutiesTooLarge { duty_events: 1 },
+        AppRefusal::DenyListFull { over: 1 },
         AppRefusal::WontDeliver(pubky_switch_client::app::WontDeliver::GivenUp),
     ] {
         let enrollment = matches!(
@@ -668,6 +724,7 @@ fn test_wallet_errors_match_the_host_guide_table() {
             "client_usage",                  // not sent: breaks a Switch rule
             "conflict",                      // nothing applied: the state changed first
             "destination",                   // refused before the attempt was written
+            "duties_too_large",              // nothing written by the backup
             "expired_unsent",                // retired before its first send
             "invalid_input",                 // the caller's value breaks a Paykit rule
             "label",                         // refused before the request was sent

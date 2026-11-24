@@ -90,7 +90,7 @@ pub(crate) enum DenyDecision {
 }
 
 pub(crate) fn deny_decision(delivery: &DeliveryView<'_>) -> Result<DenyDecision> {
-    let read = state::delivery_get::<u64>(delivery, key::LISTS_READ)?;
+    let read = receive::delivery_lists_read(delivery)?;
     if !read.is_some_and(|at| receive::lists_read_is_fresh(at, delivery.now_ms())) {
         return Ok(DenyDecision::Unknown);
     }
@@ -576,7 +576,7 @@ impl Paykit {
         // A time observed spares the read only while the copy of the lists is fresh: a due
         // copy is read before a governed send all the same (Paykit spec 8.1).
         let fresh = self
-            .local_get::<u64>(key::LISTS_READ)
+            .lists_read_at()
             .await?
             .is_some_and(|at| receive::lists_read_is_fresh(at, self.now()));
         if (self.protocol.delivery.observed().is_some() && fresh)
@@ -602,7 +602,9 @@ impl Paykit {
         // The lists read is the cheap authenticated read: its answer is observed whatever
         // becomes of the copy it carries, which a kept floor write leaves as it is.
         let now = self.now();
-        match self.app.allow_list().await {
+        // The copy carries the deny entries a provider loss's list upload still owes, as every
+        // read of it does (`Paykit::allow_list_with_owed_denies`).
+        match self.allow_list_with_owed_denies().await {
             Ok(lists) => {
                 self.observe_service_time();
                 if !Box::pin(self.floor_write_is_kept()).await? {

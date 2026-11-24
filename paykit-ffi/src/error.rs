@@ -492,6 +492,9 @@ fn app_refusal_category(refusal: &AppRefusal) -> (Category, &'static str) {
         AppRefusal::KeptBatchesAhead(_) => KEPT_BATCHES_AHEAD,
         AppRefusal::Usage(_) => (NotSent, "client_usage"),
         AppRefusal::CarriedTooLarge { .. } => (NotSent, "carried_too_large"),
+        AppRefusal::DutiesTooLarge { .. } => (NotSent, "duties_too_large"),
+        // The user unblocks enough peers to make room, then the recovery is followed again.
+        AppRefusal::DenyListFull { .. } => (NeedsUser, "deny_list_full"),
         AppRefusal::WontDeliver(_) => (Permanent, "wont_deliver"),
         _ => CLIENT_UNCLASSIFIED,
     }

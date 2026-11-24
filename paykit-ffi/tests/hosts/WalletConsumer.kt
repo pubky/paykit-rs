@@ -130,7 +130,7 @@ internal open class ReceiptReader : WalletHomeserver, PaymentMethod {
             EndpointFailure(it.id, MethodException.Unknown("route unavailable"))
         })
     }
-    override fun transfer(endpoint: String, payload: String, amount: Amount) = MethodTransfer(amount, null)
+    override fun transfer(endpoint: String, payload: String, amount: Amount) = MethodTransfer(amount)
     override suspend fun pay(payment: MethodPayment): MethodOutcome {
         transfers += 1
         error("a receipted payment cannot be dispatched again")
