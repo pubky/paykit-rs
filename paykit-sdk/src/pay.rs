@@ -931,48 +931,108 @@ pub(crate) fn unless_local_stop(error: impl Into<PaykitError>) -> Result<()> {
 }
 
 /// Whether a failure of one entry's step is a wait, which may pass at a later resume with no
-/// one acting: the Switch client's refusal for now, kept or not, or behind batches it keeps;
-/// the network or the switch not answering, an answer given before the body was read
-/// included, which is final for nothing (Switch wire 7.1); an answer of the switch whose
-/// Retry column (Switch spec 6.4) says the same request may pass as it is, after
-/// `Retry-After`, with a new timestamp or after a fresh read, such as a conflict, which a
-/// later resume reads again; a conflict this SDK met; the own switch or `identity.json`
-/// unavailable for now (Paykit spec 4, 8.4); or the payment method's history unreachable for
-/// now (Paykit spec 7.2). An answer that needs anything else first, a full quota, a key
-/// bundle or another service, and an origin the client may not connect to, are no waits. A
-/// wallet-wide stop is never one ([`stops_resume`]).
+/// one acting. A wallet-wide stop is never one ([`stops_resume`]). Of the Switch client's
+/// failures, [`client_waits`] decides; of this SDK's own: the own switch or `identity.json`
+/// unavailable for now (Paykit spec 4, 8.4), a conflict a later resume reads again, and the
+/// payment method's history unreachable for now (Paykit spec 7.2).
 ///
 /// The resume leaves such an entry for the next one and reports it as its outcome. Any other
 /// failure of one entry, which a later resume would meet again until the user or the host
 /// acts, also leaves only that entry, and the call returns it once every entry is visited,
 /// so the caller learns the reason rather than seeing the entry pending at every resume.
 pub(crate) fn entry_waits(error: &PaykitError) -> bool {
-    use pubky_switch_client::error::{ClientError, TransportError};
-    use pubky_switch_core::http::Retry;
     if stops_resume(error) {
         return false;
     }
     match error {
-        PaykitError::Client(client) => match client.unkept() {
-            AppError::Transport(TransportError::Refused(_))
-            | AppError::Switch(ClientError::Transport(TransportError::Refused(_))) => false,
-            AppError::Refused(ClientRefusal::NotNow(_) | ClientRefusal::KeptBatchesAhead(_))
-            | AppError::Transport(_)
-            | AppError::Switch(ClientError::Transport(_) | ClientError::BodyUnread { .. }) => true,
-            AppError::Switch(switch) => switch.retry().is_some_and(|retry| {
-                matches!(
-                    retry,
-                    Retry::Yes
-                        | Retry::AfterRetryAfter
-                        | Retry::WithNewTimestamp
-                        | Retry::AfterReread
-                )
-            }),
-            _ => false,
-        },
+        PaykitError::Client(client) => client_waits(client),
         PaykitError::Refused(Refusal::SwitchUnavailable(_) | Refusal::IdentityUnavailable(_))
         | PaykitError::Conflict(_)
         | PaykitError::Rail(RailError::Unavailable(_)) => true,
+        _ => false,
+    }
+}
+
+/// Whether a failure of the pinned Switch client is temporary by its own documentation: the
+/// same call may pass later with no one acting. Kept and ahead batches are judged by the
+/// failure inside them. The waits:
+/// - a batch retired before its first handoff, nothing of it applied (`ExpiredUnsent`);
+/// - the network, as the transport says ([`transport_waits`]);
+/// - the account-erasure check still waiting (`NotAnsweringAsAccount`, Switch spec 12.7);
+/// - an answer whose signature doesn't verify with a `5xx` status, as from a proxy in front
+///   of the service, nothing of it used (Switch wire 7.1);
+/// - an answer given before the body was read, final for nothing (Switch wire 7.1), and a
+///   signed public read whose time is outside the reader's window, which a fresh read
+///   replaces;
+/// - a switch answer whose Retry column (Switch spec 6.4) lets the same request pass as it
+///   is, after `Retry-After`, with a new timestamp or after a fresh read;
+/// - the client's refusal for now (`NotNow`, the owner's display read included, which the
+///   client turns into one) and a write behind batches it keeps.
+///
+/// No wait: a switch answer that needs a key bundle, a new signature or seal, the sender's
+/// `identity.json`, another service or a freed quota first, or none passes; an answer that
+/// doesn't verify otherwise, or that doesn't read; a head or proof that doesn't verify,
+/// which the client handles as a rollback; a refused origin, an answer too large, a request
+/// that can't be built; a body over its cap, no pinned
+/// key, a client usage error; data that doesn't verify or read; and the client's other
+/// refusals. A wallet-wide stop is decided first ([`stops_resume`]): the store, the
+/// protocol's store, an alarm, and the client's word that the app stopped, left, is gone,
+/// holds a recovery notice (its own `OwnRecoveryRequired` included, which the client turns
+/// into one) or has a restore question open.
+pub(crate) fn client_waits(error: &AppError) -> bool {
+    use pubky_switch_client::error::ClientError as C;
+    use pubky_switch_core::http::Retry;
+    match error.unkept() {
+        AppError::ExpiredUnsent | AppError::NotAnsweringAsAccount { .. } => true,
+        AppError::Transport(transport) | AppError::Switch(C::Transport(transport)) => {
+            transport_waits(transport)
+        }
+        AppError::Switch(switch) => match switch {
+            C::Switch { code, .. } => matches!(
+                code.retry(),
+                Retry::Yes | Retry::AfterRetryAfter | Retry::WithNewTimestamp | Retry::AfterReread
+            ),
+            C::BadServiceSignature { status } => *status >= 500,
+            C::BodyUnread { .. } | C::StaleAnswer { .. } | C::DisplayReadPending => true,
+            C::OwnRecoveryRequired { .. }
+            | C::Chain(_)
+            | C::InvalidResponse(_)
+            | C::Core(_)
+            | C::Usage(_)
+            | C::BodyOverCap { .. }
+            | C::Unpinned => false,
+            // A failure a later pin adds is no wait until it is classified here.
+            _ => false,
+        },
+        AppError::Refused(ClientRefusal::NotNow(_) | ClientRefusal::KeptBatchesAhead(_)) => true,
+        AppError::Refused(_)
+        | AppError::Store(_)
+        | AppError::Protocol(_)
+        | AppError::InvalidData(_)
+        | AppError::Alarm(_) => false,
+        _ => false,
+    }
+}
+
+/// Whether a transport failure is the network's, which the client sends again with the same
+/// bytes: no timely first handoff, its deadline passed before release, no connection, a
+/// timeout, or another failure of the transport; and a signed header that can't be read,
+/// which the client takes as an answer whose signature doesn't verify, under a `5xx` status.
+/// An origin the client may not connect to, an answer larger than the transport takes and a
+/// request that can't be built are no waits.
+fn transport_waits(error: &pubky_switch_client::error::TransportError) -> bool {
+    use pubky_switch_client::error::TransportError as T;
+    match error {
+        T::FirstSendUnavailable
+        | T::FirstSendExpired
+        | T::Connect(_)
+        | T::Timeout
+        | T::Other(_) => true,
+        // Taken as an answer whose signature doesn't verify: a wait under a `5xx` status, as
+        // [`client_waits`] judges one.
+        T::UnreadableSignedHeader { status } => *status >= 500,
+        T::Refused(_) | T::TooLarge(_) | T::InvalidRequest(_) => false,
+        // A failure a later pin adds is no wait until it is classified here.
         _ => false,
     }
 }
@@ -4683,7 +4743,7 @@ impl Paykit {
         // The method's history before any entry, which needs no switch: a payment it reports
         // made is journaled with its proof before anything an entry's step meets can end the
         // resume. It comes after the flush, so a kept batch's journal writes are in place.
-        self.journal_method_answers().await?;
+        self.journal_method_answers(payer_waits).await?;
         let mut out = Vec::new();
         // Each entry's work stands alone. A wallet-wide stop ([`stops_resume`]) ends the
         // resume and is returned. Any other failure of one entry's step leaves that entry for
@@ -4753,11 +4813,12 @@ impl Paykit {
     /// the journal, so a payment the method reports made is journaled with its proof whatever
     /// the switch answers later in the resume (Paykit spec 7.2). It is the first thing such an
     /// entry's own step does ([`Paykit::resolve_dispatched`], [`Paykit::take_outcome`]), the
-    /// acceptance of a payment made released with it; a restored entry, which reads
+    /// acceptance of a payment made released with it, unless the payer's side waits for its
+    /// keys (`payer_waits`), when the report releases it later; a restored entry, which reads
     /// its claim first, and an offline one wait for their own step. A lookup the method
     /// can't answer leaves that entry as it is, for its own step to ask again; a wallet-wide
     /// stop, such as a store failure, is returned.
-    async fn journal_method_answers(&mut self) -> Result<()> {
+    async fn journal_method_answers(&mut self, payer_waits: bool) -> Result<()> {
         for mut entry in self.journal().await? {
             if entry.stage != Stage::Paying || entry.restored || entry.offline.is_some() {
                 continue;
@@ -4775,7 +4836,9 @@ impl Paykit {
             }
             // As the entry's own step does once the proof is journaled: its acceptance goes
             // (Paykit spec 7.2 step 2); one that can't be queued now is left to the report.
-            if entry.stage == Stage::RailPaid {
+            // Not while the payer's side waits for its keys: the resume writes nothing to the
+            // switch then, and a new acceptance goes once that wait ends ([`KeysAwaited`]).
+            if entry.stage == Stage::RailPaid && !payer_waits {
                 if let Err(error) = self.release_acceptance(&mut entry, None).await {
                     unless_stop(error)?;
                 }
@@ -6319,6 +6382,12 @@ mod tests {
         // client's refusal for now, kept or not, a service answer a retry may pass, the
         // network, the own switch or identity.json for now, a conflict, the method's history
         // unreachable for now.
+        let unsigned = |status| {
+            PaykitError::Client(AppError::Switch(ClientError::BadServiceSignature {
+                status,
+            }))
+        };
+        let transport = |error| PaykitError::Client(AppError::Transport(error));
         for waits in [
             held_back(ClientRefusal::NotNow("kept batches".into())),
             kept(ClientRefusal::NotNow("reconcile".into())),
@@ -6336,6 +6405,28 @@ mod tests {
             PaykitError::Refused(Refusal::SwitchUnavailable("down".into())),
             PaykitError::Refused(Refusal::IdentityUnavailable("refresh".into())),
             PaykitError::Conflict("record".into()),
+            // The pinned client's own temporary failures, kept or not (Switch spec 12.7,
+            // Switch wire 7.1).
+            PaykitError::Client(AppError::NotAnsweringAsAccount { since_ms: 1 }),
+            PaykitError::Client(AppError::Kept {
+                batch_id: [1; 16],
+                error: Box::new(AppError::NotAnsweringAsAccount { since_ms: 1 }),
+            }),
+            unsigned(503),
+            PaykitError::Client(AppError::Kept {
+                batch_id: [1; 16],
+                error: Box::new(AppError::Switch(ClientError::BadServiceSignature {
+                    status: 502,
+                })),
+            }),
+            PaykitError::Client(AppError::ExpiredUnsent),
+            PaykitError::Client(AppError::Switch(ClientError::StaleAnswer {
+                server_time_ms: 1,
+            })),
+            answer(E::Staged),
+            transport(TransportError::Timeout),
+            transport(TransportError::FirstSendUnavailable),
+            transport(TransportError::UnreadableSignedHeader { status: 504 }),
         ] {
             assert!(!stops_resume(&waits), "{waits:?}");
             assert!(entry_waits(&waits), "{waits:?}");
@@ -6348,6 +6439,15 @@ mod tests {
             answer(E::PermissionMissing),
             answer(E::NotFound),
             answer(E::QuotaExceeded),
+            unsigned(404),
+            transport(TransportError::Refused("origin".into())),
+            transport(TransportError::TooLarge(1)),
+            transport(TransportError::UnreadableSignedHeader { status: 400 }),
+            PaykitError::Client(AppError::Switch(ClientError::InvalidResponse(
+                "member".into(),
+            ))),
+            PaykitError::Client(AppError::Switch(ClientError::Unpinned)),
+            PaykitError::Client(AppError::InvalidData("member".into())),
             answer(E::StaleEpoch),
             answer(E::Moved),
             PaykitError::Refused(Refusal::NotNow("reconcile".into())),
