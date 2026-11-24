@@ -25,7 +25,10 @@
 //!   its message staying processed. One not written within [`crate::KEPT_MESSAGE_MS`] of its
 //!   acceptance, such as a reply whose record never comes, is given up: its note goes, its
 //!   entry stays stored, and the host is told
-//!   ([`crate::NoticeKind::MessageGivenUp`]).
+//!   ([`crate::NoticeKind::MessageGivenUp`]). Only a write refused for its content counts
+//!   toward that: one the switch answers with a code that says nothing of the content is
+//!   given up only at [`hard_bound`], and one whose batch the client keeps, or that waits
+//!   behind a kept batch, isn't given up while the batch may still land ([`submitted`]).
 //! - **An effect of unknown fate** (`EffectUncertain`, or `Parked` as `Uncertain`): the same
 //!   write compensates for it, since placing a message a record already holds writes
 //!   nothing. A copy of the entry the host released after that is declined, its message
@@ -94,8 +97,9 @@ pub(crate) enum Placed {
     /// Not written now: tried again at the next receive, and given up past its window, a
     /// message waiting for a scope key included.
     Not,
-    /// Not written while the record's absence decides nothing yet: tried again at the next
-    /// receive, and never given up meanwhile.
+    /// Not written while the record's absence decides nothing yet, or while the client keeps
+    /// a batch that may still write it or that it waits behind ([`submitted`]): tried again at
+    /// the next receive, and never given up meanwhile.
     Waits,
     /// Not written now on an answer of the switch that says nothing of the write's content,
     /// one the same batch may pass later by the Switch's own table ([`refuses_the_content`]):
@@ -107,7 +111,7 @@ pub(crate) enum Placed {
 /// What a later write's batch came to: written; refused by the switch for its content, and
 /// so not written now and counted toward the message's window; answered with a code that
 /// says nothing of the content, and so tried again uncounted; or not sent now for want of a
-/// key, and so waiting. Any other error is returned, and nothing may be given up on it: a
+/// key, or kept by the client, or waiting behind a batch it keeps, and so waiting. Any other error is returned, and nothing may be given up on it: a
 /// wallet-wide stop, which ends the receive ([`crate::pay::stops_resume`]), a switch that
 /// doesn't answer ([`crate::pay::switch_unavailable`]), a store failure, an answer that
 /// doesn't verify.
@@ -115,8 +119,36 @@ pub(crate) fn submitted<T>(result: std::result::Result<T, AppError>) -> Result<P
     let error = match result {
         Ok(_) => return Ok(Placed::Done),
         Err(AppError::Refused(ClientRefusal::NotNow(_))) => return Ok(Placed::Waits),
+        // The write waits behind a batch the client keeps from an earlier call (Switch spec
+        // 12.5, "Kept batches"): nothing of it was sent, and the answer is the earlier batch's,
+        // which says nothing of this write. It waits, never counted. A switch that doesn't
+        // answer and a wallet-wide stop are returned as any.
+        Err(error @ AppError::Ahead { .. }) => {
+            if crate::pay::switch_unavailable(&error) {
+                return Err(error.into());
+            }
+            let error = PaykitError::from(error);
+            if crate::pay::stops_resume(&error) {
+                return Err(error);
+            }
+            return Ok(Placed::Waits);
+        }
         Err(error) => PaykitError::from(error),
     };
+    // The client keeps the write's own batch to send again, on an answer that says nothing of
+    // its content: the write may still land. It waits, never given up while the client keeps
+    // the batch: given up meanwhile, the message would go while its write may still be
+    // applied, and a stop kept beside it, a payee's cancellation, could go with it
+    // (`Paykit::place_kept_cancellations`). The client drops a batch it can't send within its
+    // answer window and tells the host (`AppEvent::KeptBatchDropped`); the next try decides.
+    if let PaykitError::Client(client @ AppError::Kept { .. }) = &error {
+        if !crate::pay::switch_unavailable(client)
+            && !crate::pay::stops_resume(&error)
+            && client.code().is_some_and(|code| !refuses_the_content(code))
+        {
+            return Ok(Placed::Waits);
+        }
+    }
     let code = match &error {
         PaykitError::Client(client) if !crate::pay::switch_unavailable(client) => client.code(),
         _ => None,
@@ -139,7 +171,8 @@ fn refused(error: &AppError) -> bool {
 /// column of Switch spec 6.4: never unchanged (`No`), or once the account's limit frees
 /// (`429 quota_exceeded`), the "room frees" case the message's window is for (Paykit spec
 /// 8.1, Stored entries). Every other code says the same batch may pass later, with a new
-/// timestamp, after a wait, a re-read or new keys, so it counts nothing toward the window.
+/// timestamp, after a wait, or written again over a fresh read or new keys, which the next try
+/// does, so it counts nothing toward the window.
 ///
 /// The receive goes on past a failed upkeep of the app record only where the switch doesn't
 /// answer ([`crate::pay::switch_unavailable`]), a strict subset of the answers this never
@@ -1538,6 +1571,44 @@ mod tests {
             let expected = if counted { Placed::Not } else { Placed::Retry };
             assert_eq!(placed.unwrap(), expected, "{code:?}");
         }
+    }
+
+    #[test]
+    fn test_stored_write_kept_by_the_client_waits() {
+        use pubky_switch_client::error::ClientError;
+        use pubky_switch_core::http::ErrorCode;
+        let kept = |code: ErrorCode| AppError::Kept {
+            batch_id: [7; 16],
+            error: Box::new(AppError::Switch(ClientError::Switch {
+                status: code.status(),
+                code,
+                message: String::new(),
+                current: serde_json::Value::Null,
+                known_version: None,
+                retry_after: None,
+            })),
+        };
+        // A batch the client keeps on an answer that says nothing of its content may still
+        // land: it waits.
+        for code in [
+            ErrorCode::RateLimited,
+            ErrorCode::StaleTimestamp,
+            ErrorCode::Moved,
+        ] {
+            assert_eq!(
+                submitted::<()>(Err(kept(code))).unwrap(),
+                Placed::Waits,
+                "{code:?}"
+            );
+        }
+        // Refused for its content it counts as before; a switch that doesn't answer is
+        // returned, and so is a wallet-wide stop.
+        assert_eq!(
+            submitted::<()>(Err(kept(ErrorCode::QuotaExceeded))).unwrap(),
+            Placed::Not
+        );
+        assert!(submitted::<()>(Err(kept(ErrorCode::Unavailable))).is_err());
+        assert!(submitted::<()>(Err(kept(ErrorCode::CertExpired))).is_err());
     }
 
     #[test]

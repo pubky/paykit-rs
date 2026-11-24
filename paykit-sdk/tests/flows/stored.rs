@@ -1443,16 +1443,124 @@ async fn test_stored_note_kept_when_its_write_meets_a_wallet_wide_stop() {
 #[tokio::test]
 async fn test_stored_note_given_up_past_two_windows_whatever_the_answer() {
     // Kept on answers that say nothing of its content, but not for ever: one more window
-    // past its own, it is given up as any other (Paykit spec 8.1).
+    // past its own, it is given up as any other (Paykit spec 8.1). A `conflict`, which the
+    // client doesn't keep a batch for.
     let w = World::new();
     let (mut wallet, _) =
         stored_receipt_aged(&w, paykit_sdk::KEPT_MESSAGE_MS.saturating_mul(2)).await;
-    answer_next_write(&w.alice, ErrorCode::RateLimited);
+    answer_next_write(&w.alice, ErrorCode::Conflict);
     let _ = wallet.receive(None).await;
     assert!(kept(&wallet, "se/").await.is_empty());
     let notices = wallet.notices().await.unwrap();
     assert_eq!(notices.len(), 1, "{notices:?}");
     assert_eq!(notices[0].kind, paykit_sdk::NoticeKind::MessageGivenUp);
+}
+
+#[tokio::test]
+async fn test_stored_kept_batch_past_two_windows_not_given_up_and_lands() {
+    // The client keeps a rate-limited batch to send again: the write may still land, so the
+    // message waits past any bound, and lands with the batch.
+    let w = World::new();
+    let (mut wallet, _) =
+        stored_receipt_aged(&w, paykit_sdk::KEPT_MESSAGE_MS.saturating_mul(2)).await;
+    answer_next_write(&w.alice, ErrorCode::RateLimited);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(kept(&wallet, "se/").await.len(), 1);
+    assert!(wallet.notices().await.unwrap().is_empty());
+    w.clock.advance_ms(11 * 60_000);
+    wallet.receive(None).await.unwrap();
+    assert!(kept(&wallet, "se/").await.is_empty());
+    assert!(wallet.app_mut().parked_entries().await.unwrap().is_empty());
+    assert!(wallet.notices().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_stored_answer_to_an_earlier_kept_batch_counts_nothing() {
+    // Two stored requests past their window. The first one's write is kept on a rate limit;
+    // the second one's waits behind it, and the earlier batch's resend is refused for room.
+    // That answer is the earlier batch's, not the second request's: nothing is given up.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let first = request_from(&mut shop, w.alice_id(), open_ended("1")).await;
+    let second = request_from(&mut shop, w.alice_id(), open_ended("2")).await;
+    refuse_writes(&w.alice, 4);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(kept(&wallet, "se/").await.len(), 2);
+    w.clock.advance_ms(paykit_sdk::KEPT_MESSAGE_MS);
+    wallet.app_mut().receive(None).await.unwrap();
+    answer_next_write(&w.alice, ErrorCode::RateLimited);
+    answer_next_write(&w.alice, ErrorCode::QuotaExceeded);
+    let _ = wallet.receive(None).await;
+    assert!(wallet.notices().await.unwrap().is_empty());
+    w.clock.advance_ms(11 * 60_000);
+    wallet.receive(None).await.unwrap();
+    for request in [&first, &second] {
+        assert_eq!(
+            wallet.request(request).await.unwrap().status,
+            RequestStatus::Open
+        );
+    }
+    assert!(wallet.notices().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_stored_request_kept_by_the_client_keeps_its_cancellation() {
+    // Bob's open-ended request is stored unrecorded and his cancellation of it kept as a
+    // stop beside it. Past the bound the request's write is kept by the client on a rate
+    // limit. Given up then, the stop would go with it, and the client's replay would
+    // leave the request payable. It waits instead: once the batch lands, the cancellation is
+    // placed over it, and the request is never payable.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), open_ended("1")).await;
+    refuse_writes(&w.alice, 2);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(
+        wallet.request(&request).await.unwrap().status,
+        RequestStatus::Unrecorded
+    );
+    let record = shop.payee_activity().await.unwrap()[0].record;
+    shop.cancel_sent_request(&record, None).await.unwrap();
+    refuse_writes(&w.alice, 1);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(kept(&wallet, "se/").await.len(), 1);
+    assert_eq!(kept(&wallet, "kc/").await.len(), 1);
+    // Past the bound at which any message is given up but one whose batch the client keeps.
+    w.clock
+        .advance_ms(paykit_sdk::KEPT_MESSAGE_MS.saturating_mul(2));
+    wallet.app_mut().receive(None).await.unwrap();
+    answer_next_write(&w.alice, ErrorCode::RateLimited);
+    let _ = wallet.receive(None).await;
+    assert_eq!(kept(&wallet, "kc/").await.len(), 1);
+    w.clock.advance_ms(11 * 60_000);
+    wallet.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert_eq!(
+        wallet.request(&request).await.unwrap().status,
+        RequestStatus::Cancelled
+    );
+    let refused = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .outcome
+        .unwrap_err();
+    assert_eq!(refused.refusal(), Some(&paykit_sdk::Refusal::Cancelled));
+}
+
+/// A request of `value` with no deadline of its own.
+fn open_ended(value: &str) -> paykit_sdk::RequestDraft {
+    let mut endpoints = std::collections::BTreeMap::new();
+    endpoints.insert(
+        endpoint("btc-lightning-bolt11"),
+        paykit_sdk::PaymentEndpointPayload::new("lnbc1invoice").unwrap(),
+    );
+    paykit_sdk::RequestDraft::new(
+        btc(value),
+        paykit_lib::PaymentReference::new("order-1").unwrap(),
+        paykit_sdk::RequestDestination::Endpoints(endpoints),
+    )
 }
 
 #[tokio::test]
