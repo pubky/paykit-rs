@@ -64,7 +64,7 @@ fn refused_records(error: &paykit_sdk::PaykitError) -> Vec<([u8; 32], bool, bool
 }
 
 /// Confirm every record `refused`, a divergent refusal, names, as it shows them.
-async fn confirm_refused(app: &mut Paykit, refused: &paykit_sdk::PaykitError) {
+pub(crate) async fn confirm_refused(app: &mut Paykit, refused: &paykit_sdk::PaykitError) {
     let Some(Refusal::Divergent { records }) = refused.refusal() else {
         panic!("not a divergent refusal: {refused:?}");
     };
@@ -76,7 +76,7 @@ async fn confirm_refused(app: &mut Paykit, refused: &paykit_sdk::PaykitError) {
 }
 
 /// Whether every record `refused`, a divergent refusal, names is shown for a credit.
-fn shown_for_a_credit(refused: &paykit_sdk::PaykitError) -> bool {
+pub(crate) fn shown_for_a_credit(refused: &paykit_sdk::PaykitError) -> bool {
     matches!(refused.refusal(), Some(Refusal::Divergent { records })
         if records.iter().all(|r| r.may_hold_credit))
 }
