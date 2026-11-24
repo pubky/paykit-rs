@@ -16,6 +16,13 @@ idempotency and must prevent duplicate execution of an attempt.
 For example, two wallets enrolled independently under the same payer identity
 use distinct App IDs and can both retrieve the seller's receipt for the same payment.
 
+> **Your payment method must limit fees.** Paykit configures, reports and checks no fee:
+> the amount it pays is checked, but whatever fee your payment method adds on top is
+> yours to bound. Set that limit in your payment method, most of all for payments made
+> without the user present, such as automatic payments and an Allowance's: fees don't
+> count against an Allowance's limits, and a payee can influence them through the
+> destination it chooses.
+
 ## Open a wallet and pay a one-time request
 
 Use `Paykit::join` with a signer-approved `JoinRequest` at enrollment. On an
@@ -387,10 +394,8 @@ shop, payable to its chosen BTC endpoint for at most 0.0002 BTC at a rate of at 
 0.00002 BTC per requested USD. Check the request, period, destination and both assets
 before comparing the decimal amounts. If either ceiling is exceeded, keep the payment
 waiting or show this quote to the user. The same standing policy can evaluate the next
-month's quote. The SDK checks the signed source, amount and payment method again. A fee
-above the configured cap still stops automatic payment. With no cap configured, the SDK
-makes no fee check and asks nothing for the fee: the payment method's own limit, if it
-has one, is the only bound on it. For a payment by hand, pass the
+month's quote. The SDK checks the signed source, amount and payment method again. The
+SDK makes no fee check: your payment method bounds the fee. For a payment by hand, pass the
 authorized quote through `PayOptions::with_rate_authorized`.
 
 The SDK checks the automatic payment window, the request and period records, and the
@@ -511,7 +516,7 @@ The method declares `payment_time_tolerance_ms` with its declaration. The payee 
 | `Refusal::UnsupportedEndpoint` | Ask the user to choose a compatible endpoint or payment method. |
 | `Refusal::WaitingForList` | Show that a newer Private Payment List was requested. A public destination is a separate user choice. When `device_clock_behind` is set, a list expired by the service's time while the device clock is behind it: tell the user the device clock is behind. A list in `held_lists()` waits because its record was deleted, doesn't read, or is absent: the SDK never creates a held list's record over an absent key, since an absence can be a delete the service forgot. After a delete, or over an absent key, it can wait indefinitely; the payee's public endpoints or a request's own destination remain the way to pay. |
 | `Refusal::ListDeliveryUnknown` | Show the counterparty, whether the list was a withdrawal and how long the earlier or current list may be paid. `withdraw_list_from` has already recorded the counterparty as withdrawn. Pass the same value to `send_list_again` only after the user confirms another version. `Ok` means nothing of unknown outcome is left. `NotNow` keeps the confirmation: a later call or receive sends the list once it can, which for a nonempty list to a blocked counterparty is after the block ends; `lists_waiting_to_send_again` lists the counterparties still waiting. |
-| `Refusal::Transfer` | Show the actual transfer or fee quote and return that exact quote only on confirmation. The confirmation binds the fee shown when it is above the cap the quote was judged under, or when the method can't tell what it transfers; a quote judged under another cap is refused again with a new one. |
+| `Refusal::Transfer` | Show the actual transfer quote and return that exact quote only on confirmation; a quote that changed since is refused again with a new one, unless the transfer now passes the check on its own. |
 | `Refusal::PricedByRate` | Obtain authorization for this exact quote from the user or their bounded policy (Scheduling a Billing Period). |
 | `Refusal::IdentityUnavailable` | Refresh the required identity before retrying. |
 | `Refusal::IdentityUnconfirmed` | Ask for explicit confirmation before using a public destination without Switch confirmation. |

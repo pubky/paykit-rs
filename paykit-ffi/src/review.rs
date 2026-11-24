@@ -109,8 +109,6 @@ pub enum RefusalKind {
         requested: Amount,
         /// The exact transfer the payment method proposes, if known.
         amount: Option<Amount>,
-        /// The method's maximum fee, if known.
-        max_fee: Option<String>,
     },
     /// This payment requires authorization of the original rate, destination and resulting amount.
     PricedByRate {
@@ -317,7 +315,6 @@ impl PaymentRefusal {
                 payload_hash: q.payload_hash.into(),
                 requested: (&q.amount).into(),
                 amount: q.transfer.amount.as_ref().map(Into::into),
-                max_fee: q.transfer.max_fee.as_ref().map(|v| v.as_str().into()),
             },
             Refusal::PricedByRate { payment: p } => D::PricedByRate {
                 request: p.request.into(),

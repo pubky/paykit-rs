@@ -361,7 +361,6 @@ fn every_refusal_kind() -> Vec<RefusalKind> {
             payload_hash: Vec::new(),
             requested: amount(),
             amount: None,
-            max_fee: None,
         },
         RefusalKind::PricedByRate {
             request: request(),

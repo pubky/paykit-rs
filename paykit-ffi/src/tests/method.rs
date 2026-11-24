@@ -118,7 +118,7 @@ impl PaymentMethod for Account {
                 reason: "transfer threw".into(),
             });
         }
-        Ok(MethodTransfer::new(Some(amount), None).unwrap())
+        Ok(MethodTransfer::new(Some(amount)).unwrap())
     }
     async fn pay(&self, p: MethodPayment) -> Result<MethodOutcome, MethodError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
@@ -317,7 +317,7 @@ fn test_method_thrown_transfer_and_settlement_id_answer_unknown_and_none() {
     account.throw_callbacks.store(true, Ordering::SeqCst);
     // A thrown transfer is an amount the method can't tell, which the user confirms.
     let transfer = rail.transfer(&endpoint, &payload, &amount);
-    assert_eq!((transfer.amount, transfer.max_fee), (None, None));
+    assert_eq!(transfer.amount, None);
     assert_eq!(rail.settlement_id(&endpoint, &proof), None);
 }
 

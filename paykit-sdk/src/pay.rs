@@ -110,12 +110,12 @@ pub struct PayOptions {
     /// A Billing Period with incomplete pre-loss payment history stays held.
     pub may_be_paid_confirmed: Option<PaymentDoubt>,
     /// The transfer the user was shown and chose to pay anyway, as a refusal for another
-    /// amount, or a fee above the app's cap, gave it ([`Refusal::Transfer`]; Paykit spec 7.2
+    /// amount gave it ([`Refusal::Transfer`]; Paykit spec 7.2
     /// step 1). It lets only that destination, with that same transfer, be paid: one chosen
     /// or quoted differently since is refused again with what it would transfer now.
     ///
     /// Consent is needed only for what the user didn't ask for. A destination whose
-    /// transfer passes the check, the amount asked for with no fee beyond the cap, is paid
+    /// transfer passes the check, the amount asked for, is paid
     /// without it, on a call carrying a confirmation too: the user asked for that payment
     /// when they called pay, as in v0.1, where the wallet paid the target it resolved. The
     /// confirmed quote is then not used.
@@ -180,7 +180,7 @@ impl PayOptions {
     }
 
     /// The transfer the user was shown and chose to pay anyway, as a refusal for another
-    /// amount, or a fee above the app's cap, gave it ([`Refusal::Transfer`]; Paykit spec 7.2
+    /// amount gave it ([`Refusal::Transfer`]; Paykit spec 7.2
     /// step 1). Only that destination, with that same transfer, is paid.
     #[must_use]
     pub fn with_transfer_confirmed(mut self, quote: TransferQuote) -> Self {
@@ -361,13 +361,8 @@ pub struct TransferQuote {
     /// amount chosen for a payment without a request. `transfer.amount` separately names
     /// what the method would actually transfer, if known.
     pub amount: PaymentAmount,
-    /// What the method said it would transfer: its amount and largest fee.
+    /// What the method said it would transfer: its amount.
     pub transfer: Transfer,
-    /// The fee cap the transfer was judged under, `None` for none: the cap the app
-    /// configures for the asset transferred, or, at the final payment check, the one the
-    /// attempt was journaled with. A confirmation binds a fee only under the cap it was
-    /// shown with: one given under another cap, or none, is asked again.
-    pub fee_cap: Option<paykit_lib::Decimal>,
 }
 
 /// The payment outcome or error and any payee apps whose public endpoints the call
@@ -749,55 +744,20 @@ struct Ordered {
     error: Option<RailError>,
 }
 
-/// Why the transfer check refuses `transfer` for `amount` (Paykit spec 7.2 step 1), under
-/// the fee cap `cap`: another amount or asset, or one the method can't tell, or a fee above
-/// the cap. With no cap Paykit makes no check of the fee: it is left to the payment method,
-/// whose own limit, if any, is the only bound on it. The fee is in the transfer's asset,
-/// which is the payment's (checked first). `None` when it passes.
-fn transfer_refused(
-    transfer: &Transfer,
-    amount: &PaymentAmount,
-    cap: Option<&paykit_lib::Decimal>,
-) -> Option<&'static str> {
-    if transfer.amount.as_ref() != Some(amount) {
-        return Some(
-            "the destination transfers another amount or asset, or one the method can't tell",
-        );
-    }
-    fee_above_cap(transfer, cap).then_some("a fee above the app's cap")
-}
-
-/// Whether `transfer`'s largest fee is above the fee cap `cap` (Paykit spec 7.2 step 1):
-/// never with no cap.
-fn fee_above_cap(transfer: &Transfer, cap: Option<&paykit_lib::Decimal>) -> bool {
-    transfer
-        .max_fee
-        .as_ref()
-        .filter(|fee| !fee.is_zero())
-        .zip(cap)
-        .is_some_and(|(fee, cap)| fee > cap)
-}
-
-/// Whether the user's choice of `transfer` binds its largest fee (Paykit spec 7.2 step 1):
-/// a fee above the cap `cap`, and any fee of a transfer whose amount the method can't
-/// tell, whose asset, and so the cap its fee is judged by, Paykit can't know. Otherwise,
-/// with no cap or within it, a confirmation given for another reason doesn't bind the fee.
-fn binds_fee(transfer: &Transfer, cap: Option<&paykit_lib::Decimal>) -> bool {
-    transfer.amount.is_none() || fee_above_cap(transfer, cap)
+/// Why the transfer check refuses `transfer` for `amount` (Paykit spec 7.2 step 1): another
+/// amount or asset, or one the method can't tell. Paykit makes no check of the fee: it is
+/// the payment method's. `None` when it passes.
+fn transfer_refused(transfer: &Transfer, amount: &PaymentAmount) -> Option<&'static str> {
+    (transfer.amount.as_ref() != Some(amount)).then_some(
+        "the destination transfers another amount or asset, or one the method can't tell",
+    )
 }
 
 /// Whether `quote`, the transfer the method reports now, is the one the user confirmed,
-/// `confirmed` (Paykit spec 7.2 step 1): the same destination, amount, transfer amount and
-/// fee cap, and the same largest fee when the choice binds it ([`binds_fee`]). Amounts and
-/// fees compare as values, whatever their spelling (Paykit wire 1.2).
+/// `confirmed` (Paykit spec 7.2 step 1): the same destination, amount and transfer amount.
+/// Amounts compare as values, whatever their spelling (Paykit wire 1.2).
 fn confirms(confirmed: &TransferQuote, quote: &TransferQuote) -> bool {
-    let feeless = |q: &TransferQuote| TransferQuote {
-        transfer: Transfer::new(q.transfer.amount.clone(), None),
-        ..q.clone()
-    };
-    feeless(confirmed) == feeless(quote)
-        && (!binds_fee(&quote.transfer, quote.fee_cap.as_ref())
-            || confirmed.transfer.max_fee == quote.transfer.max_fee)
+    confirmed == quote
 }
 
 /// A fixed rate lasts as long as its request. A period rate needs both clocks.
@@ -2993,7 +2953,7 @@ impl Paykit {
     }
 
     /// The transfer check (Paykit spec 7.2 step 1): the method transfers exactly the amount
-    /// paid, and any fee the payee can influence is within the app's cap. A transfer that
+    /// paid; the fee is the payment method's (Paykit spec 7.2 step 1). A transfer that
     /// passes is what the user asked for when they called pay, and is paid with no other
     /// consent. A destination failing it is paid only on the user's explicit choice of
     /// exactly what it would transfer: the method is asked again, and the destination and
@@ -3014,12 +2974,10 @@ impl Paykit {
         let endpoint_id = destination.endpoint_id()?;
         let payload = destination.payload()?;
         let transfer = self.rail.transfer(&endpoint_id, &payload, amount);
-        let cap = self.fee_cap(&transfer);
-        let kept_cap = cap.map(|cap| cap.as_str().to_owned());
-        let reason = transfer_refused(&transfer, amount, cap)
+        let reason = transfer_refused(&transfer, amount)
             .or_else(|| by_hand.then_some(conversion::BY_HAND_ONLY));
         let Some(reason) = reason else {
-            return Ok(TransferBound::Asked { cap: kept_cap });
+            return Ok(TransferBound::Asked {});
         };
         let quote = TransferQuote {
             payee: *payee,
@@ -3028,25 +2986,12 @@ impl Paykit {
             payload_hash: pubky_switch_core::enc::hash(payload.as_str().as_bytes()),
             amount: amount.clone(),
             transfer,
-            fee_cap: cap.cloned(),
         };
         if confirmed.is_some_and(|confirmed| confirms(confirmed, &quote))
             && (price.is_none() || quote.transfer.amount.as_ref() == Some(amount))
         {
-            // The fee is bound only when the user's choice binds it.
-            let max_fee = binds_fee(&quote.transfer, cap)
-                .then(|| {
-                    quote
-                        .transfer
-                        .max_fee
-                        .as_ref()
-                        .map(|f| f.as_str().to_owned())
-                })
-                .flatten();
             return Ok(TransferBound::Confirmed {
-                cap: kept_cap,
                 amount: quote.transfer.amount.as_ref().map(KeptAmount::of),
-                max_fee,
             });
         }
         Err(Refusal::Transfer {
@@ -3056,20 +3001,12 @@ impl Paykit {
         .into())
     }
 
-    /// The fee cap the app configures for the asset the method transfers (Paykit spec 7.2
-    /// step 1): its fee is in that asset. None for a transfer whose amount the method can't
-    /// tell, whose fee a confirmation then always binds ([`binds_fee`]).
-    fn fee_cap(&self, transfer: &Transfer) -> Option<&paykit_lib::Decimal> {
-        let transferred = transfer.amount.as_ref()?;
-        self.config.fee_caps.get(&transferred.asset)
-    }
-
     /// The transfer check again, at the final payment check just before the call, a
     /// repeat's included (Paykit spec 7.2 step 1): the method's transfer now of the amount
     /// paid, the one its host authorized for a payment priced by a rate, must still be
-    /// within the bound the attempt was journaled with, so a fee estimate that grew, or an
-    /// amount that changed, since the attempt was planned is never paid. A transfer that is
-    /// what the user asked for, within the cap at planning, passes; a confirmed one passes
+    /// within the bound the attempt was journaled with, so an amount that changed since the
+    /// attempt was planned is never paid. A transfer that is what the user asked for
+    /// passes; a confirmed one passes
     /// also when it is the one confirmed. For a payment permitted only by hand,
     /// [`Paykit::amount_holds`] requires the original selection and the transfer must
     /// match its confirmation. `Err` inside holds the refusal.
@@ -3087,34 +3024,18 @@ impl Paykit {
         let payload = entry.destination.payload()?;
         let amount = entry.call_amount()?;
         let transfer = self.rail.transfer(&endpoint_id, &payload, &amount);
-        let parse = |cap: &Option<String>| {
-            cap.as_deref()
-                .map(paykit_lib::Decimal::parse)
-                .transpose()
-                .map_err(|_| PaykitError::corrupt())
+        let confirmed = match &entry.transfer_bound {
+            Some(TransferBound::Confirmed { amount }) => Some(amount),
+            Some(TransferBound::Asked {}) | None => None,
         };
-        let (cap, confirmed) = match &entry.transfer_bound {
-            Some(TransferBound::Asked { cap }) => (parse(cap)?, None),
-            Some(TransferBound::Confirmed {
-                cap,
-                amount,
-                max_fee,
-            }) => (parse(cap)?, Some((amount, max_fee))),
-            None => (self.fee_cap(&transfer).cloned(), None),
-        };
-        let reason = transfer_refused(&transfer, &amount, cap.as_ref())
+        let reason = transfer_refused(&transfer, &amount)
             .or_else(|| by_hand.then_some(conversion::BY_HAND_ONLY));
-        // A fee the user's choice binds passes only when it is the one the user chose; with
-        // no cap, or within it, the fee is what the method reports at the call (Paykit spec
-        // 7.2 step 1). Amounts and fees compare as values, whatever their spelling (Paykit
-        // wire 1.2).
+        // Amounts compare as values, whatever their spelling (Paykit wire 1.2).
         let as_confirmed = match confirmed {
-            Some((kept_amount, max_fee)) => {
+            Some(kept_amount) => {
                 let kept_amount = kept_amount.as_ref().map(KeptAmount::amount).transpose()?;
-                let max_fee = parse(max_fee)?;
                 (entry.price.is_none() || transfer.amount.as_ref() == Some(&amount))
                     && transfer.amount == kept_amount
-                    && (!binds_fee(&transfer, cap.as_ref()) || transfer.max_fee == max_fee)
             }
             None => false,
         };
@@ -3136,7 +3057,6 @@ impl Paykit {
                 payload_hash: pubky_switch_core::enc::hash(payload.as_str().as_bytes()),
                 amount,
                 transfer,
-                fee_cap: cap,
             }),
         }))
     }
@@ -3187,7 +3107,6 @@ impl Paykit {
                     TransferQuote {
                         payee: entry.payee,
                         app_id: entry.destination.app_id,
-                        fee_cap: self.fee_cap(&transfer).cloned(),
                         transfer,
                         endpoint_id,
                         payload_hash: pubky_switch_core::enc::hash(payload.as_str().as_bytes()),
