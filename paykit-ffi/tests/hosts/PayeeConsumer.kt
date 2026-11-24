@@ -1,7 +1,6 @@
 package com.synonym.paykit.tests
 
 import com.synonym.paykit.*
-import java.io.File
 import java.util.Base64
 import java.util.UUID
 
@@ -44,8 +43,7 @@ internal suspend fun checkPayee(fixture: CheckoutFixture, wallet: NativeWallet) 
     // Sending and cancelling leave signed history. Give those calls their own checkout (Paykit spec 8.1).
     val store = EnrollmentStore()
     // The shop pays through this method, which settles at once and verifies its own proofs.
-    val ledger = File.createTempFile("payee", "settled").apply { delete(); deleteOnExit() }
-    val method = CheckoutMethod(ledger).apply { release.complete(Unit) }
+    val method = SettlesEach()
     enrolledTestCheckout(store, method, testDeclaration, testEndpoints).use { checkout ->
         method.clock = { checkout.nowMs() }
         val reference = ByteArray(16) { 31 }
@@ -131,4 +129,40 @@ private suspend fun checkSentRequest(fixture: CheckoutFixture, wallet: NativeWal
     check(UUID.fromString(receipt).version() == 4)
     check(wallet.confirmPayment(proven.record, null) == receipt)
     check(wallet.payeeActivity().single { it.record.contentEquals(proven.record) }.status == PayeeStatus.RECEIPTED)
+
+    // The shop pays the first period of a recurring request. The period's own record key verifies
+    // and confirms it (Paykit spec 8.2).
+    val start = fixture.nowMs()
+    val rule = Recurrence(every = 1uL, unit = RecurrenceUnit.DAY, anchor = start, startsAt = start, endsAt = null)
+    val recurring = checkNotNull(wallet.sendRequest(peer, draft.copy(recurrence = rule)).request)
+    val period = BillingPeriod(startsAt = start, endsAt = start + 86_400_000uL)
+    fixture.payPeriod(recurring, period)
+    wallet.finishReceive()
+    suspend fun subscription() = wallet.payeeActivity().single { it.requestHash?.contentEquals(recurring.requestHash) == true }
+    val accepted = subscription()
+    check(accepted.recurring && accepted.status == PayeeStatus.ACCEPTED)
+    val held = accepted.periods.single()
+    check(held.paid && !held.credited && held.receipt == null && held.billingPeriod == period)
+    check(held.record.size == 32 && !held.record.contentEquals(accepted.record))
+    check(wallet.verifyPayment(held.record) != null)
+    val periodReceipt = checkNotNull(wallet.confirmPayment(held.record, null))
+    val credited = subscription().periods.single()
+    check(credited.credited && credited.receipt?.messageId == periodReceipt && credited.receipt?.period == period)
+}
+
+/// A method that settles each payment at once, in memory, and verifies its own proofs.
+private class SettlesEach : ReceiptReader() {
+    @Volatile var clock: (() -> ULong)? = null
+    private val paid = java.util.concurrent.ConcurrentHashMap<String, ULong>()
+    private fun evidence(attempt: String) = """{"settlement":"$attempt"}""".toByteArray()
+    override suspend fun pay(payment: MethodPayment): MethodOutcome {
+        paid.putIfAbsent(payment.attemptId, checkNotNull(clock)())
+        return MethodOutcome.Paid(evidence(payment.attemptId), null)
+    }
+    override suspend fun payment(attemptId: String): MethodOutcome? =
+        if (paid.containsKey(attemptId)) MethodOutcome.Paid(evidence(attemptId), null) else null
+    override suspend fun verify(proof: MethodProof): ULong? =
+        paid[proof.attemptId]?.takeIf { proof.proofJson.contentEquals(evidence(proof.attemptId)) }
+    override fun settlementId(endpoint: String, proofJson: ByteArray): ByteArray? =
+        paid.keys.firstOrNull { proofJson.contentEquals(evidence(it)) }?.toByteArray()
 }

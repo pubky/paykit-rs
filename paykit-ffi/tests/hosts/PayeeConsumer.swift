@@ -42,11 +42,7 @@ func checkPayee(fixture: CheckoutFixture, wallet: NativeWallet) async throws {
     // Sending and cancelling leave signed history. Give those calls their own checkout (Paykit spec 8.1).
     let store = EnrollmentStore()
     // The shop pays through this method, which settles at once and verifies its own proofs.
-    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-    defer { try? FileManager.default.removeItem(at: directory) }
-    let method = CheckoutMethod(ledger: directory.appendingPathComponent("settled"))
-    await method.release.signal()
+    let method = SettlesEach()
     let checkout = try await enrolledTestCheckout(store: store, method: method,
                                                  declaration: testDeclaration, endpoints: testEndpoints)
     method.useClock { checkout.nowMs() }
@@ -143,4 +139,60 @@ private func checkSentRequest(fixture: CheckoutFixture, wallet: NativeWallet, dr
     precondition(repeated == receipt)
     let receipted = try await wallet.payeeActivity()
     precondition(receipted.contains { $0.record == proven.record && $0.status == .receipted })
+
+    // The shop pays the first period of a recurring request. The period's own record key verifies
+    // and confirms it (Paykit spec 8.2).
+    let start = fixture.nowMs()
+    var recurringDraft = draft
+    recurringDraft.recurrence = Recurrence(every: 1, unit: .day, anchor: start, startsAt: start, endsAt: nil)
+    guard let recurring = try await wallet.sendRequest(to: peer, draft: recurringDraft).request else {
+        preconditionFailure("missing recurring request")
+    }
+    let period = BillingPeriod(startsAt: start, endsAt: start + 86_400_000)
+    try await fixture.payPeriod(request: recurring, period: period)
+    try await wallet.finishReceive()
+    func subscription() async throws -> PayeeRequest {
+        guard let found = try await wallet.payeeActivity().first(where: { $0.requestHash == recurring.requestHash }) else {
+            preconditionFailure("missing recurring request activity")
+        }
+        return found
+    }
+    let accepted = try await subscription()
+    precondition(accepted.recurring && accepted.status == .accepted && accepted.periods.count == 1)
+    let held = accepted.periods[0]
+    precondition(held.paid && !held.credited && held.receipt == nil && held.billingPeriod == period)
+    precondition(held.record.count == 32 && held.record != accepted.record)
+    let periodVerified = try await wallet.verifyPayment(record: held.record)
+    precondition(periodVerified != nil)
+    guard let periodReceipt = try await wallet.confirmPayment(record: held.record, details: nil) else {
+        preconditionFailure("missing period receipt")
+    }
+    let credited = try await subscription()
+    precondition(credited.periods.count == 1 && credited.periods[0].credited)
+    precondition(credited.periods[0].receipt?.messageId == periodReceipt)
+    precondition(credited.periods[0].receipt?.period == period)
+}
+
+/// A method that settles each payment at once, in memory, and verifies its own proofs.
+private final class SettlesEach: ReceiptReader, @unchecked Sendable {
+    private let guardLock = NSLock()
+    private var clock: (() -> UInt64)?
+    private var paid: [String: UInt64] = [:]
+    func useClock(_ now: @escaping () -> UInt64) { guardLock.withLock { clock = now } }
+    private func evidence(_ attempt: String) -> Data { Data("{\"settlement\":\"\(attempt)\"}".utf8) }
+    override func pay(payment: MethodPayment) async throws -> MethodOutcome {
+        guardLock.withLock {
+            if paid[payment.attemptId] == nil { paid[payment.attemptId] = clock!() }
+        }
+        return .paid(proofJson: evidence(payment.attemptId), paidAtMs: nil)
+    }
+    override func payment(attemptId: String) async throws -> MethodOutcome? {
+        guardLock.withLock { paid[attemptId] == nil ? nil : .paid(proofJson: evidence(attemptId), paidAtMs: nil) }
+    }
+    override func verify(proof: MethodProof) async throws -> UInt64? {
+        guardLock.withLock { proof.proofJson == evidence(proof.attemptId) ? paid[proof.attemptId] : nil }
+    }
+    override func settlementId(endpoint: String, proofJson: Data) throws -> Data? {
+        guardLock.withLock { paid.keys.first { proofJson == evidence($0) }.map { Data($0.utf8) } }
+    }
 }

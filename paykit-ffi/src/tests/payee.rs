@@ -9,8 +9,9 @@ use super::{
 };
 use crate::{
     Amount, ConversionRate, ListEndpoint, MessageDelivery, NativeWallet, PayeeRequest, PayeeStatus,
-    ReceiptDetails, RequestDestination, RequestDraft, ResendSelection, RuntimeTimer, StorageError,
-    WalletConfig, WalletError, WalletScopes,
+    ReceiptDetails, Recurrence as RecurrenceRule, RecurrenceUnit, RequestConversion,
+    RequestDestination, RequestDraft, ResendSelection, RuntimeTimer, StorageError, WalletConfig,
+    WalletError, WalletScopes,
 };
 use paykit_lib::{
     bodies::Conversion,
@@ -50,6 +51,9 @@ fn draft() -> RequestDraft {
         payment_deadline_ms: None,
         accepted_endpoint_identifiers: Some(vec![ENDPOINT.into()]),
         conversion: None,
+        recurrence: None,
+        period_deadline_s: None,
+        per_period_endpoints: false,
         metadata_json: Some(br#"{"tax":1.25}"#.to_vec()),
         invite_code: None,
     }
@@ -77,10 +81,12 @@ fn test_payee_inputs_preserve_choices_and_reject_malformed_fields() -> TestResul
         },
         proposal_expires_at_ms: Some(123),
         payment_deadline_ms: Some(456),
-        conversion: Some(vec![ConversionRate {
-            asset: "btc-lightning".into(),
-            value: "0.25".into(),
-        }]),
+        conversion: Some(RequestConversion::Fixed {
+            rates: vec![ConversionRate {
+                asset: "btc-lightning".into(),
+                value: "0.25".into(),
+            }],
+        }),
         invite_code: Some("invitation".into()),
         ..draft()
     };
@@ -103,6 +109,24 @@ fn test_payee_inputs_preserve_choices_and_reject_malformed_fields() -> TestResul
         matches!(value.accepted_endpoint_identifiers.as_deref(), Some([id]) if id.as_str() == ENDPOINT)
     );
     assert!(value.recurrence.is_none() && !value.per_period_endpoints);
+    let rule = RecurrenceRule {
+        every: 2,
+        unit: RecurrenceUnit::Week,
+        anchor: 1_000,
+        starts_at: 5_000,
+        ends_at: Some(9_000_000_000),
+    };
+    let recurring = sdk::RequestDraft::try_from(RequestDraft {
+        recurrence: Some(rule.clone()),
+        period_deadline_s: Some(3_600),
+        per_period_endpoints: true,
+        conversion: Some(RequestConversion::PerPeriod),
+        ..draft()
+    })?;
+    assert_eq!(recurring.recurrence.map(RecurrenceRule::from), Some(rule));
+    assert_eq!(recurring.period_deadline_s, Some(3_600));
+    assert!(recurring.per_period_endpoints);
+    assert!(matches!(recurring.conversion, Some(Conversion::PerPeriod)));
     assert_eq!(
         sdk::RequestDestination::try_from(RequestDestination::Any)?,
         sdk::RequestDestination::Any
@@ -193,6 +217,19 @@ fn test_payee_inputs_preserve_choices_and_reject_malformed_fields() -> TestResul
         ),
         (
             RequestDraft {
+                recurrence: Some(RecurrenceRule {
+                    every: 0,
+                    unit: RecurrenceUnit::Day,
+                    anchor: 0,
+                    starts_at: 0,
+                    ends_at: None,
+                }),
+                ..draft()
+            },
+            "recurrence",
+        ),
+        (
+            RequestDraft {
                 accepted_endpoint_identifiers: Some(vec!["bad/id".into()]),
                 ..draft()
             },
@@ -200,10 +237,12 @@ fn test_payee_inputs_preserve_choices_and_reject_malformed_fields() -> TestResul
         ),
         (
             RequestDraft {
-                conversion: Some(vec![ConversionRate {
-                    asset: "btc".into(),
-                    value: "0".into(),
-                }]),
+                conversion: Some(RequestConversion::Fixed {
+                    rates: vec![ConversionRate {
+                        asset: "btc".into(),
+                        value: "0".into(),
+                    }],
+                }),
                 ..draft()
             },
             "conversion",
@@ -557,15 +596,18 @@ async fn cancellations(world: &World) -> TestResult {
     let rule = AnchoredRule::new(start, 1, Unit::Day)?;
     let period = rule.period(0)?.into();
     let terms = Recurrence::new(rule, start, None)?;
-    let recurring = wallet
-        .lend(async |app| -> Result<_, Box<dyn Error>> {
-            let value = sdk::RequestDraft::try_from(draft())?.with_recurrence(terms);
-            Ok(Box::pin(app.send_request(peer, value))
-                .await?
-                .request
-                .ok_or("missing recurring request")?)
-        })
-        .await??;
+    let recurring: RequestRef = wallet
+        .send_request(
+            peer.into(),
+            RequestDraft {
+                recurrence: Some(terms.into()),
+                ..draft()
+            },
+        )
+        .await?
+        .request
+        .ok_or("missing recurring request")?
+        .try_into()?;
     let recurring_row = activity(&wallet, &recurring).await?;
     assert!(recurring_row.recurring);
     assert_eq!(recurring_row.status, PayeeStatus::Requested);
@@ -582,8 +624,33 @@ async fn cancellations(world: &World) -> TestResult {
         return Err("missing paid Billing Period".into());
     };
     assert_eq!(
-        (held.starts_at, held.ends_at),
+        (held.billing_period.starts_at, held.billing_period.ends_at),
         (period.starts_at, period.ends_at)
+    );
+    assert!(held.paid && !held.credited && held.receipt.is_none() && held.details.is_empty());
+    assert_eq!(held.record.len(), 32);
+    assert_ne!(held.record, subscribed.record);
+    // The period's own record key verifies and confirms the period's payment (Paykit spec 8.2).
+    assert_eq!(
+        wallet.verify_payment(held.record.clone()).await?,
+        Some(world.now_ms())
+    );
+    let receipt = wallet
+        .confirm_payment(held.record.clone(), None)
+        .await?
+        .ok_or("missing period receipt")?;
+    check_uuid_v4(&receipt)?;
+    let credited = activity(&wallet, &recurring).await?;
+    let [credited] = credited.periods.as_slice() else {
+        return Err("missing credited Billing Period".into());
+    };
+    assert!(credited.paid && credited.credited);
+    let shown = credited.receipt.as_ref().ok_or("missing shown receipt")?;
+    assert_eq!(shown.message_id, receipt);
+    assert_eq!(shown.attempt_id, paid.attempt_id().to_text());
+    assert_eq!(
+        shown.period.as_ref().map(|p| (p.starts_at, p.ends_at)),
+        Some((period.starts_at, period.ends_at))
     );
     assert_eq!(wallet.payee_activity().await?.len(), 2);
     wallet.shutdown().await?;
