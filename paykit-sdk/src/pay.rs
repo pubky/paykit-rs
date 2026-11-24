@@ -966,22 +966,35 @@ pub(crate) fn entry_waits(error: &PaykitError) -> bool {
 ///   replaces;
 /// - a switch answer whose Retry column (Switch spec 6.4) lets the same request pass as it
 ///   is, after `Retry-After`, with a new timestamp or after a fresh read;
-/// - the client's refusal for now (`NotNow`, the owner's display read included, which the
-///   client turns into one) and a write behind batches it keeps.
+/// - any answer of the switch or failure of the network behind a batch the client keeps,
+///   which it sends again by itself, but for a full quota, which the host is shown;
+/// - a write behind batches the client keeps.
 ///
 /// No wait: a switch answer that needs a key bundle, a new signature or seal, the sender's
 /// `identity.json`, another service or a freed quota first, or none passes; an answer that
 /// doesn't verify otherwise, or that doesn't read; a head or proof that doesn't verify,
 /// which the client handles as a rollback; a refused origin, an answer too large, a request
 /// that can't be built; a body over its cap, no pinned
-/// key, a client usage error; data that doesn't verify or read; and the client's other
-/// refusals. A wallet-wide stop is decided first ([`stops_resume`]): the store, the
+/// key, a client usage error; data that doesn't verify or read; the client's refusal for
+/// now (`NotNow`), whose text alone tells reconcile mode, which the user ends, or a display
+/// read the host owes (`DisplayReadPending`, which the client turns into one) from the
+/// clocks apart; and the client's other refusals. A wallet-wide stop is decided first ([`stops_resume`]): the store, the
 /// protocol's store, an alarm, and the client's word that the app stopped, left, is gone,
 /// holds a recovery notice (its own `OwnRecoveryRequired` included, which the client turns
 /// into one) or has a restore question open.
 pub(crate) fn client_waits(error: &AppError) -> bool {
     use pubky_switch_client::error::ClientError as C;
-    use pubky_switch_core::http::Retry;
+    use pubky_switch_core::http::{ErrorCode, Retry};
+    // A batch the client keeps goes again, the same bytes, before its next write and at its
+    // next read; it keeps none refused for good. Behind an answer of the switch or the
+    // network, it is a wait, but for a full quota, which the host is shown.
+    if let AppError::Kept { .. } = error {
+        if matches!(error.unkept(), AppError::Switch(_) | AppError::Transport(_))
+            && error.code() != Some(ErrorCode::QuotaExceeded)
+        {
+            return true;
+        }
+    }
     match error.unkept() {
         AppError::ExpiredUnsent | AppError::NotAnsweringAsAccount { .. } => true,
         AppError::Transport(transport) | AppError::Switch(C::Transport(transport)) => {
@@ -993,8 +1006,9 @@ pub(crate) fn client_waits(error: &AppError) -> bool {
                 Retry::Yes | Retry::AfterRetryAfter | Retry::WithNewTimestamp | Retry::AfterReread
             ),
             C::BadServiceSignature { status } => *status >= 500,
-            C::BodyUnread { .. } | C::StaleAnswer { .. } | C::DisplayReadPending => true,
-            C::OwnRecoveryRequired { .. }
+            C::BodyUnread { .. } | C::StaleAnswer { .. } => true,
+            C::DisplayReadPending
+            | C::OwnRecoveryRequired { .. }
             | C::Chain(_)
             | C::InvalidResponse(_)
             | C::Core(_)
@@ -1004,7 +1018,7 @@ pub(crate) fn client_waits(error: &AppError) -> bool {
             // A failure a later pin adds is no wait until it is classified here.
             _ => false,
         },
-        AppError::Refused(ClientRefusal::NotNow(_) | ClientRefusal::KeptBatchesAhead(_)) => true,
+        AppError::Refused(ClientRefusal::KeptBatchesAhead(_)) => true,
         AppError::Refused(_)
         | AppError::Store(_)
         | AppError::Protocol(_)
@@ -1015,23 +1029,21 @@ pub(crate) fn client_waits(error: &AppError) -> bool {
 }
 
 /// Whether a transport failure is the network's, which the client sends again with the same
-/// bytes: no timely first handoff, its deadline passed before release, no connection, a
-/// timeout, or another failure of the transport; and a signed header that can't be read,
+/// bytes: its first-handoff deadline passed before release, no connection, a timeout, or
+/// another failure of the transport; and a signed header that can't be read,
 /// which the client takes as an answer whose signature doesn't verify, under a `5xx` status.
-/// An origin the client may not connect to, an answer larger than the transport takes and a
+/// No first handoff at all, which a host transport without that facility gives every time,
+/// an origin the client may not connect to, an answer larger than the transport takes and a
 /// request that can't be built are no waits.
 fn transport_waits(error: &pubky_switch_client::error::TransportError) -> bool {
     use pubky_switch_client::error::TransportError as T;
     match error {
-        T::FirstSendUnavailable
-        | T::FirstSendExpired
-        | T::Connect(_)
-        | T::Timeout
-        | T::Other(_) => true,
+        T::FirstSendExpired | T::Connect(_) | T::Timeout | T::Other(_) => true,
         // Taken as an answer whose signature doesn't verify: a wait under a `5xx` status, as
         // [`client_waits`] judges one.
         T::UnreadableSignedHeader { status } => *status >= 500,
-        T::Refused(_) | T::TooLarge(_) | T::InvalidRequest(_) => false,
+        // A host transport without a first-handoff facility gives it every time.
+        T::FirstSendUnavailable | T::Refused(_) | T::TooLarge(_) | T::InvalidRequest(_) => false,
         // A failure a later pin adds is no wait until it is classified here.
         _ => false,
     }
@@ -6389,8 +6401,6 @@ mod tests {
         };
         let transport = |error| PaykitError::Client(AppError::Transport(error));
         for waits in [
-            held_back(ClientRefusal::NotNow("kept batches".into())),
-            kept(ClientRefusal::NotNow("reconcile".into())),
             answer(E::Conflict),
             answer(E::Unavailable),
             answer(E::RateLimited),
@@ -6425,8 +6435,25 @@ mod tests {
             })),
             answer(E::Staged),
             transport(TransportError::Timeout),
-            transport(TransportError::FirstSendUnavailable),
             transport(TransportError::UnreadableSignedHeader { status: 504 }),
+            // Behind a kept batch, which the client sends again by itself.
+            PaykitError::Client(AppError::Kept {
+                batch_id: [1; 16],
+                error: Box::new(AppError::Switch(ClientError::InvalidResponse(
+                    "member".into(),
+                ))),
+            }),
+            PaykitError::Client(AppError::Kept {
+                batch_id: [1; 16],
+                error: Box::new(AppError::Switch(ClientError::Switch {
+                    status: 410,
+                    code: E::Moved,
+                    message: String::new(),
+                    current: serde_json::Value::Null,
+                    known_version: None,
+                    retry_after: None,
+                })),
+            }),
         ] {
             assert!(!stops_resume(&waits), "{waits:?}");
             assert!(entry_waits(&waits), "{waits:?}");
@@ -6440,6 +6467,20 @@ mod tests {
             answer(E::NotFound),
             answer(E::QuotaExceeded),
             unsigned(404),
+            held_back(ClientRefusal::NotNow("reconcile mode".into())),
+            kept(ClientRefusal::NotNow("reconcile mode".into())),
+            PaykitError::Client(AppError::Kept {
+                batch_id: [1; 16],
+                error: Box::new(AppError::Switch(ClientError::Switch {
+                    status: 429,
+                    code: E::QuotaExceeded,
+                    message: String::new(),
+                    current: serde_json::Value::Null,
+                    known_version: None,
+                    retry_after: None,
+                })),
+            }),
+            transport(TransportError::FirstSendUnavailable),
             transport(TransportError::Refused("origin".into())),
             transport(TransportError::TooLarge(1)),
             transport(TransportError::UnreadableSignedHeader { status: 400 }),
