@@ -354,7 +354,7 @@ A `missed` item marks every counterparty its deny list holds at its next read of
 
 ### Missing debit history
 
-After the payer's own provider loss, incomplete debit history holds payment of the exact request or Billing Period (Sections 7.3 and 8.2). A required wallet case pays a period early by hand, recovers the payer while its start is still in the future and keeps the original debit count when the earlier outcome cannot be established. A matching settled claim or verified receipt retains its effect. A payer backup restore with continuous claim history, a payee's provider loss with the payer's history intact and a genuinely later request follow their ordinary rules.
+After the payer's own provider loss, incomplete debit history holds payment of the exact request or Billing Period (Sections 7.3 and 8.2). A required wallet case pays a period early by hand, recovers the payer while its start is still in the future and keeps the original debit count when the earlier outcome cannot be established. A matching settled claim or verified receipt retains its effect. A payer backup restore with continuous claim history, a payee's provider loss with the payer's history intact and a genuinely later request follow their ordinary rules. A one-time request payable before the loss is refused for payment by hand with the doubt shown; a required case consents to one attempt, which is made once, records no statement and leaves the request in doubt until its claim is SETTLED or a receipt verifies it. Another required case confirms everything the user can for the same request, and no automatic payment or repeat follows (Section 7.3).
 
 ### Different activity at a held version
 
