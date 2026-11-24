@@ -64,7 +64,11 @@ async fn test_receipt_reader_reloads_the_held_marked_receipt() {
 }
 
 #[tokio::test]
-async fn test_receipt_reader_restores_the_held_marked_receipt() {
+async fn test_receipt_reader_after_a_fresh_restore_keeps_the_restriction_over_the_repair() {
+    // The backup carries the mark of the eager write, with its loss marker, but not the
+    // held version the repair builds on (Switch spec 12.4 "Seen marks"): the restored
+    // reader can't verify the repair, so it keeps the restriction it saw and flags the
+    // repair (Paykit wire 5).
     Box::pin(read_repaired_marker(ReadCase::FreshRestore)).await;
 }
 
@@ -342,10 +346,7 @@ async fn read_repaired_marker(case: ReadCase) {
     witness.receive(None).await.unwrap();
     witness.app_mut().flush_cursor().await.unwrap();
     let read = witness.app().shared_record(&key).await.unwrap().unwrap();
-    let covered = matches!(
-        case,
-        ReadCase::Live | ReadCase::Reload | ReadCase::FreshRestore
-    );
+    let covered = matches!(case, ReadCase::Live | ReadCase::Reload);
     let cursor = w.bob.switch().app(&app_id).cursor;
     println!(
         "receipt reader {}",
@@ -364,6 +365,11 @@ async fn read_repaired_marker(case: ReadCase) {
         assert_eq!(read.version, repaired.version);
         assert_eq!(read.writer, shop.app_id());
         assert_eq!(read.content, repaired.content);
+    } else if case == ReadCase::FreshRestore {
+        // The repair is the version shown, flagged, and its value isn't taken.
+        assert_eq!(read.version, repaired.version);
+        assert!(read.flagged);
+        assert!(read.content.value().is_none());
     } else {
         assert_eq!(read.version, eager_write.version);
         assert_eq!(read.content, eager_write.content);
