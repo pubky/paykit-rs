@@ -99,6 +99,10 @@ pub struct WalletReceiveReport {
     /// The records this receive paused: a view showed them divergent after a provider loss
     /// (Paykit spec 6).
     pub divergent: Vec<Divergence>,
+    /// The app record couldn't be brought up to date at the latest receive that tried, and the
+    /// receive went on: why, as text to show. The record is tried again at the next receive,
+    /// or at once by `update_own_record`, which returns its outcome (Paykit spec 4).
+    pub app_record_owed: Option<String>,
 }
 /// What a wait for the feed ended in (`FeedWait::wait`).
 #[derive(Clone, Copy, uniffi::Enum)]
@@ -166,24 +170,7 @@ impl NativeWallet {
         self.with_wallet(move |app| {
             Box::pin(async move {
                 let s = app.receive(None).await?;
-                let r = s.report;
-                Ok(WalletReceiveReport {
-                    generation: r.cursor.generation,
-                    sequence: r.cursor.seq,
-                    stopped: r.stopped,
-                    more: r.more,
-                    held_cursor: r.held_cursor.map(Into::into),
-                    events: r.events.into_iter().map(|e| event(app, e)).collect(),
-                    applied: s.applied,
-                    resends: s.resends,
-                    resend_refused: s.resend_refused.map(|r| Arc::new(PaymentRefusal(r))),
-                    certificate_refused: s.certificate_refused.map(|r| Arc::new(PaymentRefusal(r))),
-                    records_unlisted: s.records_unlisted,
-                    scope_keys_awaited: s.scope_keys_awaited,
-                    key_epochs_awaited: s.key_epochs_awaited,
-                    account_gone: s.account_gone,
-                    divergent: s.divergent.into_iter().map(Into::into).collect(),
-                })
+                Ok(receive_report(s, |e| event(app, e)))
             })
         })
         .await
@@ -221,5 +208,45 @@ impl NativeWallet {
             Box::pin(async move { Ok(app.app_mut().ack_events_for("paykit", id).await?) })
         })
         .await
+    }
+}
+
+/// The host's report of a receive's summary `s`, each event mapped by `event`.
+fn receive_report(
+    s: paykit_sdk::ReceiveSummary,
+    event: impl FnMut(AppEvent) -> WalletEvent,
+) -> WalletReceiveReport {
+    let r = s.report;
+    WalletReceiveReport {
+        generation: r.cursor.generation,
+        sequence: r.cursor.seq,
+        stopped: r.stopped,
+        more: r.more,
+        held_cursor: r.held_cursor.map(Into::into),
+        events: r.events.into_iter().map(event).collect(),
+        applied: s.applied,
+        resends: s.resends,
+        resend_refused: s.resend_refused.map(|r| Arc::new(PaymentRefusal(r))),
+        certificate_refused: s.certificate_refused.map(|r| Arc::new(PaymentRefusal(r))),
+        records_unlisted: s.records_unlisted,
+        scope_keys_awaited: s.scope_keys_awaited,
+        key_epochs_awaited: s.key_epochs_awaited,
+        account_gone: s.account_gone,
+        divergent: s.divergent.into_iter().map(Into::into).collect(),
+        app_record_owed: s.app_record_owed,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::receive_report;
+
+    #[test]
+    fn test_receive_report_carries_the_app_record_owed() {
+        let mut summary = paykit_sdk::ReceiveSummary::default();
+        let owed = "the app record's update was refused before it was signed".to_string();
+        summary.app_record_owed = Some(owed.clone());
+        let report = receive_report(summary, |_| unreachable!("no events"));
+        assert_eq!(report.app_record_owed, Some(owed));
     }
 }

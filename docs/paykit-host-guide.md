@@ -130,6 +130,15 @@ returns `Publication::AwaitingRecord`, the wallet still has a newer record
 choice to settle. Keep the change pending and continue normal receives.
 A restore carrying only the accepted offer can repair its missing public copy.
 
+Each receive also brings the app record up to date after its read. When that
+upkeep fails because the rail now pays a list of endpoint identifiers the record
+can't carry, or because the own switch doesn't answer, the receive still does
+its other work and sets `ReceiveSummary::app_record_owed`. Any other upkeep
+failure fails the receive. The record is tried again at the next receive;
+`update_own_record` tries it at once and returns its outcome. A delivery the
+client kept goes again at the start of its next read, so one that keeps
+failing there fails that receive.
+
 ## Use a Switch App built by the host
 
 When the host opens the Switch App, use `PaykitConfig::protocol` to build the
@@ -405,6 +414,13 @@ calls `accept_subscription_under_allowance` with the request and its permanent A
 handle. For each eligible occurrence, call `pay_period_under_allowance` with that request
 and its exact Billing Period. The wallet checks the pinned Allowance, available budget and
 payment method before it pays. A rate-priced endpoint requires a different funding decision.
+The protocol lets the user move a subscription's future Billing Periods to another accepted
+Allowance (Paykit spec 8.3); the move never changes past usage, attempts already made,
+reservations or obligations in flight. This version offers no call to make the move yet:
+accepting the subscription again under the new Allowance answers `Refusal::Subscribed` and
+moves nothing. Until then, after the Allowance a subscription was accepted under ends, its
+later periods answer `Refusal::AllowanceEnded` and the host pays them by hand
+(`pay_period`); a new Allowance pays the subscriptions accepted under it.
 If a later period requires its own destination, the wallet waits for signed details for that
 occurrence from the selling app named by the request, if one is named. It selects the
 latest valid details the payment method can pay within the request and Allowance. A newer
