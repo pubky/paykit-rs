@@ -8,6 +8,7 @@ use paykit_lib::AttemptId;
 use paykit_sdk::rail::Behaviour;
 use paykit_sdk::{PayOptions, PayOutcome, Paykit, PaykitConfig, Rail, Stage};
 use pubky_switch_client::clock::Clock;
+use pubky_switch_client::error::TransportError;
 use pubky_switch_client::testing::Fault;
 
 use crate::common::{draft, request_from, store, World};
@@ -272,40 +273,59 @@ impl pubky_switch_client::transport::Transport for RefusingOps {
     }
 }
 
+fn host_transport_errors() -> [TransportError; 4] {
+    [
+        TransportError::FirstSendUnavailable,
+        TransportError::Refused("origin".into()),
+        TransportError::TooLarge(1),
+        TransportError::InvalidRequest("header".into()),
+    ]
+}
+
+async fn settled_with_transport_error(
+    w: &World,
+    error: TransportError,
+) -> (Paykit, [AttemptId; 2]) {
+    let base = store();
+    let mut wallet = w.wallet_on("wallet", Arc::clone(&base)).await;
+    let app_id = wallet.app_id();
+    let attempts = two_in_flight(w, &mut wallet).await;
+    drop(wallet);
+    for attempt in &attempts {
+        w.rail.settle(attempt, true);
+    }
+    let transport = Arc::new(RefusingOps {
+        inner: Arc::clone(&w.router),
+        next: std::sync::Mutex::new(None),
+    });
+    let wallet = w
+        .load_with_transport(
+            &w.alice,
+            base,
+            app_id,
+            Arc::clone(&transport) as Arc<dyn pubky_switch_client::transport::Transport>,
+        )
+        .await;
+    *transport.next.lock().unwrap() = Some(error);
+    (wallet, attempts)
+}
+
 #[tokio::test]
 async fn test_resume_returns_a_host_transport_failure_behind_a_kept_outcome_write() {
     // Both payments were made. The first outcome write meets a failure of the host's own
-    // transport that no retry clears: the client keeps the batch, but the host must act, so
-    // the resume returns it, after the other payment's outcome is written, rather than report
-    // the first pending at every resume.
-    use pubky_switch_client::error::TransportError as T;
-    for error in [
-        T::FirstSendUnavailable,
-        T::Refused("origin".into()),
-        T::TooLarge(1),
-        T::InvalidRequest("header".into()),
-    ] {
+    // transport, and the batch the client kept is refused when it is sent again: the host
+    // must act, so the resume returns the failure, after the other payment's outcome is
+    // written, rather than report the first pending at every resume.
+    for error in host_transport_errors() {
         let w = World::new();
-        let base = store();
-        let mut wallet = w.wallet_on("wallet", Arc::clone(&base)).await;
-        let app_id = wallet.app_id();
-        let [first, second] = two_in_flight(&w, &mut wallet).await;
-        drop(wallet);
-        w.rail.settle(&first, true);
-        w.rail.settle(&second, true);
-        let transport = Arc::new(RefusingOps {
-            inner: Arc::clone(&w.router),
-            next: std::sync::Mutex::new(None),
+        let (mut wallet, [first, second]) = settled_with_transport_error(&w, error.clone()).await;
+        // The first submit fails at the transport. The switch refuses the same batch on
+        // retry, leaving the first outcome unwritten (Paykit spec 7.2 step 3).
+        w.alice.switch().fail_next(Fault::Error {
+            path: "/ops".into(),
+            code: pubky_switch_core::http::ErrorCode::Conflict,
+            current: serde_json::Value::Null,
         });
-        let mut wallet = w
-            .load_with_transport(
-                &w.alice,
-                Arc::clone(&base),
-                app_id,
-                Arc::clone(&transport) as Arc<dyn pubky_switch_client::transport::Transport>,
-            )
-            .await;
-        *transport.next.lock().unwrap() = Some(error.clone());
         let resumed = wallet.resume_payments().await;
         let Err(paykit_sdk::PaykitError::Client(failure)) = &resumed else {
             panic!("{error:?}: {resumed:?}");
@@ -322,5 +342,35 @@ async fn test_resume_returns_a_host_transport_failure_behind_a_kept_outcome_writ
         );
         assert_eq!(w.rail.executions(&first), 1);
         assert_eq!(w.rail.executions(&second), 1);
+    }
+}
+
+#[tokio::test]
+async fn test_resume_returns_paid_outcomes_when_the_kept_batch_applied() {
+    // Both payments were made. The first outcome write meets the same failure once: the
+    // client keeps the batch and sends it again ahead of the second payment's write, and it
+    // applies. By the end of the call both outcomes are written, so the resume reports both
+    // paid, with nothing left to return (Paykit spec 7.2 steps 3 and 4).
+    for error in host_transport_errors() {
+        let w = World::new();
+        let (mut wallet, attempts) = settled_with_transport_error(&w, error.clone()).await;
+        let resumed = wallet.resume_payments().await;
+        let Ok(outcomes) = &resumed else {
+            panic!("{error:?}: {resumed:?}");
+        };
+        assert_eq!(outcomes.len(), attempts.len());
+        for (outcome, attempt) in outcomes.iter().zip(attempts) {
+            let PayOutcome::Paid {
+                attempt_id,
+                proof_msg_id: Some(_),
+                ..
+            } = outcome
+            else {
+                panic!("{error:?}: {outcome:?}");
+            };
+            assert_eq!(*attempt_id, attempt);
+            assert_eq!(w.rail.executions(&attempt), 1);
+            assert_eq!(stage(&wallet, &attempt).await, Stage::Finished);
+        }
     }
 }

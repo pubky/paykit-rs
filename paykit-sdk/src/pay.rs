@@ -4737,7 +4737,10 @@ impl Paykit {
     /// current, that its certificate expired, or that the account awaits a recovery. Once
     /// every entry is visited and the outbox flushed, the first failure of an entry's step
     /// that is no wait, which a later resume would meet again until the user or the host
-    /// acts, as it is; nothing is pruned then. The client's
+    /// acts, as it is; nothing is pruned then. A failure whose write went through by the
+    /// end of the call isn't one of these: a paid outcome the journal then holds as written
+    /// is reported [`PayOutcome::Paid`], and an owed acceptance the journal then holds as
+    /// placed is over (Paykit spec 7.2 steps 3 and 4). The client's
     /// and the rail's errors from the work before and after the entries (the first read, the
     /// first flush, the recheck of failed attempts, the ledger and pruning), as they are. A
     /// call that returns an error carries no outcome: [`Paykit::payments`] lists every
@@ -4786,9 +4789,18 @@ impl Paykit {
         // Each entry's work stands alone. A wallet-wide stop ([`stops_resume`]) ends the
         // resume and is returned. Any other failure of one entry's step leaves that entry for
         // the next resume, reported for it, and the next entry goes on, so a payment the
-        // method reports made behind it is still resolved. The first such failure that isn't
-        // a wait ([`entry_waits`]) is returned once every entry is visited.
-        let mut not_a_wait = None;
+        // method reports made behind it is still resolved. The failures that aren't waits
+        // ([`entry_waits`]) are kept in entry order, each with its claim and what the step
+        // left, and judged once the outbox is flushed.
+        enum Left {
+            /// An acceptance owed for a written outcome, not placed.
+            Acceptance,
+            /// The outcome reported for the entry, by its place in `out`.
+            Outcome(usize),
+            /// Nothing reported.
+            Nothing,
+        }
+        let mut not_waits = Vec::new();
         for mut entry in self.journal().await? {
             // An outcome written whose acceptance is still owed: queued and placed now.
             // One that can't be placed now stays owed for the next resume: its outcome is
@@ -4798,12 +4810,13 @@ impl Paykit {
                     // Its outcome is written, so it reports none; a failure to place the
                     // acceptance is judged as any entry's: a wait says nothing more, any other
                     // is returned after the entries.
+                    let claim = entry.attempt().ok().map(|id| (id, entry.obligation));
                     if let Err(error) = self.finish_owed_acceptance(&mut entry).await {
                         if stops_resume(&error) {
                             return Err(error);
                         }
                         if judged_at_resume(&error) && !entry_waits(&error) {
-                            not_a_wait.get_or_insert(error);
+                            not_waits.push((error, claim, Left::Acceptance));
                         }
                     }
                 }
@@ -4815,11 +4828,18 @@ impl Paykit {
                     if stops_resume(&error) {
                         return Err(error);
                     }
+                    let mut left = Left::Nothing;
                     if let Some(attempt_id) = attempt_id {
-                        out.extend(self.left_for_next_resume(attempt_id, &obligation).await?);
+                        if let Some(outcome) =
+                            self.left_for_next_resume(attempt_id, &obligation).await?
+                        {
+                            left = Left::Outcome(out.len());
+                            out.push(outcome);
+                        }
                     }
                     if !entry_waits(&error) {
-                        not_a_wait.get_or_insert(error);
+                        let claim = attempt_id.map(|id| (id, obligation));
+                        not_waits.push((error, claim, left));
                     }
                 }
             }
@@ -4843,9 +4863,50 @@ impl Paykit {
                 return Err(error);
             }
         }
+        // The client sends a batch it kept before any later one, so a write that failed at
+        // an entry's step may have gone through since, and its local writes moved the entry
+        // on in the journal. The journal alone says so (Paykit spec 7.2 steps 3 and 4):
+        // - an acceptance owed for a written outcome is placed once its entry is finished;
+        // - a paid outcome reported unwritten is written once its entry holds the proof and
+        //   is finished or owes only its acceptance, and is reported paid.
+        // Every other failure stands, an entry no longer in the journal included.
+        let mut unresolved = None;
+        for (error, claim, left) in not_waits {
+            let entry = match claim {
+                Some((attempt_id, obligation)) => {
+                    self.journal_entry_on(&attempt_id, &obligation).await?
+                }
+                None => None,
+            };
+            let over = match (entry, left) {
+                (Some(entry), Left::Acceptance) => entry.stage == Stage::Finished,
+                (Some(entry), Left::Outcome(index)) => {
+                    let written = entry.rail_proof.is_some()
+                        && matches!(entry.stage, Stage::Finished | Stage::AcceptanceOwed);
+                    match out.get_mut(index) {
+                        Some(outcome)
+                            if written
+                                && matches!(outcome, PayOutcome::PaidOutcomeUnwritten { .. }) =>
+                        {
+                            let attempt_id = outcome.attempt_id();
+                            *outcome = PayOutcome::Paid {
+                                attempt_id,
+                                proof_msg_id: entry.proof_msg_id,
+                            };
+                            true
+                        }
+                        _ => false,
+                    }
+                }
+                (Some(_), Left::Nothing) | (None, _) => false,
+            };
+            if !over {
+                unresolved.get_or_insert(error);
+            }
+        }
         // A call that returns an error carries no outcome, so nothing is pruned then:
         // `payments` still lists every entry this call finished.
-        if let Some(error) = not_a_wait {
+        if let Some(error) = unresolved {
             return Err(error);
         }
         self.prune_journal().await?;
