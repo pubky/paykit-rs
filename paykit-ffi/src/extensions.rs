@@ -1,8 +1,7 @@
 //! The spam count and extension messages (Paykit spec 3.3, 8.1).
 
 use crate::{fixed, NativeWallet, WalletError};
-use paykit_lib::kinds::{ExtensionKind, OPAQUE_MEMBERS};
-use pubky_switch_core::json::{check_json_as, Doc};
+use paykit_lib::kinds::ExtensionKind;
 use serde_json::{Map, Value};
 use std::fmt;
 
@@ -130,10 +129,11 @@ fn extension_body(
     kind: &ExtensionKind,
     body_json: &str,
 ) -> Result<Map<String, Value>, WalletError> {
-    // Check the original text before a JSON map can discard duplicate members. The message
-    // context lets the Switch apply Paykit's opaque metadata rule (Paykit wire 4.3).
-    let message = format!(r#"{{"kind":"{}","body":{body_json}}}"#, kind.as_string());
-    check_json_as(message.as_bytes(), Doc::Message(OPAQUE_MEMBERS))
-        .map_err(|_| WalletError::invalid("body_json"))?;
-    crate::opaque::object(body_json.as_bytes()).ok_or_else(|| WalletError::invalid("body_json"))
+    // The message context lets the Switch apply Paykit's opaque metadata rule (Paykit wire 4.3).
+    let kind = kind.as_string();
+    crate::opaque::object(
+        body_json.as_bytes(),
+        crate::opaque::Place::ExtensionBody { kind: &kind },
+    )
+    .ok_or_else(|| WalletError::invalid("body_json"))
 }

@@ -327,15 +327,20 @@ pub struct Recurrence {
 }
 
 impl Recurrence {
-    /// A recurrence the caller supplies. Its first period, and its last when it ends, are
-    /// Billing Periods a message can name, so their times are within the wire's range
-    /// (Paykit wire 4.4).
+    /// A recurrence the caller supplies. Its anchor is a wire time, and its first period, and
+    /// its last when it ends, are Billing Periods a message can name, so their times are within
+    /// the wire's range too (Paykit wire 4.4).
     ///
     /// # Errors
     ///
-    /// [`Error::Validation`] for an `ends_at` not after `starts_at`, or a first or last period
-    /// with a time past the wire's range.
+    /// [`Error::Validation`] for an `ends_at` not after `starts_at`, an anchor past the wire's
+    /// range, or a first or last period with a time past it.
     pub fn new(rule: AnchoredRule, starts_at: u64, ends_at: Option<u64>) -> Result<Self> {
+        if rule.anchor() > MAX_TIME_MS {
+            return Err(Error::Validation(
+                "Paykit wire 4.4: recurrence: anchor past the latest time".into(),
+            ));
+        }
         let recurrence = Self::read(rule, starts_at, ends_at).map_err(Error::into_validation)?;
         recurrence
             .first()
@@ -695,6 +700,22 @@ mod tests {
         ));
         assert!(Recurrence::new(daily, 0, Some(86_400_000)).is_ok());
         assert!(Recurrence::new(daily, 0, None).is_ok());
+        // An anchor past the range, though earlier periods would be in it.
+        let late = AnchoredRule::new(MAX_TIME_MS + 1, 1, Unit::Day).unwrap();
+        assert!(matches!(
+            Recurrence::new(late, 0, None),
+            Err(Error::Validation(_))
+        ));
+        // At the range's last instant: the last period ends exactly at it, and one more
+        // millisecond takes the last period past it.
+        let edge = AnchoredRule::new(MAX_TIME_MS, 1, Unit::Day).unwrap();
+        let start = MAX_TIME_MS - 86_400_000;
+        assert!(Recurrence::new(edge, start, None).is_ok());
+        assert!(Recurrence::new(edge, start, Some(MAX_TIME_MS)).is_ok());
+        assert!(matches!(
+            Recurrence::new(edge, start, Some(MAX_TIME_MS + 1)),
+            Err(Error::Validation(_))
+        ));
     }
 
     #[test]

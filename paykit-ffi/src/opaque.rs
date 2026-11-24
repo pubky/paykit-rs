@@ -6,11 +6,45 @@
 //! back with other digits, so the signed message would not say what the host wrote. Every
 //! number is checked against its original text, and one that would change is refused.
 
+use paykit_lib::kinds::OPAQUE_MEMBERS;
+use pubky_switch_core::json::{check_json_as, Doc};
 use serde_json::{Map, Value};
 
-/// Decode `bytes` as a JSON object whose every number is written back exactly as given.
-/// The caller has already checked the original text as the wire checks it.
-pub(crate) fn object(bytes: &[u8]) -> Option<Map<String, Value>> {
+/// Where a host's opaque JSON goes in a message, which decides how the wire checks it.
+pub(crate) enum Place<'a> {
+    /// A body's `metadata`, of any kind (Paykit wire 1.1).
+    Metadata,
+    /// The whole body of an extension message of `kind` (Paykit wire 4.3).
+    ExtensionBody {
+        /// The extension kind, already validated.
+        kind: &'a str,
+    },
+    /// The `proof` of a `paykit.payment_proof` (Paykit wire 4.10).
+    Proof,
+}
+
+/// Read `bytes` as the JSON object a message carries at `place`. The original text is first
+/// checked in that message's context, as the wire checks it, before decoding can drop a
+/// repeated member; then every number must be written back exactly as given.
+pub(crate) fn object(bytes: &[u8], place: Place<'_>) -> Option<Map<String, Value>> {
+    let message = match place {
+        Place::Metadata => [br#"{"body":{"metadata":"#.as_slice(), bytes, b"}}"].concat(),
+        Place::ExtensionBody { kind } => [
+            br#"{"kind":""#.as_slice(),
+            kind.as_bytes(),
+            br#"","body":"#,
+            bytes,
+            b"}",
+        ]
+        .concat(),
+        Place::Proof => [
+            br#"{"kind":"paykit.payment_proof","body":{"proof":"#.as_slice(),
+            bytes,
+            b"}}",
+        ]
+        .concat(),
+    };
+    check_json_as(&message, Doc::Message(OPAQUE_MEMBERS)).ok()?;
     let value = serde_json::from_slice(bytes).ok()?;
     exact_numbers(bytes).then_some(value)
 }

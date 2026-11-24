@@ -217,7 +217,7 @@ impl MethodOutcome {
                 paid_at_ms,
             } => {
                 // The proof is signed as the method wrote it (Paykit wire 4.10).
-                let proof = crate::opaque::object(&proof_json)
+                let proof = crate::opaque::object(&proof_json, crate::opaque::Place::Proof)
                     .ok_or_else(|| RailError::Unavailable("invalid payment proof".into()))?;
                 let mut paid = RailPaid::new(proof);
                 if let Some(at) = paid_at_ms {

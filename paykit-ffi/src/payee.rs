@@ -209,14 +209,8 @@ fn timestamp(ms: u64, field: &str) -> Result<u64, WalletError> {
 }
 
 fn metadata(bytes: &[u8]) -> Result<Map<String, Value>, WalletError> {
-    use paykit_lib::kinds::OPAQUE_MEMBERS;
-    use pubky_switch_core::json::{check_json_as, Doc};
-
-    // Check the original bytes for duplicate keys before decoding the opaque object (Paykit wire 1.1).
-    let message = [br#"{"body":{"metadata":"#.as_slice(), bytes, b"}}"].concat();
-    check_json_as(&message, Doc::Message(OPAQUE_MEMBERS))
-        .map_err(|_| WalletError::invalid("metadata_json"))?;
-    crate::opaque::object(bytes).ok_or_else(|| WalletError::invalid("metadata_json"))
+    crate::opaque::object(bytes, crate::opaque::Place::Metadata)
+        .ok_or_else(|| WalletError::invalid("metadata_json"))
 }
 
 impl TryFrom<RequestDraft> for sdk::RequestDraft {

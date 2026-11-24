@@ -29,7 +29,12 @@ async fn check_send_inputs(wallet: &NativeWallet, payee: &[u8]) {
         (KIND, "{", "body_json"),
         (KIND, r#"{"x":1,"x":2}"#, "body_json"),
         (KIND, r#"{"price":2.5}"#, "body_json"),
-        (KIND, r#"{"order":18446744073709551617}"#, "body_json"),
+        // Under opaque metadata the wire check passes, so the number reaches the bindings' own.
+        (
+            KIND,
+            r#"{"metadata":{"order":18446744073709551617}}"#,
+            "body_json",
+        ),
     ] {
         let result = wallet
             .send_extension(payee.to_vec(), kind.into(), vec![], body.into())

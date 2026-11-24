@@ -146,18 +146,20 @@ async fn test_host_calls_homeserver_past_its_limit_times_out() {
 #[tokio::test(start_paused = true)]
 async fn test_host_calls_running_pay_stops_counting_as_in_flight() {
     use crate::flights::{Waited, STALE_AFTER};
-    let rail = stalled_rail();
     let limit = std::time::Duration::from_secs(1);
+    let rail = stalled_rail().with_own_flights();
     let id = AttemptId::from_bytes([8; 16]);
-    let attempt = id.to_text();
+    // The rail's `pay` hands the host's call to its flights as this does; the SDK's payment
+    // record can't be built outside it. The host's `pay` never answers: past its limit the
+    // wallet stops waiting, possibly sent.
     let never = std::future::pending::<Result<MethodOutcome, MethodError>>();
-    let waited = within(rail.flights().dispatch(attempt.clone(), None, never, limit)).await;
+    let waited = within(rail.flights().dispatch(id.to_text(), None, never, limit)).await;
     assert!(matches!(waited, Waited::StillRunning));
     // Until its bound, the running attempt's lookup is pending without asking the host,
     // whose lookup would never answer here.
     let bound = limit * STALE_AFTER;
     tokio::time::sleep(bound - limit - std::time::Duration::from_millis(1)).await;
-    assert!(rail.flights().in_flight(&attempt));
+    assert!(rail.flights().in_flight(&id.to_text()));
     assert!(matches!(
         within(rail.payment(id)).await,
         Ok(Some(paykit_sdk::RailOutcome::Pending))
@@ -165,7 +167,7 @@ async fn test_host_calls_running_pay_stops_counting_as_in_flight() {
     // At its bound the host's lookup decides, as the method contract makes it authoritative:
     // the host is asked, and this one doesn't answer within the lookup's own limit.
     tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-    assert!(!rail.flights().in_flight(&attempt));
+    assert!(!rail.flights().in_flight(&id.to_text()));
     assert!(matches!(
         within(rail.payment(id)).await,
         Err(RailError::Unavailable(_))
