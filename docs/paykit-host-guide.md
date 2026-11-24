@@ -547,6 +547,10 @@ the new cursor to the service. Acknowledging the deletion notice leaves the cred
 | `PublicAppFailureReason::Expired` | Wait for a current record from that app. A public record reaches its limit at any finite signed deadline or at the maximum age in the payee's signed identity document (90 days by default). |
 | `PublicAppFailureReason::OverBound` | This app's endpoints did not fit within the lookup bounds. Use the reason when explaining an incomplete lookup. |
 
+## The payment method's proof
+
+A method reports a payment made with its proof, a JSON object the payee's message carries (Paykit wire 4.10). The wallet accepts any proof that reads as an object, because the money has already moved: refusing it would leave a paid payment open for good. Paykit decodes the proof before it signs the message, so a number it can't hold exactly, such as an integer above 2^64 or a fixed decimal like `1.50`, is signed with other digits (`1.5`). Write any number that must survive exactly as a string, for example `{"fee":"1.50"}`. Give each member once: a repeated member keeps only its last value.
+
 ## The payment method's settlement ID
 
 `settlement_id` names the settlement a proof pays, for the payee's duplicate checks. Return `None` only for a proof that names no settlement: the SDK can't tell `None` from "can't tell now". A proof of a payment that names no request is then dropped for good: the feed moves past it and a resend of it is dropped as already processed, so its credit is lost. A requested proof skips the duplicate checks and is credited only on the user's confirmation (`Refusal::MaybeCredited`). The wallet bindings read a thrown `settlementId` as `None`, with the same effects, so a host method never throws it for a fault that may pass.
