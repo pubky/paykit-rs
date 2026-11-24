@@ -2102,7 +2102,7 @@ async fn test_unrequested_delete_by_another_installation_of_the_app_keeps_a_late
 }
 
 #[tokio::test]
-#[ignore = "the client makes a value the protocol holds the record's seen mark, then flags the put-back of the known history as an older list; it needs the client to keep such a value out of the mark"]
+#[ignore = "after a delete this app saw, nothing at the key is placed until the Switch proves a record's lineage and Paykit maps that proof (Paykit spec 6; wire 5, Incomplete protected-record contract)"]
 async fn test_unrequested_put_back_of_the_known_history_after_a_newer_recreation_places_the_list() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
@@ -2872,7 +2872,6 @@ async fn test_unrequested_loss_marker_read_first_kept_through_a_fresh_restore() 
 }
 
 #[tokio::test]
-#[ignore = "the client forgets what it saw of a record at a restore, so after a fresh restore it can't show the writer of a write that drops a marker it saw before; it needs the client to keep that through a backup and restore"]
 async fn test_unrequested_write_dropping_a_loss_marker_after_a_fresh_restore_shown_with_its_writer()
 {
     let w = World::new();
@@ -2939,7 +2938,6 @@ async fn test_unrequested_write_dropping_a_loss_marker_after_a_fresh_restore_sho
 }
 
 #[tokio::test]
-#[ignore = "the client never shows the app a write it flags, and forgets what it saw of the record at a restore, so the paid single-use endpoint is paid again; it needs the client to keep that through a backup and restore"]
 async fn test_unrequested_flagged_put_back_then_a_dropped_marker_not_paid_after_a_fresh_restore() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;

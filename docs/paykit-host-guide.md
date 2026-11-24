@@ -160,6 +160,13 @@ consenting to a new Allowance. If the installation's store is damaged so that
 `Paykit::restore` refuses it, restore into a new, empty store instead: that
 restore reads nothing of the old installation.
 
+Every restore, in place or into a new store, installs the seen marks the backup
+carries in place of the store's own (Switch spec 12.4 "Seen marks"). When some
+were left out, the restore reports `AppEvent::SeenMarksIncomplete` once for each
+registered protocol (`WalletEventData::SeenMarksIncomplete` in the bindings). It
+is a notice, with nothing to acknowledge: from then on a record without a mark
+is checked as new. A backup made before backups carried seen marks is refused.
+
 Register the extension kinds your app handles with `PaykitConfig::with_extension_kinds`.
 After a receive, read `Paykit::extension_messages` and acknowledge each message by
 sender and message ID once your extension has durably handled it. Reads leave the
