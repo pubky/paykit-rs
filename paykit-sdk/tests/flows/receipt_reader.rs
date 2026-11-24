@@ -31,7 +31,7 @@ impl Transport for ReaderQuota {
             })
         {
             self.service.fail_next(Fault::Error {
-                path: "ops".into(),
+                path: "/ops".into(),
                 code: pubky_switch_core::http::ErrorCode::QuotaExceeded,
                 current: serde_json::Value::Null,
             });
