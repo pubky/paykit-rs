@@ -4659,13 +4659,13 @@ async fn test_blocked_tried_stop_report_taken_again_after_a_restore() {
     wallet.app_mut().hold_queued(&w.bob_id()).await.unwrap();
     w.clock.advance_ms(31 * 24 * HOUR_MS);
     wallet.receive(None).await.unwrap();
-    wallet.receive(None).await.unwrap();
     assert!(crate::common::possibly_delivered(&wallet, &tried).await);
-    // Its report is taken and acknowledged; its stop is kept, with its decision.
-    assert_eq!(duties_of(&mut wallet, &tried).await, 0);
+    // Its report is taken, its acknowledgement still owed, and its stop kept with its
+    // decision: the backup carries the report.
+    assert_eq!(duties_of(&mut wallet, &tried).await, 1);
     assert_eq!(kept_stops(&wallet).await, 1);
-    // Restored, the app is told nothing again of the delivery of unknown outcome: the host
-    // was told once (Paykit spec 9).
+    // A restore tells the report of a delivery of unknown outcome again: it is taken as it
+    // was decided, told once in all, and acknowledged (Paykit spec 9).
     let mut wallet = restored(&w, wallet).await;
     wallet.receive(None).await.unwrap();
     wallet.receive(None).await.unwrap();
@@ -4788,7 +4788,6 @@ async fn test_blocked_given_up_stop_told_once_across_an_in_place_restore() {
         .unwrap());
     w.clock.advance_ms(31 * 24 * HOUR_MS);
     wallet.receive(None).await.unwrap();
-    wallet.receive(None).await.unwrap();
     assert_eq!(given_up_notices(&w, &wallet, &rejection, &second).await, 1);
     let id = wallet
         .notices()
@@ -4799,9 +4798,10 @@ async fn test_blocked_given_up_stop_told_once_across_an_in_place_restore() {
         .unwrap()
         .id;
     wallet.acknowledge_notice(&id).await.unwrap();
-    assert_eq!(duties_of(&mut wallet, &rejection).await, 0);
-    // Restored in place, the store tells the host nothing more of the given-up stop
-    // (Paykit spec 8.1).
+    // Its report is taken, its acknowledgement still owed: the backup carries it.
+    assert_eq!(duties_of(&mut wallet, &rejection).await, 1);
+    // Restored in place, the store keeps the report under its ID while its taken mark
+    // goes: taken again, it tells the host nothing more (Paykit spec 8.1).
     let backup = wallet.backup().await.unwrap();
     drop(wallet);
     let mut wallet = Paykit::restore(

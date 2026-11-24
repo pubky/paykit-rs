@@ -4583,81 +4583,80 @@ async fn test_divergent_request_to_an_app_whose_list_certificate_no_longer_count
 }
 
 #[tokio::test]
-async fn test_divergent_stored_entry_never_reopens_a_divergent_delete() {
-    // The payer's acceptance and proof are stored entries at the shop: their steps' writes
-    // were refused. Another of bob's apps then deletes the record, and the delete shows
-    // divergent: its upload may hold what the delete lacks. The shop holds no mark of having
-    // seen the record, as after a restore of an older backup. Confirmed or not, the entries
-    // are never written over the delete, so the record isn't opened again, and they are given
-    // up at their 30 days with the host's notice (Paykit spec 6, 8.1 "Stored entries").
+async fn test_divergent_stored_request_never_reopens_a_divergent_delete() {
+    // The wallet's write of bob's request is refused, so the request is a stored entry and the
+    // wallet never takes a value of its record. The phone takes it, then deletes the record,
+    // and the delete shows divergent: its upload may hold what the delete lacks, a
+    // cancellation among them. Confirmed or not, the stored request is never written over the
+    // delete, so the record isn't opened again, and it is given up at its 30 days with the
+    // host's notice (Paykit spec 6, 8.1 "Stored entries").
     let w = World::new();
-    let seen = Arc::new(crate::outcome_record::NoSeenMarks::default());
-    let base = Arc::clone(&seen) as Arc<dyn StateStore>;
-    let mut wallet = w.wallet("wallet").await;
-    let mut shop = shop_on(&w, Arc::clone(&base)).await;
-    let mut seller_wallet = w
-        .join(
-            &w.bob,
-            "seller-wallet",
-            AppScopes::new().request().build().unwrap(),
-        )
-        .await;
+    let base = store();
+    let mut wallet = w.wallet_on("wallet", Arc::clone(&base)).await;
+    let mut phone = w.wallet("phone").await;
+    let mut shop = w.shop().await;
     let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
-    let record = sale(&shop, &request).await.record;
+    crate::common::refuse_writes(&w.alice, 2);
     wallet.receive(None).await.unwrap();
-    wallet
-        .pay_request(&request, PayOptions::default())
-        .await
-        .outcome
-        .unwrap();
-    crate::common::refuse_writes(&w.bob, 4);
-    shop.receive(None).await.unwrap();
     assert_eq!(
-        shop.app()
+        wallet
+            .app()
             .protocol_scan("paykit", b"se/")
             .await
             .unwrap()
             .len(),
-        2
+        1
     );
-    seen.armed.store(true, std::sync::atomic::Ordering::SeqCst);
-    seller_wallet.receive(None).await.unwrap();
+    phone.receive(None).await.unwrap();
     let target = RecordTarget::new(
         SwitchCollection::new(
-            Collection::PayeeActivity.name(),
-            Collection::PayeeActivity.policy(None),
+            Collection::PayerActivity.name(),
+            Collection::PayerActivity.policy(None),
         ),
         &natural_key::request_record(&w.bob_id(), &request.request_hash),
     );
-    seller_wallet
+    let record = phone.app().record_key(&target).unwrap();
+    assert!(phone
+        .app_mut()
+        .read_record(&target)
+        .await
+        .unwrap()
+        .is_some_and(|held| held.content.value().is_some()));
+    phone
         .app_mut()
         .delete_record(&target, Vec::new())
         .await
         .unwrap();
-    shop.receive(None).await.unwrap();
-    set_divergent(&base, &shop, &record, true);
-    shop.receive(None).await.unwrap();
-    confirm(&mut shop, &record).await.unwrap();
-    shop.receive(None).await.unwrap();
-    let held = shop.app().shared_record(&record).await.unwrap().unwrap();
+    // The delete reaches the wallet already divergent.
+    w.alice
+        .switch()
+        .make_divergent(OTHER_UPLOADER, record, [1; 32])
+        .unwrap();
+    wallet.receive(None).await.unwrap();
+    let held = wallet.app().shared_record(&record).await.unwrap().unwrap();
+    assert!(held.divergent);
     assert_eq!(
         held.content,
         pubky_switch_client::app::RecordContent::Deleted
     );
+    confirm(&mut wallet, &record).await.unwrap();
+    for _ in 0..2 {
+        wallet.receive(None).await.unwrap();
+    }
+    let deleted = pubky_switch_client::app::RecordContent::Deleted;
+    let held = wallet.app().shared_record(&record).await.unwrap().unwrap();
+    assert_eq!(held.content, deleted);
     w.clock.advance_ms(31 * 24 * HOUR_MS);
-    shop.receive(None).await.unwrap();
-    let held = shop.app().shared_record(&record).await.unwrap().unwrap();
-    assert_eq!(
-        held.content,
-        pubky_switch_client::app::RecordContent::Deleted
-    );
-    assert!(shop
+    wallet.receive(None).await.unwrap();
+    let held = wallet.app().shared_record(&record).await.unwrap().unwrap();
+    assert_eq!(held.content, deleted);
+    assert!(wallet
         .app()
         .protocol_scan("paykit", b"se/")
         .await
         .unwrap()
         .is_empty());
-    assert!(shop
+    assert!(wallet
         .notices()
         .await
         .unwrap()

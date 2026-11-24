@@ -3905,9 +3905,12 @@ async fn loss_with_an_owed_deny_entry_after(
             current: serde_json::json!({ "limit": "deny", "over": 1 }),
         });
     }
+    // Two receives when the first upload is interrupted, as few as reach the list step, so
+    // nothing but the list step's own rule keeps a copy read before it from being fresh.
+    let receives = if interrupted { 2 } else { 4 };
     for app in [&mut wallet, &mut phone] {
         app.app_mut().refresh_identity().await.unwrap();
-        for _ in 0..4 {
+        for _ in 0..receives {
             let _ = app.receive(None).await;
         }
         assert_lists_step_owes_bob(w, app).await;
@@ -4090,4 +4093,167 @@ async fn test_provider_loss_list_read_before_the_list_step_isnt_taken_as_fresh()
         "{refused:?}"
     );
     assert!(w.rail.all_executions().is_empty());
+}
+
+/// Alice's app, holding `scopes`, with bob blocked and the lists read; then her provider is
+/// lost, and the app's first evidence upload goes unanswered, so a receive runs while the
+/// recovery is at its upload step, and a second follows (Switch spec 12.6). When `stays`,
+/// every later upload goes unanswered too, and the recovery waits at that step.
+async fn loss_interrupted_at_upload(
+    w: &World,
+    scopes: paykit_sdk::AppScopes,
+    stays: bool,
+) -> (Paykit, Option<RequestRef>) {
+    let mut app = w.join(&w.alice, "app", scopes.build().unwrap()).await;
+    app.app_mut().invite(&w.bob_id()).await.unwrap();
+    let request = if app.app().cert().scopes().iter().any(|s| s == "paykit_pay") {
+        let mut shop = w.shop().await;
+        let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+        app.receive(None).await.unwrap();
+        Some(request)
+    } else {
+        None
+    };
+    app.block(&w.bob_id()).await.unwrap();
+    assert!(app
+        .app_mut()
+        .allow_list()
+        .await
+        .unwrap()
+        .deny
+        .contains(&w.bob_id()));
+    app.receive(None).await.unwrap();
+    let next = declare_loss(w);
+    for _ in 0..if stays { 64 } else { 1 } {
+        next.fail_next(pubky_switch_client::testing::Fault::Unreachable {
+            path: "/recovery/upload".into(),
+            after: 0,
+        });
+    }
+    app.app_mut().refresh_identity().await.unwrap();
+    for _ in 0..2 {
+        let _ = app.receive(None).await;
+    }
+    (app, request)
+}
+
+/// The recovery step `app` is at.
+async fn recovery_step(app: &Paykit) -> pubky_switch_client::app::RecoveryStep {
+    app.app().recovery_info().await.unwrap().unwrap().step
+}
+
+/// The deny list `app` keeps as its copy (`dl`), and whether it holds a read time (`lr`).
+async fn deny_copy(app: &Paykit) -> (Vec<[u8; 32]>, bool) {
+    let copy: serde_json::Value = serde_json::from_slice(
+        &app.app()
+            .protocol_get("paykit", b"dl")
+            .await
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    let read = app.app().protocol_get("paykit", b"lr").await.unwrap();
+    (
+        serde_json::from_value(copy["d"].clone()).unwrap(),
+        read.is_some(),
+    )
+}
+
+#[tokio::test]
+async fn test_provider_loss_list_read_at_the_upload_step_keeps_the_stored_deny_list() {
+    // At the upload step the new service holds none of the loss's deny entries, and the
+    // client names none yet: a payer's or a seller's read of the lists then takes nothing,
+    // keeps bob in its copy, raises no floor, and holds no copy fresh (Switch wire 7.4.14).
+    use paykit_sdk::AppScopes;
+    for scopes in [
+        AppScopes::new().pay().manage_contacts(),
+        AppScopes::new().request().manage_contacts(),
+    ] {
+        let w = World::new();
+        let (app, _) = loss_interrupted_at_upload(&w, scopes, true).await;
+        assert_eq!(
+            recovery_step(&app).await,
+            pubky_switch_client::app::RecoveryStep::Upload
+        );
+        let (copy, fresh) = deny_copy(&app).await;
+        assert!(copy.contains(&w.bob_id()), "{copy:?}");
+        assert!(!fresh);
+        assert_eq!(block_floor(&app).await, None);
+    }
+}
+
+#[tokio::test]
+async fn test_provider_loss_upload_finished_in_a_receive_keeps_its_peer_blocked() {
+    // The receive that reads the lists at the upload step finishes the recovery's steps: no
+    // copy read before them is taken as fresh, and bob stays blocked for payments.
+    use paykit_sdk::AppScopes;
+    let w = World::new();
+    let (mut wallet, request) =
+        loss_interrupted_at_upload(&w, AppScopes::new().pay().manage_contacts(), false).await;
+    let request = request.unwrap();
+    assert!(
+        recovery_step(&wallet).await > pubky_switch_client::app::RecoveryStep::Lists,
+        "{:?}",
+        recovery_step(&wallet).await
+    );
+    reconcile_and_end(&mut wallet).await;
+    let doubted = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .outcome;
+    let refused = wallet
+        .pay_request(
+            &request,
+            PayOptions::default().with_may_be_paid_confirmed(doubt_of(&doubted)),
+        )
+        .await
+        .outcome
+        .unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::Blocked { .. })),
+        "{refused:?}"
+    );
+    assert!(w.rail.all_executions().is_empty());
+    assert_eq!(block_floor(&wallet).await, None);
+}
+
+#[tokio::test]
+async fn test_provider_loss_send_to_a_blocked_peer_waits_after_a_read_at_the_upload_step() {
+    // A seller's read of the lists at the upload step, in the receive that then finishes the
+    // recovery's steps, takes nothing: a payment request to bob, blocked, isn't sent on a
+    // copy read before them (Switch wire 7.4.14; Paykit spec 8.1).
+    use paykit_sdk::AppScopes;
+    let w = World::new();
+    // Bob's switch admits alice: only alice's block of him can stop the send.
+    let mut buyer = w
+        .join(&w.bob, "buyer", AppScopes::new().pay().build().unwrap())
+        .await;
+    buyer.app_mut().invite(&w.alice_id()).await.unwrap();
+    let (mut shop, _) =
+        loss_interrupted_at_upload(&w, AppScopes::new().request().manage_contacts(), false).await;
+    assert!(recovery_step(&shop).await > pubky_switch_client::app::RecoveryStep::Lists);
+    let entries = w.bob.switch().entries_from(&w.alice_id());
+    let _ = shop
+        .send_request(w.bob_id(), draft("2", w.clock.now_ms()))
+        .await;
+    let _ = shop.flush().await;
+    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), entries);
+}
+
+#[tokio::test]
+async fn test_provider_loss_unblock_at_the_upload_step_waits_for_the_list_step() {
+    // Before the list step nothing tells an unblock from a removal of nothing: it is refused
+    // for now, with nothing changed, and goes once the step comes.
+    use paykit_sdk::AppScopes;
+    let w = World::new();
+    let (mut wallet, _) =
+        loss_interrupted_at_upload(&w, AppScopes::new().pay().manage_contacts(), true).await;
+    let refused = wallet.unblock(&w.bob_id()).await.unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::NotNow(why)) if why.contains("after the next receive")),
+        "{refused:?}"
+    );
+    let (copy, _) = deny_copy(&wallet).await;
+    assert!(copy.contains(&w.bob_id()));
+    assert_eq!(block_floor(&wallet).await, None);
 }
