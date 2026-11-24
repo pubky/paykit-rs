@@ -23,14 +23,14 @@ async fn test_connect_admits_the_seller_and_its_waiting_request_is_paid() -> Tes
     on_both_backends(admits_the_seller_and_its_waiting_request_is_paid).await
 }
 
-/// Whether `wallet`'s allow list holds a conversation entry for `peer`: the Switch client's
-/// own read, used here only to observe admission.
+/// Whether `wallet`'s allow list holds a reply grant for `peer`: the Switch client's own
+/// read, used here only to observe admission.
 async fn admits(wallet: &mut Paykit, peer: &[u8; 32]) -> TestResult<bool> {
     let allowed = Box::pin(wallet.app_mut().allow_list()).await?;
     Ok(allowed
-        .conversations
+        .peers
         .iter()
-        .any(|entry| &entry.pubky == peer))
+        .any(|entry| &entry.pubky == peer && entry.reply.is_some()))
 }
 
 async fn admits_the_seller_and_its_waiting_request_is_paid(world: &World) -> TestResult {

@@ -1068,7 +1068,7 @@ mod tests {
                 "paykit_contacts",
                 "chat",
             ],
-            &[Permission::ListsRead, Permission::ConversationAdd],
+            &[Permission::ListsRead, Permission::ReplyAdd],
         );
         wallet.check_scopes(&request, &shop).unwrap();
         wallet.check_scopes(&resend, &shop).unwrap();
@@ -1082,7 +1082,7 @@ mod tests {
         let good = issued(
             &identity,
             &["paykit_allowance"],
-            &[Permission::ClaimsRead, Permission::ConversationAdd],
+            &[Permission::ClaimsRead, Permission::ReplyAdd],
         );
         let rules = PaykitKindRules::new(owned(&[
             "paykit_allowance_execute",
@@ -1108,7 +1108,7 @@ mod tests {
             &[
                 Permission::ClaimsRead,
                 Permission::ClaimsWrite,
-                Permission::ConversationAdd,
+                Permission::ReplyAdd,
             ],
         );
         assert!(

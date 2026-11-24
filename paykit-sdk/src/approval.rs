@@ -157,7 +157,7 @@ mod tests {
                 Permission::ClaimsRead,
                 Permission::ClaimsWrite,
                 Permission::ListsRead,
-                Permission::ConversationAdd
+                Permission::ReplyAdd
             ]
         );
     }
@@ -207,7 +207,7 @@ mod tests {
         );
         assert_eq!(
             shop.permissions,
-            vec![Permission::ListsRead, Permission::ConversationAdd]
+            vec![Permission::ListsRead, Permission::ReplyAdd]
         );
         // Plain `paykit_request` asks for the same scopes it requires.
         let payee = AppScopes::new().request().build().unwrap();

@@ -89,6 +89,19 @@ pub enum SwitchRefusalKind {
         /// Number of earlier stored batches.
         kept: u64,
     },
+    /// The backup wouldn't fit beside the duty events it carries: acknowledge the duty events
+    /// acted on, then take the backup again.
+    DutiesTooLarge {
+        /// The duty events the backup would carry.
+        duty_events: u64,
+    },
+    /// After a provider loss, the new service's deny list has no room for `over` of the app's
+    /// deny entries, and nothing of the list was merged: the user unblocks that many peers,
+    /// then the recovery is followed again.
+    DenyListFull {
+        /// How many of the app's deny entries don't fit.
+        over: u64,
+    },
     /// An unrecognized native refusal. Keep the operation held.
     Unknown,
 }
@@ -130,6 +143,10 @@ impl From<&Refusal> for SwitchRefusalKind {
                 answer_until_ms: ahead.answer_until_ms,
                 kept: ahead.kept,
             },
+            Refusal::DutiesTooLarge { duty_events } => Self::DutiesTooLarge {
+                duty_events: *duty_events,
+            },
+            Refusal::DenyListFull { over } => Self::DenyListFull { over: *over },
             _ => Self::Unknown,
         }
     }

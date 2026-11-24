@@ -1680,7 +1680,7 @@ impl Paykit {
         if !self.holds("paykit_allowance") || !receive::reads_lists(self.app.cert().scopes()) {
             return Ok(false);
         }
-        let read = self.local_get::<u64>(key::LISTS_READ).await?;
+        let read = self.lists_read_at().await?;
         if !read.is_some_and(|at| receive::lists_read_is_fresh(at, self.now()))
             || self
                 .local_get::<Vec<[u8; 32]>>(key::DENIED)

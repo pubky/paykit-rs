@@ -423,7 +423,11 @@ collections after the Switch has finished its feed read. An explicit `reconcile`
 read and retain committed duties from `wallet.app_mut().unacknowledged_events()`.
 Wait for a later successful `receive` so the SDK can process its duties, then
 acknowledge for `"paykit"` with `App::ack_events_for` up to the last duty in
-that successful report. Use the app-wide `App::ack_events` only after the
+that successful report. The SDK acknowledges each duty it takes by itself, so a duty left to the host
+never holds back one the SDK took. Show the host's duties, such as
+`AppEvent::ListsUnverified` after a restore or a provider loss (kept peers or
+reply grants not verified yet, or lists the backup left out), and acknowledge
+each once the user has seen it. Use the app-wide `App::ack_events` only after the
 other responsible protocols have handled their duties too. Keep the deletion
 notice and any surviving confirmed receipt together when showing a missing
 shared record.
@@ -529,7 +533,7 @@ The method declares `payment_time_tolerance_ms` with its declaration. The payee 
 | `Refusal::CertificateRefused` | Seek a suitable certificate from the signer and keep Paykit actions paused meanwhile. |
 | `Refusal::SwitchUnavailable` | Show the own Switch as unavailable and keep payment actions waiting. From a payment, directly or as an `AttemptFailed` cause, it means nothing was paid, not a payment in flight: retry the payment once the switch answers. If the retry is refused with `PaymentInProgress`, call `Paykit::resume_payments` and retry once the earlier attempt is resolved; the resume records it failed when the switch takes that write. |
 | `Refusal::Blocked` | Show the blocked recipient and the exact payment to the user before any supported override. |
-| `Refusal::Divergent` | Show the returned records and the exact confirmation asked for. Run receive while the record still has writes waiting. |
+| `Refusal::Divergent` | Show the returned records and the exact confirmation asked for. Run receive while the record still has writes waiting. A credit refused this way is released only by confirming, with `confirm_divergent`, the records this refusal returns (`may_hold_credit`): a record confirmed as `divergent_records()` lists it doesn't count for a credit, and one still owed that confirmation may be missing from that list. Then ask for the credit again. |
 
 ## Wallet errors
 
@@ -611,6 +615,8 @@ Two rules override a code's case. A failure with a `keptBatch` comes as `Outcome
 | `kept_batches_ahead` | `AppRefusal::KeptBatchesAhead` | `OutcomeUnknown` | The call's own batch was kept unsent behind earlier kept batches, which the wallet sends in order over its next reads: follow `more` on `receive`, then reconcile. Don't make the call again. A restore doesn't carry kept batches, so after one, reconcile decides. |
 | `client_usage` | `AppRefusal::Usage`, `ClientError::Usage` | `NotSent` | A value given breaks a Switch rule: fix the call. |
 | `carried_too_large` | `AppRefusal::CarriedTooLarge` | `NotSent` | Acknowledge the duty events acted on, then restore again. |
+| `duties_too_large` | `AppRefusal::DutiesTooLarge` | `NotSent` | The backup wouldn't fit beside the duty events it carries: acknowledge the duty events acted on, then back up again. |
+| `deny_list_full` | `AppRefusal::DenyListFull` | `NeedsUser` | After a provider loss the new service's deny list has no room for `over` of the app's deny entries: ask the user which peers to unblock, then follow the recovery again. |
 | `wont_deliver` | `AppRefusal::WontDeliver` | `Permanent` | The message can no longer be delivered safely. |
 | `expired_unsent` | `AppError::ExpiredUnsent` | `NotSent` | The batch was retired before it was sent: make the call again. |
 | `store_after_kept` | `AppError::Store` behind a kept batch | `OutcomeUnknown` | The commit failed after the call's batch was kept: it may have applied. Reconcile before trying again. |

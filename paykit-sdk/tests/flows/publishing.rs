@@ -114,12 +114,11 @@ async fn test_publication_restored_withdrawal_never_admits_its_recipient() {
         shop.app().delivery(&first.msg_id).await.unwrap(),
         Some(Delivery::Queued { .. })
     ));
-    let admitted = shop.app_mut().allow_list().await.unwrap().conversations;
-    assert!(admitted.iter().any(|entry| entry.pubky == recipient));
-    shop.app_mut()
-        .remove_conversation(&recipient)
-        .await
-        .unwrap();
+    let admitted = shop.app_mut().allow_list().await.unwrap().peers;
+    assert!(admitted
+        .iter()
+        .any(|entry| entry.pubky == recipient && entry.reply.is_some()));
+    shop.app_mut().remove_reply(&recipient).await.unwrap();
     drop(shop);
 
     let mut shop = Paykit::restore(
@@ -144,8 +143,9 @@ async fn test_publication_restored_withdrawal_never_admits_its_recipient() {
         .allow_list()
         .await
         .unwrap()
-        .conversations
-        .is_empty());
+        .peers
+        .iter()
+        .all(|entry| entry.reply.is_none()));
     wallet.app_mut().invite(&w.bob_id()).await.unwrap();
     let retry = shop
         .app_mut()
@@ -161,8 +161,9 @@ async fn test_publication_restored_withdrawal_never_admits_its_recipient() {
         .allow_list()
         .await
         .unwrap()
-        .conversations
-        .is_empty());
+        .peers
+        .iter()
+        .all(|entry| entry.reply.is_none()));
 }
 
 #[tokio::test]
@@ -2527,15 +2528,14 @@ async fn test_publication_reselecting_one_contact_retires_only_its_withdrawal_re
     assert_eq!(reselected.last().unwrap().version.counter(), 3);
     assert!(!reselected.last().unwrap().withdrawn);
     shop.app_mut()
-        .remove_conversation(&carol.identity())
+        .remove_reply(&carol.identity())
         .await
         .unwrap();
     let before = shop.app_mut().allow_list().await.unwrap();
-    assert!(!before.contacts.contains(&carol.identity()));
     assert!(!before
-        .conversations
+        .peers
         .iter()
-        .any(|c| c.pubky == carol.identity()));
+        .any(|entry| entry.pubky == carol.identity()));
     let before_retry = published(&shop, &carol).await;
     assert_eq!(before_retry.len(), 1);
     assert_eq!(before_retry[0].version, ListVersion::new(1, 1).unwrap());
