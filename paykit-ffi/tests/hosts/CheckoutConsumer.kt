@@ -60,10 +60,11 @@ internal open class CheckoutMethod(private val ledger: File) : ReceiptReader() {
         stored()?.takeIf { proofJson.contentEquals(originalProof(it)) }?.toByteArray()
 }
 
+// Read until the feed is done and every record the app's scopes read is listed (Paykit spec 6).
 internal suspend fun NativeWallet.finishReceive() {
     repeat(8) {
         val report = receive()
-        if (!report.more) return
+        if (!report.more && report.recordsUnlisted == null) return
     }
     error("wallet did not complete its feed")
 }
