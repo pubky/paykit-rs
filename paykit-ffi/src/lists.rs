@@ -255,7 +255,11 @@ impl NativeWallet {
     /// outcome, once the user confirmed it (Paykit spec 8.4, 9). `refusal` is the exact
     /// `ListDeliveryUnknown` refusal a list call returned, which the host showed. Any other
     /// refusal is `InvalidInput` naming `refusal`; a list that changed since comes back as a
-    /// new `ListDeliveryUnknown`, and nothing is sent.
+    /// new `ListDeliveryUnknown`, and nothing is sent. It returns once nothing of unknown
+    /// outcome is left for the counterparty: the new list is queued, or the shown one was
+    /// accepted, superseded or withdrawn meanwhile, or can no longer be paid, and then nothing
+    /// more is sent. `NotNow` keeps the confirmation, and a later call or receive sends the
+    /// list once it can.
     pub async fn send_list_again(&self, refusal: Arc<PaymentRefusal>) -> Result<(), WalletError> {
         let Refusal::ListDeliveryUnknown(shown) = &refusal.0 else {
             return Err(WalletError::invalid("refusal"));
