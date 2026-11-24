@@ -15,7 +15,7 @@ impl Paykit {
             .iter()
             .any(|name| name == crate::protocol::BACKUP_NAME)
         {
-            return Err(crate::error::Refusal::NotNow(
+            return Err(crate::error::Refusal::Usage(
                 "Switch spec 11: delivery ownership is not established".into(),
             )
             .into());
@@ -95,7 +95,7 @@ impl Paykit {
         Box::pin(self.first_read_before_writing()).await?;
         self.refresh_own()?;
         if registrations.is_empty() || self.app.restore_question() != registrations {
-            return Err(crate::Refusal::NotNow("read the current restore question".into()).into());
+            return Err(crate::Refusal::Usage("read the current restore question".into()).into());
         }
         Ok(())
     }

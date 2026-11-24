@@ -238,8 +238,8 @@ private func resumeRefusal(_ issuer: String, left: Bool, request: RequestId) asy
         do {
             _ = try await wallet.requestReceipts(id: request)
             preconditionFailure("read receipts before the restored records were listed")
-        } catch let WalletError.NeedsUser(failure) {
-            guard failure.code() == "not_now", case .notNow? = failure.refusal()?.kind() else { preconditionFailure("unexpected receipt refusal") }
+        } catch let WalletError.RetryLater(failure) {
+            guard failure.code() == "records_not_listed", case .notNow? = failure.refusal()?.kind() else { preconditionFailure("unexpected receipt refusal") }
         }
     }
     do {

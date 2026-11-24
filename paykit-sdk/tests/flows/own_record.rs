@@ -446,9 +446,9 @@ async fn test_own_record_upkeep_without_publishing_withdraws_every_endpoint() {
 /// A store whose next commit of the client's own state, once armed, is applied and then
 /// answers that its result is unknown, as a store that can't tell may. Paykit's own state
 /// (`p/paykit/`) commits as it is.
-struct UnknownOnce {
-    inner: Arc<dyn pubky_switch_client::store::StateStore>,
-    armed: std::sync::atomic::AtomicBool,
+pub(crate) struct UnknownOnce {
+    pub(crate) inner: Arc<dyn pubky_switch_client::store::StateStore>,
+    pub(crate) armed: std::sync::atomic::AtomicBool,
 }
 
 impl UnknownOnce {
@@ -571,10 +571,15 @@ async fn test_own_record_edit_after_an_unknown_store_result_waits_for_a_load() {
     // The record this handle holds may not be the one stored: reading its endpoints is
     // refused, naming the way out.
     let refused = shop.own_public_endpoints().unwrap_err();
-    let PaykitError::Refused(Refusal::NotNow(text)) = &refused else {
-        panic!("{refused:?}");
-    };
-    assert!(text.contains("load the app again"), "{text}");
+    assert!(
+        matches!(
+            &refused,
+            PaykitError::Refused(Refusal::HeldForUser(
+                paykit_sdk::HeldForUserReason::ReloadRequired
+            ))
+        ),
+        "{refused:?}"
+    );
     // Adding B on this handle would build on the record it still holds, with A: refused,
     // naming the way out, and nothing is signed.
     let record = shop.app().record().clone();
@@ -582,10 +587,15 @@ async fn test_own_record_edit_after_an_unknown_store_result_waits_for_a_load() {
         .set_public_endpoint(b.clone(), payload("bc1q"))
         .await
         .unwrap_err();
-    let PaykitError::Refused(Refusal::NotNow(text)) = &refused else {
-        panic!("{refused:?}");
-    };
-    assert!(text.contains("load the app again"), "{text}");
+    assert!(
+        matches!(
+            &refused,
+            PaykitError::Refused(Refusal::HeldForUser(
+                paykit_sdk::HeldForUserReason::ReloadRequired
+            ))
+        ),
+        "{refused:?}"
+    );
     assert_eq!(shop.app().record(), &record);
     // A receive's upkeep doesn't sign either, and tells the host the record is owed until the
     // app is loaded again.
@@ -654,10 +664,15 @@ async fn test_own_record_edit_after_an_unknown_read_result_waits_for_a_load() {
         .set_public_endpoint(endpoint("btc-onchain-address"), payload("bc1q"))
         .await
         .unwrap_err();
-    let PaykitError::Refused(Refusal::NotNow(text)) = &refused else {
-        panic!("{refused:?}");
-    };
-    assert!(text.contains("load the app again"), "{text}");
+    assert!(
+        matches!(
+            &refused,
+            PaykitError::Refused(Refusal::HeldForUser(
+                paykit_sdk::HeldForUserReason::ReloadRequired
+            ))
+        ),
+        "{refused:?}"
+    );
     assert_eq!(shop.app().record(), &record);
 }
 
@@ -735,10 +750,15 @@ async fn test_own_record_unknown_identity_refresh_stops_edits_and_upkeep() {
         .set_public_endpoint(endpoint("btc-onchain-address"), payload("bc1q"))
         .await
         .unwrap_err();
-    let PaykitError::Refused(Refusal::NotNow(text)) = &refused else {
-        panic!("{refused:?}");
-    };
-    assert!(text.contains("load the app again"), "{text}");
+    assert!(
+        matches!(
+            &refused,
+            PaykitError::Refused(Refusal::HeldForUser(
+                paykit_sdk::HeldForUserReason::ReloadRequired
+            ))
+        ),
+        "{refused:?}"
+    );
     let record = restored.app().record().clone();
     restored.receive(None).await.unwrap();
     assert_eq!(restored.app().record(), &record);

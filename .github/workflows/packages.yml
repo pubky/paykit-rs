@@ -1,0 +1,162 @@
+name: Wallet packages
+
+# Builds the Swift package and the Android AAR as a release would, and compiles a consumer of
+# each. It publishes nothing. It runs when something the packages are built from changes, since
+# a full package build takes long.
+on:
+  push:
+    branches: [v0.2]
+    paths:
+      - "paykit-ffi/**"
+      - "paykit-lib/**"
+      - "paykit-sdk/**"
+      - "vendor/**"
+      - ".cargo/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/packages.yml"
+  pull_request:
+    branches: [v0.2, "feat/**"]
+    paths:
+      - "paykit-ffi/**"
+      - "paykit-lib/**"
+      - "paykit-sdk/**"
+      - "vendor/**"
+      - ".cargo/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/packages.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  swift-package:
+    name: Swift package
+    runs-on: macos-26
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+        with:
+          toolchain: stable
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Build the XCFramework archive
+        run: paykit-ffi/build_ios.sh
+      - name: Compile a Swift consumer of the archive
+        run: |
+          set -eu
+          consumer="$RUNNER_TEMP/swift-consumer"
+          package="$consumer/paykit"
+          sources=paykit-ffi/dist/ios/Sources/Paykit
+          mkdir -p "$package/paykit-ffi/bindings/ios" "$consumer/Sources/WalletConsumer"
+          cp "$sources/Paykit.swift" "$sources/WalletRedaction.swift" "$package/paykit-ffi/bindings/ios/"
+          unzip -q paykit-ffi/dist/ios/Paykit.xcframework.zip -d "$package"
+          # The release manifest, resolved against the local copy of the archive.
+          sed -e 's/@TAG@/v0.0.0/' -e 's/@CHECKSUM@/local/' \
+            -e 's/url: url, checksum: checksum/path: "PaykitFFI.xcframework"/' \
+            paykit-ffi/swift/Package.release.swift > "$package/Package.swift"
+          grep -Fq 'path: "PaykitFFI.xcframework"' "$package/Package.swift" || {
+            echo "Missing local binary target" >&2; exit 1;
+          }
+          cd "$consumer"
+          cat > Package.swift <<'SWIFT'
+          // swift-tools-version: 5.9
+          import PackageDescription
+          let package = Package(
+              name: "WalletConsumer", platforms: [.iOS(.v15)],
+              products: [.library(name: "WalletConsumer", type: .dynamic, targets: ["WalletConsumer"])],
+              dependencies: [.package(path: "paykit")],
+              targets: [.target(name: "WalletConsumer", dependencies: [.product(name: "Paykit", package: "paykit")])]
+          )
+          SWIFT
+          cat > Sources/WalletConsumer/Consumer.swift <<'SWIFT'
+          import Paykit
+          public func walletHostType() -> WalletHost.Type { WalletHost.self }
+          SWIFT
+          xcodebuild build -scheme WalletConsumer -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath "$RUNNER_TEMP/consumer-derived" CODE_SIGNING_ALLOWED=NO
+
+  android-package:
+    name: Android package
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+        with:
+          toolchain: stable
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
+        with:
+          gradle-version: "9.9.0"
+      - name: Build the AAR
+        run: |
+          set -eu
+          # The runner image's own Android SDK and NDK, as the Kotlin host job uses them.
+          export ANDROID_NDK_HOME="${ANDROID_NDK_LATEST_HOME:-$ANDROID_NDK_ROOT}"
+          cargo install cargo-ndk --version 4.1.2 --locked
+          paykit-ffi/build_android.sh
+      - name: Compile a Kotlin consumer of the AAR and its POM
+        run: |
+          set -eu
+          android="$PWD/paykit-ffi/bindings/android"
+          gradle -p "$android" --no-daemon :lib:generatePomFileForMavenPublication
+          version=$(sed -n 's/^version=//p' "$android/gradle.properties")
+          : "${version:?Missing Android package version}"
+          consumer="$RUNNER_TEMP/kotlin-consumer"
+          artifact="$consumer/repo/com/synonym/paykit-android/$version/paykit-android-$version"
+          mkdir -p "$(dirname "$artifact")" "$consumer/src/main"
+          cp "$android/lib/build/outputs/aar/lib-release.aar" "$artifact.aar"
+          cp "$android/lib/build/publications/maven/pom-default.xml" "$artifact.pom"
+          cp -R "$android/lib/src/test" "$consumer/src/"
+          cp "$android/lib/src/main/AndroidManifest.xml" "$consumer/src/main/"
+          cp paykit-ffi/tests/android/settings.gradle.kts "$android/gradle.properties" "$consumer/"
+          cd "$consumer"
+          cat >> settings.gradle.kts <<'GRADLE'
+          dependencyResolutionManagement.repositories {
+              val packages = maven {
+                  url = uri("repo")
+                  metadataSources {
+                      mavenPom()
+                      ignoreGradleMetadataRedirection()
+                  }
+              }
+              exclusiveContent {
+                  forRepositories(packages)
+                  filter { includeModule("com.synonym", "paykit-android") }
+              }
+          }
+          GRADLE
+          cat > build.gradle.kts <<'GRADLE'
+          plugins { id("com.android.library") version "9.3.0" }
+          android {
+              namespace = "com.synonym.paykit.consumer"
+              compileSdk = 36
+              defaultConfig { minSdk = 28 }
+          }
+          dependencies { testImplementation("com.synonym:paykit-android:" + providers.gradleProperty("version").get()) }
+          GRADLE
+          gradle --no-daemon compileDebugUnitTestKotlin
+          compiled=$(find build -name WalletBindingsCompileKt.class -print -quit)
+          test -s "$compiled" || { echo "Missing compiled Kotlin consumer" >&2; exit 1; }

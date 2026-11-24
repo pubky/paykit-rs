@@ -494,9 +494,9 @@ async fn restored_behind(world: &World) -> TestResult {
 
     // Under the Allowance, execution is refused and nothing is executed: the old device
     // advanced the Allowance's ledger after the backup, which this installation can't
-    // establish (Paykit spec 8.3, "Resuming the same executor"). At v0.2 the executor asks
-    // for the user's confirmation, and the confirmation is refused for now; the kind of this
-    // refusal is being made definite.
+    // establish (Paykit spec 8.3, "Resuming the same executor"). The executor asks for the
+    // user's confirmation, and the confirmation is held for the user: no later read brings
+    // the grant and ledger back, so the user ends the Allowance or pays by hand.
     let refused = Box::pin(restored.pay_period_under_allowance(&request, &periods[1]))
         .await
         .outcome
@@ -508,7 +508,12 @@ async fn restored_behind(world: &World) -> TestResult {
         .await
         .expect_err("the executor was confirmed");
     assert!(
-        matches!(confirmed.refusal(), Some(Refusal::NotNow(_))),
+        matches!(
+            confirmed.refusal(),
+            Some(Refusal::HeldForUser(
+                paykit_sdk::HeldForUserReason::AllowanceExecutionHeld(_)
+            ))
+        ),
         "{confirmed:?}"
     );
     let again = Box::pin(restored.pay_period_under_allowance(&request, &periods[1]))

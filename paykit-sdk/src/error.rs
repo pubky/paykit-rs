@@ -299,10 +299,17 @@ pub enum Refusal {
     /// service followed, or else "may be paid".
     #[error("not current here: {0}")]
     NotCurrent(String),
-    /// The client layer holds the attempt back: an alarm, a restore question, reconcile mode,
-    /// or the clocks disagreeing (Switch spec 10.1, 12.4).
+    /// The call waits: a later call, a read or a wait clears it, as the reason names.
     #[error("not now: {0}")]
-    NotNow(String),
+    NotNow(crate::NotNowReason),
+    /// The user or the host acts first, as the reason names: an unblock, a paused record's
+    /// confirmation, a new decision to pay, or showing a hold no wait clears (Paykit spec
+    /// 8.1). A confirmation the call was given may be kept, as a list's to send again.
+    #[error("held for the user: {0}")]
+    HeldForUser(crate::HeldForUserReason),
+    /// A recovery step clears this, as the reason names; no wait does.
+    #[error("recovery needed: {0}")]
+    RecoveryNeeded(crate::RecoveryReason),
     /// The identity's block floor was seen divergent, and nothing can show what the hidden
     /// upload held: no raise of the floor can be written, so an unblock or a widening that
     /// needs one waits, and no automatic one-time payment goes (Paykit wire 5.6, Divergent

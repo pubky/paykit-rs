@@ -495,8 +495,11 @@ async fn finish_restore(payer: &mut Paykit) -> TestResult {
                 finished = true;
                 break;
             }
-            Err(paykit_sdk::PaykitError::Refused(paykit_sdk::Refusal::NotNow(reason)))
-                if reason.contains("Call reconcile again") => {}
+            Err(paykit_sdk::PaykitError::Refused(paykit_sdk::Refusal::NotNow(
+                paykit_sdk::NotNowReason::RecordsUnlisted {
+                    retry: paykit_sdk::ListingRetry::Reconcile,
+                },
+            ))) => {}
             Err(error) => return Err(error.into()),
         }
     }
@@ -680,8 +683,8 @@ async fn grant_after_original_application(world: &World) -> TestResult {
             // Confirming can't lift it: the original approval isn't on this device.
             assert!(!view.confirmation_needed, "{view:?}");
             assert!(
-                matches!(resumed.as_ref().unwrap_err().refusal(), Some(paykit_sdk::Refusal::NotNow(reason))
-                if reason == "this app's grant is held, but its consent isn't on this device"),
+                matches!(resumed.as_ref().unwrap_err().refusal(), Some(paykit_sdk::Refusal::HeldForUser(paykit_sdk::HeldForUserReason::AllowanceExecutionHeld(reason)))
+                if *reason == "this app's grant is held, but its consent isn't on this device"),
                 "{resumed:?}"
             );
             assert_eq!(local, prepared);
@@ -698,8 +701,8 @@ async fn grant_after_original_application(world: &World) -> TestResult {
             .await
             .unwrap_err();
             assert!(
-                matches!(refusal.refusal(), Some(paykit_sdk::Refusal::NotNow(reason))
-                if reason == "this app's grant is held, but its consent isn't on this device"),
+                matches!(refusal.refusal(), Some(paykit_sdk::Refusal::HeldForUser(paykit_sdk::HeldForUserReason::AllowanceExecutionHeld(reason)))
+                if *reason == "this app's grant is held, but its consent isn't on this device"),
                 "{refusal}"
             );
             assert!(Box::pin(restored.reconcile_allowance(&keys[0]))

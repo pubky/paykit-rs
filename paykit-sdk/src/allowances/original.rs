@@ -305,9 +305,12 @@ pub(crate) fn restore_originals(
     Ok(())
 }
 
+/// The approving wallet's original decision isn't verified, which a restore can lose for good.
 fn unconfirmed() -> PaykitError {
-    Refusal::NotNow("the approving wallet has no verified original Allowance application".into())
-        .into()
+    Refusal::HeldForUser(crate::HeldForUserReason::AllowanceExecutionHeld(
+        "the approving wallet has no verified original Allowance application",
+    ))
+    .into()
 }
 
 impl Paykit {

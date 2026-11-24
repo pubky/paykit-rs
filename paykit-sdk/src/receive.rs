@@ -3137,6 +3137,14 @@ pub struct HeldList {
     pub msg_id: String,
 }
 
+/// Why a send waits while the copy of the deny list isn't known (Paykit spec 8.1).
+pub(crate) const DENY_COPY_UNKNOWN: &str =
+    "Paykit spec 8.1: sends to the counterparty are held while the deny list's copy isn't known";
+
+/// Why a send waits while the copy of the deny list holds the counterparty (Paykit spec 8.1).
+pub(crate) const SENDS_BLOCKED: &str =
+    "Paykit spec 8.1: sends to the counterparty are held while the deny list holds it";
+
 impl Paykit {
     /// The Private Payment Lists held because their `payment_lists` record doesn't read, is
     /// absent, or was seen deleted (Paykit wire 5.4): a durable notice for the host. One held
@@ -4017,10 +4025,9 @@ impl Paykit {
         // entries, so neither an unblock at the new service nor leaving one out of the upload
         // can be told apart from a removal of nothing: the unblock waits for the step.
         if self.loss_lists().await? == LossLists::Before {
-            return Err(crate::error::Refusal::NotNow(
-                "a provider loss's list upload isn't ready: unblock again after the next receive"
-                    .into(),
-            )
+            return Err(crate::error::Refusal::NotNow(crate::NotNowReason::ReadAgain(
+                "a provider loss's list upload isn't ready: unblock again after the next receive",
+            ))
             .into());
         }
         Box::pin(self.first_read_before_writing()).await?;
@@ -4343,9 +4350,9 @@ impl Paykit {
     }
 
     /// Refuse a send the user asks for to `pubky` while sends to it are held
-    /// ([`Paykit::sends_held`]), with [`crate::Refusal::NotNow`]: a due or unknown deny
-    /// list is read first ([`Paykit::refresh_lists_when_due`]), and a read that fails leaves
-    /// it held. Called before anything of the send is signed, recorded or queued.
+    /// ([`Paykit::sends_held`]): a due or unknown deny list is read first
+    /// ([`Paykit::refresh_lists_when_due`]), and a read that fails leaves it held. Called
+    /// before anything of the send is signed, recorded or queued.
     pub(crate) async fn refuse_while_sends_held(
         &mut self,
         pubky: &[u8; 32],
@@ -4354,17 +4361,60 @@ impl Paykit {
         self.require_sends_allowed(pubky).await
     }
 
-    /// Check the deny list after this operation has already tried its due read.
+    /// Check the deny list after this operation has already tried its due read (Paykit spec
+    /// 8.1, "Blocked counterparties"): [`crate::Refusal::NotNow`] while the copy isn't known,
+    /// which a read of the lists clears, and [`crate::Refusal::HeldForUser`] while the copy
+    /// holds `pubky`, which the user unblocking it clears.
     pub(crate) async fn require_sends_allowed(&self, pubky: &[u8; 32]) -> crate::error::Result<()> {
-        if self.sends_held(pubky).await? {
-            return Err(crate::error::Refusal::NotNow(
-                "Paykit spec 8.1: sends to the counterparty are held while the deny list holds \
-                 it or its copy isn't known"
+        match self.deny_decides(pubky).await? {
+            // A copy that can't tell: an own block or unblock settled since, or a block in a
+            // copy due for a read. A read of the lists judges it; no block for the user to
+            // lift.
+            None => Err(
+                crate::error::Refusal::NotNow(crate::NotNowReason::ReadAgain(DENY_COPY_UNKNOWN))
                     .into(),
+            ),
+            Some(true) => Err(crate::error::Refusal::HeldForUser(
+                crate::HeldForUserReason::CounterpartyBlocked(SENDS_BLOCKED),
             )
-            .into());
+            .into()),
+            Some(false) => Ok(()),
         }
-        Ok(())
+    }
+
+    /// Whether the copy of the deny list decides `pubky` blocked: `Some(true)` only from a
+    /// copy read at most [`LISTS_REFRESH_MS`] ago, with no deny change the client told since
+    /// and no own block or unblock of `pubky` that counts no more ([`Paykit::own_change`]);
+    /// `None` while the copy can't tell, not known, an own change settled since, or a block
+    /// in a copy due for a read or overtaken by a deny change told; `Some(false)`
+    /// when the copy doesn't hold `pubky` (Paykit spec 8.1). A definite block is never told
+    /// from stale state.
+    pub(crate) async fn deny_decides(
+        &self,
+        pubky: &[u8; 32],
+    ) -> crate::error::Result<Option<bool>> {
+        if !self.deny_copy_known().await? {
+            return Ok(None);
+        }
+        if let Some(mark) = self
+            .local_get::<OwnBlockMark>(&key::own_block(pubky))
+            .await?
+        {
+            if self.own_change(&mark).await?.is_none() {
+                return Ok(None);
+            }
+        }
+        if !self.denied_as_last_read(pubky).await? {
+            return Ok(Some(false));
+        }
+        // A block only from a fresh copy that no deny change the client told since has
+        // overtaken (Paykit spec 8.1, "Messages already queued").
+        let fresh = self
+            .lists_read_at()
+            .await?
+            .is_some_and(|read| lists_read_is_fresh(read, self.now()));
+        let told = self.local_get::<u64>(key::LISTS_TOLD).await?.is_some();
+        Ok((fresh && !told).then_some(true))
     }
 
     /// Whether the copy of the deny list is known ([`Paykit::sends_held`]): always at an app

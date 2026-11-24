@@ -19,12 +19,21 @@ private func allowanceNotFound(_ call: () async throws -> Void) async throws {
     }
 }
 
-private func allowanceNotNow(_ call: () async throws -> Void) async throws {
+private func allowancesNotListed(_ call: () async throws -> Void) async throws {
     do {
         try await call()
-        preconditionFailure("expected an Allowance to be unavailable")
+        preconditionFailure("expected the Allowances to be unlisted")
+    } catch WalletError.RetryLater(let failure) {
+        precondition(failure.code() == "records_not_listed")
+    }
+}
+
+private func pendingProposalsFull(_ call: () async throws -> Void) async throws {
+    do {
+        try await call()
+        preconditionFailure("expected the pending proposals to be full")
     } catch WalletError.NeedsUser(let failure) {
-        precondition(failure.code() == "not_now")
+        precondition(failure.code() == "pending_proposals_full")
     }
 }
 
@@ -43,7 +52,7 @@ func checkAllowances(fixture: CheckoutFixture, wallet: NativeWallet) async throw
     let host = fixture.hostForStore(store: EnrollmentStore())
     let restored = try await host.restore(appId: wallet.appId(), bytes: wallet.backup(), sourceDevice: .inPossession)
     do {
-        try await allowanceNotNow { _ = try await restored.allowances() }
+        try await allowancesNotListed { _ = try await restored.allowances() }
     } catch {
         try await restored.shutdown()
         throw error
@@ -88,8 +97,8 @@ func checkAllowances(fixture: CheckoutFixture, wallet: NativeWallet) async throw
         }
         let listed = try await wallet.allowances().map(\.allowanceId)
         precondition(Set(listed) == Set(before + proposals.map(\.allowanceId)))
-        try await allowanceNotNow { _ = try await wallet.proposeAllowance(to: peer, role: .allowee, terms: terms) }
-        try await allowanceNotNow {
+        try await pendingProposalsFull { _ = try await wallet.proposeAllowance(to: peer, role: .allowee, terms: terms) }
+        try await pendingProposalsFull {
             _ = try await wallet.proposeExecutableAllowance(to: peer, terms: terms, userConfirmed: true)
         }
 

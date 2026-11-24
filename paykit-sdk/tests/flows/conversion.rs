@@ -1038,7 +1038,7 @@ async fn test_conversion_unknown_transfer_cannot_supply_a_blocked_amount() {
         .outcome
         .unwrap_err();
     assert!(
-        matches!(refused.refusal(), Some(Refusal::NotNow(reason)) if reason.contains("transfer amount is unknown")),
+        matches!(refused.refusal(), Some(Refusal::Destination(reason)) if reason.contains("transfer amount is unknown")),
         "{refused:?}"
     );
     nothing_paid(&w, &wallet).await;

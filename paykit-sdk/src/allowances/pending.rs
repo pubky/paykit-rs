@@ -96,9 +96,13 @@ pub(super) enum Acceptance {
     Unconfirmed,
 }
 
+/// A pending proposal or Allowance that doesn't verify as current: a later read may show it,
+/// or a mismatch kept durably never clears, so it is shown.
 fn not_current() -> PaykitError {
-    Refusal::NotNow("the current pending proposal and Allowance could not be verified".into())
-        .into()
+    Refusal::HeldForUser(crate::HeldForUserReason::Unresolved(
+        "the current pending proposal and Allowance could not be verified",
+    ))
+    .into()
 }
 
 pub(super) fn absent(key: [u8; 32]) -> Condition {
@@ -120,23 +124,45 @@ impl Paykit {
         report: Option<&pubky_switch_client::app::ReceiveReport>,
         peer: &[u8; 32],
         outgoing: bool,
-    ) -> Result<Option<usize>> {
+    ) -> Result<std::result::Result<usize, Refusal>> {
+        // Not listed yet: a receive lists the records.
+        let unlisted = || Refusal::NotNow(crate::NotNowReason::RecordsNotListed);
         let Some(report) = report else {
-            return Ok(None);
+            return Ok(Err(unlisted()));
         };
         let family = crate::activity::family(Collection::AllowanceProposals);
         let Some(current) = self.app.current_collection(&family, report).await? else {
-            return Ok(None);
+            return Ok(Err(unlisted()));
         };
+        // Members not verified yet, which a decision on every value waits for. Where the
+        // current value of each of them needs nothing but a scope key the app doesn't hold
+        // yet, the key is what is awaited (Switch spec 3.5); any other is read again.
         if !current.uncertain_keys.is_empty() {
-            return Ok(None);
+            let mut await_keys = true;
+            for key in &current.uncertain_keys {
+                let held = self.app.shared_record(key).await?;
+                await_keys &= held.as_ref().is_some_and(solely_awaits_key);
+            }
+            return Ok(Err(Refusal::NotNow(if await_keys {
+                crate::NotNowReason::ValueAwaitsKey
+            } else {
+                crate::NotNowReason::ReadAgain("the current pending proposals have not been read")
+            })));
         }
         let mut count = 0;
         for held in current.live {
             let proposal = match self.selected_pending(&held) {
                 Ok((proposal, _)) => proposal,
                 Err(error @ PaykitError::Client(_)) => return Err(error),
-                Err(_) => return Ok(None),
+                // A proposal that doesn't read keeps the count unknown until it is answered,
+                // withdrawn or discarded: shown, not waited on.
+                Err(_) => {
+                    return Ok(Err(Refusal::HeldForUser(
+                        crate::HeldForUserReason::RecordUnreadable(
+                            "a pending proposal to this counterparty doesn't read",
+                        ),
+                    )))
+                }
             };
             if proposal.counterparty() == peer
                 && (proposal.proposal().sender() == self.identity()) == outgoing
@@ -144,7 +170,7 @@ impl Paykit {
                 count += 1;
             }
         }
-        Ok(Some(count))
+        Ok(Ok(count))
     }
 
     pub(super) async fn absent_record(&mut self, target: &RecordTarget) -> Result<()> {
@@ -618,9 +644,9 @@ impl Paykit {
         };
         let previous = intent.message.stored(&intent.peer)?;
         if previous.body().kind() != kind {
-            return Err(Refusal::NotNow(
-                "an earlier answer to this proposal is awaiting settlement".into(),
-            )
+            return Err(Refusal::HeldForUser(crate::HeldForUserReason::Unresolved(
+                "an earlier answer to this proposal is awaiting settlement",
+            ))
             .into());
         }
         let msg_id = &previous.message().msg_id;
@@ -634,10 +660,7 @@ impl Paykit {
                 Box::pin(self.retry_prepared_answer(key, &intent)).await?;
                 Ok(Some(msg_id.clone()))
             }
-            _ => Err(Refusal::NotNow(
-                "the original Allowance answer has no verified outcome".into(),
-            )
-            .into()),
+            _ => Err(Refusal::HeldForUser(crate::HeldForUserReason::AnswerOutcomeUnknown).into()),
         }
     }
 
@@ -796,10 +819,9 @@ impl Paykit {
             let ledger = match self.acceptance(p, reply, peer, id).await? {
                 Acceptance::Eligible { ledger } => ledger,
                 Acceptance::BeforeLoss => {
-                    return Err(Refusal::NotNow(
-                        "the proposal predates the Allower's provider loss".into(),
-                    )
-                    .into());
+                    // A proposal from before the Allower's provider loss is never accepted:
+                    // only a new proposal goes on (Paykit spec 7.3, 8.3).
+                    return Err(Refusal::AllowanceEnded.into());
                 }
                 Acceptance::MissingExecutionScope => {
                     return Err(Refusal::ScopeMissing("paykit_allowance_execute".into()).into());
@@ -1103,7 +1125,7 @@ impl Paykit {
         if held.pending_source.is_some() {
             return Ok(Some(Placed::Waits));
         }
-        let Some(count) = self.pending_count(report, &peer, false).await? else {
+        let Ok(count) = self.pending_count(report, &peer, false).await? else {
             return Ok(Some(Placed::Waits));
         };
         if count >= LIMIT {
@@ -1351,5 +1373,84 @@ impl Paykit {
         self.submit(OpBatch::for_protocol(crate::protocol::BACKUP_NAME).entry(delete))
             .await?;
         Ok(())
+    }
+}
+
+/// Whether the record's current value needs nothing but its scope key to be read: the app
+/// took the write, with nothing in doubt about it, and its value is sealed under a key the
+/// app doesn't hold yet. A newer write the client follows without taking it, or one it
+/// flagged, leaves the member unverified for another reason, and the value held under it
+/// is an older one: the signer's key wouldn't settle that, a later read does.
+fn solely_awaits_key(held: &pubky_switch_client::app::SharedRecord) -> bool {
+    crate::hold::awaits_key(&held.content)
+        && held.authenticated
+        && !held.doubtful
+        && !held.flagged
+        && !held.not_taken
+        && !held.different_write_at_held_version
+        && !held.divergent
+}
+
+#[cfg(test)]
+mod tests {
+    use pubky_switch_client::app::{RecordContent, SharedRecord, Unopened};
+
+    use super::*;
+
+    #[test]
+    fn test_pending_awaits_its_key_only_when_the_current_write_needs_nothing_else() {
+        let sealed = SharedRecord {
+            key: [4; 32],
+            collection: Collection::AllowanceProposals.name().into(),
+            policy: Collection::AllowanceProposals.fixed_policy(),
+            version: pubky_switch_core::ops::RecordVersion::new(1, 2),
+            authenticated: true,
+            writer: [1; 16],
+            written_at_ms: Some(10),
+            content: RecordContent::Unreadable(Unopened::KeyNotHeld { data_epoch: 2 }),
+            doubtful: false,
+            flagged: false,
+            not_taken: false,
+            different_write_at_held_version: false,
+            divergent: false,
+        };
+        assert!(solely_awaits_key(&sealed));
+        // A newer write the client follows without taking it, over that older sealed value:
+        // the key wouldn't settle it.
+        let followed = SharedRecord {
+            not_taken: true,
+            ..sealed.clone()
+        };
+        assert!(!solely_awaits_key(&followed));
+        for unverified in [
+            SharedRecord {
+                flagged: true,
+                ..sealed.clone()
+            },
+            SharedRecord {
+                authenticated: false,
+                ..sealed.clone()
+            },
+            SharedRecord {
+                doubtful: true,
+                ..sealed.clone()
+            },
+            SharedRecord {
+                different_write_at_held_version: true,
+                ..sealed.clone()
+            },
+            SharedRecord {
+                divergent: true,
+                ..sealed.clone()
+            },
+        ] {
+            assert!(!solely_awaits_key(&unverified), "{unverified:?}");
+        }
+        // A value that opens awaits no key.
+        let open = SharedRecord {
+            content: RecordContent::Value(Vec::new()),
+            ..sealed
+        };
+        assert!(!solely_awaits_key(&open));
     }
 }

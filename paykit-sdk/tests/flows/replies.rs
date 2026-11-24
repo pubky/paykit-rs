@@ -412,7 +412,9 @@ async fn test_replies_dropped_restore_holds_a_window_widened_after_its_last_ask(
             .await
             .unwrap_err()
             .refusal(),
-        Some(paykit_sdk::Refusal::NotNow(_))
+        Some(paykit_sdk::Refusal::HeldForUser(
+            paykit_sdk::HeldForUserReason::Unresolved(_)
+        ))
     ));
 }
 
@@ -534,7 +536,7 @@ async fn test_replies_dropped_asked_again_at_most_once_a_day_while_the_mark_live
 /// The next delivery to alice's inbox is answered `code`.
 fn refuse_next_delivery(w: &World, code: ErrorCode) {
     w.alice.switch().fail_next(Fault::Error {
-        path: "inbox".into(),
+        path: "/inbox".into(),
         code,
         current: serde_json::Value::Null,
     });
@@ -2473,7 +2475,7 @@ async fn check_dropped_replies(
         // The original installation delivered the ask, lost its reply and gave up that ID.
         shop.unblock(&payer).await.unwrap();
         w.alice.switch().fail_next(Fault::LoseAnswer {
-            path: "inbox".into(),
+            path: "/inbox".into(),
         });
         shop.receive(None).await.unwrap();
         let original = shop
@@ -2526,7 +2528,9 @@ async fn check_dropped_replies(
                 .await
                 .unwrap_err()
                 .refusal(),
-            Some(paykit_sdk::Refusal::NotNow(_))
+            Some(paykit_sdk::Refusal::HeldForUser(
+                paykit_sdk::HeldForUserReason::Unresolved(_)
+            ))
         ));
         let earlier = paykit_sdk::ResendSelection::default()
             .with_accepted_from_ms(accepted - 1)
@@ -2576,7 +2580,9 @@ async fn check_dropped_replies(
                 .await
                 .unwrap_err()
                 .refusal(),
-            Some(paykit_sdk::Refusal::NotNow(_))
+            Some(paykit_sdk::Refusal::HeldForUser(
+                paykit_sdk::HeldForUserReason::Unresolved(_)
+            ))
         ));
 
         let mut carol = w
@@ -2634,7 +2640,9 @@ async fn check_dropped_replies(
                 .await
                 .unwrap_err()
                 .refusal(),
-            Some(paykit_sdk::Refusal::NotNow(_))
+            Some(paykit_sdk::Refusal::HeldForUser(
+                paykit_sdk::HeldForUserReason::Unresolved(_)
+            ))
         ));
         assert_eq!(w.rail.all_executions().len(), 1);
         return;
@@ -2684,7 +2692,7 @@ async fn test_replies_dropped_restore_in_place_uses_the_identified_first_deliver
         if !accepted {
             shop.app_mut().forget_directory(&payer).await.unwrap();
             w.alice.switch().fail_next(Fault::Unreachable {
-                path: "directory".into(),
+                path: "/directory".into(),
                 after: 0,
             });
         }

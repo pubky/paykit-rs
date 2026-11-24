@@ -675,7 +675,12 @@ async fn test_extensions_send_refused_while_sends_are_held() {
         .await
         .unwrap_err();
     assert!(
-        matches!(refused.refusal(), Some(Refusal::NotNow(_))),
+        matches!(
+            refused.refusal(),
+            Some(Refusal::HeldForUser(
+                paykit_sdk::HeldForUserReason::CounterpartyBlocked(_)
+            ))
+        ),
         "{refused:?}"
     );
     wallet.unblock(&w.bob_id()).await.unwrap();
@@ -688,7 +693,10 @@ async fn test_extensions_send_refused_while_sends_are_held() {
         .await
         .unwrap_err();
     assert!(
-        matches!(refused.refusal(), Some(Refusal::NotNow(_))),
+        matches!(
+            refused.refusal(),
+            Some(Refusal::NotNow(paykit_sdk::NotNowReason::ReadAgain(_)))
+        ),
         "{refused:?}"
     );
     // Read again, it goes.
