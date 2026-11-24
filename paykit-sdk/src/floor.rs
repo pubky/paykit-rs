@@ -650,13 +650,17 @@ impl Paykit {
             .await
         {
             Ok(read) => read,
-            // An alarm and a store failure are the app's own state, never a floor to wait for.
-            Err(
-                error @ (pubky_switch_client::app::AppError::Alarm(_)
-                | pubky_switch_client::app::AppError::Store(_)),
-            ) => return Err(error.into()),
-            Err(_) => return Ok(None),
+            // A wallet-wide stop, the app's own state, is never a floor to wait for.
+            Err(error) => {
+                crate::pay::unless_stop(error)?;
+                return Ok(None);
+            }
         };
+        if let RecordRead::Kept { reason, .. } = &read {
+            if let Some(stop) = crate::pay::kept_read_stop(reason) {
+                return Err(stop);
+            }
+        }
         Ok(match read {
             RecordRead::Fresh(record) => {
                 self.keep_floor_view(&record, true).await?;

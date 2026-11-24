@@ -3224,8 +3224,14 @@ impl Paykit {
                 result => result.map(|_| ()),
             },
             Err(error @ (AppError::Alarm(_) | AppError::Store(_))) => Err(error.into()),
-            Err(_) if last.is_some() => self.local_delete(key::LISTS_READ).await,
-            Err(_) => Ok(()),
+            Err(_) => {
+                // The call reads the time no more ([`crate::send_holds::DeliveryClock`]).
+                self.protocol.delivery.read_failed();
+                if last.is_some() {
+                    self.local_delete(key::LISTS_READ).await?;
+                }
+                Ok(())
+            }
         }
     }
 
@@ -3253,6 +3259,7 @@ impl Paykit {
             },
             Err(error @ (AppError::Alarm(_) | AppError::Store(_))) => Err(error.into()),
             Err(_) => {
+                self.protocol.delivery.read_failed();
                 self.local_delete(key::LISTS_READ).await?;
                 Ok(false)
             }
@@ -3293,11 +3300,13 @@ impl Paykit {
     }
 
     /// Record a payer's observed unblock together with the shared floor it requires.
-    async fn record_lists(
+    pub(crate) async fn record_lists(
         &mut self,
         lists: pubky_switch_client::client::answers::AllowList,
         read_at: u64,
     ) -> crate::error::Result<Vec<[u8; 32]>> {
+        // The read's answer verified a service time: the current delivery operation's.
+        self.observe_service_time();
         self.lists_read_this_pass = true;
         let (mut deny, mut tx) = self.judged_deny(lists.deny).await?;
         deny.sort_unstable();
@@ -3359,10 +3368,14 @@ impl Paykit {
                 Err(error) if crate::floor::is_raise_left_owed(&error) => {}
                 Err(error) => return Err(error),
             }
-            self.local_put(key::LISTS_READ, &read_at).await?;
+            let mut read = Tx::default();
+            read.put(key::LISTS_READ, &read_at)?;
+            self.put_service_time(&mut read).await?;
+            self.local_commit(read).await?;
         } else {
             tx.put(key::LISTS_READ, &read_at)?.put(key::DENIED, &deny)?;
             put_flagged(&mut tx, &lists.flagged)?;
+            self.put_service_time(&mut tx).await?;
             self.local_commit(tx).await?;
         }
         Ok(deny)
@@ -3483,6 +3496,8 @@ impl Paykit {
     /// block's error; otherwise the original error is returned and the completed read's
     /// summary remains for the next [`Paykit::receive`].
     pub async fn block(&mut self, pubky: &[u8; 32]) -> crate::error::Result<()> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         self.refresh_own()?;
         self.list_own(pubky, true).await
     }
@@ -3508,6 +3523,8 @@ impl Paykit {
     ///
     /// As [`Paykit::block`].
     pub async fn unblock(&mut self, pubky: &[u8; 32]) -> crate::error::Result<()> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         self.refresh_own()?;
         Box::pin(self.first_read_before_writing()).await?;
         self.refresh_own()?;
@@ -3718,6 +3735,33 @@ impl Paykit {
     /// counterparty is kept, never dropped, and goes once a read shows it not blocked.
     pub(crate) async fn sends_held(&self, pubky: &[u8; 32]) -> crate::error::Result<bool> {
         Ok(!self.deny_copy_known().await? || self.denied_as_last_read(pubky).await?)
+    }
+
+    /// Whether a message to `pubky` that the counterparty hold governs would wait at its
+    /// delivery now, on the deny decision the delivery takes
+    /// ([`crate::send_holds::deny_decision`]): while the copy holds `pubky`, and while it
+    /// isn't known or is [`LISTS_REFRESH_MS`] old or more (Paykit spec 8.1, "Messages
+    /// already queued"). An answer released from its record on this judgement is never
+    /// queued only to wait as one not known.
+    pub(crate) async fn delivery_held(&self, pubky: &[u8; 32]) -> crate::error::Result<bool> {
+        // An app that doesn't read the lists can never decide `pubky` isn't blocked
+        // (Paykit spec 3.1).
+        if !reads_lists(self.app.cert().scopes()) {
+            return Ok(true);
+        }
+        let fresh = self
+            .local_get::<u64>(key::LISTS_READ)
+            .await?
+            .is_some_and(|read| lists_read_is_fresh(read, self.now()));
+        if !fresh
+            || self
+                .local_get::<Vec<[u8; 32]>>(key::DENIED)
+                .await?
+                .is_none()
+        {
+            return Ok(true);
+        }
+        self.denied_as_last_read(pubky).await
     }
 
     /// Refuse a send the user asks for to `pubky` while sends to it are held

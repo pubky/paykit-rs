@@ -412,6 +412,8 @@ async fn fill_replies(
             &other_sale,
         )?;
         let sent = peer.app_mut().queue_signed(rejection).await?;
+        // A rejection goes only on a fresh copy of the deny list (Paykit spec 8.1).
+        peer.flush().await?;
         let delivery = peer.app_mut().flush_message(&sent).await?;
         assert!(
             matches!(

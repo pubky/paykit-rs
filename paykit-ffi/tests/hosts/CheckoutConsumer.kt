@@ -376,6 +376,7 @@ private fun driveCheckout(recovery: CheckoutReview, restore: String? = null) = r
                         var payer = opened
                         val original = payer.payments().single()
                         check(original.stage in setOf(PaymentStage.RAIL_PAID, PaymentStage.ACCEPTANCE_OWED, PaymentStage.FINISHED))
+                        check(original.paidByMethod)
                         check(original.amount.value == "7")
                         payer.resumePayments()
                         check(method.calls.get() == 1)

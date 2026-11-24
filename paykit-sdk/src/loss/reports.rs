@@ -185,6 +185,8 @@ impl Paykit {
     /// [`Refusal::LossChanged`] if a different loss now decides. Identity and store
     /// errors propagate.
     pub async fn recovery_members(&mut self) -> Result<Option<RecoveryMembers>> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         self.refresh_recovery_reader().await?;
         let Some(current) = self.decisive_loss().await? else {
             return Ok(None);

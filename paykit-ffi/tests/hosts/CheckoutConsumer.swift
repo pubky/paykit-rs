@@ -489,6 +489,7 @@ private func driveCheckout(_ recovery: CheckoutReview, restore: String? = nil) a
     var reopened = try await host.load(appId: enrolled.appId)
     let entries = try await reopened.payments()
     precondition(entries.count == 1 && [.railPaid, .acceptanceOwed, .finished].contains(entries[0].stage))
+    precondition(entries[0].paidByMethod)
     precondition(entries[0].amount.value == "7")
     _ = try await reopened.resumePayments()
     precondition(method.calls == 1)

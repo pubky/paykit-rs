@@ -354,6 +354,8 @@ impl Paykit {
         loss: &LossBoundary,
         _confirmed: UserConfirmed,
     ) -> Result<()> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         self.refresh_own()?;
         match self.decisive_loss().await? {
             Some(Decisive {

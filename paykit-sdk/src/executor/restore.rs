@@ -15,7 +15,7 @@ use pubky_switch_core::shared::ApplicationRef;
 use super::approval::ApprovedOpening;
 use super::checkpoint::{ledger_target, ExecutorCheckpoint};
 use super::compaction::{CompactionRead, LedgerCompaction, Retired};
-use super::evidence::AppliedRecord;
+use super::evidence::{AppliedRecord, Purpose};
 use super::ExecutorHistory;
 use super::{reconciled_usage, wallet_inventory, Accounting};
 use crate::allowances::allowance_target;
@@ -294,6 +294,8 @@ impl Paykit {
     /// or the service or storage operation fails. A successful reconciliation durably
     /// accepts the complete current ledger before reporting its usage.
     pub async fn reconcile_allowance(&mut self, record: &[u8; 32]) -> Result<Option<Usage>> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         Ok(Box::pin(self.executor_base(record, LedgerRead::Inventory))
             .await?
             .map(|checked| checked.usage))
@@ -381,10 +383,12 @@ impl Paykit {
         let allowance = allowance_target(&checkpoint.counterparty, &id);
         let ledger_target = ledger_target(&checkpoint.counterparty, &id);
         let ledger_key = self.app.record_key(&ledger_target)?;
-        let RecordRead::Fresh(current_grant) =
-            Box::pin(self.app.read_record_fresh(&allowance)).await?
-        else {
-            return Ok(None);
+        let current_grant = match Box::pin(self.app.read_record_fresh(&allowance)).await? {
+            RecordRead::Fresh(current_grant) => current_grant,
+            RecordRead::Kept { reason, .. } => {
+                return crate::pay::kept_read_stop(&reason).map_or(Ok(None), Err)
+            }
+            _ => return Ok(None),
         };
         let current_ledger = match Box::pin(self.app.read_record_fresh(&ledger_target)).await? {
             RecordRead::Fresh(value) => value,
@@ -397,6 +401,9 @@ impl Paykit {
                     .raise_rollback(crate::protocol::BACKUP_NAME, MISSING_LEDGER)
                     .await?;
                 return Err(pubky_switch_client::app::AppError::Alarm(alarm).into());
+            }
+            RecordRead::Kept { reason, .. } => {
+                return crate::pay::kept_read_stop(&reason).map_or(Ok(None), Err)
             }
             _ => return Ok(None),
         };
@@ -447,13 +454,9 @@ impl Paykit {
                 .await?;
             return Err(pubky_switch_client::app::AppError::Alarm(alarm).into());
         }
-        let Some(applied_proposals) = Box::pin(self.prepared_ledger(
-            permanent_key,
-            &accepted.application,
-            &current,
-            &exact_grant,
-        ))
-        .await?
+        let Some(applied_proposals) =
+            Box::pin(self.prepared_ledger(permanent_key, &accepted, &current, &exact_grant))
+                .await?
         else {
             return Ok(None);
         };
@@ -492,7 +495,13 @@ impl Paykit {
                         let with_claim = self.app.shared_evidence().await?;
                         let Some(((opening, seq), original)) =
                             with_claim.ops.iter().find_map(|op| {
-                                Some((current.reservation(&self.app, op, entry, &claim)?, op))
+                                // The reservation this read was asked to establish is the
+                                // one being made; any other already applied.
+                                let just_made = matches!(source, LedgerRead::Applied(_));
+                                Some((
+                                    current.reservation(&self.app, op, entry, &claim, just_made)?,
+                                    op,
+                                ))
                             })
                         else {
                             return Ok(None);
@@ -629,12 +638,12 @@ impl Paykit {
             self.local_scan::<LedgerCompaction>(&key::ledger_compactions(&ledger_key))
                 .await?
                 .into_iter()
-                .map(|(_, row)| row)
+                .map(|(_, row)| (row, Purpose::Established))
                 .collect()
         };
         if let Some(receipt) = &compaction {
-            if !compactions.contains(receipt) {
-                compactions.push(receipt.clone());
+            if !compactions.iter().any(|(held, _)| held == receipt) {
+                compactions.push((receipt.clone(), Purpose::Evidence));
             }
         }
         // An open claim reserves its entry even before dispatch (Paykit spec 8.3).
@@ -676,23 +685,26 @@ impl Paykit {
                 .map(|e| (e.attempt_id, e))
                 .collect();
             let openings = || {
-                ops.ops
-                    .iter()
-                    .chain(compactions.iter().filter_map(|c| c.opening.as_ref()))
+                ops.ops.iter().map(|op| (op, Purpose::Evidence)).chain(
+                    compactions.iter().filter_map(|(receipt, purpose)| {
+                        receipt.opening.as_ref().map(|op| (op, *purpose))
+                    }),
+                )
             };
             for entry in entries {
                 let Some(read) = reads.get(&entry.obligation).and_then(Option::as_ref) else {
                     continue;
                 };
-                if let Some(opening) = openings().find_map(|op| {
+                if let Some(opening) = openings().find_map(|(op, purpose)| {
                     let op = checkpoint.signers.original(entry.attempt_id, op)?;
-                    let (claim, seq) = accepted.application.opening(
+                    let (claim, seq) = accepted.application.opening_for(
                         &self.app,
                         &op,
                         &entry.obligation,
                         entry.attempt_id,
                         read,
                         Some((&exact_grant, entry.at)),
+                        purpose,
                     )?;
                     results
                         .confirms(entry.attempt_id, claim, seq, None)
@@ -730,15 +742,16 @@ impl Paykit {
                 let Some(read) = reads.get(&entry.obligation).and_then(Option::as_ref) else {
                     continue;
                 };
-                if let Some(opening) = openings().find_map(|op| {
+                if let Some(opening) = openings().find_map(|(op, purpose)| {
                     let op = checkpoint.signers.original(entry.attempt_id, op)?;
-                    let (claim, seq) = current.opening(
+                    let (claim, seq) = current.opening_for(
                         &self.app,
                         &op,
                         &entry.obligation,
                         entry.attempt_id,
                         read,
                         Some((&exact_grant, 0)),
+                        purpose,
                     )?;
                     results
                         .confirms(entry.attempt_id, claim, seq, None)
@@ -823,7 +836,12 @@ impl Paykit {
                     self.rail.settlement_id(endpoint, proof)
                 })?;
                 let target = crate::activity::ActivityTarget::payer(natural).record_target();
-                let _ = self.app.read_record_fresh(&target).await?;
+                if let RecordRead::Kept { reason, .. } = self.app.read_record_fresh(&target).await?
+                {
+                    if let Some(stop) = crate::pay::kept_read_stop(&reason) {
+                        return Err(stop);
+                    }
+                }
                 let dated = self.app.shared_evidence().await?.ops.iter().any(|op| {
                     AppliedRecord::retained(&self.app, &target, op)
                         .is_some_and(|write| write.dates_payment_proof(&self.app, proof))

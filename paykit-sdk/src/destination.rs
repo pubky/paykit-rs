@@ -184,13 +184,11 @@ impl Paykit {
                 None => match self.app.begin_identity_lookup(payee, refresh).await {
                     Ok(lookup) => (lookup.identity, lookup.switch.map(PendingLookup::new)),
                     Err(error) => {
-                        return Ok((
-                            Err(Refusal::IdentityUnavailable(format!(
-                                "Switch spec 4.3: the payee's identity.json can't be read now: \
-                                 {error}"
-                            ))),
-                            read,
-                        ))
+                        let why = format!(
+                            "Switch spec 4.3: the payee's identity.json can't be read now: {error}"
+                        );
+                        crate::pay::unless_local_stop(error)?;
+                        return Ok((Err(Refusal::IdentityUnavailable(why)), read));
                     }
                 },
             };
@@ -220,7 +218,11 @@ impl Paykit {
                         Lookup::Answered(answer) => {
                             match self.app.finish_identity_lookup(answer).await {
                                 Ok(identity) => identity,
-                                Err(error) => return Ok((Err(not_taken(&error)), read)),
+                                Err(error) => {
+                                    let refusal = not_taken(&error);
+                                    crate::pay::unless_local_stop(error)?;
+                                    return Ok((Err(refusal), read));
+                                }
                             }
                         }
                         Lookup::Running(switch) => {
@@ -381,7 +383,11 @@ impl Paykit {
                 // An answer the client refuses to take is no answer to ignore: it may show
                 // the payee's identity.json equivocating, and then nothing is paid to it
                 // (Switch wire 3.3). It refuses as it does anywhere else.
-                Err(error) => Ok(Err(not_taken(&error))),
+                Err(error) => {
+                    let refusal = not_taken(&error);
+                    crate::pay::unless_local_stop(error)?;
+                    Ok(Err(refusal))
+                }
             },
             (Lookup::Running(switch), _) => {
                 self.lookups.insert(
