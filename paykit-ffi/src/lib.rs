@@ -2,22 +2,22 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 #![recursion_limit = "512"]
+mod allowances;
 #[cfg(feature = "test-wallet")]
 #[path = "../tests/hosts/checkout.rs"]
 mod checkout;
-mod allowances;
 mod enrollment;
 mod environment;
 mod error;
 mod events;
+mod executor;
+mod extensions;
 #[cfg(feature = "test-wallet")]
 #[path = "../tests/hosts/service.rs"]
 mod fixture_service;
 #[cfg(any(test, feature = "test-wallet"))]
 #[path = "../tests/hosts/signer.rs"]
 mod fixture_signer;
-mod executor;
-mod extensions;
 mod flights;
 mod lists;
 mod method;
@@ -36,22 +36,38 @@ mod runtime;
 mod store;
 mod switch_refusal;
 mod wallet;
+// Empty until its group of wallet calls is bound; the allow goes with the first export.
+#[allow(unused_imports)]
+pub use allowances::*;
 #[cfg(feature = "test-wallet")]
 pub use checkout::{enrolled_test_checkout, CheckoutFixture};
-pub use allowances::*;
 pub use enrollment::*;
 pub use environment::*;
 pub use error::*;
 pub use events::*;
+// Empty until its group of wallet calls is bound; the allow goes with the first export.
+#[allow(unused_imports)]
 pub use executor::*;
+// Empty until its group of wallet calls is bound; the allow goes with the first export.
+#[allow(unused_imports)]
 pub use extensions::*;
+// Empty until its group of wallet calls is bound; the allow goes with the first export.
+#[allow(unused_imports)]
 pub use lists::*;
 pub use method::*;
 pub use notices::*;
+// Empty until its group of wallet calls is bound; the allow goes with the first export.
+#[allow(unused_imports)]
 pub use payee::*;
+// Empty until its group of wallet calls is bound; the allow goes with the first export.
+#[allow(unused_imports)]
 pub use payer::*;
 pub use payments::*;
+// Empty until its group of wallet calls is bound; the allow goes with the first export.
+#[allow(unused_imports)]
 pub use periods::*;
+// Empty until its group of wallet calls is bound; the allow goes with the first export.
+#[allow(unused_imports)]
 pub use public::*;
 pub use receive::*;
 pub use reconcile::*;
