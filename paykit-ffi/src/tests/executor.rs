@@ -4,19 +4,23 @@ use super::{
     method::Account,
     refusal::categorized,
     signer,
-    wallet::{enrolled_wallet, run},
+    wallet::{enrolled_payer, enrolled_wallet, host, run},
 };
 use crate::{
-    AllowanceRole, AllowanceStatus, HostRail, NativeWallet, PaymentDecision, PaymentOutcome,
-    PaymentResult, RefusalKind, RequestId, RuntimeTimer, SwitchAlarm, WalletError, WalletFailure,
-    WalletHost, WalletScopes,
+    AllowanceRole, AllowanceStatus, BackupDevice, HostRail, NativeWallet, PaymentDecision,
+    PaymentOutcome, PaymentResult, RefusalKind, RequestId, RuntimeTimer, SwitchAlarm, WalletError,
+    WalletFailure, WalletHost, WalletScopes,
 };
 use paykit_lib::{
     allowances::AllowanceTerms, Asset, AttemptId, Decimal, PaymentAmount,
     PaymentEndpointIdentifier, PaymentEndpointPayload, PaymentReference,
 };
 use paykit_sdk::{AppScopes, Paykit, RequestDestination, RequestDraft, UserConfirmed};
-use pubky_switch_client::store::MemoryStore;
+use pubky_switch_client::{
+    app::AppError,
+    store::{Fault, FaultStore, MemoryStore, StoreHandle},
+    StoreError,
+};
 use pubky_switch_harness::{parties::Asking, Backend, World};
 use pubky_switch_signer::{CertChange, Signer};
 use std::{collections::BTreeMap, error::Error, sync::atomic::Ordering, sync::Arc};
@@ -314,6 +318,65 @@ fn test_allowance_payment_enforces_terms_and_confirmation() {
     run(Backend::Service, payments);
 }
 
+async fn confirmation(world: &World) -> TestResult {
+    let mut p = Box::pin(Parties::open(world)).await?;
+    let record = Box::pin(p.accept()).await?;
+    let original = p.payer.allowance(record.clone()).await?.hold;
+    let id = p.payer.app_id().await?;
+    let backup = p.payer.backup().await?;
+
+    // The service cursor moves past the backup, so restoring it holds consent (Paykit spec 8.3).
+    Box::pin(p.checkout("1")).await?;
+    p.payer
+        .lend(async |app| app.app_mut().flush_cursor().await)
+        .await??;
+    p.payer.shutdown().await?;
+    let directory = tempfile::tempdir()?;
+    let restored = host(world, directory.path(), p.account.clone())
+        .restore(id, backup, BackupDevice::InPossession)
+        .await?;
+    receive(&restored).await?;
+    let mut remaining = 8;
+    loop {
+        match restored.reconcile().await {
+            Ok(_) => break,
+            Err(WalletError::NeedsUser { failure })
+                if failure.code() == "not_now" && remaining > 1 =>
+            {
+                remaining -= 1;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    restored.end_confirmed_reconciliation().await?;
+    let view = restored.allowance(record.clone()).await?;
+    assert!(view.confirmation_needed && !view.consented);
+
+    let failure = refusal(
+        restored.confirm_allowance_executor(original, true).await,
+        "needs_user",
+        "allowance_confirmation_needed",
+    )?;
+    let reason = failure.refusal().ok_or("missing Allowance refusal")?;
+    let RefusalKind::AllowanceConfirmationNeeded { record: held } = reason.kind() else {
+        return Err("expected an Allowance to confirm".into());
+    };
+    assert_eq!(held, record);
+    let view = restored.allowance(held).await?;
+    assert!(view.confirmation_needed && !view.consented);
+    restored.confirm_allowance_executor(view.hold, true).await?;
+    let view = restored.allowance(record).await?;
+    assert!(view.consented && !view.confirmation_needed);
+    restored.shutdown().await?;
+    Ok(())
+}
+
+#[test]
+fn test_allowance_confirmation_rejects_a_stale_hold_and_renews_consent() {
+    run(Backend::Scripted, confirmation);
+    run(Backend::Service, confirmation);
+}
+
 async fn scopes(world: &World) -> TestResult {
     let mut p = Box::pin(Parties::open(world)).await?;
     let other = Box::pin(p.other_payer(world)).await?;
@@ -430,6 +493,14 @@ async fn release(world: &World) -> TestResult {
 
     // Record the local pre-dispatch stop before releasing the other app's failure (Paykit spec 8.3).
     p.payer.resume_payments().await?;
+    invalid(
+        p.payer
+            .release_allowance_attempt(record.clone(), reservation.attempt_id.clone(), false)
+            .await,
+        "user_confirmed",
+    );
+    let remaining = p.payer.reserved_by_other_apps(record.clone()).await?;
+    assert!(matches!(remaining.as_slice(), [held] if held.attempt_id == reservation.attempt_id));
     p.payer
         .release_allowance_attempt(record.clone(), reservation.attempt_id.clone(), true)
         .await?;
@@ -458,27 +529,32 @@ fn test_allowance_reservation_releases_a_confirmed_foreign_failure() {
     run(Backend::Service, release);
 }
 
+const MISSING_LEDGER: &str =
+    "the current service is missing the executor's accepted permanent ledger";
+
+fn missing_ledger_alarm(alarm: Option<SwitchAlarm>) -> bool {
+    matches!(alarm, Some(SwitchAlarm::ProtocolRollback { protocol, reason })
+        if protocol == "paykit" && reason == MISSING_LEDGER)
+}
+
 async fn ledger(world: &World) -> TestResult {
-    const REASON: &str = "the current service is missing the executor's accepted permanent ledger";
     let mut p = Box::pin(Parties::open(world)).await?;
     assert!(p.payer.ledger_alarm().await?.is_none());
     Box::pin(p.accept()).await?;
     let id = p.payer.app_id().await?;
     p.payer
-        .lend(async |app| app.app_mut().raise_rollback("paykit", REASON).await)
+        .lend(async |app| app.app_mut().raise_rollback("paykit", MISSING_LEDGER).await)
         .await??;
-    let persisted = |alarm| {
-        matches!(alarm, Some(SwitchAlarm::ProtocolRollback { protocol, reason })
-            if protocol == "paykit" && reason == REASON)
-    };
-    assert!(persisted(p.payer.ledger_alarm().await?));
+    for _ in 0..2 {
+        assert!(missing_ledger_alarm(p.payer.ledger_alarm().await?));
+    }
     p.payer.shutdown().await?;
     assert!(matches!(
         p.payer.ledger_alarm().await,
         Err(WalletError::Closed)
     ));
     let reopened = p.host.load(id).await?;
-    assert!(persisted(reopened.ledger_alarm().await?));
+    assert!(missing_ledger_alarm(reopened.ledger_alarm().await?));
     reopened.shutdown().await?;
     Ok(())
 }
@@ -487,4 +563,33 @@ async fn ledger(world: &World) -> TestResult {
 fn test_ledger_alarm_survives_reopening() {
     run(Backend::Scripted, ledger);
     run(Backend::Service, ledger);
+}
+
+async fn unknown_alarm(world: &World) -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let account = Arc::new(Account::open(directory.path(), world.clock().clone()));
+    let (host, payer, id, _) = Box::pin(enrolled_payer(world, directory.path(), account)).await?;
+    payer.shutdown().await?;
+    let id = crate::fixed(id, "app_id")?;
+    let payer = host
+        .open_wallet(id, async |mut env| {
+            let store = FaultStore::new(env.store.store().clone(), Fault::FailAfter(1));
+            env.store = StoreHandle::new(Arc::new(store));
+            Ok(host.load_app(env, id).await?)
+        })
+        .await?;
+    assert!(payer.ledger_alarm().await?.is_none());
+    let raised = payer
+        .lend(async |app| app.app_mut().raise_rollback("paykit", MISSING_LEDGER).await)
+        .await?;
+    assert!(matches!(raised, Err(AppError::Store(StoreError::Unknown))));
+    assert!(missing_ledger_alarm(payer.ledger_alarm().await?));
+    payer.shutdown().await?;
+    Ok(())
+}
+
+#[test]
+fn test_ledger_alarm_reloads_an_unknown_commit_on_the_open_wallet() {
+    run(Backend::Scripted, unknown_alarm);
+    run(Backend::Service, unknown_alarm);
 }

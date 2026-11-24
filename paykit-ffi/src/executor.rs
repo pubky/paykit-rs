@@ -133,7 +133,13 @@ impl NativeWallet {
     /// It survives reopening. Show its reason until the signer resolves the provider move
     /// or loss (Paykit spec 8.3, Switch spec 10.1).
     pub async fn ledger_alarm(&self) -> Result<Option<SwitchAlarm>, WalletError> {
-        self.with_wallet(|app| Box::pin(async move { Ok(app.ledger_alarm().map(Into::into)) }))
-            .await
+        self.with_wallet(|app| {
+            Box::pin(async move {
+                // Local inspection reloads a failed commit without handing duties to the host.
+                app.app_mut().pending_duty_events().await?;
+                Ok(app.ledger_alarm().map(Into::into))
+            })
+        })
+        .await
     }
 }
