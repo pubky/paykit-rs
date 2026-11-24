@@ -135,7 +135,7 @@ impl Standing {
 /// counterparty's block and the knowledge of the deny list, and only then the user's
 /// confirmation, so the user is asked only when confirming lifts the refusal.
 pub(crate) fn standing(app: &Paykit, view: &AllowanceView, consent: ConsentState) -> Standing {
-    if let Some(standing) = status_standing(view.status) {
+    if let Some(standing) = status_standing(view.status, view.proposed_here) {
         return standing;
     }
     if view.role != Some(AllowanceRole::Allower) {
@@ -238,16 +238,21 @@ pub(crate) fn standing(app: &Paykit, view: &AllowanceView, consent: ConsentState
 
 /// Where an Allowance stands by its status alone: `None` for an accepted one, which the
 /// rest of [`standing`] decides.
-fn status_standing(status: AllowanceStatus) -> Option<Standing> {
+fn status_standing(status: AllowanceStatus, proposed_here: bool) -> Option<Standing> {
     Some(match status {
         AllowanceStatus::Accepted => return None,
         AllowanceStatus::Ended => Standing::Final(Refusal::AllowanceEnded),
         AllowanceStatus::Conflicted => Standing::Final(Refusal::AllowanceConflicted),
         AllowanceStatus::Rejected => Standing::Final(Refusal::Rejected),
         AllowanceStatus::AwaitingConflictCheck => Standing::Temporary(read_again(CONFLICT_CHECK)),
-        _ => Standing::Temporary(Refusal::NotNow(crate::NotNowReason::AwaitingCounterparty(
-            "the Allowance isn't accepted yet",
-        ))),
+        // A proposal of this identity waits for the counterparty's answer; one the
+        // counterparty proposed waits for this user's.
+        _ if proposed_here => Standing::Temporary(Refusal::NotNow(
+            crate::NotNowReason::AwaitingCounterparty("the Allowance isn't accepted yet"),
+        )),
+        _ => Standing::Temporary(execution_held(
+            "the Allowance waits for this wallet's acceptance",
+        )),
     })
 }
 
@@ -257,6 +262,13 @@ pub(crate) const SET_UP_BEFORE_LOSS: &str = "the Allowance was set up before a p
 
 /// Why an Allowance last confirmed before a provider loss waits before asking the user.
 pub(crate) const WAITS_FOR_RECORD_WRITE: &str = "the Allowance record is divergent or has messages to write first: the user confirms the record as shown, a newer write ends it, or the next receive writes the messages";
+
+/// Why a payment waits for the user to release another app's failed attempt.
+const RELEASE_HELD: &str = "the lifetime limit has no room while another app's failed attempt holds it: the user can release that attempt (reserved_by_other_apps)";
+
+/// Why a payment waits on usage that doesn't follow the Allowance's terms.
+const INCONSISTENT_USAGE: &str =
+    "the Allowance's usage doesn't follow its terms: the user ends it and sets up a new one";
 
 /// Why an accepted Allowance waits for its conflict check.
 const CONFLICT_CHECK: &str = "the Allowance waits for its conflict check";
@@ -336,9 +348,12 @@ impl AllowanceReservation {
                     accounts_for_attempt(ledger, claim.claim_key, attempt.attempt_id)
                 })
             {
-                return Err(waits(crate::NotNowReason::EarlierWriteUnresolved(
+                // A claim gone, or an attempt another app or the user made outside the ledger:
+                // no read adds it, so it is shown, and the user may pay by hand.
+                return Err(execution_held(
                     "an earlier attempt is not accounted for under this Allowance",
-                )));
+                )
+                .into());
             }
         }
         Ok(())
@@ -474,9 +489,23 @@ impl AllowanceReservation {
                 // Room another app's failed attempt holds comes back once the user releases
                 // it, when that makes room for this payment, and room a reserved entry holds
                 // once it is released.
-                // [`crate::Paykit::reserved_by_other_apps`] lists the attempt.
-                LimitKind::Lifetime if release_fits() => no_room(),
+                // [`crate::Paykit::reserved_by_other_apps`] lists the attempt; only the user
+                // releases it, so it is the user's to answer.
+                LimitKind::Lifetime if release_fits() => execution_held(RELEASE_HELD).into(),
                 LimitKind::Lifetime if checked.usage.reserved() == 0 => not_automatic(&why),
+                // A period's amount limit below this payment alone never makes room.
+                LimitKind::PeriodAmount
+                    if checked.terms.period_limits.iter().any(|period| {
+                        period
+                            .amount_limit
+                            .as_ref()
+                            .is_some_and(|cap| amount.value.scaled() > cap.scaled())
+                    }) =>
+                {
+                    not_automatic(&why)
+                }
+                // Usage of other terms: no window or release mends it (Paykit spec 8.3).
+                LimitKind::InconsistentUsage => execution_held(INCONSISTENT_USAGE).into(),
                 _ => no_room(),
             }
         })?;
@@ -648,7 +677,7 @@ impl Paykit {
         payee: &[u8; 32],
     ) -> Result<AllowanceReservation> {
         let stopped = || {
-            waits(crate::NotNowReason::ReadAgain(
+            crate::PaykitError::from(execution_held(
                 "the accepted executor grant, ledger or wallet history is unavailable",
             ))
         };
@@ -840,11 +869,11 @@ mod tests {
         // An accepted Allowance whose record could still establish a conflict waits for
         // the check, with its own reason, not as one not accepted yet.
         assert_eq!(
-            status_standing(shown_status(AllowanceStatus::Accepted, true)),
+            status_standing(shown_status(AllowanceStatus::Accepted, true), true),
             Some(Standing::Temporary(read_again(CONFLICT_CHECK)))
         );
         assert_eq!(
-            status_standing(shown_status(AllowanceStatus::Accepted, false)),
+            status_standing(shown_status(AllowanceStatus::Accepted, false), true),
             None
         );
         // An ended, rejected or conflicted record stays final with conflict evidence still
@@ -855,7 +884,7 @@ mod tests {
             (AllowanceStatus::Conflicted, Refusal::AllowanceConflicted),
         ] {
             assert_eq!(
-                status_standing(shown_status(status, true)),
+                status_standing(shown_status(status, true), true),
                 Some(Standing::Final(refusal))
             );
         }

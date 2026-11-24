@@ -729,6 +729,12 @@ impl Paykit {
     /// asked nothing until then (Paykit wire 5.6, Raising).
     pub(crate) async fn refuse_while_raise_owed_to(&self, to: &[u8; 32]) -> Result<()> {
         if self.raise_holds_asks_to(to).await? {
+            // Under the divergence hold alone no raise is written: the floor's hold, which
+            // the user is shown, holds the ask (Paykit wire 5.6, Unblocking under the
+            // divergence hold).
+            if self.floor_kept().await?.divergent && !self.shared_loss_hold().await? {
+                return Err(Refusal::FloorHeld.into());
+            }
             return Err(Refusal::NotNow(crate::NotNowReason::EarlierWriteUnresolved(
                 "Paykit wire 5.6: no one is asked while a floor raise this app owes isn't \
                  written",
@@ -1924,7 +1930,7 @@ mod tests {
         // Another wait whose text reads the same is not the floor's: only the reason tells.
         let text = NotNowReason::FloorUnreadable.to_string();
         let same_text: crate::error::PaykitError =
-            Refusal::NotNow(NotNowReason::SwitchClient(text.clone())).into();
+            Refusal::HeldForUser(crate::HeldForUserReason::SwitchClient(text.clone())).into();
         assert!(!is_unreadable_floor(&same_text));
         let other: crate::error::PaykitError =
             Refusal::NotNow(NotNowReason::ReadAgain("the deny list must be read again")).into();

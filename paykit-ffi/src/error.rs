@@ -327,12 +327,11 @@ pub(crate) fn refusal_category(kind: &crate::RefusalKind) -> (Category, &'static
         K::WaitingForList {
             device_clock_behind: false,
         } => (RetryLater, "waiting_for_list"),
-        // The list expired only by the service's time: the device clock is behind it. A newer
-        // list clears it as well as a corrected clock, so it waits too; the code tells the
-        // host to show the clock.
+        // The list expired only by the service's time: the device clock is behind it, and the
+        // user is told so (Paykit spec 8.4), even if a newer list clears it later.
         K::WaitingForList {
             device_clock_behind: true,
-        } => (RetryLater, "waiting_for_list_clock_behind"),
+        } => (NeedsUser, "waiting_for_list_clock_behind"),
         K::SwitchUnavailable => (RetryLater, "switch_unavailable"),
         K::PaymentInProgress => (RetryLater, "payment_in_progress"),
         K::BeingHandledByOtherWallet => (RetryLater, "being_handled_by_other_wallet"),
@@ -388,12 +387,9 @@ fn not_now_code(reason: &crate::NotNowKind) -> &'static str {
         R::PendingProposalsFull => "pending_proposals_full",
         R::BlockMarksFull => "block_marks_full",
         R::AllowanceLedgerFull => "allowance_ledger_full",
-        R::AttemptCheck => "attempt_check",
         R::CallAgain => "call_again",
-        R::ReloadRequired => "reload_required",
         R::AllowanceLimit { .. } => "allowance_limit",
         R::AnswerOutcomeUnknown => "answer_outcome_unknown",
-        R::SwitchClient => "switch_client_wait",
         R::Unknown => "not_now",
     }
 }
@@ -410,6 +406,10 @@ fn held_for_user_code(reason: &crate::HeldForUserKind) -> &'static str {
         R::RecordUnreadable => "record_unreadable",
         R::AllowanceNotResumed => "allowance_not_resumed",
         R::AllowanceExecutionHeld => "allowance_execution_held",
+        R::AttemptCheck => "attempt_check",
+        R::ReloadRequired => "reload_required",
+        R::SwitchClient => "switch_client_hold",
+        R::Unresolved => "held_unresolved",
         R::Unknown => "held_for_user",
     }
 }
@@ -419,7 +419,6 @@ fn recovery_code(reason: &crate::RecoveryNeededKind) -> &'static str {
     use crate::RecoveryNeededKind as R;
     match reason {
         R::PayerPassOwed => "payer_pass_owed",
-        R::RecoveryAccessMissing => "recovery_access_missing",
         R::Unknown => "recovery_needed",
     }
 }

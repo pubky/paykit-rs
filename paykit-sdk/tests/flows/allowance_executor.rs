@@ -2957,9 +2957,12 @@ async fn confirm_foreign_failure(case: ForeignFailure) {
             .outcome
             .unwrap_err();
         let expected = if case == ForeignFailure::BeforeDispatch {
-            paykit_sdk::Refusal::NotNow(paykit_sdk::NotNowReason::AllowanceLimit {
-                limit: "lifetime".into(),
-            })
+            // Only the user releases the other app's attempt.
+            paykit_sdk::Refusal::HeldForUser(
+                paykit_sdk::HeldForUserReason::AllowanceExecutionHeld(
+                    "the lifetime limit has no room while another app's failed attempt holds it: the user can release that attempt (reserved_by_other_apps)",
+                ),
+            )
         } else {
             paykit_sdk::Refusal::NotAutomatic("the lifetime limit has no room".into())
         };
@@ -3209,8 +3212,8 @@ async fn test_allowance_refuses_an_earlier_failed_attempt_outside_its_ledger() {
     assert!(
         matches!(
             error.refusal(),
-            Some(paykit_sdk::Refusal::NotNow(
-                paykit_sdk::NotNowReason::EarlierWriteUnresolved(_)
+            Some(paykit_sdk::Refusal::HeldForUser(
+                paykit_sdk::HeldForUserReason::AllowanceExecutionHeld(_)
             ))
         ),
         "{error}"
@@ -5425,15 +5428,15 @@ async fn test_executor_restore_after_a_change_whose_key_is_no_longer_listed_pays
             .await
             .unwrap_err()
             .refusal(),
-        Some(&paykit_sdk::Refusal::NotNow(
-            paykit_sdk::NotNowReason::ReadAgain(
+        Some(&paykit_sdk::Refusal::HeldForUser(
+            paykit_sdk::HeldForUserReason::AllowanceExecutionHeld(
                 "the executor cannot establish the original Allowance grant and ledger"
             )
         ))
     );
     assert_eq!(
         Box::pin(subscription_refused(&world, &mut shop, &mut restored, &key)).await,
-        paykit_sdk::Refusal::NotNow(paykit_sdk::NotNowReason::ReadAgain(
+        paykit_sdk::Refusal::HeldForUser(paykit_sdk::HeldForUserReason::AllowanceExecutionHeld(
             "the accepted executor grant, ledger or wallet history is unavailable"
         ))
     );
@@ -5468,8 +5471,8 @@ async fn test_executor_restore_after_a_provider_loss_pays_nothing_under_the_earl
         .unwrap_err();
     assert_eq!(
         refused.refusal(),
-        Some(&paykit_sdk::Refusal::NotNow(
-            paykit_sdk::NotNowReason::ReadAgain(
+        Some(&paykit_sdk::Refusal::HeldForUser(
+            paykit_sdk::HeldForUserReason::AllowanceExecutionHeld(
                 "the Allowance record isn't read as writing on it needs yet"
             )
         ))
@@ -5877,8 +5880,8 @@ async fn proposal_across_a_move(establish: bool) {
             .unwrap_err();
         assert_eq!(
             refused.refusal(),
-            Some(&paykit_sdk::Refusal::NotNow(
-                paykit_sdk::NotNowReason::ReadAgain(
+            Some(&paykit_sdk::Refusal::HeldForUser(
+                paykit_sdk::HeldForUserReason::AllowanceExecutionHeld(
                     "the executor cannot establish the original Allowance grant and ledger"
                 )
             ))

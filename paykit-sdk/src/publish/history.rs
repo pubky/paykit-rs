@@ -127,7 +127,11 @@ impl PublicationHistory {
         // alone do not give it the standing of this owner's qualified observation.
         self.floor.check_later_write(current)?;
         if self.floor.counter != current.counter {
-            return Err(counter_unavailable().into());
+            // A later read that covers the pending uploads clears it.
+            return Err(crate::Refusal::NotNow(crate::NotNowReason::ReadAgain(
+                "Paykit spec 8.4.1: the held counter doesn't cover this app's pending uploads yet",
+            ))
+            .into());
         }
         Ok(())
     }

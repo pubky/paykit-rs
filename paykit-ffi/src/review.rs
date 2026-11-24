@@ -519,12 +519,8 @@ pub enum NotNowKind {
     BlockMarksFull,
     /// The Allowance ledger has no room until earlier outcomes resolve.
     AllowanceLedgerFull,
-    /// A check before money moved failed; a new payment makes a new attempt.
-    AttemptCheck,
     /// The same call made again clears this.
     CallAgain,
-    /// The host loads the wallet again before editing its record.
-    ReloadRequired,
     /// An Allowance limit has no room now; its window rolling makes room.
     AllowanceLimit {
         /// The limit with no room.
@@ -532,8 +528,6 @@ pub enum NotNowKind {
     },
     /// The original Allowance answer's delivery isn't known; a receive learns it.
     AnswerOutcomeUnknown,
-    /// The Switch client holds the attempt back for a wait of its own.
-    SwitchClient,
     /// A reason these bindings don't know.
     Unknown,
 }
@@ -577,6 +571,17 @@ pub enum HeldForUserKind {
     /// This app's execution of the Allowance is held until the user or the host acts, as the
     /// message names.
     AllowanceExecutionHeld,
+    /// A check before money moved failed, inside `AttemptFailed`: a new payment is the
+    /// user's decision once the check can pass.
+    AttemptCheck,
+    /// The host loads the wallet again before editing its record.
+    ReloadRequired,
+    /// The Switch client holds the attempt back, as the message names: reconcile mode, the
+    /// clocks apart, or a display read owed.
+    SwitchClient,
+    /// A hold on one request, publication or delivery that no wait clears, as the message
+    /// names.
+    Unresolved,
     /// A reason these bindings don't know.
     Unknown,
 }
@@ -586,8 +591,6 @@ pub enum HeldForUserKind {
 pub enum RecoveryNeededKind {
     /// `reconcile` runs the payer pass owed since a restore.
     PayerPassOwed,
-    /// The wallet lacks current recovery access, which the signer gives.
-    RecoveryAccessMissing,
     /// A reason these bindings don't know.
     Unknown,
 }
@@ -617,14 +620,11 @@ impl From<&paykit_sdk::NotNowReason> for NotNowKind {
             R::PendingProposalsFull => Self::PendingProposalsFull,
             R::BlockMarksFull => Self::BlockMarksFull,
             R::AllowanceLedgerFull => Self::AllowanceLedgerFull,
-            R::AttemptCheck(_) => Self::AttemptCheck,
             R::CallAgain(_) => Self::CallAgain,
-            R::ReloadRequired => Self::ReloadRequired,
             R::AllowanceLimit { limit } => Self::AllowanceLimit {
                 limit: limit.clone(),
             },
             R::AnswerOutcomeUnknown => Self::AnswerOutcomeUnknown,
-            R::SwitchClient(_) => Self::SwitchClient,
             _ => Self::Unknown,
         }
     }
@@ -642,6 +642,10 @@ impl From<&paykit_sdk::HeldForUserReason> for HeldForUserKind {
             R::RecordUnreadable(_) => Self::RecordUnreadable,
             R::AllowanceNotResumed => Self::AllowanceNotResumed,
             R::AllowanceExecutionHeld(_) => Self::AllowanceExecutionHeld,
+            R::AttemptCheck(_) => Self::AttemptCheck,
+            R::ReloadRequired => Self::ReloadRequired,
+            R::SwitchClient(_) => Self::SwitchClient,
+            R::Unresolved(_) => Self::Unresolved,
             _ => Self::Unknown,
         }
     }
@@ -652,7 +656,6 @@ impl From<&paykit_sdk::RecoveryReason> for RecoveryNeededKind {
         use paykit_sdk::RecoveryReason as R;
         match reason {
             R::PayerPassOwed => Self::PayerPassOwed,
-            R::RecoveryAccessMissing => Self::RecoveryAccessMissing,
             _ => Self::Unknown,
         }
     }

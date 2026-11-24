@@ -878,8 +878,8 @@ fn first_dispatch_hold(held: Held) -> FirstHold {
     match held {
         // Writes still go on in reconcile mode and with the clocks apart: the attempt is
         // closed, so a later payment of the obligation isn't held behind it.
-        Held::Client(refusal @ ClientRefusal::NotNow(_)) => FirstHold::Fail(Refusal::NotNow(
-            crate::NotNowReason::SwitchClient(refusal.to_string()),
+        Held::Client(refusal @ ClientRefusal::NotNow(_)) => FirstHold::Fail(Refusal::HeldForUser(
+            crate::HeldForUserReason::SwitchClient(refusal.to_string()),
         )),
         Held::Client(refusal) => FirstHold::Return(held_back(refusal)),
         Held::Check(refusal @ Refusal::NotCurrent(_)) => FirstHold::Return(refusal.into()),
@@ -2696,7 +2696,9 @@ impl Paykit {
             } else {
                 "a current Private Payment List is needed to quote this endpoint"
             };
-            return Err(Refusal::NotNow(crate::NotNowReason::AwaitingCounterparty(why)).into());
+            // A quote sends nothing, so nothing asks the payee for a list: the host shows it;
+            // a payment asks for one.
+            return Err(Refusal::HeldForUser(crate::HeldForUserReason::Unresolved(why)).into());
         }
         // With nothing to ask but a paused app, as a payment naming one, the payment waits for
         // the user's confirmation of its record, not for a list (Paykit spec 8.4).
@@ -3491,7 +3493,7 @@ impl Paykit {
             return self
                 .fail_attempt(
                     &mut entry,
-                    Refusal::NotNow(crate::NotNowReason::AttemptCheck(
+                    Refusal::HeldForUser(crate::HeldForUserReason::AttemptCheck(
                         "the applied Allowance reservation could not be established",
                     )),
                 )
@@ -3506,7 +3508,9 @@ impl Paykit {
             return self
                 .fail_attempt(
                     &mut entry,
-                    Refusal::NotNow(crate::NotNowReason::AttemptCheck("no attempt proof")),
+                    Refusal::HeldForUser(crate::HeldForUserReason::AttemptCheck(
+                        "no attempt proof",
+                    )),
                 )
                 .await;
         };
@@ -3517,7 +3521,9 @@ impl Paykit {
             return self
                 .fail_attempt(
                     &mut entry,
-                    Refusal::NotNow(crate::NotNowReason::AttemptCheck("no attempt in its proof")),
+                    Refusal::HeldForUser(crate::HeldForUserReason::AttemptCheck(
+                        "no attempt in its proof",
+                    )),
                 )
                 .await;
         };
@@ -5751,18 +5757,22 @@ impl Paykit {
     fn within_budget(&self, answered: &Answered, now: u64) -> std::result::Result<(), Refusal> {
         let age = answered.age_ms(now).saturating_add(CLOCK_TOLERANCE_MS);
         if age >= crate::PRE_DISPATCH_BUDGET_MS {
-            return Err(Refusal::NotNow(crate::NotNowReason::AttemptCheck(
-                "Switch spec 10.2: the attempt is past its pre-dispatch budget",
-            )));
+            return Err(Refusal::HeldForUser(
+                crate::HeldForUserReason::AttemptCheck(
+                    "Switch spec 10.2: the attempt is past its pre-dispatch budget",
+                ),
+            ));
         }
         if self
             .app
             .cert()
             .expired_at(answered.opened_at_ms.saturating_add(age))
         {
-            return Err(Refusal::NotNow(crate::NotNowReason::AttemptCheck(
-                "Switch spec 3.2: the app's certificate expires within the pre-dispatch budget",
-            )));
+            return Err(Refusal::HeldForUser(
+                crate::HeldForUserReason::AttemptCheck(
+                    "Switch spec 3.2: the app's certificate expires within the pre-dispatch budget",
+                ),
+            ));
         }
         Ok(())
     }
@@ -6191,7 +6201,7 @@ mod tests {
         }
         // Writes go on: the attempt is closed, as before the client's refusal was typed.
         let wait = ClientRefusal::NotNow("reconcile mode".into());
-        let FirstHold::Fail(Refusal::NotNow(crate::NotNowReason::SwitchClient(why))) =
+        let FirstHold::Fail(Refusal::HeldForUser(crate::HeldForUserReason::SwitchClient(why))) =
             first_dispatch_hold(Held::Client(wait.clone()))
         else {
             panic!("reconcile mode left the attempt open");

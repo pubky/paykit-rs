@@ -137,11 +137,11 @@ impl Paykit {
                 .own_identity()
                 .current_now(&self.app_id(), &cert.hash())
                 && !cert.expired_at(self.now()),
-            access: self.holds(RECOVERY)
-                && self
-                    .app
-                    .scope_key(self.app.data_epoch(), RECOVERY)
-                    .is_some(),
+            scope: self.holds(RECOVERY),
+            key: self
+                .app
+                .scope_key(self.app.data_epoch(), RECOVERY)
+                .is_some(),
         };
         reader
             .refusal()
@@ -244,12 +244,14 @@ impl Paykit {
 struct RecoveryReader {
     fresh: bool,
     current: bool,
-    access: bool,
+    scope: bool,
+    key: bool,
 }
 
 impl RecoveryReader {
     /// The refusal of a recovery read, by what clears it: a read of the own identity, a
-    /// current certificate, or the recovery access the signer gives.
+    /// current certificate, a certificate holding the recovery scope, which the user
+    /// approves, or its key, which the signer stores when it is next online (Switch spec 3.5).
     fn refusal(self) -> Option<Refusal> {
         if !self.fresh {
             Some(Refusal::NotNow(crate::NotNowReason::ReadAgain(
@@ -259,10 +261,10 @@ impl RecoveryReader {
             Some(Refusal::NotCurrent(
                 "the app's certificate is not current for the recovery read".into(),
             ))
-        } else if !self.access {
-            Some(Refusal::RecoveryNeeded(
-                crate::RecoveryReason::RecoveryAccessMissing,
-            ))
+        } else if !self.scope {
+            Some(Refusal::ScopeMissing(RECOVERY.into()))
+        } else if !self.key {
+            Some(Refusal::NotNow(crate::NotNowReason::ScopeKeysAwaited))
         } else {
             None
         }
@@ -276,7 +278,8 @@ mod tests {
     const READER: RecoveryReader = RecoveryReader {
         fresh: true,
         current: true,
-        access: true,
+        scope: true,
+        key: true,
     };
 
     #[test]
@@ -306,16 +309,23 @@ mod tests {
     }
 
     #[test]
-    fn test_recovery_reader_needs_the_recovery_access() {
+    fn test_recovery_reader_needs_the_recovery_scope_then_its_key() {
         let missing = RecoveryReader {
-            access: false,
+            scope: false,
+            key: false,
             ..READER
         };
         assert_eq!(
             missing.refusal(),
-            Some(Refusal::RecoveryNeeded(
-                crate::RecoveryReason::RecoveryAccessMissing
-            ))
+            Some(Refusal::ScopeMissing(RECOVERY.into()))
+        );
+        let awaited = RecoveryReader {
+            key: false,
+            ..READER
+        };
+        assert_eq!(
+            awaited.refusal(),
+            Some(Refusal::NotNow(crate::NotNowReason::ScopeKeysAwaited))
         );
     }
 }

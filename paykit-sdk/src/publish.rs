@@ -60,10 +60,11 @@ fn target(publisher: &[u8; 16], recipient: &[u8; 32], generation: u64) -> Record
     )
 }
 
-/// The refusal while the recipient's counter isn't verified now: a later read that shows an
-/// accepted, current counter clears it (Paykit spec 8.4.1).
+/// The refusal while the recipient's counter isn't verified: one deleted, unreadable,
+/// flagged or not taken, which a later read may or may not clear, so publication to that
+/// recipient is held and the host shows it (Paykit spec 8.4.1).
 fn counter_unavailable() -> Refusal {
-    Refusal::NotNow(crate::NotNowReason::ReadAgain(
+    Refusal::HeldForUser(crate::HeldForUserReason::Unresolved(
         "Paykit spec 8.4.1: the recipient's publication counter cannot be verified",
     ))
 }
@@ -97,10 +98,23 @@ pub(crate) fn foreign_publication(
 const PUBLICATION_CONFLICTS: &str = "Paykit spec 8.4.1: the recipient's publication counter \
     cannot be verified: another write is at its version, or the record is divergent";
 
+const PREVIOUS_UNRESOLVED: &str =
+    "Paykit spec 8.4.1: the recipient's previous publication is unresolved";
+
+/// The refusal while the recipient's previous publication waits for its batch, which the
+/// client still keeps and sends again, or for the call that changed it meanwhile (Paykit
+/// spec 8.4.1).
 fn unresolved() -> Refusal {
     Refusal::NotNow(crate::NotNowReason::EarlierWriteUnresolved(
-        "Paykit spec 8.4.1: the recipient's previous publication is unresolved",
+        PREVIOUS_UNRESOLVED,
     ))
+}
+
+/// The refusal while the recipient's previous publication is unresolved with no batch kept
+/// to settle it: dropped with its outcome unknown, or no longer told by the client, which no
+/// answer settles, so it is shown (Paykit spec 8.4.1).
+fn unresolved_for_good() -> Refusal {
+    Refusal::HeldForUser(crate::HeldForUserReason::Unresolved(PREVIOUS_UNRESOLVED))
 }
 
 /// The revision of a reusable list is derived from its endpoints, so the same list set
@@ -1136,10 +1150,13 @@ impl Paykit {
 
     async fn resolve_publications(&mut self, recipient: &[u8; 32]) -> Result<()> {
         let mut pending = false;
+        let mut kept = false;
         for (original, ids) in self.publication_batches(recipient).await? {
             let mut remaining = PublicationIds::new();
             for &id in &ids {
-                let resolved = match self.app.kept_batch(id).await? {
+                let status = self.app.kept_batch(id).await?;
+                kept |= matches!(status, Some(KeptBatchStatus::Kept { .. }));
+                let resolved = match status {
                     Some(KeptBatchStatus::Applied { .. }) => true,
                     Some(KeptBatchStatus::Dropped {
                         reason: KeptBatchDrop::Refused { .. } | KeptBatchDrop::Unsent,
@@ -1167,7 +1184,13 @@ impl Paykit {
             }
         }
         if pending {
-            return Err(unresolved().into());
+            // A batch still kept settles by itself; one gone with its outcome unknown doesn't.
+            return Err(if kept {
+                unresolved()
+            } else {
+                unresolved_for_good()
+            }
+            .into());
         }
         Ok(())
     }
@@ -1315,6 +1338,9 @@ impl Paykit {
         };
         self.own_identity_confirmed(false).await??;
         if self.app.own_identity().generation() != generation || !self.holds(SCOPE) {
+            if !self.holds(SCOPE) {
+                return Err(Refusal::ScopeMissing(SCOPE.into()).into());
+            }
             return Err(counter_unavailable().into());
         }
         let signed = self.app.sign_message(OutgoingMessage::new(
@@ -1383,6 +1409,9 @@ impl Paykit {
             .locals(applied.into_writes());
         self.own_identity_confirmed(false).await??;
         if self.app.own_identity().generation() != generation || !self.holds(SCOPE) {
+            if !self.holds(SCOPE) {
+                return Err(Refusal::ScopeMissing(SCOPE.into()).into());
+            }
             return Err(counter_unavailable().into());
         }
         if matches!(reason, IssueFor::RetryWithdrawal | IssueFor::Confirmed) {

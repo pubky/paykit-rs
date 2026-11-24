@@ -3581,7 +3581,7 @@ async fn test_blocked_return_restore_widening_held_asks_no_one() {
         .await
         .unwrap_err();
     assert!(
-        matches!(error.refusal(), Some(paykit_sdk::Refusal::NotNow(_))),
+        matches!(error.refusal(), Some(paykit_sdk::Refusal::FloorHeld)),
         "{error}"
     );
 }
@@ -3747,7 +3747,7 @@ async fn test_blocked_return_missed_item_under_the_hold_asks_no_one() {
         .await
         .unwrap_err();
     assert!(
-        matches!(error.refusal(), Some(paykit_sdk::Refusal::NotNow(_))),
+        matches!(error.refusal(), Some(paykit_sdk::Refusal::FloorHeld)),
         "{error}"
     );
 }
@@ -5132,7 +5132,7 @@ async fn test_blocked_return_owed_raise_asks_the_unblocked_sender_nothing() {
         .await
         .unwrap_err();
     assert!(
-        matches!(error.refusal(), Some(paykit_sdk::Refusal::NotNow(_))),
+        matches!(error.refusal(), Some(paykit_sdk::Refusal::FloorHeld)),
         "{error}"
     );
     assert!(asked(&wallet, &w.bob_id()).await.is_empty());

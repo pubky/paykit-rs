@@ -22,11 +22,15 @@ use crate::{AllowanceRole, AllowanceStatus, Paykit, Refusal, Result};
 const REGRANT_WAITS: &str = "the Allowance record isn't read as writing on it needs yet";
 
 fn regrant_waits() -> Refusal {
-    Refusal::NotNow(crate::NotNowReason::ReadAgain(REGRANT_WAITS))
+    Refusal::HeldForUser(crate::HeldForUserReason::AllowanceExecutionHeld(
+        REGRANT_WAITS,
+    ))
 }
 
+/// The executor can't establish the original grant and ledger: as after a restore that
+/// lost what verifies them, or a paused record, which no read alone mends.
 fn held() -> Refusal {
-    Refusal::NotNow(crate::NotNowReason::ReadAgain(
+    Refusal::HeldForUser(crate::HeldForUserReason::AllowanceExecutionHeld(
         "the executor cannot establish the original Allowance grant and ledger",
     ))
 }

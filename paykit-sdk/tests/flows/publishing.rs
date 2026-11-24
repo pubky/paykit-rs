@@ -548,7 +548,9 @@ async fn test_publication_expired_original_batch_still_waits_at_the_same_counter
     assert!(
         matches!(
             result.as_ref().err().and_then(|e| e.refusal()),
-            Some(paykit_sdk::Refusal::NotNow(_))
+            Some(paykit_sdk::Refusal::HeldForUser(
+                paykit_sdk::HeldForUserReason::Unresolved(_)
+            ))
         ),
         "{result:?}"
     );
@@ -875,7 +877,7 @@ async fn test_publication_later_provider_refusal_does_not_release_the_lost_origi
     let issue = shop.publish_list_to(recipient).await;
     assert!(
         matches!(issue.as_ref().err().and_then(|e|e.refusal()),
-        Some(paykit_sdk::Refusal::NotNow(paykit_sdk::NotNowReason::EarlierWriteUnresolved(reason))) if reason.contains("previous publication")),
+        Some(paykit_sdk::Refusal::HeldForUser(paykit_sdk::HeldForUserReason::Unresolved(reason))) if reason.contains("previous publication")),
         "{issue:?}"
     );
     let current = shop
@@ -941,7 +943,7 @@ async fn test_publication_older_in_place_restore_retains_the_later_unresolved_re
     shop.set_list_endpoints(offered("lno1other")).await.unwrap();
     let held = shop.publish_list_to(recipient).await.unwrap_err();
     assert!(
-        matches!(held.refusal(), Some(Refusal::NotNow(paykit_sdk::NotNowReason::EarlierWriteUnresolved(reason))) if reason.contains("previous publication")),
+        matches!(held.refusal(), Some(Refusal::HeldForUser(paykit_sdk::HeldForUserReason::Unresolved(reason))) if reason.contains("previous publication")),
         "{held}"
     );
     assert_eq!(w.record_writes(&w.bob, &first), 1);
@@ -1073,7 +1075,7 @@ async fn test_publication_restored_pending_batch_needs_its_matching_applied_writ
         .unwrap();
     let no_outcome = elsewhere.publish_list_to(recipient).await.unwrap_err();
     assert!(
-        matches!(no_outcome.refusal(),Some(Refusal::NotNow(paykit_sdk::NotNowReason::EarlierWriteUnresolved(reason))) if reason.contains("previous publication")),
+        matches!(no_outcome.refusal(),Some(Refusal::HeldForUser(paykit_sdk::HeldForUserReason::Unresolved(reason))) if reason.contains("previous publication")),
         "{no_outcome}"
     );
     drop(elsewhere);

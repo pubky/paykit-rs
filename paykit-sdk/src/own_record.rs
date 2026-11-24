@@ -400,7 +400,7 @@ impl Paykit {
     /// stored ([`Paykit::set_public_endpoints`]).
     fn own_record_known(&self) -> Result<()> {
         if self.own_record_unknown {
-            return Err(Refusal::NotNow(crate::NotNowReason::ReloadRequired).into());
+            return Err(Refusal::HeldForUser(crate::HeldForUserReason::ReloadRequired).into());
         }
         Ok(())
     }

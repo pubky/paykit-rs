@@ -3,7 +3,7 @@
 //! is for display.
 
 /// What a call waits for: a later call, a read or a wait changes it, and the call is made
-/// again then. Nothing was written for the call that was refused.
+/// again then. Nothing was sent for the call that was refused.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum NotNowReason {
@@ -70,23 +70,10 @@ pub enum NotNowReason {
     /// resolving let it compact and make room (Paykit spec 8.3).
     #[error("the Allowance ledger has no room for the payment and its outcome")]
     AllowanceLedgerFull,
-    /// A check before money moved failed, so the attempt was written `failed` and nothing was
-    /// paid. It comes only inside [`crate::Refusal::AttemptFailed`]; a new payment makes a
-    /// new attempt once the check can pass, for a certificate expiring within the budget
-    /// after the signer renews it (Paykit spec 7.2 step 1). The text names the check.
-    #[error("{0}")]
-    AttemptCheck(&'static str),
     /// The same call made again clears this: it picks a new identifier or reads again. The
     /// text names why.
     #[error("{0}")]
     CallAgain(&'static str),
-    /// The store couldn't tell whether the last write of the app's record was applied; the
-    /// host loads the app again ([`crate::Paykit::load`]) before editing its record.
-    #[error(
-        "the store couldn't tell whether the last write of the app's record was applied: load \
-         the app again (Paykit::load) before editing its record"
-    )]
-    ReloadRequired,
     /// An Allowance limit has no room for the payment now; its window rolling, or an
     /// earlier payment's release, makes room (Paykit spec 8.3).
     #[error("the {limit} limit has no room")]
@@ -98,10 +85,6 @@ pub enum NotNowReason {
     /// was delivered (Paykit spec 8.3).
     #[error("the original Allowance answer has no verified outcome")]
     AnswerOutcomeUnknown,
-    /// The Switch client holds the attempt back for a wait of its own: reconcile mode, the
-    /// clocks apart or a read owed, named in its text (Switch spec 10.1, 12.4).
-    #[error("{0}")]
-    SwitchClient(String),
 }
 
 /// The call [`NotNowReason::RecordsUnlisted`] names to continue a listing.
@@ -179,10 +162,33 @@ pub enum HeldForUserReason {
     /// "Executor").
     #[error("{0}")]
     AllowanceExecutionHeld(&'static str),
+    /// A check before money moved failed, so the attempt was written `failed` and nothing was
+    /// paid. It comes only inside [`crate::Refusal::AttemptFailed`]. A new payment is the
+    /// user's decision, made once the check can pass: for a certificate expiring within the
+    /// budget, after the signer renews it (Paykit spec 7.2 step 1). The text names the check.
+    #[error("{0}")]
+    AttemptCheck(&'static str),
+    /// The store couldn't tell whether the last write of the app's record was applied; the
+    /// host loads the app again ([`crate::Paykit::load`]) before editing its record, which
+    /// no wait on this handle clears.
+    #[error(
+        "the store couldn't tell whether the last write of the app's record was applied: load \
+         the app again (Paykit::load) before editing its record"
+    )]
+    ReloadRequired,
+    /// The Switch client holds the attempt back, named in its text: reconcile mode, which the
+    /// user ends, the clocks apart, which the user may have to correct, or a display read the
+    /// host owes (Switch spec 10.1, 12.4). The text alone tells them apart, so it is shown.
+    #[error("{0}")]
+    SwitchClient(String),
+    /// A hold on one request, publication or delivery that no wait clears as far as this
+    /// wallet can tell: the text names it, and the host shows it (Paykit spec 8.1, 8.4).
+    #[error("{0}")]
+    Unresolved(&'static str),
 }
 
 /// The recovery step of the wallet as a whole that clears a refusal: no wait does (Paykit
-/// spec 7.3). Nothing was written for the call that was refused.
+/// spec 7.3). Nothing was sent for the call that was refused.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum RecoveryReason {
@@ -193,8 +199,4 @@ pub enum RecoveryReason {
          restore"
     )]
     PayerPassOwed,
-    /// The wallet lacks current recovery access: the recovery scope, its key or a current
-    /// certificate, which the signer gives.
-    #[error("the wallet needs current recovery access")]
-    RecoveryAccessMissing,
 }

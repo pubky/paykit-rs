@@ -573,7 +573,9 @@ async fn test_own_record_edit_after_an_unknown_store_result_waits_for_a_load() {
     assert!(
         matches!(
             &refused,
-            PaykitError::Refused(Refusal::NotNow(paykit_sdk::NotNowReason::ReloadRequired))
+            PaykitError::Refused(Refusal::HeldForUser(
+                paykit_sdk::HeldForUserReason::ReloadRequired
+            ))
         ),
         "{refused:?}"
     );
@@ -587,7 +589,9 @@ async fn test_own_record_edit_after_an_unknown_store_result_waits_for_a_load() {
     assert!(
         matches!(
             &refused,
-            PaykitError::Refused(Refusal::NotNow(paykit_sdk::NotNowReason::ReloadRequired))
+            PaykitError::Refused(Refusal::HeldForUser(
+                paykit_sdk::HeldForUserReason::ReloadRequired
+            ))
         ),
         "{refused:?}"
     );
@@ -657,7 +661,9 @@ async fn test_own_record_edit_after_an_unknown_read_result_waits_for_a_load() {
     assert!(
         matches!(
             &refused,
-            PaykitError::Refused(Refusal::NotNow(paykit_sdk::NotNowReason::ReloadRequired))
+            PaykitError::Refused(Refusal::HeldForUser(
+                paykit_sdk::HeldForUserReason::ReloadRequired
+            ))
         ),
         "{refused:?}"
     );
@@ -741,7 +747,9 @@ async fn test_own_record_unknown_identity_refresh_stops_edits_and_upkeep() {
     assert!(
         matches!(
             &refused,
-            PaykitError::Refused(Refusal::NotNow(paykit_sdk::NotNowReason::ReloadRequired))
+            PaykitError::Refused(Refusal::HeldForUser(
+                paykit_sdk::HeldForUserReason::ReloadRequired
+            ))
         ),
         "{refused:?}"
     );

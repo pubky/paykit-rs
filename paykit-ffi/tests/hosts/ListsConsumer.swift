@@ -19,9 +19,9 @@ func checkLists(fixture: CheckoutFixture, wallet: NativeWallet) async throws {
         try await wallet.publishListTo(recipient: recipient)
         preconditionFailure("payer published a Private Payment List")
     } catch let WalletError.NeedsUser(failure) {
-        precondition(failure.code() == "not_now")
+        precondition(failure.code() == "scope_missing")
         // Only an unknown list delivery is a confirmation to send another list.
-        guard let refusal = failure.refusal() else { preconditionFailure("missing not_now refusal") }
+        guard let refusal = failure.refusal() else { preconditionFailure("missing scope refusal") }
         do {
             try await wallet.sendListAgain(refusal: refusal)
             preconditionFailure("a refusal other than an unknown delivery sent a list")

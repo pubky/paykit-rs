@@ -128,7 +128,8 @@ impl Paykit {
             .recovery_request_permitted(&counterparty, &selection.request(), None)
             .await?
         {
-            return Err(Refusal::NotNow(crate::NotNowReason::EarlierWriteUnresolved(
+            // An earlier request whose delivery may never be learned: shown, not waited on.
+            return Err(Refusal::HeldForUser(crate::HeldForUserReason::Unresolved(
                 "the outcome of an overlapping recovery request is unknown",
             ))
             .into());

@@ -22,7 +22,7 @@ internal suspend fun checkLists(fixture: CheckoutFixture, wallet: NativeWallet) 
         error("payer published a Private Payment List")
     } catch (error: WalletException.NeedsUser) {
         error.failure.use { failure ->
-            check(failure.code() == "not_now")
+            check(failure.code() == "scope_missing")
             // Only an unknown list delivery is a confirmation to send another list.
             checkNotNull(failure.refusal()).use { refusal ->
                 try {

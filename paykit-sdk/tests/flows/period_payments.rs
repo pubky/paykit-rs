@@ -1792,7 +1792,7 @@ async fn test_period_payments_quote_for_leaves_restore_and_list_requests_to_the_
         .outcome
         .unwrap_err();
     assert!(
-        matches!(refusal(&quoted), Refusal::NotNow(paykit_sdk::NotNowReason::AwaitingCounterparty(why)) if why.contains("Private Payment List")),
+        matches!(refusal(&quoted), Refusal::HeldForUser(paykit_sdk::HeldForUserReason::Unresolved(why)) if why.contains("Private Payment List")),
         "{quoted:?}"
     );
     assert_eq!(

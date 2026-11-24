@@ -519,6 +519,18 @@ fn every_refusal_kind() -> Vec<RefusalKind> {
         RefusalKind::HeldForUser {
             reason: HeldForUserKind::AllowanceExecutionHeld,
         },
+        RefusalKind::HeldForUser {
+            reason: HeldForUserKind::AttemptCheck,
+        },
+        RefusalKind::HeldForUser {
+            reason: HeldForUserKind::ReloadRequired,
+        },
+        RefusalKind::HeldForUser {
+            reason: HeldForUserKind::SwitchClient,
+        },
+        RefusalKind::HeldForUser {
+            reason: HeldForUserKind::Unresolved,
+        },
         RefusalKind::FloorHeld,
         RefusalKind::Usage,
         RefusalKind::RecordHeld,
@@ -912,14 +924,11 @@ fn every_not_now_kind() -> Vec<NotNowKind> {
         R::PendingProposalsFull,
         R::BlockMarksFull,
         R::AllowanceLedgerFull,
-        R::AttemptCheck,
         R::CallAgain,
-        R::ReloadRequired,
         R::AllowanceLimit {
             limit: "lifetime".into(),
         },
         R::AnswerOutcomeUnknown,
-        R::SwitchClient,
         R::Unknown,
     ]);
     for kind in &kinds {
@@ -937,12 +946,9 @@ fn every_not_now_kind() -> Vec<NotNowKind> {
             | R::PendingProposalsFull
             | R::BlockMarksFull
             | R::AllowanceLedgerFull
-            | R::AttemptCheck
             | R::CallAgain
-            | R::ReloadRequired
             | R::AllowanceLimit { .. }
             | R::AnswerOutcomeUnknown
-            | R::SwitchClient
             | R::Unknown => {}
         }
     }
@@ -952,10 +958,10 @@ fn every_not_now_kind() -> Vec<NotNowKind> {
 /// One of every recovery step; the match has no wildcard.
 fn every_recovery_kind() -> Vec<RecoveryNeededKind> {
     use RecoveryNeededKind as R;
-    let kinds = vec![R::PayerPassOwed, R::RecoveryAccessMissing, R::Unknown];
+    let kinds = vec![R::PayerPassOwed, R::Unknown];
     for kind in &kinds {
         match kind {
-            R::PayerPassOwed | R::RecoveryAccessMissing | R::Unknown => {}
+            R::PayerPassOwed | R::Unknown => {}
         }
     }
     // Every reason a user answers or is shown; the match has no wildcard either.
@@ -969,6 +975,10 @@ fn every_recovery_kind() -> Vec<RecoveryNeededKind> {
             | HeldForUserKind::RecordUnreadable
             | HeldForUserKind::AllowanceNotResumed
             | HeldForUserKind::AllowanceExecutionHeld
+            | HeldForUserKind::AttemptCheck
+            | HeldForUserKind::ReloadRequired
+            | HeldForUserKind::SwitchClient
+            | HeldForUserKind::Unresolved
             | HeldForUserKind::Unknown => {}
         }
     }
@@ -982,6 +992,11 @@ fn test_wallet_errors_each_refusal_variant_comes_as_one_case() {
     let mut cases = HashMap::new();
     for kind in every_refusal_kind() {
         let (category, code) = crate::error::refusal_category(&kind);
+        // The one kind with two cases: a list expired only by the service's time is shown to
+        // the user, the device clock being behind (Paykit spec 8.4).
+        if matches!(kind, RefusalKind::WaitingForList { .. }) {
+            continue;
+        }
         let earlier = cases.insert(std::mem::discriminant(&kind), category.case());
         assert!(
             earlier.is_none_or(|earlier| earlier == category.case()),
@@ -1081,8 +1096,8 @@ fn test_wallet_errors_context_carries_no_outside_text() {
         PaykitError::Refused(Refusal::SwitchUnavailable(text())),
         PaykitError::Refused(Refusal::IdentityUnavailable(text())),
         PaykitError::Refused(Refusal::CertificateRefused(text())),
-        PaykitError::Refused(Refusal::AttemptFailed(Box::new(Refusal::NotNow(
-            paykit_sdk::NotNowReason::SwitchClient(text()),
+        PaykitError::Refused(Refusal::AttemptFailed(Box::new(Refusal::HeldForUser(
+            paykit_sdk::HeldForUserReason::SwitchClient(text()),
         )))),
         PaykitError::Client(AppError::Alarm(pubky_switch_client::app::Alarm::Rollback {
             reason: text(),
