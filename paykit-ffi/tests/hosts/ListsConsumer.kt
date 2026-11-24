@@ -2,38 +2,11 @@ package com.synonym.paykit.tests
 
 import com.synonym.paykit.*
 
-// A payer can inspect Private Payment Lists and acknowledge an old report (Paykit spec 8.4.1).
+// Share Private Payment Lists and confirm another list after an unknown delivery (Paykit spec 8.4.1).
 internal suspend fun checkLists(fixture: CheckoutFixture, wallet: NativeWallet) {
     val recipient = fixture.payee()
     val endpoint = ListEndpoint(identifier = "btc-lightning-bolt11", payload = "lnbc1example")
-    try {
-        wallet.setListEndpoints(listOf(endpoint))
-        error("payer set a Private Payment List")
-    } catch (error: WalletException.NeedsUser) {
-        error.failure.use { failure ->
-            check(failure.code() == "scope_missing")
-            checkNotNull(failure.refusal()).use { refusal ->
-                check((refusal.kind() as RefusalKind.ScopeMissing).scope == "paykit_request")
-            }
-        }
-    }
-    try {
-        wallet.publishListTo(recipient)
-        error("payer published a Private Payment List")
-    } catch (error: WalletException.NeedsUser) {
-        error.failure.use { failure ->
-            check(failure.code() == "not_now")
-            // Only an unknown list delivery is a confirmation to send another list.
-            checkNotNull(failure.refusal()).use { refusal ->
-                try {
-                    wallet.sendListAgain(refusal)
-                    throw AssertionError("a refusal other than an unknown delivery sent a list")
-                } catch (invalid: WalletException.InvalidInput) {
-                    check(invalid.field == "refusal")
-                }
-            }
-        }
-    }
+    wallet.setListEndpoints(listOf(endpoint))
     wallet.withdrawListFrom(recipient)
     check(wallet.heldLists().isEmpty())
     check(wallet.publicationConflicts().isEmpty())
@@ -50,8 +23,39 @@ internal suspend fun checkLists(fixture: CheckoutFixture, wallet: NativeWallet) 
         wallet.acknowledgePublicationConflict(report.copy(refused = refused.copy(messageHash = byteArrayOf())))
         error("acknowledged a malformed message hash")
     } catch (error: WalletException.InvalidInput) {
-        check(error.field == "message_hash")
+        check(error.field == "refused.message_hash")
     }
     wallet.acknowledgePublicationConflict(report)
     check(wallet.publicationConflicts().isEmpty())
+
+    fixture.restoredListSeller().use { seller ->
+        val payer = wallet.identity()
+        val original = try {
+            seller.publishListTo(payer)
+            error("sent a replacement without confirmation")
+        } catch (error: WalletException.NeedsUser) {
+            error.failure.use { failure ->
+                checkNotNull(failure.refusal()).use { refusal ->
+                    val shown = refusal.kind() as RefusalKind.ListDeliveryUnknown
+                    check(shown.recipient.contentEquals(payer) && !shown.withdrawal)
+                    seller.sendListAgain(refusal)
+                    shown.msgId
+                }
+            }
+        }
+        val received = mutableListOf<String>()
+        // A list can wait for a record listing even after the last feed page.
+        for (read in 1..8) {
+            val report = wallet.receive()
+            for (event in report.events) {
+                val message = event.data as? WalletEventData.MessageReceived ?: continue
+                if (message.kind == "paykit.private_payment_list" && message.sender.contentEquals(recipient)) {
+                    received.add(message.msgId)
+                }
+            }
+            if (received.size >= 2) break
+        }
+        check(received.size == 2 && received.first() == original && received.last() != original)
+        seller.shutdown()
+    }
 }

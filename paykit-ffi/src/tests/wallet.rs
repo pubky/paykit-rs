@@ -44,6 +44,15 @@ const LOOKUP_LIMIT: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// A wallet host on `root`, paying through `account`, on `world`'s service.
 pub(super) fn host(world: &World, root: &Path, account: Arc<Account>) -> Arc<WalletHost> {
+    configured_host(world, root, account, None)
+}
+
+fn configured_host(
+    world: &World,
+    root: &Path,
+    account: Arc<Account>,
+    config: Option<WalletConfig>,
+) -> Arc<WalletHost> {
     let host = WalletHost::new(
         Arc::new(DeviceStore::open(root)),
         Arc::new(Home(world.files().clone())),
@@ -53,6 +62,7 @@ pub(super) fn host(world: &World, root: &Path, account: Arc<Account>) -> Arc<Wal
             identifier: "btc-lightning-bolt11".into(),
             fraction_digits: Some(8),
         }],
+        config,
     )
     .unwrap();
     let mut host = Arc::into_inner(host).unwrap();
@@ -72,12 +82,35 @@ pub(super) async fn enrolled_payer(
     world: &World,
     root: &Path,
     account: Arc<Account>,
-) -> TestResult<(
+) -> TestResult<EnrolledWallet> {
+    Box::pin(enrolled_wallet(
+        world,
+        root,
+        account,
+        WalletScopes {
+            pay: true,
+            ..Default::default()
+        },
+        None,
+    ))
+    .await
+}
+
+type EnrolledWallet = (
     Arc<WalletHost>,
     Arc<NativeWallet>,
     Vec<u8>,
     pubky_switch_signer::Signer,
-)> {
+);
+
+pub(super) async fn enrolled_wallet(
+    world: &World,
+    root: &Path,
+    account: Arc<Account>,
+    scopes: WalletScopes,
+    config: Option<WalletConfig>,
+) -> TestResult<EnrolledWallet> {
+    let open = || configured_host(world, root, account.clone(), config.clone());
     let id = world.identity("buyer")?.public();
     let mut buyer = Box::pin(signer::serving(world, "buyer")).await?;
     let mut other = Box::pin(signer::serving(world, "other-buyer")).await?;
@@ -92,7 +125,7 @@ pub(super) async fn enrolled_payer(
     let owner = vec![23; 32];
     assert!(physical.acquire(ns.clone(), owner.clone())?);
     assert!(matches!(
-        Box::pin(host(world, root, account.clone()).complete_enrollment(reference.clone())).await,
+        Box::pin(open().complete_enrollment(reference.clone())).await,
         Err(WalletError::EnrollmentUnavailable)
     ));
     physical.release(ns, owner)?;
@@ -102,15 +135,7 @@ pub(super) async fn enrolled_payer(
         caps: format!("{}:rw", info.app_record_path),
         secret: [9; 32],
     };
-    let original = prepare()
-        .prepare_enrollment(
-            reference.clone(),
-            auth.client_id.clone(),
-            auth.client_key.into(),
-            auth.caps.clone(),
-            auth.secret.into(),
-        )
-        .await?;
+    let original = prepare_scopes(&prepare(), &reference, &auth, scopes).await?;
     let signed = serde_json::from_slice(&original.signed_request)?;
     let review = buyer.review(&signed, &auth)?;
     let approved = Box::pin(buyer.approve(review)).await?;
@@ -119,7 +144,7 @@ pub(super) async fn enrolled_payer(
     prepare()
         .accept_approval(reference.clone(), id.into(), approved.claim.clone())
         .await?;
-    let current = host(world, root, account.clone());
+    let current = open();
     DeviceStore::hold_installation(root, true);
     assert!(matches!(
         Box::pin(current.complete_enrollment(reference.clone())).await,
@@ -127,7 +152,7 @@ pub(super) async fn enrolled_payer(
     ));
     drop(current);
     DeviceStore::hold_installation(root, false);
-    let current = host(world, root, account.clone());
+    let current = open();
     assert!(matches!(
         current.load(original.app_id.clone()).await,
         Err(WalletError::NotJoined)
@@ -148,7 +173,7 @@ pub(super) async fn enrolled_payer(
     ));
     drop(current);
     DeviceStore::hold_enrollment_completion(root, false);
-    let current = host(world, root, account);
+    let current = open();
     assert!(matches!(
         prepare()
             .accept_approval(reference.clone(), other_id.into(), alternate.claim)
@@ -602,6 +627,7 @@ async fn later_checkout(
     // still opens.
     // A method whose guarantees change is given to a new host.
     let without_history = WalletHost {
+        config: host.config.clone(),
         clock: host.clock.clone(),
         transport: host.transport.clone(),
         home: host.home.clone(),
@@ -876,4 +902,292 @@ fn test_installed_payer_reopens_the_original_approved_wallet_on_scripted() {
 #[test]
 fn test_installed_payer_reopens_the_original_approved_wallet_on_postgresql() {
     run(Backend::Service, journey);
+}
+
+async fn prepare_scopes(
+    owner: &WalletEnrollment,
+    reference: &[u8],
+    auth: &AuthRequest,
+    scopes: WalletScopes,
+) -> Result<EnrollmentRequest, WalletError> {
+    owner
+        .prepare_enrollment(
+            reference.to_vec(),
+            auth.client_id.clone(),
+            auth.client_key.into(),
+            auth.caps.clone(),
+            auth.secret.into(),
+            scopes,
+        )
+        .await
+}
+
+async fn enrollment_auth(owner: &WalletEnrollment, reference: &[u8]) -> TestResult<AuthRequest> {
+    let info = owner.begin_enrollment(reference.to_vec()).await?;
+    Ok(AuthRequest {
+        client_id: "wallet.example".into(),
+        client_key: [8; 32],
+        caps: format!("{}:rw", info.app_record_path),
+        secret: [9; 32],
+    })
+}
+
+async fn certificate_scopes(world: &World) -> TestResult {
+    let root = tempfile::tempdir()?;
+    let owner = WalletEnrollment::new(Arc::new(DeviceStore::open(root.path())));
+    let mut signer = Box::pin(signer::serving(world, "buyer")).await?;
+    let none = WalletScopes::default();
+    let cases: [(WalletScopes, &[&str]); 9] = [
+        (
+            WalletScopes {
+                pay: true,
+                ..none.clone()
+            },
+            &["paykit_pay", "paykit_contacts"],
+        ),
+        (
+            WalletScopes {
+                request: true,
+                ..none.clone()
+            },
+            &["paykit_request", "paykit_settlements", "paykit_contacts"],
+        ),
+        (
+            WalletScopes {
+                request_labels: vec!["shop".into()],
+                ..none.clone()
+            },
+            &[
+                "paykit_request:shop",
+                "paykit_settlements",
+                "paykit_contacts",
+            ],
+        ),
+        (
+            WalletScopes {
+                allowance: true,
+                ..none.clone()
+            },
+            &["paykit_allowance"],
+        ),
+        (
+            WalletScopes {
+                allowance_execute: true,
+                ..none.clone()
+            },
+            &[
+                "paykit_allowance_execute",
+                "paykit_allowance",
+                "paykit_pay",
+                "paykit_contacts",
+            ],
+        ),
+        (
+            WalletScopes {
+                contacts: true,
+                ..none.clone()
+            },
+            &["paykit_contacts"],
+        ),
+        (
+            WalletScopes {
+                manage_contacts: true,
+                ..none.clone()
+            },
+            &["paykit_manage_contacts", "paykit_contacts"],
+        ),
+        (
+            WalletScopes {
+                recovery: true,
+                ..none.clone()
+            },
+            &["paykit_recovery"],
+        ),
+        (
+            WalletScopes {
+                extensions: vec!["paykit-cap".into()],
+                ..none
+            },
+            &["paykit_ext:paykit-cap"],
+        ),
+    ];
+    for (index, (scopes, expected)) in cases.into_iter().enumerate() {
+        let reference = [u8::try_from(index)?; 16];
+        let auth = enrollment_auth(&owner, &reference).await?;
+        let request = prepare_scopes(&owner, &reference, &auth, scopes).await?;
+        let signed = serde_json::from_slice(&request.signed_request)?;
+        let review = signer.review(&signed, &auth)?;
+        let approved = Box::pin(signer.approve(review)).await?;
+        owner
+            .accept_approval(reference.into(), signer.identity().into(), approved.claim)
+            .await?;
+        signer.claim_delivered(&approved.request).await?;
+        let cert = signer
+            .apps()?
+            .into_iter()
+            .find(|app| app.app_id == approved.app_id)
+            .and_then(|app| app.cert)
+            .ok_or("missing approved certificate")?;
+        let actual: std::collections::BTreeSet<_> =
+            cert.scopes().iter().map(String::as_str).collect();
+        assert_eq!(actual, expected.iter().copied().collect());
+        paykit_lib::scopes::check_certificate(&cert)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn test_wallet_scopes_match_each_approved_certificate() {
+    run(Backend::Scripted, certificate_scopes);
+    run(Backend::Service, certificate_scopes);
+}
+
+async fn enrollment_retry(_world: &World) -> TestResult {
+    let root = tempfile::tempdir()?;
+    let open = || WalletEnrollment::new(Arc::new(DeviceStore::open(root.path())));
+    let reference = [2; 16];
+    let auth = enrollment_auth(&open(), &reference).await?;
+    let none = WalletScopes::default();
+    for (scopes, field_name) in [
+        (none.clone(), "scopes"),
+        (
+            WalletScopes {
+                request_labels: vec!["bad/label".into()],
+                ..none.clone()
+            },
+            "request_labels",
+        ),
+        (
+            WalletScopes {
+                extensions: vec!["cap".into()],
+                ..none.clone()
+            },
+            "extensions",
+        ),
+        (
+            WalletScopes {
+                request: true,
+                request_labels: vec!["shop".into()],
+                ..none.clone()
+            },
+            "scopes",
+        ),
+    ] {
+        assert!(
+            matches!(prepare_scopes(&open(), &reference, &auth, scopes).await, Err(WalletError::InvalidInput { field }) if field == field_name)
+        );
+    }
+    let mut scopes = WalletScopes {
+        pay: true,
+        request_labels: vec!["one".into(), "two".into()],
+        extensions: vec!["paykit-cap".into(), "paykit-shop".into()],
+        ..none
+    };
+    let original = prepare_scopes(&open(), &reference, &auth, scopes.clone()).await?;
+    scopes.contacts = true;
+    scopes.extensions.reverse();
+    scopes.request_labels.reverse();
+    let retried = prepare_scopes(&open(), &reference, &auth, scopes.clone()).await?;
+    assert_eq!(retried.signed_request, original.signed_request);
+    scopes.extensions = vec!["paykit-shop".into(), "paykit-other".into()];
+    assert!(matches!(
+        prepare_scopes(&open(), &reference, &auth, scopes).await,
+        Err(WalletError::EnrollmentConflict)
+    ));
+    Ok(())
+}
+
+#[test]
+fn test_wallet_scopes_reject_invalid_requests_and_changed_retries() {
+    run(Backend::Scripted, enrollment_retry);
+    run(Backend::Service, enrollment_retry);
+}
+
+async fn wallet_config(world: &World) -> TestResult {
+    use paykit_lib::{kinds::ExtensionKind, Label};
+    use paykit_sdk::PaykitConfig;
+    let root = tempfile::tempdir()?;
+    let account = Arc::new(Account::open(root.path(), world.clock().clone()));
+    let construct = |config| {
+        WalletHost::new(
+            Arc::new(DeviceStore::open(root.path())),
+            Arc::new(Home(world.files().clone())),
+            account.clone(),
+            Account::declaration(true),
+            vec![],
+            config,
+        )
+    };
+    for (config, name) in [
+        (
+            WalletConfig {
+                selling_label: Some("bad/label".into()),
+                ..Default::default()
+            },
+            "selling_label",
+        ),
+        (
+            WalletConfig {
+                extension_kinds: vec!["paykit.payment_request".into()],
+                ..Default::default()
+            },
+            "extension_kinds",
+        ),
+    ] {
+        assert!(
+            matches!(construct(Some(config)), Err(WalletError::InvalidInput { field }) if field == name)
+        );
+    }
+    assert_eq!(construct(None)?.config, PaykitConfig::default());
+    assert_eq!(
+        construct(Some(WalletConfig::default()))?.config,
+        PaykitConfig::default()
+    );
+    let config = WalletConfig {
+        orphan_after_s: Some(3600),
+        selling_label: Some("shop".into()),
+        resend_budget: Some(0),
+        extension_kinds: vec!["paykit-cap.offer".into()],
+        publishes_record: Some(true),
+    };
+    let scopes = WalletScopes {
+        request_labels: vec!["shop".into()],
+        extensions: vec!["paykit-cap".into()],
+        ..Default::default()
+    };
+    let (host, wallet, id, _) = Box::pin(enrolled_wallet(
+        world,
+        root.path(),
+        account,
+        scopes,
+        Some(config),
+    ))
+    .await?;
+    let mut expected = PaykitConfig::default()
+        .with_orphan_after_s(3600)
+        .with_selling_label(Label::new("shop")?)
+        .with_resend_budget(0)
+        .with_extension_kinds(vec![ExtensionKind::new("paykit-cap.offer")?]);
+    expected.app.publishes_record = true;
+    assert_eq!(host.config, expected);
+    let check_record = async |app: &mut Paykit| -> TestResult {
+        assert!(app.app().publishes_record());
+        let record =
+            pubky_switch_core::records::AppRecord::verify(app.app().record(), &app.identity())?;
+        assert!(record.accepts("paykit-cap.offer"));
+        Ok(())
+    };
+    wallet.lend(&check_record).await??;
+    let backup = wallet.backup().await?;
+    wallet.shutdown().await?;
+    let restored = Box::pin(host.restore(id, backup, BackupDevice::KnownWiped)).await?;
+    restored.lend(check_record).await??;
+    restored.shutdown().await?;
+    Ok(())
+}
+
+#[test]
+fn test_wallet_config_applies_sdk_defaults_and_host_choices() {
+    run(Backend::Scripted, wallet_config);
+    run(Backend::Service, wallet_config);
 }

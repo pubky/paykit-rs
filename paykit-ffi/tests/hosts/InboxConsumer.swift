@@ -8,16 +8,21 @@ func checkInbox(fixture: CheckoutFixture, wallet: NativeWallet) async throws {
     let messages = try await wallet.extensionMessages()
     precondition(count == 0 && messages.isEmpty)
     try await wallet.acknowledgeExtensionMessage(sender: payee, msgId: "00000000-0000-4000-8000-000000000001")
-    do {
-        _ = try await wallet.sendExtension(to: payee, kind: "paykit-cap.offer", refs: [Data(repeating: 0, count: 32)], bodyJson: "{}")
-        preconditionFailure("sent without the extension scope")
-    } catch let WalletError.NeedsUser(failure) {
-        precondition(failure.code() == "scope_missing")
-        guard case let .scopeMissing(scope)? = failure.refusal()?.kind() else {
-            preconditionFailure("missing extension scope expected")
-        }
-        precondition(scope == "paykit_ext:paykit-cap")
-    }
+    let id = try await wallet.sendExtension(to: payee, kind: "paykit-cap.offer", refs: [Data(repeating: 0, count: 32)], bodyJson: "{}")
+    precondition(UUID(uuidString: id) != nil)
     let remaining = try await wallet.extensionMessages()
     precondition(remaining.isEmpty)
+}
+
+func checkClosedInbox(wallet: NativeWallet, peer: Data) async throws {
+    func closed<T>(_ call: () async throws -> T) async throws {
+        do {
+            _ = try await call()
+            preconditionFailure("inbox call succeeded after shutdown")
+        } catch WalletError.Closed {}
+    }
+    try await closed { try await wallet.spamCount(sender: peer) }
+    try await closed { try await wallet.extensionMessages() }
+    try await closed { try await wallet.acknowledgeExtensionMessage(sender: peer, msgId: "00000000-0000-4000-8000-000000000001") }
+    try await closed { try await wallet.sendExtension(to: peer, kind: "paykit-cap.offer", refs: [], bodyJson: "{}") }
 }

@@ -6,6 +6,7 @@ mod allowances;
 #[cfg(feature = "test-wallet")]
 #[path = "../tests/hosts/checkout.rs"]
 mod checkout;
+mod config;
 mod enrollment;
 mod environment;
 mod error;
@@ -41,6 +42,7 @@ mod wallet;
 pub use allowances::*;
 #[cfg(feature = "test-wallet")]
 pub use checkout::{enrolled_test_checkout, CheckoutFixture};
+pub use config::*;
 pub use enrollment::*;
 pub use environment::*;
 pub use error::*;

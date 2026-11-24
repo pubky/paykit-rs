@@ -112,20 +112,28 @@ impl From<Publication> for ListPublicationRecord {
 }
 
 impl ListPublicationRecord {
-    fn into_wire_value(self) -> Result<Value, WalletError> {
+    fn into_wire_value(self, field: &str) -> Result<Value, WalletError> {
+        let member = |name: &str| format!("{field}.{name}");
+        // A reservation names a positive Switch integer for each part of its version
+        // and a lower-case UUID v4 for its message (Paykit wire 5.8).
+        for (name, value) in [("generation", self.generation), ("counter", self.counter)] {
+            if !(1..=pubky_switch_core::json::MAX_INT).contains(&value) {
+                return Err(WalletError::invalid(&member(name)));
+            }
+        }
+        pubky_switch_core::json::check_uuid_v4(&self.msg_id)
+            .map_err(|_| WalletError::invalid(&member("msg_id")))?;
         let record = Publication {
-            publisher: fixed(self.publisher, "publisher")?,
-            recipient: fixed(self.recipient, "recipient")?,
+            publisher: fixed(self.publisher, &member("publisher"))?,
+            recipient: fixed(self.recipient, &member("recipient"))?,
             generation: self.generation,
             counter: self.counter,
             msg_id: self.msg_id,
-            message_hash: fixed(self.message_hash, "message_hash")?,
+            message_hash: fixed(self.message_hash, &member("message_hash"))?,
             unknown: Default::default(),
         };
-        let bytes = record
-            .to_json()
-            .map_err(|_| WalletError::invalid("publication record"))?;
-        serde_json::from_slice(&bytes).map_err(|_| WalletError::invalid("publication record"))
+        let bytes = record.to_json().map_err(|_| WalletError::invalid(field))?;
+        serde_json::from_slice(&bytes).map_err(|_| WalletError::invalid(field))
     }
 }
 
@@ -162,8 +170,8 @@ impl TryFrom<ListPublicationConflict> for PublicationConflict {
         serde_json::from_value(json!({
             "application_hash": b64(&hash),
             "other_applications": conflict.other_applications,
-            "held": conflict.held.into_wire_value()?,
-            "refused": conflict.refused.into_wire_value()?,
+            "held": conflict.held.into_wire_value("held")?,
+            "refused": conflict.refused.into_wire_value("refused")?,
         }))
         .map_err(|_| WalletError::invalid("publication conflict"))
     }
@@ -258,4 +266,54 @@ impl NativeWallet {
         })
         .await
     }
+}
+
+/// Restore the test seller and give up its first list after the recipient's inbox accepts
+/// it and the answer is lost (Paykit spec 8.4.1, 9, Switch spec 11, 12.4).
+#[cfg(any(test, feature = "test-wallet"))]
+pub(crate) async fn restored_list_seller(
+    world: &pubky_switch_harness::World,
+    host: &crate::WalletHost,
+    app_id: Vec<u8>,
+    backup: Vec<u8>,
+    recipient: [u8; 32],
+) -> Result<Arc<NativeWallet>, WalletError> {
+    let seller = host
+        .restore(app_id, backup, crate::BackupDevice::InPossession)
+        .await?;
+    while seller.receive().await?.more {}
+    seller.reconcile().await?;
+    seller.end_confirmed_reconciliation().await?;
+    seller
+        .set_list_endpoints(vec![ListEndpoint {
+            identifier: "btc-lightning-bolt11".into(),
+            payload: "lnbc1example".into(),
+        }])
+        .await?;
+    world.lose_answer("POST", "/inbox");
+    seller.publish_list_to(recipient.into()).await?;
+    seller
+        .with_wallet(move |app| {
+            Box::pin(async move {
+                let list = app
+                    .app()
+                    .queued_messages("paykit")
+                    .await?
+                    .into_iter()
+                    .find(|message| {
+                        message.to == recipient && message.kind == "paykit.private_payment_list"
+                    })
+                    .ok_or_else(|| WalletError::invalid("queued test list"))?;
+                if !app
+                    .app_mut()
+                    .withdraw_message("paykit", &list.msg_id)
+                    .await?
+                {
+                    return Err(WalletError::invalid("queued test list"));
+                }
+                Ok(())
+            })
+        })
+        .await?;
+    Ok(seller)
 }

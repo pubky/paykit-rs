@@ -1,11 +1,11 @@
 # Paykit wallets for Kotlin and Swift
 
-`WalletEnrollment` prepares a payer application for the signer and keeps the selected approval on the device. Both languages use the same native implementation. The Kotlin package is `com.synonym.paykit`. The Swift module is `Paykit`.
+`WalletEnrollment` prepares a wallet application for the signer and keeps the selected approval on the device. Both languages use the same native implementation. The Kotlin package is `com.synonym.paykit`. The Swift module is `Paykit`.
 
 Use a host-owned, protected store with process-wide and cross-process writer exclusion for each physical namespace. Implement key reads and an atomic, durable commit that verifies the exact owner in the same transaction. Report an unknown outcome when a commit may have applied. If acquisition may have applied before its answer was lost, report an unknown outcome. A release can be retried with the original token. It must leave a newer owner intact. A process exit must release its ownership. Keep signing material and the protected approval out of system backups and logs.
 
 1. Save a random 16-byte enrollment reference, then call `beginEnrollment` for its App ID and public record path.
-2. Call `prepareEnrollment` with the original Pubky authentication request and secret. Give the returned signed app request to the signer.
+2. Call `prepareEnrollment` with the original Pubky authentication request, secret and a nonempty `WalletScopes`. For a payer, use `WalletScopes(pay = true)` in Kotlin or `WalletScopes(pay: true)` in Swift. The SDK adds required scopes, including contacts for a payer. Choose either `request` for all sales or `requestLabels` for labelled sales. Use prefixes such as `paykit-cap` in `extensions`. A retry with a different effective scope set returns `EnrollmentConflict` (Paykit spec 3.1, 3.2). Give the returned signed app request to the signer.
 3. Call `acceptApproval` with the user's selected identity and the original signed companion claim. It verifies the identity, the request, certificate and scope keys before committing the original result. An interrupted host reopens the same reference.
 
 ## Threads, waiting and the payment method
@@ -21,6 +21,8 @@ Paykit calls the host's store, Homeserver and payment method from its own thread
 ## Install and reopen the approved payer
 
 Create a `WalletHost` with the same protected store, the user's authenticated Homeserver session, the host's payment method, the method's `MethodDeclaration` and the endpoints it pays, each an `EndpointSupport` with its Payment Endpoint Identifier and the fractional digits it supports for that endpoint's transfer amount. The declaration and endpoints are given once: a method whose guarantees change is given to a new `WalletHost`. The store also provides ordered key scans and conditional deletes for the installed Switch app. Call `completeEnrollment` with the original enrollment reference. If the process stops during installation, use the same reference again. After installation, `load` opens the same App ID and keys. Shut down the existing writer before opening another handle for the same physical store.
+
+The optional `config` argument to `WalletHost` applies to enrollment, load and restore. Omit it for the SDK defaults. In `WalletConfig`, `orphanAfterS` sets the orphan age in seconds (the default is the rail's floor), `sellingLabel` selects the label for outgoing requests, and `resendBudget` sets the daily message budget per requester. List each extension kind the host handles in `extensionKinds`, such as `paykit-cap.offer`. Its prefix must be approved for the app to receive it. Set `publishesRecord` to true to publish the app record through the host's authenticated Homeserver session. Adding a public Payment Endpoint also requires the unlabelled request scope (Paykit spec 3.1, 3.3, 4, 7.2, 9, Switch spec 4.2).
 
 If an install or load fails after acquiring its writer, the call waits for release before returning the original failure. A release that cannot be confirmed returns a storage error, and the next opener retries that exact owner. An enrollment still waiting for approval only reads its enrollment reference.
 
@@ -53,6 +55,8 @@ Ask whether the source device is still in the user's possession or known to have
 ## Receive and acknowledge
 
 Call `receive` on startup and after a feed wake. It returns one bounded report. Use `more` to decide when to read another page. If `stopped` is set, inspect the reported event. Persist or show each duty before acknowledging its ID with `acknowledgeEvents`. This acknowledges the processed prefix for Paykit. Each other protocol in a shared app remains responsible for its own duties.
+
+`messageDelivery` can return no entry after retention expires or after a restore. A `Failed` delivery can follow a refused retry when the recipient accepted an earlier try and its answer was lost. Check the request or record before sending a replacement (Switch spec 11, 12.4).
 
 After an interruption, `unacknowledgedEvents` lists surviving Paykit duties in order. After a failed receive, keep those events and wait for a successful receive before acknowledging through the last duty in that report. `recoveryRequired` returns the current signed service notice across reopen even after acknowledging delivery. A clearance event names the generation that was held. The receive cursor can already be in the next generation.
 

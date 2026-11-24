@@ -7,28 +7,18 @@ func checkPublic(fixture: CheckoutFixture, wallet: NativeWallet) async throws {
     precondition(endpoints.isEmpty)
     let endpoint = PublicEndpoint(identifier: "btc-lightning-bolt11", payload: "lnbc1public")
 
-    func checkSellingScope(_ publish: () async throws -> PublicationState) async throws {
-        do {
-            _ = try await publish()
-            preconditionFailure("payer published a public Payment Endpoint")
-        } catch let WalletError.NeedsUser(failure) {
-            precondition(failure.code() == "scope_missing")
-            guard case let .scopeMissing(scope)? = failure.refusal()?.kind(), scope == "paykit_request" else {
-                preconditionFailure("expected the public Payment Endpoint selling scope")
-            }
-        }
-    }
-    try await checkSellingScope {
-        try await wallet.setPublicEndpoint(identifier: endpoint.identifier, payload: endpoint.payload)
-    }
-    try await checkSellingScope {
-        try await wallet.setPublicEndpoints(endpoints: [endpoint], expiresAtMs: nil)
+    let published = try await wallet.setPublicEndpoint(identifier: endpoint.identifier, payload: endpoint.payload)
+    let own = try await wallet.ownPublicEndpoints()
+    guard case .published = published, own == [endpoint] else {
+        preconditionFailure("the public Payment Endpoint was not published")
     }
     let removed = try await wallet.removePublicEndpoint(identifier: endpoint.identifier)
+    let withdrawn = try await wallet.ownPublicEndpoints()
+    precondition(withdrawn.isEmpty)
     let cleared = try await wallet.setPublicEndpoints(endpoints: [], expiresAtMs: fixture.nowMs())
     let refreshed = try await wallet.updateOwnRecord()
-    guard case .notPublishing = removed, case .notPublishing = cleared, case .notPublishing = refreshed else {
-        preconditionFailure("unexpected payer publication state")
+    guard case .published = removed, case .published = cleared, case .published = refreshed else {
+        preconditionFailure("the cleared public record was not published")
     }
     let remaining = try await wallet.ownPublicEndpoints()
     precondition(remaining.isEmpty)

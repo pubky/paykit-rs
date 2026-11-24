@@ -29,9 +29,6 @@ fn endpoint(identifier: &str, payload: &str) -> PublicEndpoint {
     }
 }
 
-// The test wallet is enrolled to pay only, so its writes of public endpoints are refused for
-// the selling scope. A successful publication needs a wallet enrolled with that scope, which
-// the choice of scopes at enrolment brings.
 async fn public_endpoints(world: &World) -> TestResult {
     let root = tempfile::tempdir()?;
     let account = Arc::new(Account::open(root.path(), world.clock().clone()));
@@ -82,6 +79,48 @@ async fn public_endpoints(world: &World) -> TestResult {
 fn test_public_endpoints_without_a_selling_grant() {
     run(Backend::Scripted, public_endpoints);
     run(Backend::Service, public_endpoints);
+}
+
+async fn publish_endpoint(world: &World) -> TestResult {
+    let root = tempfile::tempdir()?;
+    let account = Arc::new(Account::open(root.path(), world.clock().clone()));
+    let scopes = crate::WalletScopes {
+        request: true,
+        ..Default::default()
+    };
+    let config = crate::WalletConfig {
+        publishes_record: Some(true),
+        ..Default::default()
+    };
+    let (_, wallet, _, _) = Box::pin(super::wallet::enrolled_wallet(
+        world,
+        root.path(),
+        account,
+        scopes,
+        Some(config),
+    ))
+    .await?;
+    let offer = endpoint(IDENTIFIER, "lnbc1public");
+    assert_eq!(
+        wallet
+            .set_public_endpoint(offer.identifier.clone(), offer.payload.clone())
+            .await?,
+        PublicationState::Published
+    );
+    assert_eq!(wallet.own_public_endpoints().await?, [offer]);
+    assert_eq!(
+        wallet.remove_public_endpoint(IDENTIFIER.into()).await?,
+        PublicationState::Published
+    );
+    assert!(wallet.own_public_endpoints().await?.is_empty());
+    wallet.shutdown().await?;
+    Ok(())
+}
+
+#[test]
+fn test_public_endpoint_publishes_lists_and_removes() {
+    run(Backend::Scripted, publish_endpoint);
+    run(Backend::Service, publish_endpoint);
 }
 
 async fn invalid_endpoints(world: &World) -> TestResult {
@@ -368,7 +407,24 @@ fn test_delivery_and_transport_codes_name_each_known_answer() {
             "too_large",
         ),
         ("403 not_admitted", "not_admitted"),
+        (
+            "429 rate_limited: not_found before the body was read (status 404)",
+            "rate_limited",
+        ),
         ("500 not_admitted", "unknown"),
+        (
+            "rate_limited before the body was read (status 429)",
+            "rate_limited",
+        ),
+        (
+            "too_large before the body was read (status 413)",
+            "too_large",
+        ),
+        (
+            "not_found before the body was read (status 404)",
+            "not_found",
+        ),
+        ("not_found before the body was read (status 503)", "unknown"),
     ] {
         let delivery = MessageDelivery::from(D::Queued {
             tries: 1,

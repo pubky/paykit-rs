@@ -79,7 +79,7 @@ private suspend fun checkoutFromMain(directory: File) {
         val secret = ByteArray(32) { 9 }
         WalletEnrollment(store).use { owner ->
             val info = owner.beginEnrollment(reference)
-            val request = owner.prepareEnrollment(reference, "wallet.example", ByteArray(32) { 8 }, info.appRecordPath + ":rw", secret)
+            val request = owner.prepareEnrollment(reference, "wallet.example", ByteArray(32) { 8 }, info.appRecordPath + ":rw", secret, WalletScopes(pay = true))
             owner.acceptApproval(reference, fixture.identity(), fixture.approve(request.signedRequest, secret))
         }
         fixture.host().use { host ->

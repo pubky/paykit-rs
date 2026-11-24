@@ -1,7 +1,8 @@
 use crate::{
-    EndpointSupport, HostRail, MethodDeclaration, PaymentMethod, WalletError, WalletStore,
+    EndpointSupport, HostRail, MethodDeclaration, PaymentMethod, WalletConfig, WalletError,
+    WalletStore,
 };
-use paykit_sdk::{PaymentEndpointIdentifier, Timer};
+use paykit_sdk::{PaykitConfig, PaymentEndpointIdentifier, Timer};
 use pubky_switch_client::app::{HomeserverReader, HomeserverWriter};
 use pubky_switch_client::clock::{Clock, SystemClock};
 
@@ -107,6 +108,7 @@ impl Timer for RuntimeTimer {
 /// A Paykit application's protected store, Pubky session and payment method.
 #[derive(Clone, uniffi::Object)]
 pub struct WalletHost {
+    pub(crate) config: PaykitConfig,
     pub(crate) clock: Arc<dyn Clock>,
     pub(crate) transport: Arc<dyn Transport>,
     pub(crate) home: Arc<dyn HomeserverReader>,
@@ -119,20 +121,27 @@ pub struct WalletHost {
 impl WalletHost {
     /// Use this protected store, Pubky session and payment method for wallet operations. The
     /// method's declaration and the endpoints it supports are given here, once: a method whose
-    /// guarantees change is given to a new `WalletHost`.
-    #[uniffi::constructor]
+    /// guarantees change is given to a new `WalletHost`. Omit the config for the SDK defaults
+    /// (Paykit spec 3.3, 7.2, 9, Switch spec 4.2).
+    #[uniffi::constructor(default(config = None))]
     pub fn new(
         store: Arc<dyn WalletStore>,
         homeserver: Arc<dyn WalletHomeserver>,
         method: Arc<dyn PaymentMethod>,
         declaration: MethodDeclaration,
         endpoints: Vec<EndpointSupport>,
+        config: Option<WalletConfig>,
     ) -> Result<Arc<Self>, WalletError> {
         let endpoints = supported_endpoints(endpoints)?;
+        let config = config
+            .map(PaykitConfig::try_from)
+            .transpose()?
+            .unwrap_or_default();
         let home = Arc::new(Home(homeserver));
         let transport = HttpTransport::new(HttpConfig::default())
             .map_err(|_| WalletError::invalid("HTTPS transport configuration"))?;
         Ok(Arc::new(Self {
+            config,
             clock: Arc::new(SystemClock),
             transport: Arc::new(transport),
             home: home.clone(),

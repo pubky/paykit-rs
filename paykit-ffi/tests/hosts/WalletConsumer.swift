@@ -416,21 +416,21 @@ private enum WalletConsumer {
             let entry = try await first.beginEnrollment(reference: reference)
             do {
                 _ = try await first.prepareEnrollment(reference: reference, clientId: "wallet.example",
-                    clientKey: key, capabilities: "/pub/another.json:rw", authSecret: secret)
+                    clientKey: key, capabilities: "/pub/another.json:rw", authSecret: secret, scopes: WalletScopes(pay: true))
                 preconditionFailure("invalid app capabilities were pinned")
             } catch WalletError.InvalidInput(let field) { precondition(field == "capabilities") }
-            original = try await first.prepareEnrollment(reference: reference, clientId: "wallet.example", clientKey: key, capabilities: entry.appRecordPath + ":rw", authSecret: secret)
+            original = try await first.prepareEnrollment(reference: reference, clientId: "wallet.example", clientKey: key, capabilities: entry.appRecordPath + ":rw", authSecret: secret, scopes: WalletScopes(pay: true))
         }
         let next = host()
         let entry = try await next.beginEnrollment(reference: reference)
         precondition(entry.appId == original.appId)
         let caps = entry.appRecordPath + ":rw"
-        let resumed = try await next.prepareEnrollment(reference: reference, clientId: "wallet.example", clientKey: key, capabilities: caps, authSecret: secret)
+        let resumed = try await next.prepareEnrollment(reference: reference, clientId: "wallet.example", clientKey: key, capabilities: caps, authSecret: secret, scopes: WalletScopes(pay: true))
         precondition(resumed.requestHash == original.requestHash && resumed.signedRequest == original.signedRequest)
         precondition(String(reflecting: resumed) == "EnrollmentRequest(<redacted>)")
         precondition(Mirror(reflecting: resumed).children.isEmpty)
         do {
-            _ = try await next.prepareEnrollment(reference: reference, clientId: "wallet.example", clientKey: key, capabilities: caps, authSecret: Data(repeating: 10, count: 32))
+            _ = try await next.prepareEnrollment(reference: reference, clientId: "wallet.example", clientKey: key, capabilities: caps, authSecret: Data(repeating: 10, count: 32), scopes: WalletScopes(pay: true))
             preconditionFailure("changed secret accepted")
         } catch WalletError.EnrollmentConflict {}
         // Cancelling the Swift task does not stop the call: its commit keeps the physical
@@ -441,7 +441,7 @@ private enum WalletConsumer {
         store.holdNextWrite()
         let task = Task {
             try await next.prepareEnrollment(reference: interrupted, clientId: "wallet.example",
-                clientKey: key, capabilities: interruptedCaps, authSecret: secret)
+                clientKey: key, capabilities: interruptedCaps, authSecret: secret, scopes: WalletScopes(pay: true))
         }
         let arrived = await store.waitForChange(false)
         precondition(arrived)
@@ -459,10 +459,10 @@ private enum WalletConsumer {
         precondition(released)
         let reopened = host()
         let recovered = try await reopened.prepareEnrollment(reference: interrupted, clientId: "wallet.example",
-            clientKey: key, capabilities: interruptedCaps, authSecret: secret)
+            clientKey: key, capabilities: interruptedCaps, authSecret: secret, scopes: WalletScopes(pay: true))
         precondition(recovered.appId == pending.appId)
         let again = try await reopened.prepareEnrollment(reference: interrupted, clientId: "wallet.example",
-            clientKey: key, capabilities: interruptedCaps, authSecret: secret)
+            clientKey: key, capabilities: interruptedCaps, authSecret: secret, scopes: WalletScopes(pay: true))
         precondition(recovered.signedRequest == again.signedRequest)
         guard let issuer = ProcessInfo.processInfo.environment["PAYKIT_TEST_ISSUER"] else {
             preconditionFailure("the enrolled signer is required")
