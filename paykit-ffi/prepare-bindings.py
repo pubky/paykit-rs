@@ -231,24 +231,138 @@ SWIFT_WRAPPERS = {
         handleSuccess(callResult)
 """),
 }
+# The rest of each wrapper, as generated and without its comment lines: what comes before
+# its block, from its declaration on, and what comes after, to its closing brace. A wrapper
+# is guarded only when the whole function is the generated one, so nothing that calls the
+# host's method stands outside the guarded block.
+KOTLIN_SHELLS = {
+    "uniffiTraitInterfaceCall": ("""\
+internal inline fun<T> uniffiTraitInterfaceCall(
+    callStatus: UniffiRustCallStatus,
+    makeCall: () -> T,
+    writeReturn: (T) -> Unit,
+) {
+""", """\
+}
+"""),
+    "uniffiTraitInterfaceCallWithError": ("""\
+internal inline fun<T, reified E: Throwable> uniffiTraitInterfaceCallWithError(
+    callStatus: UniffiRustCallStatus,
+    makeCall: () -> T,
+    writeReturn: (T) -> Unit,
+    lowerError: (E) -> RustBuffer.ByValue
+) {
+""", """\
+}
+"""),
+    "uniffiTraitInterfaceCallAsync": ("""\
+internal inline fun<T> uniffiTraitInterfaceCallAsync(
+    crossinline makeCall: suspend () -> T,
+    crossinline handleSuccess: (T) -> Unit,
+    crossinline handleError: (UniffiRustCallStatus.ByValue) -> Unit,
+): UniffiForeignFuture {
+    @OptIn(DelicateCoroutinesApi::class)
+    val job = GlobalScope.launch coroutineBlock@ {
+""", """\
+    }
+    val handle = uniffiForeignFutureHandleMap.insert(job)
+    return UniffiForeignFuture(handle, uniffiForeignFutureFreeImpl)
+}
+"""),
+    "uniffiTraitInterfaceCallAsyncWithError": ("""\
+internal inline fun<T, reified E: Throwable> uniffiTraitInterfaceCallAsyncWithError(
+    crossinline makeCall: suspend () -> T,
+    crossinline handleSuccess: (T) -> Unit,
+    crossinline handleError: (UniffiRustCallStatus.ByValue) -> Unit,
+    crossinline lowerError: (E) -> RustBuffer.ByValue,
+): UniffiForeignFuture {
+    @OptIn(DelicateCoroutinesApi::class)
+    val job = GlobalScope.launch coroutineBlock@ {
+""", """\
+    }
+    val handle = uniffiForeignFutureHandleMap.insert(job)
+    return UniffiForeignFuture(handle, uniffiForeignFutureFreeImpl)
+}
+"""),
+}
+SWIFT_SHELLS = {
+    "uniffiTraitInterfaceCall": ("""\
+private func uniffiTraitInterfaceCall<T>(
+    callStatus: UnsafeMutablePointer<RustCallStatus>,
+    makeCall: () throws -> T,
+    writeReturn: (T) -> ()
+) {
+""", """\
+}
+"""),
+    "uniffiTraitInterfaceCallWithError": ("""\
+private func uniffiTraitInterfaceCallWithError<T, E>(
+    callStatus: UnsafeMutablePointer<RustCallStatus>,
+    makeCall: () throws -> T,
+    writeReturn: (T) -> (),
+    lowerError: (E) -> RustBuffer
+) {
+""", """\
+}
+"""),
+    "uniffiTraitInterfaceCallAsync": ("""\
+private func uniffiTraitInterfaceCallAsync<T>(
+    makeCall: @escaping () async throws -> T,
+    handleSuccess: @escaping (T) -> (),
+    handleError: @escaping (Int8, RustBuffer) -> ()
+) -> UniffiForeignFuture {
+    let task = Task {
+        var callResult: T
+""", """\
+    }
+    let handle = UNIFFI_FOREIGN_FUTURE_HANDLE_MAP.insert(obj: task)
+    return UniffiForeignFuture(handle: handle, free: uniffiForeignFutureFree)
+
+}
+"""),
+    "uniffiTraitInterfaceCallAsyncWithError": ("""\
+private func uniffiTraitInterfaceCallAsyncWithError<T, E>(
+    makeCall: @escaping () async throws -> T,
+    handleSuccess: @escaping (T) -> (),
+    handleError: @escaping (Int8, RustBuffer) -> (),
+    lowerError: @escaping (E) -> RustBuffer
+) -> UniffiForeignFuture {
+    let task = Task {
+        var callResult: T
+""", """\
+    }
+    let handle = UNIFFI_FOREIGN_FUTURE_HANDLE_MAP.insert(obj: task)
+    return UniffiForeignFuture(handle: handle, free: uniffiForeignFutureFree)
+}
+"""),
+}
 
 
-def guard_wrappers(source, language, declaration, entry, wrappers):
+def without_comments(text):
+    """`text` without the lines that hold only a comment."""
+    return "".join(line for line in text.splitlines(keepends=True)
+                   if not line.lstrip().startswith("//"))
+
+
+
+def guard_wrappers(source, language, declaration, entry, wrappers, shells):
     """Replace, in every wrapper `source` declares, the generated block with the guarded
-    one. Refuse a wrapper whose block isn't the generated one, and a host callback that
-    isn't called through a guarded wrapper for a method that declares a failure."""
+    one. Refuse a wrapper that isn't, comments aside, the generated function, and a host
+    callback that isn't called through a guarded wrapper for a method that declares a
+    failure."""
     declared = set()
     for name, (generated, guarded) in wrappers.items():
         found = re.search(declaration.format(name=name), source, re.MULTILINE)
         if not found:
             continue
         declared.add(name)
-        end = source.index("\n}\n", found.end())
-        body = source[found.end():end + 1]
-        if body.count(generated) != 1:
+        end = source.index("\n}\n", found.end()) + len("\n}\n")
+        function = source[found.start():end]
+        head, tail = shells[name]
+        if without_comments(function) != head + generated + tail or function.count(generated) != 1:
             raise ValueError(f"{language}: {name} isn't the callback wrapper expected")
         guarded = guarded.replace("CALLBACK_FAILURE", CALLBACK_FAILURE)
-        source = source[:found.end()] + body.replace(generated, guarded) + source[end + 1:]
+        source = source[:found.start()] + function.replace(generated, guarded) + source[end:]
     calls = re.findall(r"^\s+(?:let \w+ = )?(uniffiTraitInterfaceCall\w*)\(", source, re.MULTILINE)
     if not set(calls) <= declared:
         raise ValueError(f"{language}: a callback wrapper isn't guarded: {sorted(set(calls) - declared)}")
@@ -281,7 +395,7 @@ def guard_callbacks(kotlin, swift):
     kotlin = guard_wrappers(
         kotlin, "Kotlin", r"^internal inline fun<[^>]*> {name}\(",
         r"^\s+internal object `[^`]+`: UniffiCallbackInterface\w+Method\d+ \{$",
-        KOTLIN_WRAPPERS,
+        KOTLIN_WRAPPERS, KOTLIN_SHELLS,
     )
     if re.search(r"catch\s*\(\s*\w+\s*:\s*(?:kotlin\.)?Exception\s*\)\s*\{", kotlin):
         raise ValueError("Kotlin: a generated handler catches Exception only")
@@ -290,7 +404,7 @@ def guard_callbacks(kotlin, swift):
     swift = guard_wrappers(
         swift, "Swift", r"^private func {name}<[^>]*>\(",
         r"^\s+uniffiHandle: UInt64,$",
-        SWIFT_WRAPPERS,
+        SWIFT_WRAPPERS, SWIFT_SHELLS,
     )
     if "lower(String(describing: error))" in swift:
         raise ValueError("Swift: a generated handler describes what was thrown")
