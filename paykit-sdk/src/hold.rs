@@ -123,6 +123,29 @@ impl HeldRequest {
     }
 }
 
+/// An Allowance as the user is shown it to confirm its automatic payment again
+/// ([`Refusal::AllowanceConfirmationNeeded`], [`crate::AllowanceView::hold`]; Paykit spec
+/// 8.3, "Ends reach the executor"): its record, and the hold in force when it was shown, set
+/// by the latest restore or `missed` item, if any. The user's confirmation carries it back
+/// ([`Paykit::confirm_allowance_executor`]) and counts only for that hold: once a newer
+/// restore or `missed` item has set another, the confirmation is refused with the hold in
+/// force now, and nothing is written, so the user is asked again. It also carries the
+/// provider loss the app had followed: a confirmation shown before a newer loss is refused
+/// the same way (Paykit spec 8.3, "After provider loss").
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AllowanceHold {
+    record: [u8; 32],
+    epoch: Option<HoldEpoch>,
+    loss: Option<u64>,
+}
+
+impl AllowanceHold {
+    /// The Allowance's record key.
+    pub fn record(&self) -> [u8; 32] {
+        self.record
+    }
+}
+
 /// The hold a restore set (`p/rh`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -609,6 +632,15 @@ impl Paykit {
     /// The current hold identifier (`he`), `None` before any restore or `missed` item.
     pub(crate) async fn current_hold(&self) -> Result<Option<HoldEpoch>> {
         self.local_get::<HoldEpoch>(key::HOLD_EPOCH).await
+    }
+
+    /// The Allowance at `record` with the hold in force now, as the user is shown it.
+    pub(crate) async fn allowance_hold(&self, record: &[u8; 32]) -> Result<AllowanceHold> {
+        Ok(AllowanceHold {
+            record: *record,
+            epoch: self.current_hold().await?,
+            loss: self.app.own_identity().body().recovery_from,
+        })
     }
 
     /// Whether this app holds the user's approval of automatic execution of the Allowance
