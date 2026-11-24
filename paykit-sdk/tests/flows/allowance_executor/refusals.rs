@@ -1543,3 +1543,49 @@ async fn test_allowance_refusals_restore_before_the_acceptance_asks_no_confirmat
         Refusal::AllowanceConfirmationNeeded { .. }
     ));
 }
+
+#[tokio::test]
+async fn test_allowance_refusals_stale_subscription_copy_waits_for_a_read() {
+    // Another wallet of alice's rejects the subscription after this wallet last read it.
+    // Its answer under the Allowance starts from a copy older than the fresh record: a
+    // wait, not a hold for the user (Paykit spec 8.1); the next answer, read again, sees
+    // the rejection.
+    let (w, mut payer, mut shop, key) = Box::pin(first_grant_in(store(), terms())).await;
+    let start = w.clock.now_ms() / 1_000 * 1_000;
+    let schedule = Recurrence::new(
+        AnchoredRule::new(start, 1, Unit::Hour).unwrap(),
+        start,
+        None,
+    )
+    .unwrap();
+    let request = Box::pin(request_from(
+        &mut shop,
+        payer.identity(),
+        draft("1", start).with_recurrence(schedule),
+    ))
+    .await;
+    Box::pin(payer.receive(None)).await.unwrap();
+    let mut phone = w
+        .join_with(
+            &w.alice,
+            "phone",
+            paykit_sdk::AppScopes::new().pay().build().unwrap(),
+            paykit_sdk::PaykitConfig::default(),
+            store(),
+        )
+        .await;
+    Box::pin(phone.receive(None)).await.unwrap();
+    Box::pin(phone.reject_request(&request, None))
+        .await
+        .unwrap();
+    let refused =
+        refusal_of(Box::pin(payer.accept_subscription_under_allowance(&request, &key)).await);
+    assert!(
+        matches!(
+            refused,
+            Refusal::NotNow(paykit_sdk::NotNowReason::ReadAgain(_))
+        ),
+        "{refused:?}"
+    );
+    assert!(w.rail.all_executions().is_empty());
+}

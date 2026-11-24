@@ -501,7 +501,8 @@ pub enum NotNowKind {
     /// A record's value is sealed under keys not stored yet; the signer stores them when
     /// online.
     ValueAwaitsKey,
-    /// The block floor can't be read now; a later receive clears this.
+    /// The block floor can't be read now; a later receive clears this, though a floor deleted
+    /// or lost keeps it: if it stays, show that blocks and unblocks wait.
     FloorUnreadable,
     /// A raise of the block floor left unwritten waits before it is tried again.
     FloorRaiseWaiting,

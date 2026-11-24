@@ -2645,12 +2645,17 @@ impl Paykit {
             let fresh = self.current_period_activity(&target, None).await?;
             let request_key = self.activity_key(&target)?;
             let held = self.app.shared_record(&request_key).await?;
-            // A copy not current or not authenticated waits for a read; a pause that blocks
-            // automatic acceptance is the user's to confirm (Paykit spec 8.1).
-            if !matches!(fresh, Some(ref current) if current.to_json()? == record.to_json()?)
-                || !held.is_some_and(|r| r.authenticated && !r.doubtful)
-            {
-                // Automatic acceptance only: the user may accept by hand.
+            // A copy older than the fresh one: the request stays bound to its signed hash, and
+            // the call made again starts from the fresh copy, so it waits (Paykit spec 8.1).
+            if !matches!(fresh, Some(ref current) if current.to_json()? == record.to_json()?) {
+                return Err(Refusal::NotNow(crate::NotNowReason::ReadAgain(
+                    "the subscription changed since it was read: answer the current one",
+                ))
+                .into());
+            }
+            // A held write not authenticated, or one nothing dates, lasts until a write the
+            // app takes replaces it: automatic acceptance only, so the user may accept by hand.
+            if !held.is_some_and(|r| r.authenticated && !r.doubtful) {
                 return Err(
                     Refusal::HeldForUser(crate::HeldForUserReason::HeldFromAutomatic).into(),
                 );

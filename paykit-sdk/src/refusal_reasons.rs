@@ -37,8 +37,9 @@ pub enum NotNowReason {
     )]
     ValueAwaitsKey,
     /// The block floor can't be read now: a kept floor write, no service time verified yet, a
-    /// first read pending or the switch not answering, which a later receive clears (Paykit
-    /// wire 5.6).
+    /// first read pending or the switch not answering, which a later receive clears. A floor
+    /// deleted, lost or not readable keeps it until the floor is written again, so a host
+    /// that meets it on every try shows that blocks and unblocks wait (Paykit wire 5.6).
     #[error("Paykit wire 5.6: the block floor can't be read now")]
     FloorUnreadable,
     /// A raise of the block floor left unwritten waits before it is tried again; the same

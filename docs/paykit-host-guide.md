@@ -658,7 +658,7 @@ Two rules override a code's case. A failure with a `keptBatch` comes as `Outcome
 | `records_not_listed` | `NotNowReason::RecordsNotListed` | `RetryLater` | `receive`, which lists the shared records, then call again. |
 | `scope_keys_awaited` | `NotNowReason::ScopeKeysAwaited` | `RetryLater` | The signer stores the certificate's keys when it is next online; tell the user if it stays. |
 | `value_awaits_key` | `NotNowReason::ValueAwaitsKey` | `RetryLater` | The signer stores the record's keys when it is next online; call again then. |
-| `floor_unreadable` | `NotNowReason::FloorUnreadable` | `RetryLater` | The block floor can't be read now: a kept floor write, no service time yet, a first read pending or the switch not answering; a later `receive` clears it. |
+| `floor_unreadable` | `NotNowReason::FloorUnreadable` | `RetryLater` | The block floor can't be read now: a kept floor write, no service time yet, a first read pending or the switch not answering; a later `receive` clears it. A floor deleted or lost keeps it: if it stays across tries, show that blocks and unblocks wait. |
 | `floor_raise_waiting` | `NotNowReason::FloorRaiseWaiting` | `RetryLater` | A block floor raise left unwritten waits before it is tried again: call again later. |
 | `no_service_time` | `NotNowReason::NoServiceTime` | `RetryLater` | `receive`, which verifies a service time, then call again. |
 | `read_again` | `NotNowReason::ReadAgain` | `RetryLater` | What the call relies on isn't verified or changed: `receive`, then call again. |
