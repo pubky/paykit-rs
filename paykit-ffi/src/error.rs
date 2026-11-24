@@ -440,7 +440,8 @@ fn recovery_code(reason: &crate::RecoveryNeededKind) -> &'static str {
 }
 
 /// The action a Switch service's error answer calls for, by the Retry column of Switch spec
-/// 6.4. The code is `switch_` and the wire's error code (Switch wire 7.6).
+/// 6.4. The code is `switch_` and the wire's error code (Switch wire 7.6). Every code carries
+/// its retry rule on the wire, so a code these bindings don't name takes the case of its rule.
 fn service_category(code: pubky_switch_core::http::ErrorCode) -> (Category, String) {
     use pubky_switch_core::http::{ErrorCode as E, Retry as R};
     use Category::*;
@@ -516,7 +517,8 @@ fn quota_category(limit: Option<&str>) -> (Category, String) {
         Some("connect_requests") => (NotSent, "switch_quota_connect_requests"),
         // Final for this obligation: no more attempts fit its claim.
         Some("attempts") => (Permanent, "switch_quota_final"),
-        // A limit these bindings don't know: shown, never retried by itself.
+        // A limit these bindings don't know: shown, never retried by itself, since what frees
+        // a limit differs by limit and only the user can be told which.
         _ => (NeedsUser, "switch_quota_exceeded"),
     };
     (category, code.into())
@@ -684,6 +686,12 @@ fn client_failure(e: &AppError) -> (Category, WalletFailure) {
     // A batch kept for this call may have applied: reconcile before trying again.
     if failure.kept_batch.is_some() && !matches!(category, Recovery) {
         category = OutcomeUnknown;
+    }
+    // The resend of a batch kept from an earlier call failed first: nothing of this call was
+    // kept or sent, since no write overtakes a kept batch, whatever the resend met. A stop of
+    // the wallet as a whole keeps its case.
+    if matches!(e, AppError::Ahead { .. }) && !matches!(category, Recovery) {
+        category = NotSent;
     }
     (category, failure)
 }

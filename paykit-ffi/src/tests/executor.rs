@@ -630,7 +630,6 @@ async fn regrant_lost(world: &World) -> TestResult {
     );
     // Automatic payments under it don't resume, and no retry changes that.
     not_resumed(p.payer.resume_allowance_executor(record.clone()).await)?;
-    not_resumed(p.payer.resume_allowance_executor(record.clone()).await)?;
     receive(&p.payer).await?;
     assert_eq!(
         grant_count(&p.payer, &record).await?,

@@ -1434,4 +1434,12 @@ fn test_wallet_errors_failures_after_sending_are_outcome_unknown() {
         assert_eq!((kept_case, kept.code.as_str()), ("outcome_unknown", code));
         assert_eq!(kept.kept_batch.as_deref(), Some([5; 16].as_slice()));
     }
+    // A delay an unread answer gives comes with the failure, in milliseconds.
+    let delayed = AppError::Switch(C::BodyUnread {
+        status: 429,
+        code: ErrorCode::RateLimited,
+        retry_after: Some(7),
+    });
+    let (_, delayed) = categorized(PaykitError::Client(delayed).into()).expect("categorized");
+    assert_eq!(delayed.retry_after_ms, Some(7_000));
 }

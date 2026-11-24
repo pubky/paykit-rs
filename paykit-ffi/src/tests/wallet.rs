@@ -239,12 +239,23 @@ async fn connect_after_earlier_batch(
             .into(),
         ),
     };
+    // Nothing of this call was kept or sent, whatever the earlier batch's resend met.
     assert!(
-        matches!(WalletError::from(service_reply), WalletError::RetryLater { failure }
+        matches!(WalletError::from(service_reply), WalletError::NotSent { failure }
         if failure.kept_batch.is_none() && failure.switch_refusal.is_some()
             && failure.service_code.as_deref() == Some("unavailable"))
     );
-    let WalletError::RetryLater { failure } = held.into() else {
+    let no_answer = pubky_switch_client::app::AppError::Ahead {
+        ahead: *ahead,
+        error: Box::new(pubky_switch_client::app::AppError::Transport(
+            pubky_switch_client::error::TransportError::Timeout,
+        )),
+    };
+    assert!(
+        matches!(WalletError::from(no_answer), WalletError::NotSent { failure }
+        if failure.code == "transport_no_answer" && failure.kept_batch.is_none())
+    );
+    let WalletError::NotSent { failure } = held.into() else {
         return Err("transport failure lost the earlier batch".into());
     };
     assert!(failure.kept_batch.is_none() && failure.service_code.is_none());
@@ -821,6 +832,11 @@ async fn journey(world: &World) -> TestResult {
         paykit_sdk::PaykitBackup::from_bytes(&backup)?.to_bytes()?,
         backup
     );
+    // Bytes that aren't a backup are the caller's input, refused before any store is opened.
+    assert!(matches!(
+        Box::pin(env.restore(vec![14; 16], vec![1, 2, 3], BackupDevice::InPossession)).await,
+        Err(WalletError::InvalidInput { field }) if field == "backup"
+    ));
     let identity = payer.identity().await?;
     let blocked_release = root.path().join("hold-release");
     std::fs::write(&blocked_release, [])?;
