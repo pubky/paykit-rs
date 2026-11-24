@@ -150,3 +150,32 @@ async fn test_own_record_upkeep_refused_by_the_switch_ends_the_receive() {
     // A refusal the stored entries' writes would count toward their window, not try again.
     receive_ended_by_the_upkeep(ErrorCode::PermissionMissing).await;
 }
+
+#[tokio::test]
+async fn test_own_record_homeserver_write_owed_told_at_the_receive() {
+    // The switch takes the record listing what the payment method pays now, and its
+    // Homeserver write fails: the receive tells the host the record is owed, and the next one,
+    // which writes it, clears that.
+    let w = World::new();
+    let mut shop = w
+        .join_with(
+            &w.bob,
+            "shop",
+            paykit_sdk::AppScopes::new()
+                .request()
+                .pay()
+                .build()
+                .unwrap(),
+            super::publishing(),
+            crate::common::store(),
+        )
+        .await;
+    w.rail
+        .set_endpoint_identifiers(vec![endpoint("btc-onchain-address")]);
+    w.homeserver.fail_writes(1, false);
+    let summary = shop.receive(None).await.unwrap();
+    let owed = summary.app_record_owed.unwrap();
+    assert!(owed.contains("Homeserver"), "{owed}");
+    let summary = shop.receive(None).await.unwrap();
+    assert_eq!(summary.app_record_owed, None, "{summary:?}");
+}

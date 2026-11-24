@@ -242,8 +242,8 @@ impl Paykit {
         Box::pin(self.first_read_before_writing()).await?;
         self.refresh_own()?;
         match Box::pin(self.tend_own_record()).await? {
-            Some(publication) => Ok(publication),
-            None => {
+            Tended::Signed(publication) => Ok(publication),
+            Tended::Held | Tended::Unchanged(_) => {
                 let published = Box::pin(self.app.publish_record()).await;
                 self.note_own_record_write(&published);
                 Ok(published?)
@@ -253,8 +253,9 @@ impl Paykit {
 
     /// Bring the app's record up to date at a receive (module docs): its capabilities to
     /// what the payment method pays, and a record with public endpoints renewed once less
-    /// than half of its lifetime is left. Returns where a record changed or renewed stands on
-    /// the Homeserver, and `None` when the record held went to the client unchanged. A
+    /// than half of its lifetime is left. Returns what it did ([`Tended`]): where a record
+    /// changed or renewed stands on the Homeserver, or the one held, which went to the client
+    /// unchanged; or nothing tried, while the record held may not be the one stored. A
     /// delivery that fails stays owed by the client, which sends it again at a later read; a
     /// definite failure before the client kept the record leaves the record
     /// held unchanged, so the next call finds it differs and puts it again. An unknown
@@ -264,11 +265,11 @@ impl Paykit {
     ///
     /// The client's refusal, store failure, alarm or delivery error; the refusal of a
     /// capabilities list the resolved record cannot carry (Switch wire 6.1).
-    pub(crate) async fn tend_own_record(&mut self) -> Result<Option<Publication>> {
+    pub(crate) async fn tend_own_record(&mut self) -> Result<Tended> {
         // Nothing is signed while the record this handle holds may not be the one stored:
         // the next load reads it again (`own_record_known`).
         if self.own_record_unknown {
-            return Ok(None);
+            return Ok(Tended::Held);
         }
         let desired = self.desired_record().await?;
         let held = PaykitMember::from_member(desired.member.as_ref())?;
@@ -289,7 +290,7 @@ impl Paykit {
         if desired.pending || wanted != held || expiry != desired.expiry {
             return Box::pin(self.put_member(wanted, desired, expiry))
                 .await
-                .map(Some);
+                .map(Tended::Signed);
         }
         if !held.public_endpoints.is_empty() && self.renewal_due(now)? {
             let renewed = match expiry {
@@ -305,7 +306,7 @@ impl Paykit {
                 }
             };
             self.note_own_record_write(&renewed);
-            return Ok(Some(renewed?));
+            return Ok(Tended::Signed(renewed?));
         }
         // The unchanged-member call retains the exact policy and optional fields. A
         // restored record never accepted by the service still gets its required new delivery.
@@ -314,8 +315,7 @@ impl Paykit {
             .set_protocol_member_with_lifetime(PROTOCOL_NAME, desired.member, None)
             .await;
         self.note_own_record_write(&result);
-        result?;
-        Ok(None)
+        Ok(Tended::Unchanged(result?))
     }
 
     /// The upkeep at a receive ([`Paykit::tend_own_record`]), held to its own outcome: the
@@ -339,14 +339,18 @@ impl Paykit {
     /// record was applied, the upkeep isn't tried and the record is reported owed until the
     /// app is loaded again.
     pub(crate) async fn tend_own_record_at_receive(&mut self) -> Result<Option<String>> {
-        // Nothing is signed while the record this handle holds may not be the one stored, so
-        // the record isn't brought up to date until the app is loaded again.
-        if self.own_record_unknown {
-            return Ok(Some(OWED_UNTIL_LOADED.to_string()));
-        }
         let before = self.own_standing();
         match Box::pin(self.tend_own_record()).await {
-            Ok(_) => Ok(None),
+            // Nothing is signed while the record this handle holds may not be the one stored,
+            // so the record isn't brought up to date until the app is loaded again.
+            Ok(Tended::Held) => Ok(Some(OWED_UNTIL_LOADED.to_string())),
+            // The switch holds the record and its Homeserver write failed: the client writes it
+            // again at a later read.
+            Ok(
+                Tended::Signed(Publication::Owed { .. })
+                | Tended::Unchanged(Publication::Owed { .. }),
+            ) => Ok(Some(PUBLICATION_OWED.to_string())),
+            Ok(Tended::Signed(_) | Tended::Unchanged(_)) => Ok(None),
             Err(error) => upkeep_outcome(error, &before, &self.own_standing()),
         }
     }
@@ -619,9 +623,26 @@ pub(crate) fn upkeep_outcome(
         .ok_or(error)
 }
 
+/// What the app record's upkeep did ([`Paykit::tend_own_record`]).
+pub(crate) enum Tended {
+    /// Nothing tried: the store couldn't tell whether the last write of the record was
+    /// applied, so the record held may not be the one stored.
+    Held,
+    /// The record was signed anew, changed or renewed: where it stands on the Homeserver.
+    Signed(Publication),
+    /// The record held went to the client unchanged: where its copy stands on the Homeserver.
+    Unchanged(Publication),
+}
+
+/// Why the record is owed when the switch holds it and its Homeserver write failed
+/// ([`Paykit::tend_own_record_at_receive`]). Shown to hosts as it is.
+const PUBLICATION_OWED: &str = "the app record's copy on the Homeserver couldn't be written; \
+     it is written again at a later receive";
+
 /// Why the record is owed while the store can't tell whether the last write of it was
 /// applied ([`Paykit::tend_own_record_at_receive`]). Shown to hosts as it is.
-const OWED_UNTIL_LOADED: &str = "the app record isn't updated until the app is loaded again: \
+pub(crate) const OWED_UNTIL_LOADED: &str =
+    "the app record isn't updated until the app is loaded again: \
      the store couldn't tell whether its last write of the record was applied";
 
 /// Why a failure of the app record's upkeep leaves the record owed without ending a receive
@@ -657,8 +678,8 @@ pub(crate) fn own_record_left_owed(error: &PaykitError) -> Option<&'static str> 
     };
     match client.unkept() {
         AppError::Refused(ClientRefusal::Usage(_)) => Some(
-            "the app record's update was refused before it was signed, as one the record can't \
-             carry; it is tried again at the next receive",
+            "the app record's update was refused as one the record can't carry; it is tried \
+             again at the next receive",
         ),
         _ if crate::pay::switch_unavailable(client) => Some(
             "the own switch didn't answer for the app record's update; it is tried again at \
@@ -832,6 +853,16 @@ mod upkeep_tests {
             (ClientError::Unpinned, false),
             (ClientError::InvalidResponse("member".into()), false),
             (ClientError::Usage("call".into()), false),
+            (
+                ClientError::Chain(pubky_switch_core::chain::ChainError::Malformed(
+                    "stub".into(),
+                )),
+                false,
+            ),
+            (
+                ClientError::Core(pubky_switch_core::Error::Invalid("document".into())),
+                false,
+            ),
         ] {
             let error = AppError::Switch(error);
             assert_eq!(switch_unavailable(&error), try_again, "{error:?}");
