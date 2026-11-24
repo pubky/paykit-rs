@@ -524,10 +524,9 @@ impl Paykit {
                 let mut found: std::collections::BTreeMap<_, (Destination, Carrier)> =
                     std::collections::BTreeMap::new();
                 for list in self.lists_of(&obligation.payee).await? {
-                    // A value over a delete seen names nothing (Paykit spec 6; wire 5).
-                    if required.is_some_and(|app| app != list.app_id)
-                        || !self.list_admitted(&list).await?
-                    {
+                    // A value over a delete seen names nothing (Paykit spec 6; wire 5):
+                    // `lists_of` gives only the lists the gate admits.
+                    if required.is_some_and(|app| app != list.app_id) {
                         continue;
                     }
                     let Body::PrivatePaymentList(listed) = list.list.body() else {

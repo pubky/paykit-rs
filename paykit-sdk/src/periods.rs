@@ -1016,8 +1016,10 @@ impl Paykit {
     /// # Errors
     ///
     /// As [`Paykit::pay_period`]. [`Refusal::ManualOnly`] holds a marked or
-    /// Allowance-funded request or period. [`Refusal::NotAutomatic`] holds a period
-    /// outside its automatic window or whose acceptance time cannot be verified.
+    /// Allowance-funded request or period. [`Refusal::NotAutomatic`] is a stop for this
+    /// period: the verified subscription acceptance came after the period ended, or its
+    /// automatic window has ended. [`Refusal::NotNow`] holds a period whose acceptance time
+    /// can't be verified yet: a later read can date it, so try again.
     pub async fn pay_period_automatically(
         &mut self,
         request: &RequestRef,
