@@ -3496,3 +3496,242 @@ async fn test_unrequested_held_list_over_an_absent_key_never_created_over_a_forg
     );
     assert_eq!(w.rail.all_executions().len(), 1);
 }
+
+#[tokio::test]
+async fn test_unrequested_open_attempt_to_a_list_not_dispatched_again_after_its_delete() {
+    use paykit_sdk::rail::{FAKE_LONGEST_COMPLETION_MS, FAKE_PAYMENT_TIME_TOLERANCE_MS};
+    let w = World::new();
+    // An idempotent method without a history: a resume repeats the dispatch.
+    w.rail.set_declaration(
+        paykit_sdk::RailDeclaration::new(
+            FAKE_LONGEST_COMPLETION_MS,
+            FAKE_PAYMENT_TIME_TOLERANCE_MS,
+        )
+        .with_idempotent(true),
+    );
+    let mut wallet = w.wallet("wallet").await;
+    let mut phone = w.wallet("phone").await;
+    let mut shop = w.shop().await;
+    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 1))
+        .await;
+    wallet.receive(None).await.unwrap();
+    w.rail.next(paykit_sdk::rail::Behaviour::Hang);
+    let PayOutcome::Pending { attempt_id, .. } = wallet
+        .pay_without_request(to_bob(&w, "0.0015", "btc-bitcoin-p2wpkh"))
+        .await
+        .outcome
+        .unwrap()
+    else {
+        panic!("pending");
+    };
+    assert_eq!(w.rail.pay_calls(&attempt_id), 1);
+    // Another own app deletes the list's record, and the wallet sees the delete.
+    let target = shop_list_target(&w, &shop);
+    phone.app_mut().read_record(&target).await.unwrap();
+    put_list_record(&mut phone, &target, None).await;
+    wallet.receive(None).await.unwrap();
+    // A resume doesn't dispatch the saved list destination again (Paykit spec 6; wire 5):
+    // the attempt stays open, "may be paid", for the user to reconcile.
+    let resumed = wallet.resume_payments().await.unwrap();
+    assert!(
+        matches!(resumed.as_slice(), [PayOutcome::Uncertain { .. }]),
+        "{resumed:?}"
+    );
+    assert_eq!(w.rail.pay_calls(&attempt_id), 1);
+    // What the method did is still taken: its history shows the payment made.
+    w.rail.set_declaration(
+        paykit_sdk::RailDeclaration::new(
+            FAKE_LONGEST_COMPLETION_MS,
+            FAKE_PAYMENT_TIME_TOLERANCE_MS,
+        )
+        .with_history(true),
+    );
+    w.rail.settle(&attempt_id, true);
+    let resumed = wallet.resume_payments().await.unwrap();
+    assert!(
+        matches!(resumed.as_slice(), [PayOutcome::Paid { .. }]),
+        "{resumed:?}"
+    );
+    assert_eq!(w.rail.pay_calls(&attempt_id), 1);
+}
+
+#[tokio::test]
+async fn test_unrequested_loss_marker_kept_through_an_in_place_restore_of_a_backup_without_pay() {
+    use paykit_sdk::AppScopes;
+    use pubky_switch_core::ops::OpKind;
+    let w = World::new();
+    let storage = crate::common::store();
+    // The tablet starts without `paykit_pay`, so it reads no `payment_lists` record, and is
+    // backed up then.
+    let mut tablet = w
+        .join_with(
+            &w.alice,
+            "tablet",
+            AppScopes::new().request().build().unwrap(),
+            paykit_sdk::PaykitConfig::default(),
+            std::sync::Arc::clone(&storage),
+        )
+        .await;
+    let backup = tablet.backup().await.unwrap();
+    // It is renewed to pay, with the scope keys it needs.
+    let me = tablet.app_id();
+    let old = tablet.app().cert().clone();
+    let wider = crate::certificate::renew_for(
+        &w,
+        &w.alice,
+        "tablet",
+        me,
+        &AppScopes::new().pay().request().build().unwrap(),
+        1_000,
+    );
+    // The signer stores the bundle the renewed certificate needs, as it answers a request
+    // for a full one.
+    let store_bundle = || {
+        let epoch = w.alice.switch().identity_doc().unwrap().data_epoch();
+        for part in pubky_switch_core::records::seal_bundle_parts(
+            w.alice.identity().key(),
+            &wider,
+            1,
+            epoch,
+            &|scope| crate::common::spec().has_keys(scope),
+        )
+        .unwrap()
+        {
+            w.alice
+                .switch()
+                .signer_op(OpKind::KeyBundlePut(pubky_switch_core::ops::KeyBundlePut {
+                    target_app_id: me,
+                    bundle: part.bundle,
+                    first_epoch: part.first_epoch,
+                    last_epoch: part.last_epoch,
+                }))
+                .unwrap();
+        }
+    };
+    store_bundle();
+    tablet.receive(None).await.unwrap();
+    crate::certificate::list_for(&w.alice, me, &old, &wider);
+    w.clock.advance_ms(1_000);
+    tablet.receive(None).await.unwrap();
+    assert_eq!(tablet.app().cert().hash(), wider.hash());
+    store_bundle();
+    crate::common::finish_listing(&mut tablet).await;
+    tablet.app_mut().invite(&w.bob_id()).await.unwrap();
+    // The wallet pays a single-use endpoint; the phone deletes the record and puts it back
+    // naming the delete, without the mark; the tablet reads that put-back.
+    let mut wallet = w.wallet("wallet").await;
+    let mut phone = w.wallet("phone").await;
+    let mut shop = w.shop().await;
+    w.list_to_alice(
+        &mut shop,
+        &[wallet.app_id(), tablet.app_id()],
+        list_version(1, 1),
+    )
+    .await;
+    tablet.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    let paid = wallet
+        .pay_without_request(to_bob(&w, "0.0015", "btc-bitcoin-p2wpkh"))
+        .await
+        .outcome
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    let target = shop_list_target(&w, &shop);
+    phone.app_mut().read_record(&target).await.unwrap();
+    let (_, marked) = list_record(&phone, &w).await;
+    put_list_record(&mut phone, &target, None).await;
+    let put_back = marked_put_back(&marked, 5);
+    put_list_record(&mut phone, &target, Some(&put_back)).await;
+    tablet.receive(None).await.unwrap();
+    drop(tablet);
+    // A later write drops the marker and the mark.
+    let mut dropped = put_back.clone();
+    dropped.as_object_mut().unwrap().remove("lost_to_delete");
+    phone.app_mut().read_record(&target).await.unwrap();
+    put_list_record(&mut phone, &target, Some(&dropped)).await;
+    // The older backup, whose certificate reads no `payment_lists` record, is restored in
+    // place: the installation's hold is its own, whatever that certificate reads, so the
+    // list is never paid from again (Paykit spec 6; wire 5).
+    let mut restored = Paykit::restore(
+        w.env(&w.alice, storage),
+        paykit_sdk::PaykitConfig::default(),
+        &backup,
+        std::sync::Arc::clone(&w.rail) as std::sync::Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    // It takes the renewed certificate and its scope keys, then lists the records.
+    restored.receive(None).await.unwrap();
+    store_bundle();
+    for _ in 0..8 {
+        let summary = restored.receive(None).await.unwrap();
+        if summary.records_unlisted.is_none()
+            && !summary.scope_keys_awaited
+            && !summary.report.more
+            && !restored.app().listing_owed().await.unwrap()
+        {
+            break;
+        }
+    }
+    assert_eq!(restored.app().cert().hash(), wider.hash());
+    crate::common::finish_listing(&mut restored).await;
+    for _ in 0..8 {
+        if restored.reconcile().await.is_ok() {
+            break;
+        }
+    }
+    restored
+        .end_reconcile(pubky_switch_client::app::UserConfirmed::new())
+        .await
+        .unwrap();
+    let again = restored
+        .pay_without_request(to_bob(&w, "0.0015", "btc-bitcoin-p2wpkh"))
+        .await
+        .outcome;
+    assert!(
+        !matches!(again, Ok(PayOutcome::Paid { .. })),
+        "the paid single-use endpoint was paid again: {again:?}"
+    );
+    assert_eq!(w.rail.all_executions().len(), 1);
+}
+
+#[tokio::test]
+async fn test_unrequested_loss_marker_that_does_not_read_kept_and_its_drop_flagged() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut phone = w.wallet("phone").await;
+    let mut shop = w.shop().await;
+    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 1))
+        .await;
+    wallet.receive(None).await.unwrap();
+    let paid = wallet
+        .pay_without_request(to_bob(&w, "0.0015", "btc-bitcoin-p2wpkh"))
+        .await
+        .outcome
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    // Another own app writes the record with every mark and a `lost_to_delete` that doesn't
+    // read: the wallet takes it at the least permissive state and keeps the hold (Paykit
+    // wire 5, "Deletion data that doesn't read").
+    let target = shop_list_target(&w, &shop);
+    phone.app_mut().read_record(&target).await.unwrap();
+    let (_, marked) = list_record(&phone, &w).await;
+    let mut null_marked = marked.clone();
+    null_marked["lost_to_delete"] = serde_json::Value::Null;
+    put_list_record(&mut phone, &target, Some(&null_marked)).await;
+    wallet.receive(None).await.unwrap();
+    assert_eq!(lost_entries(&wallet.backup().await.unwrap()).len(), 1);
+    // A later write that drops it is ignored and shown with its writer, and nothing is paid
+    // from the list.
+    phone.app_mut().read_record(&target).await.unwrap();
+    put_list_record(&mut phone, &target, Some(&marked)).await;
+    wallet.receive(None).await.unwrap();
+    assert_eq!(wallet.app().flagged_writes().await.unwrap().len(), 1);
+    let again = wallet
+        .pay_without_request(to_bob(&w, "0.0015", "btc-bitcoin-p2wpkh"))
+        .await
+        .outcome;
+    assert!(!matches!(again, Ok(PayOutcome::Paid { .. })), "{again:?}");
+    assert_eq!(w.rail.all_executions().len(), 1);
+}

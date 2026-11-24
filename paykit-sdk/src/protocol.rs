@@ -346,6 +346,20 @@ fn local_write<T: serde::Serialize>(key: &str, value: &T) -> Result<LocalWrite, 
 
 /// The `lost_to_delete` member of a `payment_lists` value, as written, if present (Paykit
 /// wire 5, 5.4).
+/// A `payment_lists` value as the client's seen-mark hooks judge it: its list and marks,
+/// read without its `lost_to_delete`. A marker that doesn't read is still a marker (Paykit
+/// wire 5, "Deletion data that doesn't read"): the value is taken, so Paykit observes it and
+/// keeps its hold, and becomes the mark, so a later write that drops it is shown with its
+/// writer. The hooks compare only the marker's presence ([`list_loss_marker`]); the list
+/// and its marks follow the rules of wire 5.4.
+fn list_for_marks(value: &[u8], own: &[u8; 32]) -> Option<PaymentListRecord> {
+    let mut members: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_slice(value).ok()?;
+    members.remove("lost_to_delete");
+    let unmarked = serde_json::to_vec(&members).ok()?;
+    PaymentListRecord::read(&unmarked, own).ok()
+}
+
 pub(crate) fn list_loss_marker(value: &[u8]) -> Option<serde_json::Value> {
     let members: serde_json::Map<String, serde_json::Value> = serde_json::from_slice(value).ok()?;
     members.get("lost_to_delete").cloned()
@@ -2389,9 +2403,7 @@ impl Protocol for PaykitProtocol {
             // here to the key its payee and app derive (Paykit wire 5.4), and another payee
             // app's valid record written at a key becomes the mark there, against which the
             // real payee app's lists are then refused. Binding needs the key from the client.
-            (Collection::PaymentLists, Some(v)) => {
-                PaymentListRecord::read(v, &own.identity).is_ok()
-            }
+            (Collection::PaymentLists, Some(v)) => list_for_marks(v, &own.identity).is_some(),
             (Collection::BlockFloor, Some(v)) => BlockFloorRecord::read(v).is_ok(),
             (Collection::Allowances, Some(v)) => AllowanceRecord::read(v, &own.identity).is_ok(),
             _ => false,
@@ -2567,20 +2579,19 @@ impl PaykitProtocol {
                 checked.err().map(|e| e.to_string())
             }
             Collection::PaymentLists => {
-                let held = PaymentListRecord::read(seen, &own.identity).ok()?;
-                let Ok(later) = PaymentListRecord::read(value, &own.identity) else {
+                // Wire 5: a reader that has seen `lost_to_delete` ignores, and shows with its
+                // writer, a later write that drops it, whether or not the marker it saw reads
+                // (wire 5, "Deletion data that doesn't read"). One that changes it is taken: a
+                // put-back answering a later delete names that delete ("Repeated deletes").
+                if list_loss_marker(seen).is_some() && list_loss_marker(value).is_none() {
+                    return Some("Paykit wire 5: a later write drops lost_to_delete".into());
+                }
+                let held = list_for_marks(seen, &own.identity)?;
+                let Some(later) = list_for_marks(value, &own.identity) else {
                     return Some(
                         "Paykit wire 5.4: a payment_lists record that doesn't read".into(),
                     );
                 };
-                // Wire 5: a reader that has seen `lost_to_delete` ignores, and shows with its
-                // writer, a later write that drops it. One that changes it is taken: a
-                // put-back answering a later delete names that delete ("Repeated deletes").
-                // The record's reader keeps the marker as an unknown member, so its presence
-                // is read as written.
-                if list_loss_marker(seen).is_some() && list_loss_marker(value).is_none() {
-                    return Some("Paykit wire 5: a later write drops lost_to_delete".into());
-                }
                 // Wire 5.4 "Seen lists": a later list of a greater version, or the same list,
                 // and never a single-use mark dropped, at any version.
                 held.check_later_write(&later).err().map(|e| e.to_string())

@@ -131,6 +131,8 @@ async fn paid_request(
         // the last check before money moves can hold a payment by hand there: the payment
         // answers Pending, and the next resume closes the attempt unpaid. The host then pays
         // again. A few rounds at most; a payment that never goes through still fails here.
+        // Only that hold is followed: the resume must close this very attempt as never
+        // started, and any other outcome fails the test.
         let mut held = 0;
         let id = loop {
             let payment = buyer
@@ -142,9 +144,18 @@ async fn paid_request(
                     proof_msg_id: Some(id),
                     ..
                 } => break id,
-                PayOutcome::Pending { .. } if held < MAX_HELD_PAYMENTS => {
+                PayOutcome::Pending { attempt_id, .. } if held < MAX_HELD_PAYMENTS => {
                     held += 1;
-                    buyer.resume_payments().await?;
+                    let resumed = buyer.resume_payments().await?;
+                    assert!(
+                        matches!(
+                            resumed.as_slice(),
+                            [PayOutcome::Failed { attempt_id: closed, reason, .. }]
+                                if *closed == attempt_id
+                                    && reason == "Paykit spec 7.2: no payment started"
+                        ),
+                        "a payment held at the last check must close unpaid, got {resumed:?}"
+                    );
                 }
                 payment => panic!("the wallet must report its actual proof, got {payment:?}"),
             }
