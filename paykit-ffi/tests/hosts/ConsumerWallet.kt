@@ -12,7 +12,7 @@ internal fun driveConsumers() = runBlocking {
         try {
             val method = CheckoutMethod(File(directory, "settled"))
             val store = EnrollmentStore()
-            val scopes = WalletScopes(pay = true, request = true, contacts = true, manageContacts = true,
+            val scopes = WalletScopes(pay = true, request = true, allowance = true, allowanceExecute = true, contacts = true, manageContacts = true,
                 extensions = listOf("paykit-cap"))
             val config = WalletConfig(extensionKinds = listOf("paykit-cap.offer"), publishesRecord = true)
             enrolledTestCheckout(store, method, testDeclaration, testEndpoints, config).use { fixture ->
