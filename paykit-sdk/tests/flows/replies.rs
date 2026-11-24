@@ -711,6 +711,52 @@ async fn test_replies_dropped_terminal_refusal_of_a_sealed_ask_keeps_the_window_
     assert_eq!(shop.receive(None).await.unwrap().resends, 0);
 }
 
+/// The `msg_id`s of the `resend_request`s `app`'s outbox holds.
+async fn queued_asks(app: &Paykit) -> Vec<String> {
+    app.queued_in_delivery()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|m| m.kind == "paykit.resend_request")
+        .map(|m| m.msg_id)
+        .collect()
+}
+
+#[tokio::test]
+async fn test_replies_dropped_ask_held_past_its_window_given_up_untold() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let n = paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER;
+    let (_, at) = unmatched_after_payment(&w, &mut wallet, &mut shop, n).await;
+    shop.app_mut().hold_queued(&w.alice_id()).await.unwrap();
+    assert_eq!(shop.receive(None).await.unwrap().resends, 1);
+    let ask = queued_asks(&shop).await;
+    assert_eq!(ask.len(), 1);
+    // Past its window the ask never goes: its copy ends, and no activity record holds a
+    // `resend_request`, so the host is told nothing of it (Paykit spec 8.1, "Undelivered
+    // messages").
+    w.clock.advance_ms(31 * DAY_MS);
+    for _ in 0..2 {
+        shop.receive(None).await.unwrap();
+    }
+    assert!(queued_asks(&shop).await.is_empty());
+    assert!(!shop
+        .notices()
+        .await
+        .unwrap()
+        .iter()
+        .any(|notice| notice.msg_id.as_deref() == Some(ask[0].as_str())));
+    // Its outcome is known, so an overlapping recovery request may be asked (Paykit spec
+    // 7.2).
+    shop.request_resend(
+        w.alice_id(),
+        paykit_sdk::ResendSelection::default().with_accepted_from_ms(at),
+    )
+    .await
+    .unwrap();
+}
+
 #[tokio::test]
 async fn test_replies_dropped_marks_carried_through_a_restore_unreset() {
     let w = World::new();

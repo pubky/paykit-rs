@@ -430,6 +430,27 @@ The SDK checks the automatic payment window, the request and period records, and
 usual payment restrictions again before dispatch. A missed period remains available for
 `pay_period` when its other payment conditions hold.
 
+## Blocked counterparties
+
+Blocking pauses what is open with a counterparty. It ends nothing (Paykit spec 8.1).
+When the user blocks a counterparty with `block`, tell them that their open
+subscriptions and Allowances with it are paused, not ended: while the block holds, no
+Billing Period is paid automatically and no payment is made under an Allowance. To end
+one, call `cancel_request` for a subscription the user pays, `cancel_sent_request` for a
+request the user's shop sent, or `end_allowance` for an Allowance. List them with
+`requests`, where a request from a blocked payee shows `RequestStatus::Blocked`, with
+`payee_activity` for the requests the shop sent, and with `allowances`.
+
+When the user unblocks a counterparty with `unblock`, show the subscriptions and
+Allowances with it that resume paying automatically, from the same calls, so the user
+can end any they no longer want before its next period is due. An unblocked subscription
+pays its later periods automatically; cancelling or ending it is the explicit stop.
+Messages held while the counterparty was blocked go once it is unblocked, unless they
+are more than 30 days old. Those are given up and never sent from this installation, and
+`NoticeKind::MessageGivenUp` names each one an activity record holds. The notice says
+only that this installation never saw the message accepted: after a restore, the device
+the backup came from may have delivered it.
+
 ## Notices and errors
 
 Read `notices` and `payee_deletion_notices` by their stable identities. Acknowledge

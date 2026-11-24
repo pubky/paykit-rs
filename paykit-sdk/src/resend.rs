@@ -136,7 +136,11 @@ impl Paykit {
         }
         let signed = self.resend_request_message(counterparty, selection)?;
         let msg_id = signed.msg_id().to_owned();
-        self.app.queue_signed(signed).await?;
+        let mut tx = Tx::default();
+        crate::send_holds::QueuedStop::put_resend_request(&mut tx, &signed)?;
+        self.app
+            .queue_signed_with(crate::protocol::BACKUP_NAME, signed, &tx.into_writes())
+            .await?;
         self.send_message(&msg_id).await?;
         Ok(msg_id)
     }
@@ -266,6 +270,7 @@ impl Paykit {
             });
             let mut tx = Tx::default();
             tx.put(&ask_key, &ask)?;
+            crate::send_holds::QueuedStop::put_resend_request(&mut tx, &signed)?;
             self.app
                 .queue_signed_with(crate::protocol::BACKUP_NAME, signed, &tx.into_writes())
                 .await?;
