@@ -2567,20 +2567,19 @@ impl PaykitProtocol {
                 checked.err().map(|e| e.to_string())
             }
             Collection::PaymentLists => {
+                // Wire 5: a reader that has seen `lost_to_delete` ignores, and shows with its
+                // writer, a later write that drops it, whether or not the marker it saw reads
+                // (wire 5, "Deletion data that doesn't read"). One that changes it is taken: a
+                // put-back answering a later delete names that delete ("Repeated deletes").
+                if list_loss_marker(seen).is_some() && list_loss_marker(value).is_none() {
+                    return Some("Paykit wire 5: a later write drops lost_to_delete".into());
+                }
                 let held = PaymentListRecord::read(seen, &own.identity).ok()?;
                 let Ok(later) = PaymentListRecord::read(value, &own.identity) else {
                     return Some(
                         "Paykit wire 5.4: a payment_lists record that doesn't read".into(),
                     );
                 };
-                // Wire 5: a reader that has seen `lost_to_delete` ignores, and shows with its
-                // writer, a later write that drops it. One that changes it is taken: a
-                // put-back answering a later delete names that delete ("Repeated deletes").
-                // The record's reader keeps the marker as an unknown member, so its presence
-                // is read as written.
-                if list_loss_marker(seen).is_some() && list_loss_marker(value).is_none() {
-                    return Some("Paykit wire 5: a later write drops lost_to_delete".into());
-                }
                 // Wire 5.4 "Seen lists": a later list of a greater version, or the same list,
                 // and never a single-use mark dropped, at any version.
                 held.check_later_write(&later).err().map(|e| e.to_string())

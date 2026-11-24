@@ -2427,9 +2427,10 @@ pub(crate) mod key {
         format!("{LISTS_LOST}{}", b64(record_key))
     }
 
-    /// Set while a list is held over the `payment_lists` record at `record_key` because
-    /// the record didn't read or bind, so a later absence keeps the list held; cleared by a
-    /// value that reads and binds, or by a delete seen ([`list_record_lost`]).
+    /// Set once a list is held over the `payment_lists` record at `record_key` because the
+    /// record didn't read or bind, so a later absence keeps the list held. A later value
+    /// that reads and binds is still taken, and the mark stays: what the unreadable value
+    /// held is still unknown. Only a delete seen replaces it ([`list_record_lost`]).
     pub(crate) fn list_record_unread(record_key: &[u8; 32]) -> String {
         format!("{LISTS_UNREAD}{}", b64(record_key))
     }
