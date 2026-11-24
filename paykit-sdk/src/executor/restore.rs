@@ -60,6 +60,30 @@ fn compacted_transfer_matches(
     saved == (obligation, &amount.asset, &amount.value)
 }
 
+/// Whether a verified proof that `attempt` paid contradicts the usage counted for it: the
+/// attempt is a compacted failure still in `totals.failed`, which that usage released, and no
+/// retired payment counts it already. The executor then holds rather than leave a payment
+/// uncounted (Paykit spec 8.3, `failed` releases).
+fn proof_contradicts_a_release(
+    ledger: &Ledger,
+    retired: Option<&Retired>,
+    attempt: paykit_lib::AttemptId,
+) -> bool {
+    ledger.failed.iter().any(|item| item.attempt_id == attempt)
+        && !matches!(retired, Some(Retired::Paid(_)))
+}
+
+/// Whether a claim read shows `attempt` done. A compacted failure whose claim shows a `done`
+/// that doesn't verify can't count as released (Paykit spec 8.3, `failed` releases).
+fn read_shows_done(
+    read: &pubky_switch_client::app::ClaimRead,
+    attempt: paykit_lib::AttemptId,
+) -> bool {
+    read.view
+        .attempt(&attempt.to_bytes())
+        .is_some_and(|shown| shown.outcome == pubky_switch_core::claims::Outcome::Done)
+}
+
 /// A settled tombstone can outlive its signed opening. It corroborates a Done entry
 /// already accepted under this grant, never a new reservation (Paykit spec 8.3).
 /// The caller must also verify the dated payer proof and the method's exact transfer.
@@ -754,11 +778,7 @@ impl Paykit {
                     results.confirmed(entry.attempt_id, claim, seq)
                 }) {
                     claims.insert(entry.attempt_id, opening);
-                } else if read
-                    .view
-                    .attempt(&entry.attempt_id.to_bytes())
-                    .is_some_and(|shown| shown.outcome == pubky_switch_core::claims::Outcome::Done)
-                {
+                } else if read_shows_done(read, entry.attempt_id) {
                     // A compacted failure its claim shows done, which doesn't verify: counting
                     // it released could leave a payment uncounted (Paykit spec 8.3, `failed`
                     // releases).
@@ -898,7 +918,11 @@ impl Paykit {
                     .failed
                     .iter()
                     .find(|entry| entry.attempt_id == dispatch.attempt_id);
-                let failed_in_totals = failed.is_some();
+                let contradicted = proof_contradicts_a_release(
+                    &ledger,
+                    retired.get(&dispatch.attempt_id),
+                    dispatch.attempt_id,
+                );
                 let compacted = retired.get(&dispatch.attempt_id);
                 let (compacted, failed) = match (compacted, failed) {
                     (Some(Retired::PreviouslyFailed(_)), Some(_)) => return Ok(None),
@@ -922,10 +946,8 @@ impl Paykit {
                     {
                         return Ok(None);
                     }
-                    if failed_in_totals && compacted.is_none() {
-                        // A compacted failure this proof shows paid counts spent, but the
-                        // usage above released it: nothing is paid until a ledger counts it
-                        // (Paykit spec 8.3, `failed` releases).
+                    if contradicted {
+                        // Nothing is paid until a ledger counts this payment.
                         return Ok(None);
                     }
                     retired.remove(&dispatch.attempt_id);
@@ -1251,6 +1273,83 @@ mod tests {
                 "{scope}, {proof_label}, {payment_reference:?}"
             );
         }
+    }
+
+    #[test]
+    fn test_restore_holds_a_compacted_failure_shown_paid() {
+        use paykit_lib::allowances::CompactedFailed;
+        use pubky_switch_client::app::ClaimRead;
+        use pubky_switch_core::claims::{AttemptView, ClaimStatus, ClaimView, Outcome};
+
+        let attempt = AttemptId::from_bytes([4; 16]);
+        let mut ledger = Ledger::empty(
+            [7; 32],
+            paykit_lib::AllowanceId::new("4b3fb324-091b-47da-a7ad-46b3a07d0409").unwrap(),
+            [8; 32],
+        );
+        let item = CompactedFailed {
+            obligation: [2; 32],
+            attempt_id: attempt,
+            value: Decimal::new("70").unwrap(),
+        };
+        ledger.failed.push(item.clone());
+        // A verified proof of the compacted failure: the usage that released it is wrong.
+        assert!(proof_contradicts_a_release(&ledger, None, attempt));
+        assert!(proof_contradicts_a_release(
+            &ledger,
+            Some(&Retired::PreviouslyFailed(item)),
+            attempt
+        ));
+        // A retired payment counts it already, and another attempt is no concern of it.
+        let paid = Retired::Paid(LedgerEntry {
+            obligation: [2; 32],
+            attempt_id: attempt,
+            asset: Asset::new("btc").unwrap(),
+            value: Decimal::new("70").unwrap(),
+            at: 1000,
+            outcome: Some(EntryOutcome::Done),
+        });
+        assert!(!proof_contradicts_a_release(&ledger, Some(&paid), attempt));
+        assert!(!proof_contradicts_a_release(
+            &ledger,
+            None,
+            AttemptId::from_bytes([5; 16])
+        ));
+
+        // A claim read showing the compacted failure done; failed or open shows nothing.
+        let read = |outcome| ClaimRead {
+            entries: Vec::new(),
+            view: ClaimView {
+                claim_key: [2; 32],
+                status: ClaimStatus::Settled,
+                owner: None,
+                attempt_id: None,
+                step: 2,
+                attempts: vec![AttemptView {
+                    attempt_id: attempt.to_bytes(),
+                    owner: [7; 16],
+                    outcome,
+                    opened_at: 1002,
+                    orphan_after: 60,
+                    orphaned: false,
+                    possibly_duplicate: false,
+                    duplicate: false,
+                    resolved_by: Some([9; 16]),
+                }],
+                tombstone: false,
+                deadline: None,
+                divergent: false,
+                rebuilt: false,
+                next_possibly_duplicate: false,
+            },
+        };
+        assert!(read_shows_done(&read(Outcome::Done), attempt));
+        assert!(!read_shows_done(&read(Outcome::Failed), attempt));
+        assert!(!read_shows_done(&read(Outcome::Open), attempt));
+        assert!(!read_shows_done(
+            &read(Outcome::Done),
+            AttemptId::from_bytes([5; 16])
+        ));
     }
 
     #[test]

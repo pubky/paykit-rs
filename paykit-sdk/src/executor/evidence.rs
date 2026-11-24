@@ -246,16 +246,7 @@ impl<'a> ClaimResults<'a> {
         claim: ReservationClaim,
         opened: u64,
     ) -> Option<ReservationClaim> {
-        if matches!(claim.state, ClaimState::Failed { .. }) {
-            let done = ReservationClaim {
-                state: ClaimState::Done,
-                ..claim
-            };
-            if self.confirms(id, done, opened, None) {
-                return Some(done);
-            }
-        }
-        self.confirms(id, claim, opened, None).then_some(claim)
+        settled_state(claim, |state| self.confirms(id, state, opened, None))
     }
 
     pub(super) fn confirms(
@@ -295,6 +286,24 @@ impl<'a> ClaimResults<'a> {
             })
         })
     }
+}
+
+/// [`ClaimResults::confirmed`] over `verifies`, which says whether this app holds a signed
+/// outcome for a claim state: a failure gives way to a verified `done`.
+fn settled_state(
+    claim: ReservationClaim,
+    verifies: impl Fn(ReservationClaim) -> bool,
+) -> Option<ReservationClaim> {
+    if matches!(claim.state, ClaimState::Failed { .. }) {
+        let done = ReservationClaim {
+            state: ClaimState::Done,
+            ..claim
+        };
+        if verifies(done) {
+            return Some(done);
+        }
+    }
+    verifies(claim).then_some(claim)
 }
 
 /// The pending condition must select this original write before acceptance. An upload
@@ -869,6 +878,33 @@ impl AppliedRecord {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn test_evidence_a_verified_done_wins_over_a_lagging_failure() {
+        use super::{settled_state, ClaimState, ReservationClaim};
+        let failed = ReservationClaim {
+            obligation: [2; 32],
+            state: ClaimState::Failed { by_owner: false },
+        };
+        let state = |claim: ReservationClaim, verified: &[ClaimState]| {
+            settled_state(claim, |c| verified.contains(&c.state)).map(|c| c.state)
+        };
+        // The read lags and still shows the failure, while this app holds a later signed
+        // `done`: the attempt counts paid.
+        assert_eq!(
+            state(failed, &[failed.state, ClaimState::Done]),
+            Some(ClaimState::Done)
+        );
+        assert_eq!(state(failed, &[ClaimState::Done]), Some(ClaimState::Done));
+        // Only the failure verifies: it stands. Neither: nothing is confirmed.
+        assert_eq!(state(failed, &[failed.state]), Some(failed.state));
+        assert_eq!(state(failed, &[]), None);
+        // A read showing `done` or `open` is taken as shown.
+        let done = ReservationClaim {
+            state: ClaimState::Done,
+            ..failed
+        };
+        assert_eq!(state(done, &[ClaimState::Done]), Some(ClaimState::Done));
+    }
 
     #[test]
     fn test_evidence_authorization_admits_only_the_current_generation() {
