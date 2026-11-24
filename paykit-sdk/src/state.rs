@@ -51,9 +51,7 @@
 //! | `ml` | set by a `missed` item: the shared records aren't listed by Paykit since, so a record's absence means nothing yet; cleared by Paykit's next listing (`hold.rs`); never restored | |
 //! | `lp/<recipient>/<generation>/<message hash>` | outstanding original publication batch IDs, kept atomically before submission and retained across restore | yes |
 //! | `lres/<recipient>` | the applied list, its publisher and original signed message, its first delivery outcome (open, undelivered or unknown) and any kept confirmation of another version, prior offers' latest possible expiry, and the interval of an outstanding withdrawal | yes |
-//! | `lh/<record key>` | a Private Payment List held because its `payment_lists` record doesn't read or bind, or was seen deleted (`lgone/`): never written over it, which could drop its single-use marks, until the record reads and binds, never created over an absent key; deleted once the record holds the list | |
-//! | `lgone/<record key>` | set in the commit in which this app sees the `payment_lists` record deleted, or reads a value there carrying `lost_to_delete` (`LostListRecord`): no later value or absence of it places a list held there; never cleared, and a restore keeps the union of the installation's and the backup's | yes |
-//! | `lur/<record key>` | set once a list was held over the `payment_lists` record because it didn't read or bind: a later absence keeps the list held, as what that value held stays unknown; cleared only by a delete seen (`lgone/`), which holds the list anyway, and a restore keeps the union of the installation's and the backup's | yes |
+//! | `lh/<record key>` | a Private Payment List held because its `payment_lists` record doesn't read or bind: never written over it, which could drop its single-use marks, until the record reads and binds, never created over an absent key; deleted once the record holds the list | |
 //! | `kc/<record key>/<certificate hash>/<feed generation>` | a payee's cancellation of a request, kept until it is placed in the payer's request record | |
 //! | `peer/<pubky>` | a counterparty with Paykit activity, and when | |
 //! | `sv` | the highest service time the app verified, as the receive step and a flush last saw it, for the delivery hook's window of a held message, which judges by it, by the device clock only while none is kept; written also before every delivery Paykit starts. The client's own window for a message it queues again from signed plaintext, which ends a held answer released from its record, takes the later of the device clock and the service time instead, so under a fast device clock such an answer can be given up while a queued stop still goes (`send_holds.rs`, Paykit spec 8.1); never restored, a restore's first read writing it again | |
@@ -762,95 +760,6 @@ impl Stored for OwnBlockMark {
     }
 }
 
-/// That this app saw a `payment_lists` record deleted, or read a value at its key carrying
-/// `lost_to_delete` (`lgone/<record key>`; Paykit spec 6, "Visible deletion without a
-/// copy"; Paykit wire 5, "A visible delete without a copy" and "Incomplete
-/// protected-record contract"): the newest such version, and the delete's item hash. While
-/// it is kept, no value at that key is taken, and no list of that payee app is used, for
-/// any list version and whatever marks a value holds: a later authorization over a delete
-/// needs the Switch's lineage proof and its Paykit mapping, which this revision lacks, so
-/// wire 5 withholds it. An absence of the record keeps its list held too.
-///
-/// It is never removed: removing it would let a later absence of the record, or a value
-/// without the marks the delete took, read as a record never deleted, since no backup
-/// carries the client's own mark of what it saw, nor does a fresh store hold it.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct LostListRecord {
-    /// The record version of the newest delete seen, or of a write naming one: a report of
-    /// it again, or of an older one, as a covering read or a restore's listing gives,
-    /// changes nothing.
-    deleted: [u64; 2],
-    /// That delete's item hash, as the client reports a delete it verified (Switch wire
-    /// 6.6), which tells two deletes at one version apart, as a recovery can upload them
-    /// (Paykit spec 6); `None` when no report gave it, or two deletes at the version were
-    /// seen. Only an exact match is the same delete: any other at its version is merged.
-    #[serde(deserialize_with = "Option::deserialize")]
-    item: Option<[u8; 32]>,
-}
-
-impl LostListRecord {
-    /// The delete at record version `deleted`, of item hash `item` if the report gave it,
-    /// or a value carrying `lost_to_delete` written at that version: it names a delete that
-    /// lost content, which this app may never have seen (Paykit spec 6; wire 5).
-    pub(crate) fn over(
-        deleted: pubky_switch_core::ops::RecordVersion,
-        item: Option<[u8; 32]>,
-    ) -> Self {
-        Self {
-            deleted: [deleted.generation, deleted.version],
-            item,
-        }
-    }
-
-    /// Whether the newest delete kept is the one at `version`, known by its item hash: one
-    /// kept without it can't be told from another delete at that version.
-    pub(crate) fn deleted_at(&self, version: pubky_switch_core::ops::RecordVersion) -> bool {
-        self.deleted == [version.generation, version.version] && self.item.is_some()
-    }
-
-    /// The entry after `seen`, a delete seen now, is kept with it: the same delete, by its
-    /// item hash, or an older one, reported again changes nothing; a newer one, or another
-    /// at the same version, is merged in.
-    pub(crate) fn then(self, seen: Self) -> Self {
-        match seen.deleted.cmp(&self.deleted) {
-            std::cmp::Ordering::Less => self,
-            std::cmp::Ordering::Equal if self.item.is_some() && self.item == seen.item => self,
-            _ => self.merge(seen),
-        }
-    }
-
-    /// Both kept, as after a restore: the newer version, with its item hash, and none for
-    /// two different deletes at one version.
-    pub(crate) fn merge(self, other: Self) -> Self {
-        let item = match self.deleted.cmp(&other.deleted) {
-            std::cmp::Ordering::Greater => self.item,
-            std::cmp::Ordering::Less => other.item,
-            std::cmp::Ordering::Equal => self.item.filter(|_| self.item == other.item),
-        };
-        Self {
-            deleted: std::cmp::max(self.deleted, other.deleted),
-            item,
-        }
-    }
-}
-
-impl sealed::Sealed for LostListRecord {}
-
-/// Its delete's version is one a delete has: a write's, of a generation of at least 1
-/// (Switch wire 1.7, 3.3, 6.3).
-impl Stored for LostListRecord {
-    fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
-        const MAX_INT: u64 = (1 << 53) - 1;
-        let [generation, seq] = self.deleted;
-        let valid = (1..=MAX_INT).contains(&seq) && (1..=MAX_INT).contains(&generation);
-        match family {
-            StateKey::ListRecordLost(_) if valid => Ok(()),
-            _ => corrupt(),
-        }
-    }
-}
-
 impl sealed::Sealed for bool {}
 
 /// A mark, which every writer sets `true`.
@@ -870,7 +779,6 @@ impl Stored for bool {
             | StateKey::RestoreApproval(_)
             | StateKey::NotPaidBeforeLoss(_)
             | StateKey::FloorOpened(_)
-            | StateKey::ListRecordUnread(_)
             | StateKey::Taken(_)
                 if *self =>
             {
@@ -2033,8 +1941,6 @@ pub(crate) mod key {
     /// `lt`: a deny change or gap the client told, not followed by a read of the lists.
     pub(crate) const LISTS_TOLD: &str = "lt";
     pub(crate) const HELD_LISTS: &str = "lh/";
-    pub(crate) const LISTS_LOST: &str = "lgone/";
-    pub(crate) const LISTS_UNREAD: &str = "lur/";
     pub(crate) const RECORDS_UNLISTED: &str = "nl";
     pub(crate) const MISSED_UNLISTED: &str = "ml";
     pub(crate) const MISSED_CONSENTS: &str = "mc";
@@ -2424,20 +2330,6 @@ pub(crate) mod key {
         format!("{HELD_LISTS}{}", b64(record_key))
     }
 
-    /// Set once this app has seen the `payment_lists` record at `record_key` deleted
-    /// ([`LostListRecord`]), and never cleared.
-    pub(crate) fn list_record_lost(record_key: &[u8; 32]) -> String {
-        format!("{LISTS_LOST}{}", b64(record_key))
-    }
-
-    /// Set once a list is held over the `payment_lists` record at `record_key` because the
-    /// record didn't read or bind, so a later absence keeps the list held. A later value
-    /// that reads and binds is still taken, and the mark stays: what the unreadable value
-    /// held is still unknown. Only a delete seen replaces it ([`list_record_lost`]).
-    pub(crate) fn list_record_unread(record_key: &[u8; 32]) -> String {
-        format!("{LISTS_UNREAD}{}", b64(record_key))
-    }
-
     /// This app's block or unblock of `pubky` not yet shown by a read of the lists
     /// ([`OwnBlockMark`](super::OwnBlockMark)). A block is marked before the switch is asked, so a crash before
     /// the call leaves it counted; its mark goes once the switch took it, or once a read of
@@ -2654,10 +2546,6 @@ pub(crate) enum StateKey {
     ListsTold,
     /// `lh/<record key>`: a list held over a record that didn't read.
     HeldList([u8; 32]),
-    /// `lgone/<record key>`: a `payment_lists` record seen deleted ([`LostListRecord`]).
-    ListRecordLost([u8; 32]),
-    /// `lur/<record key>`: a `payment_lists` record a list is held over that didn't read.
-    ListRecordUnread([u8; 32]),
     /// `side/<msg_id>`: the side of a message the app sent.
     Side(String),
     /// `ex/<msg_id>`: why an acceptance the app sent may go while sends are held.
@@ -3015,8 +2903,6 @@ impl StateKey {
                     "pn" => Self::NotPaidBeforeLoss(b64_32(rest)?),
                     "fo" => Self::FloorOpened(b64_32(rest)?),
                     "lh" => Self::HeldList(b64_32(rest)?),
-                    "lgone" => Self::ListRecordLost(b64_32(rest)?),
-                    "lur" => Self::ListRecordUnread(b64_32(rest)?),
                     "side" => Self::Side(msg_id(rest)?),
                     "ex" => Self::SendExemption(msg_id(rest)?),
                     "qs" => Self::QueuedStop(msg_id(rest)?),
@@ -3673,91 +3559,6 @@ mod tests {
     }
 
     #[test]
-    fn test_state_lost_list_record_bound_to_a_delete_version() {
-        let at = key::list_record_lost(&[1; 32]);
-        let lost = serde_json::json!({ "deleted": [1, 4], "item": null });
-        assert!(reads::<LostListRecord>(&at, lost.clone()));
-        assert!(reads::<LostListRecord>(
-            &at,
-            serde_json::json!({ "deleted": [1, 4], "item": vec![6u8; 32] })
-        ));
-        // A delete's version is a write's: never `{0, 0}`, a version or a generation 0, or
-        // past the integers.
-        for deleted in [
-            serde_json::json!([0, 0]),
-            serde_json::json!([1, 0]),
-            serde_json::json!([0, 5]),
-            serde_json::json!([1, 9_007_199_254_740_992u64]),
-        ] {
-            let at_version = serde_json::json!({ "deleted": deleted, "item": null });
-            assert!(!reads::<LostListRecord>(&at, at_version));
-        }
-        // Every member is written, no other is, and a bare mark is no value of this family.
-        assert!(!reads::<LostListRecord>(
-            &at,
-            serde_json::json!({ "deleted": [1, 4] })
-        ));
-        assert!(!reads::<LostListRecord>(
-            &at,
-            serde_json::json!({ "deleted": [1, 4], "item": null, "copy": null })
-        ));
-        assert!(!reads::<bool>(&at, serde_json::json!(true)));
-        assert!(!reads::<LostListRecord>(&key::held_list(&[1; 32]), lost));
-    }
-
-    /// The entry for a delete at version `deleted` of generation 1, with item hash `item`.
-    fn lost_at(deleted: u64, item: Option<u8>) -> LostListRecord {
-        LostListRecord {
-            deleted: [1, deleted],
-            item: item.map(|byte| [byte; 32]),
-        }
-    }
-
-    #[test]
-    fn test_state_lost_list_record_keeps_the_newest_delete() {
-        // A restore keeps the newer delete, whichever side holds it.
-        assert_eq!(
-            lost_at(4, Some(1)).merge(lost_at(6, Some(2))),
-            lost_at(6, Some(2))
-        );
-        assert_eq!(
-            lost_at(6, Some(2)).merge(lost_at(4, Some(1))),
-            lost_at(6, Some(2))
-        );
-        // A delete reported again by its item, or an older one, changes nothing; a newer
-        // one is kept.
-        assert_eq!(
-            lost_at(6, Some(2)).then(lost_at(6, Some(2))),
-            lost_at(6, Some(2))
-        );
-        assert_eq!(
-            lost_at(6, Some(2)).then(lost_at(5, None)),
-            lost_at(6, Some(2))
-        );
-        assert_eq!(lost_at(6, Some(2)).then(lost_at(7, None)), lost_at(7, None));
-        let at = key::list_record_lost(&[1; 32]);
-        let value = serde_json::to_value(lost_at(7, None)).expect("a lost record serializes");
-        assert!(reads::<LostListRecord>(&at, value));
-    }
-
-    #[test]
-    fn test_state_lost_list_record_tells_deletes_at_one_version_apart_by_item() {
-        let one = lost_at(4, Some(1));
-        // Another delete at the same version, as a recovery can upload, or one whose item
-        // isn't known, is merged: the entry no longer names one delete (Paykit spec 6).
-        for other in [lost_at(4, Some(2)), lost_at(4, None)] {
-            assert_eq!(one.clone().then(other), lost_at(4, None));
-        }
-        // Only a delete known by its item is the one a later report may name again.
-        let version = pubky_switch_core::ops::RecordVersion {
-            generation: 1,
-            version: 4,
-        };
-        assert!(one.deleted_at(version));
-        assert!(!lost_at(4, None).deleted_at(version));
-    }
-
-    #[test]
     fn test_state_marks_bound_to_their_sender_with_times_not_crossed() {
         let mark = |sender: u8, earliest: u64, latest: u64| {
             serde_json::json!({
@@ -4230,14 +4031,6 @@ mod tests {
                 StateKey::Taken(format!("{}-7", "05".repeat(16))),
             ),
             (key::held_list(&pubky), StateKey::HeldList(pubky)),
-            (
-                key::list_record_lost(&pubky),
-                StateKey::ListRecordLost(pubky),
-            ),
-            (
-                key::list_record_unread(&pubky),
-                StateKey::ListRecordUnread(pubky),
-            ),
             (key::side(id), StateKey::Side(id.into())),
             (key::send_exemption(id), StateKey::SendExemption(id.into())),
             (key::queued_stop(id), StateKey::QueuedStop(id.into())),

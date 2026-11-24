@@ -64,7 +64,7 @@ use crate::pay::ListAsk;
 use crate::rail::Rail;
 use crate::receive::{self, Fail, QueuedAnswer};
 use crate::records::KeptMessage;
-use crate::state::{self, key, LostListRecord, StateKey};
+use crate::state::{self, key, StateKey};
 
 /// The kinds this SDK handles (Paykit wire 4.3): the one-time request flow, recurring
 /// requests' acceptance and period details, payments without a request, Private Payment Lists,
@@ -754,58 +754,6 @@ pub(crate) fn restore_paykit_layer(
     // And its recorded loss: an in-place restore keeps the shared post-loss hold's evidence
     // (Paykit spec 8.1, wire 5.6).
     let mut loss_recorded = previous_loss_recorded(restoring, &binder)?;
-    // A backup taken before a `payment_lists` delete was seen cannot discharge the
-    // installation's knowledge of it either (Paykit spec 6).
-    let mut lists_lost: std::collections::BTreeMap<Vec<u8>, LostListRecord> =
-        std::collections::BTreeMap::new();
-    let mut keep_lost = |k: Vec<u8>, lost: LostListRecord| match lists_lost.remove(&k) {
-        Some(held) => lists_lost.insert(k, held.merge(lost)),
-        None => lists_lost.insert(k, lost),
-    };
-    for (k, value) in restoring
-        .previous_local_scan(key::LISTS_LOST.as_bytes())
-        .map_err(|_| "the installation's deleted list records cannot be read")?
-    {
-        if !matches!(StateKey::parse(&k), Some(StateKey::ListRecordLost(_))) {
-            return Err("the installation holds an invalid deleted list record".into());
-        }
-        let lost = state::restored::<LostListRecord>(&k, &value, &binder)
-            .map_err(|_| "the installation holds an invalid deleted list record")?;
-        keep_lost(k, lost);
-    }
-    // And its holds over unread `payment_lists` records: a later absence of one holds its
-    // list too, which a backup taken before the hold doesn't know (Paykit spec 6).
-    let mut lists_unread = std::collections::BTreeSet::new();
-    for (k, value) in restoring
-        .previous_local_scan(key::LISTS_UNREAD.as_bytes())
-        .map_err(|_| "the installation's unread list records cannot be read")?
-    {
-        if !matches!(StateKey::parse(&k), Some(StateKey::ListRecordUnread(_))) {
-            return Err("the installation holds an invalid unread list record".into());
-        }
-        state::restored::<bool>(&k, &value, &binder)
-            .map_err(|_| "the installation holds an invalid unread list record")?;
-        lists_unread.insert(k);
-    }
-    // And the marker of a `payment_lists` value the installation's client holds but never
-    // showed Paykit, such as a recovery upload with no proof of its version: an earlier
-    // backup lacks it, and a later value dropping it is still never taken (Paykit spec 6;
-    // wire 5).
-    for record in restoring.previous_records_of(Collection::PaymentLists.name()) {
-        let record = record.map_err(|_| "the installation's list records cannot be read")?;
-        let Some(value) = record.content.value() else {
-            continue;
-        };
-        if list_loss_marker(value).is_none() {
-            continue;
-        }
-        let marked = receive::marked_entry(value, &record.key, record.version, None, |t| {
-            binder.record_key(t).ok()
-        });
-        if let Some(lost) = marked {
-            keep_lost(key::list_record_lost(&record.key).into_bytes(), lost);
-        }
-    }
     // The installation's stops: a restore in place keeps the store's unacknowledged
     // reports under their IDs, so the decision taken on them stays with them (Paykit spec
     // 8.1, 9).
@@ -1253,17 +1201,6 @@ pub(crate) fn restore_paykit_layer(
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
-            StateKey::ListRecordLost(_) => {
-                let lost = state::restored::<LostListRecord>(&key, &value, &binder)
-                    .map_err(|_| unread())?;
-                keep_lost(key, lost);
-                continue;
-            }
-            StateKey::ListRecordUnread(_) => {
-                state::restored::<bool>(&key, &value, &binder).map_err(|_| unread())?;
-                lists_unread.insert(key);
-                continue;
-            }
             StateKey::HeldList(_) => {
                 state::restored::<KeptMessage>(&key, &value, &binder).map_err(|_| {
                     String::from("Paykit wire 5.4: a held list in the backup doesn't verify")
@@ -1522,18 +1459,6 @@ pub(crate) fn restore_paykit_layer(
             state::local_put(key::LOSS_RECORDED, &recorded)
                 .map_err(|_| "the recorded provider loss cannot be written")?,
         );
-    }
-    for key in lists_unread {
-        writes.push(LocalWrite::Put {
-            key,
-            value: state::encode(&true).map_err(|_| "an unread list record cannot be written")?,
-        });
-    }
-    for (key, lost) in lists_lost {
-        writes.push(LocalWrite::Put {
-            key,
-            value: state::encode(&lost).map_err(|_| "a deleted list record cannot be written")?,
-        });
     }
     if !floor_kept.is_empty() {
         writes.push(
@@ -2413,7 +2338,6 @@ impl Protocol for PaykitProtocol {
         }
         let mut writes = crate::settlement_marks::observe(observation, context)?;
         writes.extend(crate::publish::history::observe(observation, context)?);
-        writes.extend(crate::receive::observe_list_record(observation, context)?);
         Ok(writes)
     }
 
@@ -2482,24 +2406,6 @@ impl Protocol for PaykitProtocol {
     ) -> Result<Option<PutBack>, StoreFailure> {
         // `block_floor` is permanent (Paykit wire 5.1, 5.6): the client refuses a delete of it,
         // so none comes here.
-        if deletion.collection == paykit_lib::collections::Collection::PaymentLists.name() {
-            // The delete is kept as seen in the commit that observes it, from the feed or a
-            // read: no later absence or value places a list there (Paykit spec 6; wire 5,
-            // "Incomplete protected-record contract").
-            //
-            // The limit: the client reports only another app's delete here, so a delete by
-            // another installation of this App ID, which only a faulty own app writes, is
-            // seen as a delete only by a list arriving over it ([`crate::receive`]
-            // `hold_list`), until the client reports it.
-            return Ok(Some(PutBack::Observe {
-                observed: crate::receive::list_record_deleted(
-                    cx,
-                    deletion.key,
-                    deletion.version,
-                    Some(deletion.item_hash),
-                )?,
-            }));
-        }
         crate::deletions::observe_payee_deletion(deletion, cx, &|endpoint, proof| {
             self.settlement_id(endpoint, proof)
         })
