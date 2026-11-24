@@ -241,3 +241,86 @@ async fn test_resume_on_a_failing_store_journals_nothing() {
     assert_eq!(stage(&wallet, &first).await, Stage::Paying);
     assert_eq!(stage(&wallet, &second).await, Stage::Paying);
 }
+
+/// The world's switches, where the next operation batch (`/ops`), once armed, fails at the
+/// host's transport with the error armed, nothing sent; later ones go through.
+struct RefusingOps {
+    inner: Arc<pubky_switch_client::testing::Router>,
+    next: std::sync::Mutex<Option<pubky_switch_client::error::TransportError>>,
+}
+
+impl pubky_switch_client::transport::Transport for RefusingOps {
+    fn send(
+        &self,
+        request: pubky_switch_client::transport::Request,
+    ) -> pubky_switch_client::transport::BoxFuture<
+        '_,
+        Result<
+            pubky_switch_client::transport::Response,
+            pubky_switch_client::error::TransportError,
+        >,
+    > {
+        let refused = (request.method == "POST" && request.path_and_query.ends_with("/ops"))
+            .then(|| self.next.lock().unwrap().take())
+            .flatten();
+        Box::pin(async move {
+            match refused {
+                Some(error) => Err(error),
+                None => self.inner.send(request).await,
+            }
+        })
+    }
+}
+
+#[tokio::test]
+async fn test_resume_returns_a_host_transport_failure_behind_a_kept_outcome_write() {
+    // Both payments were made. The first outcome write meets a failure of the host's own
+    // transport that no retry clears: the client keeps the batch, but the host must act, so
+    // the resume returns it, after the other payment's outcome is written, rather than report
+    // the first pending at every resume.
+    use pubky_switch_client::error::TransportError as T;
+    for error in [
+        T::FirstSendUnavailable,
+        T::Refused("origin".into()),
+        T::TooLarge(1),
+        T::InvalidRequest("header".into()),
+    ] {
+        let w = World::new();
+        let base = store();
+        let mut wallet = w.wallet_on("wallet", Arc::clone(&base)).await;
+        let app_id = wallet.app_id();
+        let [first, second] = two_in_flight(&w, &mut wallet).await;
+        drop(wallet);
+        w.rail.settle(&first, true);
+        w.rail.settle(&second, true);
+        let transport = Arc::new(RefusingOps {
+            inner: Arc::clone(&w.router),
+            next: std::sync::Mutex::new(None),
+        });
+        let mut wallet = w
+            .load_with_transport(
+                &w.alice,
+                Arc::clone(&base),
+                app_id,
+                Arc::clone(&transport) as Arc<dyn pubky_switch_client::transport::Transport>,
+            )
+            .await;
+        *transport.next.lock().unwrap() = Some(error.clone());
+        let resumed = wallet.resume_payments().await;
+        let Err(paykit_sdk::PaykitError::Client(failure)) = &resumed else {
+            panic!("{error:?}: {resumed:?}");
+        };
+        assert_eq!(
+            failure.unkept(),
+            &pubky_switch_client::app::AppError::Transport(error.clone()),
+            "{resumed:?}"
+        );
+        let second_stage = stage(&wallet, &second).await;
+        assert!(
+            matches!(second_stage, Stage::Finished | Stage::AcceptanceOwed),
+            "{error:?}: {second_stage:?}"
+        );
+        assert_eq!(w.rail.executions(&first), 1);
+        assert_eq!(w.rail.executions(&second), 1);
+    }
+}

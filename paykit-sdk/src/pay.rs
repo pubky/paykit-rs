@@ -966,9 +966,10 @@ pub(crate) fn entry_waits(error: &PaykitError) -> bool {
 ///   replaces;
 /// - a switch answer whose Retry column (Switch spec 6.4) lets the same request pass as it
 ///   is, after `Retry-After`, with a new timestamp or after a fresh read;
-/// - any answer of the switch or failure of the network behind a batch the client keeps,
-///   which it sends again by itself, but for a full quota, which the host is shown;
 /// - a write behind batches the client keeps.
+///
+/// A failure inside a kept or ahead batch (`Kept`, `Ahead`) is judged as the same failure
+/// bare: the client keeps a batch after failures that need the host too.
 ///
 /// No wait: a switch answer that needs a key bundle, a new signature or seal, the sender's
 /// `identity.json`, another service or a freed quota first, or none passes; an answer that
@@ -984,17 +985,9 @@ pub(crate) fn entry_waits(error: &PaykitError) -> bool {
 /// into one) or has a restore question open.
 pub(crate) fn client_waits(error: &AppError) -> bool {
     use pubky_switch_client::error::ClientError as C;
-    use pubky_switch_core::http::{ErrorCode, Retry};
-    // A batch the client keeps goes again, the same bytes, before its next write and at its
-    // next read; it keeps none refused for good. Behind an answer of the switch or the
-    // network, it is a wait, but for a full quota, which the host is shown.
-    if let AppError::Kept { .. } = error {
-        if matches!(error.unkept(), AppError::Switch(_) | AppError::Transport(_))
-            && error.code() != Some(ErrorCode::QuotaExceeded)
-        {
-            return true;
-        }
-    }
+    use pubky_switch_core::http::Retry;
+    // A kept or ahead batch is judged by the failure inside it, by the same table: the
+    // client keeps one the host's own transport refused too, which no resend clears.
     match error.unkept() {
         AppError::ExpiredUnsent | AppError::NotAnsweringAsAccount { .. } => true,
         AppError::Transport(transport) | AppError::Switch(C::Transport(transport)) => {
@@ -4111,8 +4104,21 @@ impl Paykit {
     }
 
     /// Steps 3 and 4: the outcome, the activity record and the proof, in one batch, then
-    /// the proof is sent.
+    /// the proof is sent. A failure to write a payment made is reported as
+    /// [`PayOutcome::PaidOutcomeUnwritten`], never as the payment's error (Paykit spec 7.2),
+    /// unless it stops the wallet.
     pub(crate) async fn report(&mut self, entry: &mut JournalEntry) -> Result<PayOutcome> {
+        Box::pin(self.report_as(entry, false)).await
+    }
+
+    /// [`Paykit::report`] for a resume: a failure to write a payment made is returned, so the
+    /// resume reports the entry [`PayOutcome::PaidOutcomeUnwritten`] and decides whether the
+    /// failure is a wait or one the host must act on ([`entry_waits`]).
+    async fn resume_report(&mut self, entry: &mut JournalEntry) -> Result<PayOutcome> {
+        Box::pin(self.report_as(entry, true)).await
+    }
+
+    async fn report_as(&mut self, entry: &mut JournalEntry, strict: bool) -> Result<PayOutcome> {
         let attempt_id = entry.attempt()?;
         let paid = entry.rail_proof.is_some();
         if entry.offline.is_some() {
@@ -4126,6 +4132,7 @@ impl Paykit {
             match self.record_offline_attempt(entry).await {
                 Ok(true) => {}
                 Ok(false) => return Ok(PayOutcome::PaidOutcomeUnwritten { attempt_id }),
+                Err(error) if strict => return Err(error),
                 Err(error) => {
                     unless_stop(error)?;
                     return Ok(PayOutcome::PaidOutcomeUnwritten { attempt_id });
@@ -4153,6 +4160,7 @@ impl Paykit {
             }
             // Money moved: a failure to write it is never the payment's error (Paykit spec
             // 7.2), unless it stops the wallet; the journal keeps the proof for a resume.
+            Err(error) if strict => return Err(error),
             Err(error) if paid => {
                 unless_stop(error)?;
                 return Ok(PayOutcome::PaidOutcomeUnwritten { attempt_id });
@@ -4769,9 +4777,15 @@ impl Paykit {
             // written already, so it reports none.
             if entry.stage == Stage::AcceptanceOwed {
                 if !payer_waits {
+                    // Its outcome is written, so it reports none; a failure to place the
+                    // acceptance is judged as any entry's: a wait says nothing more, any other
+                    // is returned after the entries.
                     if let Err(error) = self.finish_owed_acceptance(&mut entry).await {
                         if stops_resume(&error) {
                             return Err(error);
+                        }
+                        if !entry_waits(&error) {
+                            not_a_wait.get_or_insert(error);
                         }
                     }
                 }
@@ -4973,7 +4987,7 @@ impl Paykit {
                 out.extend(self.resolve_dispatched(entry).await?);
             }
             Stage::RailPaid | Stage::RailFailed => {
-                out.push(self.report(&mut entry).await?);
+                out.push(self.resume_report(&mut entry).await?);
             }
             Stage::AcceptanceOwed | Stage::Finished | Stage::Abandoned => {}
         }
@@ -6394,6 +6408,15 @@ mod tests {
         // client's refusal for now, kept or not, a service answer a retry may pass, the
         // network, the own switch or identity.json for now, a conflict, the method's history
         // unreachable for now.
+        // A client failure inside a kept batch, for each row: wrappers are judged by the
+        // failure inside them (`AppError::Ahead`, which can't be built here, unwraps the same).
+        let kept_of = |error: &PaykitError| match error {
+            PaykitError::Client(inner) => Some(PaykitError::Client(AppError::Kept {
+                batch_id: [2; 16],
+                error: Box::new(inner.clone()),
+            })),
+            _ => None,
+        };
         let unsigned = |status| {
             PaykitError::Client(AppError::Switch(ClientError::BadServiceSignature {
                 status,
@@ -6436,27 +6459,14 @@ mod tests {
             answer(E::Staged),
             transport(TransportError::Timeout),
             transport(TransportError::UnreadableSignedHeader { status: 504 }),
-            // Behind a kept batch, which the client sends again by itself.
-            PaykitError::Client(AppError::Kept {
-                batch_id: [1; 16],
-                error: Box::new(AppError::Switch(ClientError::InvalidResponse(
-                    "member".into(),
-                ))),
-            }),
-            PaykitError::Client(AppError::Kept {
-                batch_id: [1; 16],
-                error: Box::new(AppError::Switch(ClientError::Switch {
-                    status: 410,
-                    code: E::Moved,
-                    message: String::new(),
-                    current: serde_json::Value::Null,
-                    known_version: None,
-                    retry_after: None,
-                })),
-            }),
         ] {
             assert!(!stops_resume(&waits), "{waits:?}");
             assert!(entry_waits(&waits), "{waits:?}");
+            // The same failure inside a kept batch is judged the same.
+            if let Some(kept) = kept_of(&waits) {
+                assert!(!stops_resume(&kept), "{kept:?}");
+                assert!(entry_waits(&kept), "{kept:?}");
+            }
         }
         // Anything else is no wait: a later resume meets it again until someone acts, so the
         // call returns it once every entry is visited.
@@ -6467,6 +6477,11 @@ mod tests {
             answer(E::NotFound),
             answer(E::QuotaExceeded),
             unsigned(404),
+            answer(E::Moved),
+            PaykitError::Client(AppError::Switch(ClientError::InvalidResponse(
+                "member".into(),
+            ))),
+            transport(TransportError::InvalidRequest("header".into())),
             held_back(ClientRefusal::NotNow("reconcile mode".into())),
             kept(ClientRefusal::NotNow("reconcile mode".into())),
             PaykitError::Client(AppError::Kept {
@@ -6501,6 +6516,10 @@ mod tests {
         ] {
             assert!(!stops_resume(&returned), "{returned:?}");
             assert!(!entry_waits(&returned), "{returned:?}");
+            if let Some(kept) = kept_of(&returned) {
+                assert!(!stops_resume(&kept), "{kept:?}");
+                assert!(!entry_waits(&kept), "{kept:?}");
+            }
         }
         for stop in [answer(E::NotCurrent), held_back(ClientRefusal::Left)] {
             assert!(!entry_waits(&stop), "{stop:?}");
