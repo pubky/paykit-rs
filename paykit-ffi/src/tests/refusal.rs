@@ -1069,11 +1069,18 @@ fn unsaved_settlement_warning(storage: PaykitError) -> PaykitError {
 }
 
 #[test]
-fn test_wallet_errors_unsaved_settlement_warning_keeps_its_bucket_and_kept_batch() {
-    for storage in [
-        PaykitError::from(pubky_switch_client::StoreError::Unavailable),
-        PaykitError::from(pubky_switch_client::StoreError::Unknown),
-        PaykitError::Conflict("notice".into()),
+fn test_wallet_errors_unsaved_settlement_warning_keeps_its_bucket_outcome_and_kept_batch() {
+    use crate::SettlementWarningOutcome::{Failed, OutcomeUnknown};
+    for (storage, outcome) in [
+        (
+            PaykitError::from(pubky_switch_client::StoreError::Unavailable),
+            Failed,
+        ),
+        (
+            PaykitError::from(pubky_switch_client::StoreError::Unknown),
+            OutcomeUnknown,
+        ),
+        (PaykitError::Conflict("notice".into()), Failed),
     ] {
         let (case, failure) =
             categorized(unsaved_settlement_warning(storage).into()).expect("a categorized failure");
@@ -1086,8 +1093,11 @@ fn test_wallet_errors_unsaved_settlement_warning_keeps_its_bucket_and_kept_batch
         assert_eq!(failure.kept_batch().as_deref(), Some(&[4; 16][..]));
         assert_eq!(failure.service_code().as_deref(), Some("quota_exceeded"));
         assert_eq!(failure.quota_limit().as_deref(), Some("record_keys"));
+        // Whether the warning may already be saved.
+        assert_eq!(failure.settlement_warning_outcome(), Some(outcome));
     }
-    // Every other failure carries no bucket.
+    // Every other failure carries no bucket and no warning outcome.
     let (_, other) = categorized(PaykitError::Conflict("state".into()).into()).unwrap();
     assert_eq!(other.settlement_bucket(), None);
+    assert_eq!(other.settlement_warning_outcome(), None);
 }
