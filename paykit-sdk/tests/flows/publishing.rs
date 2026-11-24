@@ -2826,7 +2826,7 @@ async fn test_publication_keeps_an_unknown_withdrawal_and_a_failed_resend_from_a
         shop.publish_list_to(payer).await.unwrap();
         if !accepted {
             w.alice.switch().fail_next(Fault::LoseAnswer {
-                path: "inbox".into(),
+                path: "/inbox".into(),
             });
         }
         shop.withdraw_list_from(payer).await.unwrap();
@@ -2878,7 +2878,7 @@ async fn unknown_list(
 ) -> (ListPublicationRecord, [u8; 32]) {
     use pubky_switch_client::testing::Fault;
     w.alice.switch().fail_next(Fault::Unanswered {
-        path: "inbox".into(),
+        path: "/inbox".into(),
         after: 0,
     });
     send(shop).await;
@@ -3365,7 +3365,7 @@ async fn test_publication_notice_of_a_version_superseded_while_its_batch_waited_
     shop.app_mut().invite(&payer).await.unwrap();
     shop.set_list_endpoints(offered("lno1first")).await.unwrap();
     w.alice.switch().fail_next(Fault::Unanswered {
-        path: "inbox".into(),
+        path: "/inbox".into(),
         after: 0,
     });
     shop.publish_list_to(payer).await.unwrap();
@@ -3556,7 +3556,7 @@ async fn test_publication_takes_only_a_proof_naming_its_own_unknown_list_as_its_
     shop.receive(None).await.unwrap();
     shop.set_list_endpoints(offered("lno1first")).await.unwrap();
     w.alice.switch().fail_next(Fault::LoseAnswer {
-        path: "inbox".into(),
+        path: "/inbox".into(),
     });
     shop.publish_list_to(payer).await.unwrap();
     let key = shop.app().record_key(&target(&shop, &payer, 1)).unwrap();
@@ -3651,7 +3651,7 @@ async fn test_publication_takes_a_proof_paid_from_the_unknown_list_as_its_arriva
     // The inbox takes the list but its answer is lost: the payer holds it, and the shop
     // can't tell.
     w.alice.switch().fail_next(Fault::LoseAnswer {
-        path: "inbox".into(),
+        path: "/inbox".into(),
     });
     shop.publish_list_to(payer).await.unwrap();
     let key = shop.app().record_key(&target(&shop, &payer, 1)).unwrap();
@@ -3689,7 +3689,7 @@ async fn test_publication_takes_a_list_request_naming_the_unknown_withdrawal_as_
     shop.publish_list_to(payer).await.unwrap();
     // The inbox takes the withdrawal but its answer is lost: the payer holds it.
     w.alice.switch().fail_next(Fault::LoseAnswer {
-        path: "inbox".into(),
+        path: "/inbox".into(),
     });
     shop.withdraw_list_from(payer).await.unwrap();
     let key = shop.app().record_key(&target(&shop, &payer, 1)).unwrap();
