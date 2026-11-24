@@ -12,7 +12,7 @@ impl Paykit {
         carrier: Carrier,
         options: &PayOptions,
     ) -> Result<PayOutcome> {
-        self.own_identity_confirmed(true).await?;
+        self.own_identity_confirmed(true).await??;
         if self.app.follow_provider().await? != ProviderStatus::Current {
             return Err(
                 Refusal::NotNow("follow the payer's current switch before paying".into()).into(),

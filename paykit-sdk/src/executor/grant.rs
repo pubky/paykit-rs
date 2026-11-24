@@ -25,8 +25,12 @@ impl Paykit {
         &mut self,
         target: &RecordTarget,
     ) -> Result<(AppliedRecord, KeptOp)> {
-        let RecordRead::Fresh(record) = self.app.read_record_fresh(target).await? else {
-            return Err(held().into());
+        let record = match self.app.read_record_fresh(target).await? {
+            RecordRead::Fresh(record) => record,
+            RecordRead::Kept { reason, .. } => {
+                return Err(crate::pay::kept_read_stop(&reason).unwrap_or_else(|| held().into()))
+            }
+            _ => return Err(held().into()),
         };
         self.app
             .shared_evidence()
@@ -50,6 +54,8 @@ impl Paykit {
     /// unavailable, the ledger cannot be reconciled, a later user decision is owed, or accessing
     /// the store or service failed.
     pub async fn resume_allowance_executor(&mut self, record: &[u8; 32]) -> Result<()> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         Box::pin(self.apply_executor_grant(record, None)).await
     }
 
@@ -68,6 +74,8 @@ impl Paykit {
         record: &[u8; 32],
         confirmed: UserConfirmed,
     ) -> Result<()> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         Box::pin(self.apply_executor_grant(record, Some(confirmed))).await
     }
 
@@ -220,6 +228,7 @@ impl Paykit {
             &view.counterparty,
             &view.allowance_id,
             opening.deletion,
+            &opening.deletion_write,
         ))
         .await?
         .ok_or_else(held)?;

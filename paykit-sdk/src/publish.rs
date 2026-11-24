@@ -500,6 +500,17 @@ pub(crate) fn may_send(view: &DeliveryView<'_>) -> std::result::Result<bool, Sto
             return Ok(false);
         }
         if list.payment_endpoints.is_empty() {
+            // A withdrawal goes while sends are held, on its first delivery, its retries and
+            // a restore's re-send; sent again in answer to a `resend_request`, Section 9
+            // decides it, which needs a deny copy that permits the counterparty (Paykit
+            // spec 8.1, "Messages already queued"; 9).
+            if view.resend()
+                && (!crate::receive::reads_lists(view.cert().scopes())
+                    || crate::send_holds::deny_decision(view)?
+                        != crate::send_holds::DenyDecision::Permits)
+            {
+                return Ok(false);
+            }
             return Ok(issue.revision.is_none());
         }
         let settings = crate::state::view_get::<ListSettings>(local, key::LIST_SETTINGS)?;
@@ -509,26 +520,10 @@ pub(crate) fn may_send(view: &DeliveryView<'_>) -> std::result::Result<bool, Sto
         {
             return Ok(false);
         }
-        if !crate::receive::reads_lists(view.cert().scopes()) {
-            return Ok(true);
-        }
-        if crate::state::view_get::<u64>(local, key::LISTS_READ)?.is_none() {
-            return Ok(false);
-        }
-        if let Some(mark) = crate::state::view_get::<crate::state::OwnBlockMark>(
-            local,
-            &key::own_block(&message.to),
-        )? {
-            let kept = match mark.unblock_batch() {
-                Some(id) => matches!(view.kept_batch(id)?, Some(KeptBatchStatus::Kept { .. })),
-                None => false,
-            };
-            return Ok(mark.counts(kept) == Some(false));
-        }
-        Ok(
-            !crate::state::view_get::<Vec<[u8; 32]>>(local, key::DENIED)?
-                .is_some_and(|ids| ids.contains(&message.to)),
-        )
+        // A nonempty list goes only on the deny decision every held send is judged by: a
+        // copy past its refresh interval or not known doesn't authorize it (Paykit spec 8.1,
+        // "Messages already queued").
+        Ok(crate::send_holds::deny_decision(view)? == crate::send_holds::DenyDecision::Permits)
     }
     allowed(view).map_err(crate::protocol::view_failure)
 }
@@ -689,6 +684,8 @@ impl Paykit {
         &mut self,
         endpoints: BTreeMap<PaymentEndpointIdentifier, PaymentEndpointPayload>,
     ) -> Result<()> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         self.first_read_before_writing().await?;
         self.refresh_own()?;
         if !self.holds(SCOPE) {
@@ -721,6 +718,8 @@ impl Paykit {
     /// while sends are held, before the list is set, or while an earlier publication is
     /// unresolved. A store or client failure.
     pub async fn publish_list_to(&mut self, recipient: [u8; 32]) -> Result<()> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         self.first_read_before_writing().await?;
         self.refresh_own()?;
         if recipient == self.identity() || !self.holds(SCOPE) {
@@ -783,6 +782,8 @@ impl Paykit {
     /// unresolved, or while a confirmed list can't be published yet. A store or client
     /// failure.
     pub async fn withdraw_list_from(&mut self, recipient: [u8; 32]) -> Result<()> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         self.first_read_before_writing().await?;
         self.refresh_own()?;
         let at = key::list_recipient(&recipient);
@@ -858,6 +859,8 @@ impl Paykit {
         shown: &UnknownListDelivery,
         _confirmed: UserConfirmed,
     ) -> Result<()> {
+        // A delivery operation for the whole call (Paykit spec 8.1).
+        let _delivery = self.delivery_operation();
         self.first_read_before_writing().await?;
         self.refresh_own()?;
         if !self.holds(SCOPE) {
@@ -1078,7 +1081,7 @@ impl Paykit {
         if let Some(issue) = prior.as_mut() {
             if issue.delivery == FirstDelivery::Open
                 && recipient.answers.first(issue).is_none()
-                && self.take_prior_list_delivery(&issue.id).await?
+                && self.take_delivery_duty(&issue.id).await?
             {
                 if let Some(taken) = self.local_get::<ListReservation>(&at).await? {
                     issue.delivery = taken.delivery;
@@ -1124,7 +1127,7 @@ impl Paykit {
                     }) => {
                         // After a loss the client can sign the batch again under the same
                         // ID. A refusal of those bytes says nothing about the old service.
-                        self.own_identity_confirmed(false).await?;
+                        self.own_identity_confirmed(false).await??;
                         let own = self.app.own_identity();
                         own.generation() >= original.generation
                             && own
@@ -1223,7 +1226,7 @@ impl Paykit {
         if !endpoints.is_empty() {
             self.refuse_while_sends_held(&recipient).await?;
         }
-        self.own_identity_confirmed(false).await?;
+        self.own_identity_confirmed(false).await??;
         let generation = self.app.own_identity().generation();
         let publisher = self.app_id();
         let target = target(&publisher, &recipient, generation);
@@ -1290,7 +1293,7 @@ impl Paykit {
                 .collect(),
             expires_at: self.now().saturating_add(PRIVATE_LIST_MAX_AGE_MS),
         };
-        self.own_identity_confirmed(false).await?;
+        self.own_identity_confirmed(false).await??;
         if self.app.own_identity().generation() != generation || !self.holds(SCOPE) {
             return Err(counter_unavailable().into());
         }
@@ -1358,7 +1361,7 @@ impl Paykit {
             .queue(signed)
             .keep_id_at(marker.into_bytes())
             .locals(applied.into_writes());
-        self.own_identity_confirmed(false).await?;
+        self.own_identity_confirmed(false).await??;
         if self.app.own_identity().generation() != generation || !self.holds(SCOPE) {
             return Err(counter_unavailable().into());
         }
