@@ -97,8 +97,9 @@ pub(crate) enum Placed {
     /// message waiting for a scope key included.
     Not,
     /// Not written while the record's absence decides nothing yet, or while the client keeps
-    /// a batch that may still write it or that it waits behind ([`submitted`]): tried again at
-    /// the next receive, and never given up meanwhile.
+    /// a batch of its own write, which may still land ([`submitted`]): tried again at the next
+    /// receive, and never given up meanwhile. A write that waits behind a batch kept from an
+    /// earlier call is [`Placed::Not`].
     Waits,
 }
 
