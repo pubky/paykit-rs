@@ -469,7 +469,30 @@ async fn test_allowance_refusals_lifetime_limit_waits_while_reserved_then_is_fin
         refused(Box::pin(payer.pay_under_allowance(&second, &key)).await),
         Refusal::NotAutomatic("the lifetime limit has no room".into())
     );
-    assert_eq!(w.rail.all_executions().len(), 1);
+    // 70 paid and 10 more in flight: 25 fits if those 10 fail, so it waits; 40 never fits,
+    // even with the 10 released.
+    let third = Box::pin(one_time(&w, &mut shop, &mut payer, "10")).await;
+    w.rail.next(Behaviour::Hang);
+    assert!(matches!(
+        Box::pin(payer.pay_under_allowance(&third, &key))
+            .await
+            .outcome
+            .unwrap(),
+        PayOutcome::Pending { .. }
+    ));
+    let fits_later = Box::pin(one_time(&w, &mut shop, &mut payer, "25")).await;
+    assert_eq!(
+        refused(Box::pin(payer.pay_under_allowance(&fits_later, &key)).await),
+        paykit_sdk::Refusal::NotNow(paykit_sdk::NotNowReason::AllowanceLimit {
+            limit: "lifetime".into()
+        })
+    );
+    let never = Box::pin(one_time(&w, &mut shop, &mut payer, "40")).await;
+    assert_eq!(
+        refused(Box::pin(payer.pay_under_allowance(&never, &key)).await),
+        Refusal::NotAutomatic("the lifetime limit has no room".into())
+    );
+    assert_eq!(w.rail.all_executions().len(), 2);
 }
 #[tokio::test]
 async fn test_allowance_refusals_a_count_limit_of_none_is_final() {

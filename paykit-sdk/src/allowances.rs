@@ -178,9 +178,10 @@ pub struct AllowanceView {
     /// Whether the counterparty is on the identity's deny list, as the app last read it
     /// (Paykit spec 8.1, "Blocked counterparties"): nothing new from it is taken, its
     /// requests are paused and nothing is sent to it, so the host shows the Allowance as
-    /// blocked. `None` while the copy of the deny list isn't known, at an app holding
-    /// `paykit_contacts` after a failed read of the lists or a restore: sends are held then too,
-    /// and the host can't show it as not blocked.
+    /// blocked. `None` while the copy of the deny list can't tell, at an app holding
+    /// `paykit_contacts`: not known after a failed read of the lists or a restore, an own block
+    /// or unblock settled since the last read, or a block in a copy due for a read. Sends are
+    /// held then too, and the host can't show it as not blocked.
     pub blocked: Option<bool>,
 }
 
@@ -2741,10 +2742,8 @@ impl Paykit {
     /// Whether the copy of the deny list holds `pubky`, for the views: `None` while the copy
     /// isn't known ([`Paykit::deny_copy_known`]).
     async fn blocked_as_known(&self, pubky: &[u8; 32]) -> Result<Option<bool>> {
-        if !Box::pin(self.deny_copy_known()).await? {
-            return Ok(None);
-        }
-        Ok(Some(Box::pin(self.denied_as_last_read(pubky)).await?))
+        // Never a definite block from stale state: `None` while the copy can't tell.
+        Box::pin(self.deny_decides(pubky)).await
     }
 
     /// [`Refusal::NotNow`] while the record at `record` waits for its scope key: the app

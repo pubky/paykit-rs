@@ -3,7 +3,7 @@
 //! is for display.
 
 /// What a call waits for: a later call, a read or a wait changes it, and the call is made
-/// again then. Nothing was sent for the call that was refused.
+/// again then.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum NotNowReason {
@@ -192,7 +192,7 @@ pub enum HeldForUserReason {
 }
 
 /// The recovery step of the wallet as a whole that clears a refusal: no wait does (Paykit
-/// spec 7.3). Nothing was sent for the call that was refused.
+/// spec 7.3).
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum RecoveryReason {

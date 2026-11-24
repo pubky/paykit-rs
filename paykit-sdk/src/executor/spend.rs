@@ -496,11 +496,26 @@ impl AllowanceReservation {
                         .amount_limit
                         .as_ref()
                         .is_some_and(|cap| amount.value.scaled() > cap.scaled())
-            }) || checked
-                .terms
-                .lifetime_amount_limit
-                .as_ref()
-                .is_some_and(|cap| amount.value.scaled() > cap.scaled());
+            }) || checked.terms.lifetime_amount_limit.as_ref().is_some_and(
+                |cap| {
+                    // The most room the open reservations and the attempts the user may release
+                    // could ever free: if the payment doesn't fit even then, it never does.
+                    let open = checked
+                        .ledger
+                        .entries
+                        .iter()
+                        .filter(|entry| entry.outcome.is_none())
+                        .fold(0u128, |sum, entry| sum.saturating_add(entry.value.scaled()));
+                    let freed = open.saturating_add(checked.facts.releasable().unwrap_or(0));
+                    checked
+                        .usage
+                        .lifetime()
+                        .scaled()
+                        .saturating_sub(freed)
+                        .checked_add(amount.value.scaled())
+                        .is_none_or(|sum| sum > cap.scaled())
+                },
+            );
             match limit {
                 LimitKind::PerPayment => not_automatic(&why),
                 _ if never_fits => not_automatic(&why),

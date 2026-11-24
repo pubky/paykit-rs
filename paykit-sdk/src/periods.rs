@@ -1276,25 +1276,31 @@ impl Paykit {
             )
             .await?;
         // A blocked payee's period is paid only once the user confirms it (Paykit spec 8.1).
-        let blocked =
-            if options.quote_only {
-                // Acting on a fresh deny-list read can publish an unblock floor. Leave it to
-                // the real dispatch; a quote never authorizes that write.
-                if self.floor_write_is_kept().await? {
-                    return Err(crate::floor::unreadable_floor());
-                }
-                if self.denied_as_last_read(&request.payee).await? {
-                    return Err(Refusal::HeldForUser(
+        let blocked = if options.quote_only {
+            // Acting on a fresh deny-list read can publish an unblock floor. Leave it to
+            // the real dispatch; a quote never authorizes that write.
+            if self.floor_write_is_kept().await? {
+                return Err(crate::floor::unreadable_floor());
+            }
+            if self.denied_as_last_read(&request.payee).await? {
+                // A block only from a copy that decides it; one due for a read, or an
+                // own change settled since, waits for that read.
+                return Err(match self.deny_decides(&request.payee).await? {
+                    Some(true) => Refusal::HeldForUser(
                         crate::HeldForUserReason::CounterpartyBlocked("the payee is blocked"),
-                    )
-                    .into());
+                    ),
+                    _ => Refusal::NotNow(crate::NotNowReason::ReadAgain(
+                        "the deny list must be read again",
+                    )),
                 }
-                false
-            } else if automatic {
-                self.denied(&request.payee).await?
-            } else {
-                self.denied_for_user(&request.payee).await?
-            };
+                .into());
+            }
+            false
+        } else if automatic {
+            self.denied(&request.payee).await?
+        } else {
+            self.denied_for_user(&request.payee).await?
+        };
         let obligation =
             self.obligation(&request.payee, &request.request_hash, period.start_secs());
         let restored = self.restored_attempts(&obligation).await?;
