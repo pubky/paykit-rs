@@ -4808,6 +4808,33 @@ async fn test_blocked_return_scope_key_arriving_ends_the_wait_over_a_floor_that_
 }
 
 #[tokio::test]
+async fn test_blocked_return_wait_ended_by_a_clock_set_back_between_receives() {
+    // Paykit wire 5.6, Raising: a try starts a two-minute wait. No receive comes for 121
+    // seconds, and in that gap the device clock goes back 40 seconds, so the next receive's
+    // clock shows only 81 seconds since the try. The monotonic clock shows 121: the wait is
+    // over and the raise is tried at that receive.
+    let w = World::new();
+    let storage = store();
+    let (wallet, _shop, _phone, _contacts) =
+        waiting_raise_in(&w, false, Arc::clone(&storage)).await;
+    let app_id = wallet.app_id();
+    drop(wallet);
+    let device = Arc::new(pubky_switch_client::clock::TestClock::new(w.clock.now_ms()));
+    let mut wallet = w
+        .load_on_clock(&w.alice, storage, app_id, Arc::clone(&device) as _)
+        .await;
+    // The first receive is the reopened wallet's first read; the raise goes at the next.
+    for _ in 0..2 {
+        wallet.receive(None).await.unwrap();
+    }
+    assert_eq!(raise_retry(&wallet).await, Some((3, 120_000)));
+    wallet.age_raise_try(121_000);
+    device.advance_ms(81_000);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(raise_retry(&wallet).await, Some((4, 240_000)));
+}
+
+#[tokio::test]
 async fn test_blocked_return_conflicting_raise_starts_no_wait() {
     // Paykit wire 5.6, Raising: a `409 conflict` on the raise neither starts nor ends a wait:
     // the wallet has read the newer record, and builds anew at its next receive.

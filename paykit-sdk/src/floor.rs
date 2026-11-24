@@ -294,12 +294,14 @@ impl RaiseRetry {
             && self.tried.windows(2).all(|pair| pair[0] < pair[1])
     }
 
-    /// Whether the wait after the last try is over at `now_ms`: at least the wait has passed
-    /// since it, or the time since can't be told, the clock having gone back.
-    fn waited(&self, now_ms: u64) -> bool {
+    /// Whether the wait after the last try is over at `now_ms`, `monotonic_ms` having passed
+    /// on this run's monotonic clock since it: at least the wait has passed on either clock,
+    /// so a clock set back can't hide time, or the time since can't be told, the clock having
+    /// gone back past the try.
+    fn waited(&self, now_ms: u64, monotonic_ms: u64) -> bool {
         now_ms
             .checked_sub(self.tried_at_ms)
-            .is_none_or(|elapsed| elapsed >= Self::wait_after(self.tries))
+            .is_none_or(|elapsed| elapsed.max(monotonic_ms) >= Self::wait_after(self.tries))
     }
 }
 
@@ -829,22 +831,22 @@ impl Paykit {
         // and a clock it saw at a later time since its last try went back, part of the way
         // included: the wait is over either way (the stored time alone can't tell a partial
         // step back).
-        if !self.raise_tried_in_run.load(Ordering::SeqCst) {
+        let tried_at = self.raise_tried_at.lock().ok().and_then(|at| *at);
+        let Some(tried_at) = tried_at else {
             return Ok(true);
-        }
+        };
+        let monotonic = u64::try_from(tried_at.elapsed().as_millis()).unwrap_or(u64::MAX);
         let seen = self.raise_clock_seen.fetch_max(now, Ordering::SeqCst);
-        Ok(now < seen || retry.waited(now) || self.floor_changed_since(retry).await?)
+        Ok(now < seen || retry.waited(now, monotonic) || self.floor_changed_since(retry).await?)
     }
 
     /// Note a try that left the raise unwritten: one more in a row, or the first after the
     /// floor changed ([`RaiseRetry`]).
     async fn note_raise_unwritten(&mut self) -> Result<()> {
         let tried = self.owed_raises().await?.ids().to_vec();
-        // The wait counts from this try: the device times seen start from it.
-        self.raise_clock_seen.store(self.now(), Ordering::SeqCst);
-        self.raise_tried_in_run.store(true, Ordering::SeqCst);
         // One read of the lists counts one try: a second raise it leaves unwritten, a
-        // widening's and an unblock's say, keeps the tries and the wait.
+        // widening's and an unblock's say, keeps the tries and the wait, the clocks it counts
+        // on included.
         if self.raise_tried_in_read {
             if let Some(retry) = self.raise_retry().await? {
                 return self
@@ -853,6 +855,12 @@ impl Paykit {
             }
         }
         self.raise_tried_in_read = true;
+        // The wait counts from this try: the device times seen and the monotonic count start
+        // from it.
+        self.raise_clock_seen.store(self.now(), Ordering::SeqCst);
+        if let Ok(mut at) = self.raise_tried_at.lock() {
+            *at = Some(std::time::Instant::now());
+        }
         let previous = match self.raise_retry().await? {
             Some(retry) if !self.floor_changed_since(&retry).await? => Some(retry),
             _ => None,
@@ -1720,15 +1728,17 @@ mod tests {
         };
         assert!(kept(1).reads() && kept(9).reads() && !kept(0).reads());
         // The wait counts from the try; a clock that went back since ends it at once.
-        assert!(kept(1).waited(1_000_000));
-        assert!(!kept(2).waited(1_059_999) && kept(2).waited(1_060_000));
-        assert!(!kept(9).waited(1_599_999) && kept(9).waited(1_600_000));
-        assert!(kept(9).waited(999_999) && kept(2).waited(0));
+        assert!(kept(1).waited(1_000_000, 0));
+        assert!(!kept(2).waited(1_059_999, 0) && kept(2).waited(1_060_000, 0));
+        assert!(!kept(9).waited(1_599_999, 0) && kept(9).waited(1_600_000, 0));
+        assert!(kept(9).waited(999_999, 0) && kept(2).waited(0, 0));
+        // A clock set back between checks: 21 s on it, 61 s on the monotonic clock.
+        assert!(kept(2).waited(1_021_000, 61_000) && !kept(2).waited(1_021_000, 21_000));
         let future = RaiseRetry {
             tried_at_ms: u64::MAX,
             ..kept(9)
         };
-        assert!(future.waited(1_000_000));
+        assert!(future.waited(1_000_000, 0));
     }
 
     #[test]

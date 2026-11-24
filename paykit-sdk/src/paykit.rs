@@ -409,9 +409,10 @@ pub struct Paykit {
     /// The latest device time this handle's retry check saw since its last unwritten try, so
     /// a clock put back, part of the way included, ends a wait ([`crate::floor::RaiseRetry`]).
     pub(crate) raise_clock_seen: std::sync::atomic::AtomicU64,
-    /// Whether this handle left a raise unwritten since it started: before that, every wait
-    /// is over, the time waited not being known ([`crate::floor::RaiseRetry`]).
-    pub(crate) raise_tried_in_run: std::sync::atomic::AtomicBool,
+    /// When this handle last left a raise unwritten, on its monotonic clock: none since it
+    /// started means every wait is over, the time waited not being known; with it, a clock set
+    /// back between checks can't hide time ([`crate::floor::RaiseRetry`]).
+    pub(crate) raise_tried_at: std::sync::Mutex<Option<std::time::Instant>>,
     /// How many activity records this handle bound ([`Paykit::activity_binds`]).
     #[cfg(feature = "test-support")]
     pub(crate) activity_binds: std::sync::atomic::AtomicU64,
@@ -489,7 +490,7 @@ impl Paykit {
             lists_read_this_pass: false,
             raise_tried_in_read: false,
             raise_clock_seen: std::sync::atomic::AtomicU64::new(0),
-            raise_tried_in_run: std::sync::atomic::AtomicBool::new(false),
+            raise_tried_at: std::sync::Mutex::new(None),
             #[cfg(feature = "test-support")]
             activity_binds: std::sync::atomic::AtomicU64::new(0),
             certificates: std::sync::Mutex::default(),
@@ -503,6 +504,16 @@ impl Paykit {
     pub fn activity_binds(&self) -> u64 {
         self.activity_binds
             .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Move this handle's last unwritten floor raise try `ms` back on its monotonic clock, as
+    /// if that much had passed since it without a receive. For tests of the retry wait, whose
+    /// monotonic count no test clock drives.
+    #[cfg(feature = "test-support")]
+    pub fn age_raise_try(&self, ms: u64) {
+        if let Ok(mut at) = self.raise_tried_at.lock() {
+            *at = at.and_then(|at| at.checked_sub(std::time::Duration::from_millis(ms)));
+        }
     }
 
     /// Join from an approval (Switch spec 12.1), as a Paykit App: the client's join, with
