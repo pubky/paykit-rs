@@ -915,6 +915,7 @@ mod tests {
         assert!(Purpose::Evidence.admits(1, 3, None));
         assert!(Purpose::Evidence.admits(3, 4, Some(2)));
         assert!(!Purpose::Evidence.admits(2, 4, Some(2)));
+        assert!(!Purpose::Established.admits(1, 2, Some(1)));
         assert!(!Purpose::Evidence.admits(1, 4, Some(2)));
         assert!(!Purpose::Evidence.admits(5, 4, None));
     }
