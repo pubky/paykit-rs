@@ -21,7 +21,9 @@ pub(crate) use spend::{standing, AllowanceReservation, JournalAllowance, Standin
 
 use std::collections::{HashMap, HashSet};
 
-use paykit_lib::allowances::{usage, AllowanceTerms, AttemptEvidence, ClaimState, Ledger, Usage};
+use paykit_lib::allowances::{
+    counts, usage, AllowanceTerms, AttemptEvidence, ClaimState, Counting, Ledger, Usage,
+};
 use paykit_lib::AttemptId;
 
 use crate::rail::{AllowanceDispatch, Rail, RailOutcome};
@@ -48,6 +50,11 @@ struct ReservationClaim {
 struct Accounting {
     counted: Usage,
     unclassified: Vec<AllowanceDispatch>,
+    /// The ledger's entries `counted` holds reserved that the method's inventory doesn't
+    /// show, each with its amount, scaled: the only reservations whose room an outcome may
+    /// still give back (Paykit spec 8.3). Judged entry by entry on the evidence `counted`
+    /// was computed from, the method's history included.
+    reserved_before_call: Vec<(AttemptId, u128)>,
 }
 
 async fn wallet_inventory(rail: &dyn Rail, payer: [u8; 32]) -> Option<Vec<AllowanceDispatch>> {
@@ -142,9 +149,22 @@ fn reconciled_usage(
         }
         evidence.get_mut(&id)?.paid |= matches!(dispatch.outcome, RailOutcome::Paid(_));
     }
+    let reserved_before_call = ledger
+        .entries
+        .iter()
+        .filter(|entry| {
+            !seen.contains(&entry.attempt_id)
+                && counts(
+                    entry,
+                    evidence.get(&entry.attempt_id).copied().unwrap_or_default(),
+                ) == Counting::Reserved
+        })
+        .map(|entry| (entry.attempt_id, entry.value.scaled()))
+        .collect();
     Some(Accounting {
         counted: usage(terms, ledger, &evidence, at).ok()?,
         unclassified,
+        reserved_before_call,
     })
 }
 
@@ -340,11 +360,42 @@ mod tests {
         let Accounting {
             counted,
             unclassified,
+            reserved_before_call,
         } = read_usage(&rail, payer, &terms, &ledger, &claims, 1_001)
             .await
             .unwrap();
         assert!(unclassified.is_empty());
         assert_eq!(counted.lifetime().as_str(), "70");
+        // Paid by the method's history: spent, and no reservation an outcome frees.
+        assert!(reserved_before_call.is_empty());
+        // 10 more reserved that the history doesn't show: the only room that may come back,
+        // whatever the 70 are counted as.
+        let later = AttemptId::from_bytes([9; 16]);
+        let mut both = ledger.clone();
+        both.entries.push(LedgerEntry {
+            obligation: [4; 32],
+            attempt_id: later,
+            value: Decimal::new("10").unwrap(),
+            asset: terms.asset.clone(),
+            at: 1_001,
+            outcome: None,
+        });
+        let mut two = claims.clone();
+        two.insert(
+            later,
+            ReservationClaim {
+                obligation: [4; 32],
+                state: ClaimState::Open,
+            },
+        );
+        let mixed = read_usage(&rail, payer, &terms, &both, &two, 1_001)
+            .await
+            .unwrap();
+        assert_eq!(mixed.counted.lifetime().as_str(), "80");
+        assert_eq!(
+            mixed.reserved_before_call,
+            vec![(later, Decimal::new("10").unwrap().scaled())]
+        );
         assert_eq!(
             check_limits(&terms, &counted, &Decimal::new("31").unwrap()),
             Err(LimitKind::Lifetime)

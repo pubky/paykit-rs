@@ -556,6 +556,10 @@ pub enum HeldForUserKind {
     PublicationConflict,
     /// A held record doesn't read; it is rewritten or recovered.
     RecordUnreadable,
+    /// The block floor record doesn't read and nothing in this version repairs it: an
+    /// unblock is refused, a block still takes effect, and one-time requests are paid by
+    /// hand.
+    FloorRecordUnreadable,
     /// After a provider loss this version doesn't resume automatic payments under the
     /// Allowance: the user ends it and sets up a new one.
     AllowanceNotResumed,
@@ -634,6 +638,7 @@ impl From<&paykit_sdk::HeldForUserReason> for HeldForUserKind {
             R::CancellationOrderUnknown => Self::CancellationOrderUnknown,
             R::PublicationConflict(_) => Self::PublicationConflict,
             R::RecordUnreadable(_) => Self::RecordUnreadable,
+            R::FloorRecordUnreadable => Self::FloorRecordUnreadable,
             R::AllowanceNotResumed => Self::AllowanceNotResumed,
             R::AllowanceExecutionHeld(_) => Self::AllowanceExecutionHeld,
             R::AttemptCheck(_) => Self::AttemptCheck,

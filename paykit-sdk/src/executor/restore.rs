@@ -36,6 +36,9 @@ pub(super) struct ReconciledLedger {
     pub(super) applied_proposals: Vec<String>,
     pub(super) ledger: Ledger,
     pub(super) usage: Usage,
+    /// The entries `usage` holds reserved that the method's inventory doesn't show, with
+    /// their amounts, scaled ([`super::Accounting`]).
+    pub(super) reserved_before_call: Vec<(paykit_lib::AttemptId, u128)>,
     pub(super) evidence: KeptOp,
     pub(super) grant: Condition,
     pub(super) current: Condition,
@@ -599,30 +602,34 @@ impl Paykit {
         if compaction.is_some() {
             signers.retain(&ledger);
         }
-        let result = |usage, ledger, grant, compaction, facts| ReconciledLedger {
-            signers,
-            facts,
-            applied_proposals: applied_proposals.suffixes,
-            compaction,
-            at_initial_ledger: current.revision == approval.ledger.revision,
-            at,
-            terms: proposed.terms.clone(),
-            ledger,
-            usage,
-            evidence: evidence.clone(),
-            grant,
-            current: Condition::RecordCurrent {
-                key: ledger_key,
-                revision: current.revision,
-                deleted: false,
-            },
-        };
+        let result =
+            |usage, reserved_before_call, ledger, grant, compaction, facts| ReconciledLedger {
+                signers,
+                facts,
+                applied_proposals: applied_proposals.suffixes,
+                compaction,
+                at_initial_ledger: current.revision == approval.ledger.revision,
+                at,
+                terms: proposed.terms.clone(),
+                ledger,
+                usage,
+                reserved_before_call,
+                evidence: evidence.clone(),
+                grant,
+                current: Condition::RecordCurrent {
+                    key: ledger_key,
+                    revision: current.revision,
+                    deleted: false,
+                },
+            };
         if !needs_inventory {
             let Ok(counted) = usage(&proposed.terms, &ledger, &HashMap::new(), at) else {
                 return Ok(None);
             };
+            // Counted with no claim read: nothing is held reserved.
             return Ok(Some(result(
                 counted,
+                Vec::new(),
                 ledger,
                 exact_grant,
                 compaction,
@@ -798,6 +805,7 @@ impl Paykit {
         let Some(Accounting {
             counted,
             unclassified,
+            reserved_before_call,
         }) = reconciled_usage(
             inventory,
             &proposed.terms,
@@ -987,6 +995,7 @@ impl Paykit {
         }
         Ok(Some(result(
             counted,
+            reserved_before_call,
             ledger,
             exact_grant,
             compaction,
