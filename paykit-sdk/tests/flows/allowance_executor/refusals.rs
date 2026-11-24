@@ -491,6 +491,53 @@ async fn test_allowance_refusals_lifetime_limit_counts_a_dispatched_payment_as_s
     assert_eq!(w.rail.all_executions().len(), 2);
 }
 #[tokio::test]
+async fn test_allowance_refusals_lifetime_limit_waits_for_a_reservation_before_the_call() {
+    let (w, mut payer, mut shop, key) = Box::pin(first_grant_in(store(), terms())).await;
+    w.rail.set_history_payer(payer.identity());
+    // 70 of 100 made on the method, its history showing it paid while the claim is still
+    // open and the journal still at the call: spent.
+    let first = Box::pin(one_time(&w, &mut shop, &mut payer, "70")).await;
+    w.rail.next(Behaviour::Hang);
+    let PayOutcome::Pending { attempt_id, .. } = Box::pin(payer.pay_under_allowance(&first, &key))
+        .await
+        .outcome
+        .unwrap()
+    else {
+        panic!("the first payment did not stay in flight");
+    };
+    w.rail.settle(&attempt_id, true);
+    // 10 more reserved, by an attempt whose answer was lost before the method was called.
+    let second = Box::pin(one_time(&w, &mut shop, &mut payer, "10")).await;
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::LoseAnswer {
+            path: "/ops".into(),
+        });
+    let lost = Box::pin(payer.pay_under_allowance(&second, &key))
+        .await
+        .outcome
+        .unwrap_err();
+    assert!(lost.kept_batch().is_some(), "{lost:?}");
+    Box::pin(payer.receive(None)).await.unwrap();
+    assert_eq!(w.rail.all_executions().len(), 1);
+    // 25 fits once those 10 are released, which their own outcome does: it waits. 40 never
+    // fits, even then.
+    let fits_later = Box::pin(one_time(&w, &mut shop, &mut payer, "25")).await;
+    assert_eq!(
+        refused(Box::pin(payer.pay_under_allowance(&fits_later, &key)).await),
+        paykit_sdk::Refusal::NotNow(paykit_sdk::NotNowReason::AllowanceLimit {
+            limit: "lifetime".into()
+        })
+    );
+    let never = Box::pin(one_time(&w, &mut shop, &mut payer, "40")).await;
+    assert_eq!(
+        refused(Box::pin(payer.pay_under_allowance(&never, &key)).await),
+        Refusal::NotAutomatic("the lifetime limit has no room".into())
+    );
+    assert_eq!(w.rail.all_executions().len(), 1);
+}
+
+#[tokio::test]
 async fn test_allowance_refusals_a_count_limit_of_none_is_final() {
     // A period that admits no payment never makes room: final for automatic payment, even
     // in an empty window.

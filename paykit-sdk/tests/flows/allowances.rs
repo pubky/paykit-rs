@@ -2462,7 +2462,7 @@ fn stored_locally(summary: &paykit_sdk::ReceiveSummary) -> bool {
 async fn test_allowances_proposal_waits_while_a_pending_record_awaits_its_key() {
     // A pending proposal sealed under a key the phone doesn't hold yet, after an ordinary
     // rotation: the client lists it as not verified, never as absent, so the count waits
-    // for the key, which comes without the user.
+    // for the key, which comes without the user, and says so.
     let w = World::new();
     let (mut phone, record, _, _) = Box::pin(sealed_pending_rejection(&w, false)).await;
     assert_sealed_pending(&phone, &record).await;
@@ -2472,9 +2472,7 @@ async fn test_allowances_proposal_waits_while_a_pending_record_awaits_its_key() 
         .unwrap_err();
     assert_eq!(
         refusal(&refused),
-        Some(&Refusal::NotNow(paykit_sdk::NotNowReason::ReadAgain(
-            "the current pending proposals have not been read"
-        ))),
+        Some(&Refusal::NotNow(paykit_sdk::NotNowReason::ValueAwaitsKey)),
         "{refused:?}"
     );
 }
@@ -14135,10 +14133,10 @@ async fn test_pending_capacity_waits_for_the_key_of_an_earlier_proposal() {
         .propose_executable_allowance(w.bob_id(), terms(), UserConfirmed::new())
         .await
         .unwrap_err();
-    assert!(matches!(
+    assert_eq!(
         refusal.refusal(),
-        Some(Refusal::NotNow(paykit_sdk::NotNowReason::ReadAgain(_)))
-    ));
+        Some(&Refusal::NotNow(paykit_sdk::NotNowReason::ValueAwaitsKey))
+    );
     assert!(wallet
         .app()
         .queued_messages("paykit")

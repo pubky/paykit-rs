@@ -113,16 +113,15 @@ enum LifetimeRoom {
     Never,
 }
 
-/// [`LifetimeRoom`] for a payment of `value`, from the same counting as `usage`: the room
-/// that frees itself is the entries `usage` holds reserved but for `dispatched`, those of
-/// them whose payment may have reached the payment method, which count as spent whether it
-/// pays or fails (Paykit spec 8.3); and the room only the user frees is `releasable`, the
-/// failed attempts of other apps the user may release, which count as spent until then. An
-/// entry spent or released already frees nothing more.
+/// [`LifetimeRoom`] for a payment of `value`, from the same counting as `usage`:
+/// `self_freeing` is the amount of the reservations an outcome may still give back with no
+/// one acting ([`self_freeing`]), and `releasable` the room only the user frees, the failed
+/// attempts of other apps the user may release, which count as spent until then. An entry
+/// spent or released already frees nothing more.
 fn lifetime_room(
     terms: &paykit_lib::allowances::AllowanceTerms,
     usage: &paykit_lib::allowances::Usage,
-    dispatched: u128,
+    self_freeing: u128,
     releasable: u128,
     value: &paykit_lib::Decimal,
 ) -> LifetimeRoom {
@@ -135,44 +134,45 @@ fn lifetime_room(
             .checked_add(value.scaled())
             .is_some_and(|sum| sum <= cap.scaled())
     };
-    let automatic = usage.reserved_amount().scaled().saturating_sub(dispatched);
     if fits(0) {
         LifetimeRoom::Now
-    } else if fits(automatic) {
+    } else if fits(self_freeing) {
         LifetimeRoom::Automatic
-    } else if fits(automatic.saturating_add(releasable)) {
+    } else if fits(self_freeing.saturating_add(releasable)) {
         LifetimeRoom::Manual
     } else {
         LifetimeRoom::Never
     }
 }
 
-/// The amount of the ledger's entries counted reserved whose payment this app's journal
-/// shows may have reached the payment method ([`JournalEntry::may_have_dispatched`]): no
-/// outcome gives it back (Paykit spec 8.3). Another app's reservation, whose dispatch this
-/// app can't see, isn't counted here, and may still free itself.
-fn dispatched_reserved(
-    ledger: &Ledger,
-    facts: &std::collections::HashMap<
-        paykit_lib::AttemptId,
-        paykit_lib::allowances::AttemptEvidence,
-    >,
-    journal: &[JournalEntry],
+/// The amount of the reservations whose room an outcome may still give back with no one
+/// acting (Paykit spec 8.3), judged entry by entry: of the entries the usage holds reserved
+/// that the method's history doesn't show (`before_call`), those this app's journal doesn't
+/// hold at or past the method's call (`past_call`). A payment at the call or past it counts
+/// whether it pays or fails, so its reservation never frees. One of another app, which this
+/// app's journal doesn't hold, may still free itself.
+fn self_freeing(
+    before_call: &[(paykit_lib::AttemptId, u128)],
+    past_call: impl Fn(&paykit_lib::AttemptId) -> bool,
 ) -> u128 {
-    ledger
-        .entries
+    before_call
         .iter()
-        .filter(|entry| {
-            paykit_lib::allowances::counts(
-                entry,
-                facts.get(&entry.attempt_id).copied().unwrap_or_default(),
-            ) == paykit_lib::allowances::Counting::Reserved
-                && journal.iter().any(|own| {
-                    own.attempt().is_ok_and(|id| id == entry.attempt_id)
-                        && own.may_have_dispatched()
-                })
-        })
-        .fold(0u128, |sum, entry| sum.saturating_add(entry.value.scaled()))
+        .filter(|(attempt_id, _)| !past_call(attempt_id))
+        .fold(0u128, |sum, (_, value)| sum.saturating_add(*value))
+}
+
+/// Whether this app's journal holds `attempt` at or past the payment method's call: any
+/// entry of it but one of this installation still before the call. An entry back from a
+/// backup may have been at the call, which the backup can't tell (Paykit spec 7.2).
+fn past_the_call(journal: &[JournalEntry], attempt: &paykit_lib::AttemptId) -> bool {
+    journal.iter().any(|own| {
+        own.attempt().is_ok_and(|id| id == *attempt)
+            && (own.restored
+                || !matches!(
+                    own.stage,
+                    crate::journal::Stage::Recorded | crate::journal::Stage::Attempted
+                ))
+    })
 }
 
 /// Terms whose start is still ahead: the same call once it has passed clears this (Paykit
@@ -581,7 +581,9 @@ impl AllowanceReservation {
             let room = lifetime_room(
                 &checked.terms,
                 &checked.usage,
-                dispatched_reserved(&checked.ledger, &checked.facts.signed, &journal),
+                self_freeing(&checked.reserved_before_call, |attempt| {
+                    past_the_call(&journal, attempt)
+                }),
                 checked.facts.releasable().unwrap_or(0),
                 &amount.value,
             );
@@ -1003,11 +1005,13 @@ mod tests {
             paid,
             never_dispatched,
         };
-        let room_after = |entries: &[LedgerEntry],
-                          facts: &[(u8, AttemptEvidence)],
-                          dispatched: &str,
-                          releasable: &str,
-                          value: &str| {
+        // `at_method`: the attempts the method's history shows or the journal holds at or
+        // past the call.
+        let room_with = |entries: &[LedgerEntry],
+                         facts: &[(u8, AttemptEvidence)],
+                         at_method: &[u8],
+                         releasable: &str,
+                         value: &str| {
             let ledger = Ledger {
                 entries: entries.to_vec(),
                 ..Ledger::empty(
@@ -1021,10 +1025,26 @@ mod tests {
                 .map(|(id, fact)| (AttemptId::from_bytes([*id; 16]), *fact))
                 .collect();
             let used = usage(&terms, &ledger, &facts, 2_000).unwrap();
+            let at_method: Vec<_> = at_method
+                .iter()
+                .map(|id| AttemptId::from_bytes([*id; 16]))
+                .collect();
+            // As the reconciliation lists them: counted reserved, not in the history.
+            let before_call: Vec<_> = ledger
+                .entries
+                .iter()
+                .filter(|entry| {
+                    paykit_lib::allowances::counts(
+                        entry,
+                        facts.get(&entry.attempt_id).copied().unwrap_or_default(),
+                    ) == paykit_lib::allowances::Counting::Reserved
+                })
+                .map(|entry| (entry.attempt_id, entry.value.scaled()))
+                .collect();
             lifetime_room(
                 &terms,
                 &used,
-                Decimal::parse(dispatched).unwrap().scaled(),
+                self_freeing(&before_call, |attempt| at_method.contains(attempt)),
                 Decimal::parse(releasable).unwrap().scaled(),
                 &Decimal::parse(value).unwrap(),
             )
@@ -1033,7 +1053,7 @@ mod tests {
             |entries: &[LedgerEntry],
              facts: &[(u8, AttemptEvidence)],
              releasable: &str,
-             value: &str| room_after(entries, facts, "0", releasable, value);
+             value: &str| room_with(entries, facts, &[], releasable, value);
         use LifetimeRoom::{Automatic, Manual, Never};
         // 70 dispatched and failed by another app, spent for good, and 10 reserved: 40
         // never fits; 25 fits once the 10 come back.
@@ -1047,9 +1067,35 @@ mod tests {
         ];
         assert_eq!(room(&entries, &facts, "0", "40"), Never);
         assert_eq!(room(&entries, &facts, "0", "25"), Automatic);
-        // The 10 reserved, once this app's journal shows them dispatched, are spent whatever
-        // they answer: 25 never fits.
-        assert_eq!(room_after(&entries, &facts, "10", "0", "25"), Never);
+        // The 10 reserved, once at the method's call, are spent whatever they answer: 25
+        // never fits.
+        assert_eq!(room_with(&entries, &facts, &[2], "0", "25"), Never);
+        // 70 the method's history shows paid while its claim is still open, and 10 reserved
+        // before the call: the 70 are spent and at the method, and that takes nothing from
+        // the 10, which may still come back. 25 waits for them; 40 never fits.
+        let paid_by_history = [
+            (1, evidence(ClaimState::Open, true, false)),
+            (2, evidence(ClaimState::Open, false, false)),
+        ];
+        assert_eq!(
+            room_with(&entries, &paid_by_history, &[1], "0", "25"),
+            Automatic
+        );
+        assert_eq!(
+            room_with(&entries, &paid_by_history, &[1], "0", "40"),
+            Never
+        );
+        // 70 the method reported failed, its claim's outcome not written yet: still counted
+        // reserved, but at the method, so nothing gives it back and 50 never fits.
+        let failed_unwritten = [(1, evidence(ClaimState::Open, false, false))];
+        assert_eq!(
+            room_with(&entries[..1], &failed_unwritten, &[1], "0", "50"),
+            Never
+        );
+        assert_eq!(
+            room_with(&entries[..1], &failed_unwritten, &[], "0", "50"),
+            Automatic
+        );
         // 70 paid on the method with its ledger outcome unwritten, and 10 in flight: the 70
         // are spent, so 40 never fits.
         let facts = [

@@ -1084,7 +1084,6 @@ pub struct Usage {
     lifetime: Decimal,
     periods: Vec<PeriodUsage>,
     reserved: u64,
-    reserved_amount: Decimal,
     spent: u64,
     released: u64,
     limits: Vec<PeriodLimit>,
@@ -1106,12 +1105,6 @@ impl Usage {
     /// Entries reserved.
     pub fn reserved(&self) -> u64 {
         self.reserved
-    }
-
-    /// The amount of the entries reserved, counted in [`Usage::lifetime`]: the room their
-    /// outcomes may give back, as a never-dispatched failure releases, with no one acting.
-    pub fn reserved_amount(&self) -> &Decimal {
-        &self.reserved_amount
     }
 
     /// Entries spent.
@@ -1186,7 +1179,6 @@ pub fn usage(
     let mut lifetime = ledger.spent_scaled();
     let mut periods = vec![(0u128, 0u64); terms.period_limits.len()];
     let (mut reserved, mut spent, mut released) = (0u64, 0u64, 0u64);
-    let mut reserved_amount = 0u128;
     for item in &ledger.failed {
         if counting(
             Some(EntryOutcome::Failed),
@@ -1203,10 +1195,7 @@ pub fn usage(
         ) {
             // Counts of the ledger's entries, informational: a ledger holds fewer entries than
             // a u64 counts, so these never saturate; the limits use the checked sums below.
-            Counting::Reserved => {
-                reserved = reserved.saturating_add(1);
-                reserved_amount = add(reserved_amount, entry.value.scaled())?;
-            }
+            Counting::Reserved => reserved = reserved.saturating_add(1),
             Counting::Spent => spent = spent.saturating_add(1),
             Counting::Released => {
                 released = released.saturating_add(1);
@@ -1231,7 +1220,6 @@ pub fn usage(
             })
             .collect(),
         reserved,
-        reserved_amount: Decimal::from_scaled(reserved_amount),
         spent,
         released,
         limits: terms.period_limits.clone(),
