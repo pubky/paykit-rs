@@ -59,7 +59,9 @@ impl NativeWallet {
 
     /// Complete this app's previously authorized first grant and record consent once it
     /// applies. Retry after a lost reply, including after reopening. A repeated call checks
-    /// the current grant and ledger. A later consent hold requires confirmation (Paykit spec 8.3).
+    /// the current grant and ledger. A later consent hold requires confirmation. After a
+    /// provider loss it answers `HeldForUser` with `AllowanceNotResumed`, which no retry
+    /// clears: the user ends the Allowance and sets up a new one (Paykit spec 8.3).
     pub async fn resume_allowance_executor(&self, record: Vec<u8>) -> Result<(), WalletError> {
         let record = fixed(record, "record")?;
         self.with_wallet(move |app| {
@@ -71,7 +73,9 @@ impl NativeWallet {
     /// Renew this app's previously approved execution after the user confirms the displayed
     /// counterparty, terms and executor under this exact hold. A newer hold requires fresh
     /// confirmation. If the ledger cannot yet be verified, retry with the same confirmed hold.
-    /// Regranting after provider loss leaves spending held (Paykit spec 8.3).
+    /// After a provider loss the regrant lands, also when a call again follows a lost reply,
+    /// but spending stays held: the call, or the resume after it, answers `HeldForUser` with
+    /// `AllowanceNotResumed`, which no retry clears (Paykit spec 8.3).
     pub async fn confirm_allowance_executor(
         &self,
         hold: Arc<AllowanceHold>,

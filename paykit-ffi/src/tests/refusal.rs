@@ -654,12 +654,28 @@ fn every_other_failure() -> Vec<WalletError> {
         client(ClientError::Usage(reason())),
         client(ClientError::OwnRecoveryRequired { generation: 1 }),
         client(ClientError::BadServiceSignature { status: 404 }),
+        client(ClientError::BadServiceSignature { status: 502 }),
         client(ClientError::StaleAnswer { server_time_ms: 0 }),
         client(ClientError::BodyUnread {
             status: 429,
             code: ErrorCode::RateLimited,
             retry_after: None,
         }),
+        client(ClientError::BodyUnread {
+            status: 404,
+            code: ErrorCode::NotFound,
+            retry_after: None,
+        }),
+        client(ClientError::BodyUnread {
+            status: 413,
+            code: ErrorCode::TooLarge,
+            retry_after: None,
+        }),
+        AppError::Transport(TransportError::FirstSendUnavailable),
+        AppError::Transport(TransportError::FirstSendExpired),
+        AppError::Transport(TransportError::Refused(reason())),
+        AppError::Transport(TransportError::TooLarge(1)),
+        AppError::Transport(TransportError::InvalidRequest(reason())),
         client(ClientError::BodyOverCap { cap: 1 }),
         client(ClientError::Core(pubky_switch_core::Error::Invalid(
             reason(),
@@ -797,25 +813,30 @@ fn test_wallet_errors_match_the_host_guide_table() {
     assert_eq!(
         not_sent,
         [
-            "body_over_cap",                 // not sent: over its call's cap
-            "carried_too_large",             // nothing written by the restore
-            "client_usage",                  // not sent: breaks a Switch rule
-            "conflict",                      // nothing applied: the state changed first
-            "destination",                   // refused before the attempt was written
-            "duties_too_large",              // nothing written by the backup
-            "expired_unsent",                // retired before its first send
-            "invalid_input",                 // the caller's value breaks a Paykit rule
-            "label",                         // refused before the request was sent
-            "method_not_submitted",          // the method submitted nothing
-            "no_destination",                // refused before the attempt was written
-            "recurring",                     // refused before the attempt was written
-            "switch_conflict",               // refused by the switch, nothing applied
-            "switch_not_admitted",           // refused by the recipient's switch, nothing applied
+            "body_over_cap",                    // not sent: over its call's cap
+            "body_unread_too_large",            // refused as too large before the body was read
+            "carried_too_large",                // nothing written by the restore
+            "client_usage",                     // not sent: breaks a Switch rule
+            "conflict",                         // nothing applied: the state changed first
+            "destination",                      // refused before the attempt was written
+            "duties_too_large",                 // nothing written by the backup
+            "expired_unsent",                   // retired before its first send
+            "invalid_input",                    // the caller's value breaks a Paykit rule
+            "label",                            // refused before the request was sent
+            "method_not_submitted",             // the method submitted nothing
+            "no_destination",                   // refused before the attempt was written
+            "recurring",                        // refused before the attempt was written
+            "switch_conflict",                  // refused by the switch, nothing applied
+            "switch_not_admitted", // refused by the recipient's switch, nothing applied
             "switch_quota_connect_requests", // the recipient's pending list is full
-            "switch_too_large",              // refused by the switch as over a cap, nothing applied
-            "unpinned",                      // not sent without a pinned key
-            "unsupported_endpoint",          // nothing written
-            "usage",                         // the caller's value breaks a Paykit rule
+            "switch_too_large",    // refused by the switch as over a cap, nothing applied
+            "transport_first_send_expired", // a first send never released
+            "transport_first_send_unavailable", // a first send the transport can't hand over
+            "transport_invalid_request", // the transport couldn't build the request
+            "transport_refused",   // the transport may not connect to the origin
+            "unpinned",            // not sent without a pinned key
+            "unsupported_endpoint", // nothing written
+            "usage",               // the caller's value breaks a Paykit rule
         ]
     );
     let rows = guide_rows();
@@ -1282,4 +1303,116 @@ fn test_wallet_errors_unsaved_settlement_warning_keeps_its_bucket_outcome_and_ke
     let (_, other) = categorized(PaykitError::Conflict("state".into()).into()).unwrap();
     assert_eq!(other.settlement_bucket(), None);
     assert_eq!(other.settlement_warning_outcome(), None);
+}
+
+/// A failure of the host's transport, an answer that doesn't verify and an answer given before
+/// the body was read each keep their cause's code. Only the network's own failures, a `5xx`
+/// answer that doesn't verify and a `429` pass by themselves; behind a kept batch each comes
+/// as `OutcomeUnknown` with the same code (Switch wire 7.1).
+#[test]
+fn test_wallet_errors_transport_and_unverified_answers_keep_their_cause() {
+    use pubky_switch_client::error::{ClientError as C, TransportError as T};
+    let reason = || String::from("reason");
+    let unread = |status, code| {
+        AppError::Switch(C::BodyUnread {
+            status,
+            code,
+            retry_after: None,
+        })
+    };
+    let rows = [
+        (
+            AppError::Transport(T::Connect(reason())),
+            "retry_later",
+            "transport",
+        ),
+        (AppError::Transport(T::Timeout), "retry_later", "transport"),
+        (
+            AppError::Transport(T::Other(reason())),
+            "retry_later",
+            "transport",
+        ),
+        (
+            AppError::Switch(C::Transport(T::Timeout)),
+            "retry_later",
+            "transport",
+        ),
+        (
+            AppError::Transport(T::UnreadableSignedHeader { status: 503 }),
+            "retry_later",
+            "bad_service_signature",
+        ),
+        (
+            AppError::Transport(T::UnreadableSignedHeader { status: 401 }),
+            "permanent",
+            "unverified_answer",
+        ),
+        (
+            AppError::Switch(C::Transport(T::UnreadableSignedHeader { status: 499 })),
+            "permanent",
+            "unverified_answer",
+        ),
+        (
+            AppError::Transport(T::FirstSendUnavailable),
+            "not_sent",
+            "transport_first_send_unavailable",
+        ),
+        (
+            AppError::Switch(C::Transport(T::FirstSendExpired)),
+            "not_sent",
+            "transport_first_send_expired",
+        ),
+        (
+            AppError::Transport(T::Refused(reason())),
+            "not_sent",
+            "transport_refused",
+        ),
+        (
+            AppError::Transport(T::TooLarge(1)),
+            "permanent",
+            "transport_too_large",
+        ),
+        (
+            AppError::Transport(T::InvalidRequest(reason())),
+            "not_sent",
+            "transport_invalid_request",
+        ),
+        (
+            AppError::Switch(C::BadServiceSignature { status: 500 }),
+            "retry_later",
+            "bad_service_signature",
+        ),
+        (
+            AppError::Switch(C::BadServiceSignature { status: 401 }),
+            "permanent",
+            "unverified_answer",
+        ),
+        (
+            unread(429, ErrorCode::RateLimited),
+            "retry_later",
+            "body_unread",
+        ),
+        (
+            unread(404, ErrorCode::NotFound),
+            "permanent",
+            "body_unread_not_found",
+        ),
+        (
+            unread(413, ErrorCode::TooLarge),
+            "not_sent",
+            "body_unread_too_large",
+        ),
+    ];
+    for (error, case, code) in rows {
+        let (bare_case, bare) =
+            categorized(PaykitError::Client(error.clone()).into()).expect("categorized");
+        assert_eq!((bare_case, bare.code.as_str()), (case, code));
+        let kept = AppError::Kept {
+            batch_id: [5; 16],
+            error: Box::new(error),
+        };
+        let (kept_case, kept) = categorized(PaykitError::Client(kept).into()).expect("kept");
+        assert_eq!((kept_case, kept.code.as_str()), ("outcome_unknown", code));
+        assert_eq!(kept.kept_batch.as_deref(), Some([5; 16].as_slice()));
+    }
 }

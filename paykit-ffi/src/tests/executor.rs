@@ -530,6 +530,134 @@ fn test_allowance_reservation_releases_a_confirmed_foreign_failure() {
     run(Backend::Service, release);
 }
 
+/// The refusal after a provider loss names the repair the user makes: no retry clears it.
+fn not_resumed<T>(result: Result<T, WalletError>) -> TestResult {
+    let failure = refusal(result, "needs_user", "allowance_not_resumed")?;
+    let refused = failure.refusal().ok_or("missing the typed refusal")?;
+    assert!(matches!(
+        refused.kind(),
+        RefusalKind::HeldForUser {
+            reason: crate::HeldForUserKind::AllowanceNotResumed
+        }
+    ));
+    Ok(())
+}
+
+/// After a provider loss the user confirms the Allowance again and the regrant's reply is
+/// lost. The call again lands the kept regrant and builds no second one; the resume then
+/// answers that automatic payments under it don't resume in this version, as a typed
+/// refusal, the same every time (Paykit spec 8.3, "After provider loss").
+async fn regrant_lost(world: &World) -> TestResult {
+    let mut p = Box::pin(Parties::open(world)).await?;
+    let record = Box::pin(p.accept()).await?;
+    let grants = || async {
+        p.payer
+            .lend(async |app| {
+                let held = app
+                    .app()
+                    .shared_record(&crate::fixed(record.clone(), "record")?)
+                    .await?;
+                let held = held.ok_or("missing the Allowance record")?;
+                let value = held
+                    .content
+                    .value()
+                    .ok_or("the Allowance record doesn't read")?;
+                let allowance = paykit_lib::records::AllowanceRecord::read(value, &app.identity())?;
+                Ok::<_, Box<dyn Error>>(allowance.grants.len())
+            })
+            .await?
+    };
+    let before = grants().await?;
+
+    let buyer = world.identity("buyer")?;
+    let successor = "https://recovered-buyer.payments.test";
+    world.advance_ms(11 * 60_000);
+    world
+        .set_account_missing("https://buyer.payments.test", &buyer, true)
+        .await?;
+    world.add_switch(successor, &[&buyer]).await?;
+    let opening = Box::pin(p.signer.declare_provider_loss(
+        successor,
+        pubky_switch_signer::UserConfirmed::shown_and_confirmed(),
+    ))
+    .await?;
+    Box::pin(p.signer.end_staged_admission()).await?;
+    after_loss(&p.payer, opening.generation()).await?;
+    let shop = p.shop.identity();
+    p.payer
+        .lend(async move |app| app.app_mut().invite(&shop).await)
+        .await??;
+    world.advance_ms(pubky_switch_client::app::DOC_CACHE_MS + 1);
+    Box::pin(receive_app(&mut p.shop)).await?;
+
+    let view = p.payer.allowance(record.clone()).await?;
+    assert!(view.confirmation_needed, "the loss asks the user to confirm again");
+    world.lose_answer("POST", "/ops");
+    let lost = p
+        .payer
+        .confirm_allowance_executor(view.hold.clone(), true)
+        .await;
+    let (case, _) = lost
+        .err()
+        .and_then(categorized)
+        .ok_or("the regrant's answer is lost")?;
+    assert_eq!(case, "outcome_unknown");
+    match p
+        .payer
+        .confirm_allowance_executor(view.hold.clone(), true)
+        .await
+    {
+        Ok(()) => {}
+        again => not_resumed(again)?,
+    }
+    receive(&p.payer).await?;
+    assert_eq!(grants().await?, before + 1, "one regrant, landed once");
+    not_resumed(p.payer.resume_allowance_executor(record.clone()).await)?;
+    not_resumed(p.payer.resume_allowance_executor(record.clone()).await)?;
+    not_resumed(p.payer.confirm_allowance_executor(view.hold, true).await)?;
+    assert_eq!(grants().await?, before + 1, "no retry builds another grant");
+    p.payer.shutdown().await?;
+    Ok(())
+}
+
+/// The wallet follows the provider loss to `generation`: it lists its records and ends the
+/// reconciliation the loss opened.
+async fn after_loss(wallet: &NativeWallet, generation: u64) -> TestResult {
+    let mut listed = false;
+    for _ in 0..12 {
+        let page = wallet.receive().await?;
+        if page.generation >= generation
+            && !page.stopped
+            && !page.more
+            && page.records_unlisted.is_none()
+        {
+            listed = true;
+            break;
+        }
+    }
+    if !listed {
+        return Err("the wallet did not list its records after the loss".into());
+    }
+    for _ in 0..12 {
+        match wallet.reconcile().await {
+            // The records are still being listed: a wait.
+            Err(WalletError::RetryLater { failure }) if failure.code() == "records_unlisted" => {}
+            result => {
+                result?;
+                wallet.end_confirmed_reconciliation().await?;
+                return Ok(());
+            }
+        }
+    }
+    Err("the reconciliation after the loss did not finish its listing".into())
+}
+
+#[test]
+fn test_allowance_regrant_after_a_lost_reply_answers_not_resumed() {
+    run(Backend::Scripted, regrant_lost);
+    run(Backend::Service, regrant_lost);
+}
+
 const MISSING_LEDGER: &str =
     "the current service is missing the executor's accepted permanent ledger";
 
