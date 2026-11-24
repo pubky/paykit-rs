@@ -2474,17 +2474,18 @@ async fn test_provider_loss_consent_to_one_attempt_pays_it_once_and_states_nothi
 #[tokio::test]
 async fn test_provider_loss_nothing_the_user_states_releases_an_automatic_payment() {
     // Paykit spec 7.3: whatever the user confirms or states, an obligation from before the
-    // loss is never paid automatically, and a resume never repeats a payment method call
-    // made before the loss. The user's statement that a request wasn't paid before the loss
-    // lets a payment by hand of it go as any other.
+    // loss is never paid automatically: the shared post-loss hold refuses it (Paykit spec
+    // 8.1). A payment the method made before the loss, its answer lost, is resolved from the
+    // method's history and not paid again. The user's statement that a request wasn't paid
+    // before the loss lets a payment by hand of it go as any other.
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
     let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
     let in_flight = request_from(&mut shop, w.alice_id(), draft("2", w.clock.now_ms())).await;
     wallet.receive(None).await.unwrap();
-    // Before the loss, the method is called for the second request and its answer is lost:
-    // the attempt stays open for a resume.
+    // Before the loss, the method is called for the second request and its answer is lost;
+    // the method's history knows it was paid.
     w.rail.set_idempotent(true);
     w.rail.next(Behaviour::LoseAnswer);
     let lost = wallet
@@ -2503,7 +2504,7 @@ async fn test_provider_loss_nothing_the_user_states_releases_an_automatic_paymen
             .await
             .outcome,
     );
-    // Before any statement, an automatic payment is refused, the doubt handed back or not.
+    // Before any statement, the shared post-loss hold refuses an automatic payment.
     let refused = wallet
         .pay_request_automatically(&request, PayOptions::default())
         .await
@@ -2538,7 +2539,8 @@ async fn test_provider_loss_nothing_the_user_states_releases_an_automatic_paymen
             .outcome;
         assert!(held_after_loss(&refused), "{refused:?}");
     }
-    // The resume repeats no method call made before the loss.
+    // The payment from before the loss is resolved from the method's history: nothing is paid
+    // again.
     let resumed = wallet.resume_payments().await.unwrap();
     assert!(
         !resumed

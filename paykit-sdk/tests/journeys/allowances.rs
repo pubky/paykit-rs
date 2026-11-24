@@ -8,7 +8,7 @@ use paykit_lib::allowances::AllowanceTerms;
 use paykit_sdk::rail::FakeRail;
 use paykit_sdk::{
     AllowanceRole, AllowanceStatus, AppScopes, PayOptions, PayOutcome, Paykit, PaykitConfig,
-    Refusal, RequestDraft, RequestRef, RequestStatus,
+    ReceiptsOf, Refusal, RequestDraft, RequestRef, RequestStatus,
 };
 use pubky_switch_client::app::UserConfirmed;
 use pubky_switch_client::store::MemoryStore;
@@ -88,6 +88,11 @@ async fn parties(world: &World) -> TestResult<Parties> {
     // reads before it pays under an Allowance (Paykit spec 8.3).
     rail.set_history_payer(wallet.identity());
     Ok(Parties { wallet, shop, rail })
+}
+
+/// Every call the payment method took, repeats included.
+fn method_calls(rail: &FakeRail) -> u64 {
+    rail.all_pay_calls().values().sum()
 }
 
 /// Allowance terms in btc: the lifetime limit `lifetime`, at most `per_payment` a payment
@@ -250,7 +255,7 @@ async fn lifecycle(world: &World, proposer: AllowanceRole) -> TestResult {
         assert_eq!(usage.spent(), 1, "{usage:?}");
         assert_eq!(usage.reserved(), 0, "{usage:?}");
     }
-    let spent = rail.all_executions().len();
+    let spent = method_calls(rail);
 
     // The payer ends the Allowance; the seller sees it ended, and nothing more is paid.
     Box::pin(wallet.end_allowance(&key)).await?;
@@ -267,8 +272,14 @@ async fn lifecycle(world: &World, proposer: AllowanceRole) -> TestResult {
     let refused = Box::pin(wallet.pay_period_under_allowance(&request, &next))
         .await
         .outcome;
-    assert!(refused.is_err(), "{refused:?}");
-    assert_eq!(rail.all_executions().len(), spent);
+    assert!(
+        matches!(
+            refused.as_ref().err().and_then(|e| e.refusal()),
+            Some(Refusal::AllowanceEnded)
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(method_calls(rail), spent);
     Ok(())
 }
 
@@ -305,9 +316,38 @@ async fn one_time(
     Ok(request)
 }
 
-/// What an Allowance's limits hold (Paykit spec 8.3): a payment over the day's count waits
-/// for the next day and is then paid; a payment over the per-payment maximum, and one the
-/// lifetime limit has no room left for, never fit. Nothing that doesn't fit is paid.
+/// The seller verifies and credits the payment of `request`, and the payer then holds its
+/// receipt: exactly one, on both sides.
+async fn credited_once(wallet: &mut Paykit, shop: &mut Paykit, request: &RequestRef) -> TestResult {
+    Box::pin(shop.receive(None)).await?;
+    let sale = Box::pin(shop.payee_activity())
+        .await?
+        .into_iter()
+        .find(|activity| activity.request_hash == Some(request.request_hash))
+        .ok_or("the seller has no record of the payment")?;
+    assert!(Box::pin(shop.verify_payment(&sale.record)).await?.is_some());
+    let receipt = Box::pin(shop.confirm_payment(&sale.record))
+        .await?
+        .ok_or("the seller could not confirm the payment")?;
+    Box::pin(wallet.receive(None)).await?;
+    let receipts = Box::pin(wallet.receipts(ReceiptsOf::Request(*request))).await?;
+    assert_eq!(receipts.len(), 1, "{receipts:?}");
+    assert_eq!(receipts[0].msg_id, receipt);
+    Ok(())
+}
+
+/// Whether `outcome` is refused as never fitting the Allowance, for the limit `limit` names.
+fn never_fits(outcome: &paykit_sdk::Result<PayOutcome>, limit: &str) -> bool {
+    matches!(
+        outcome.as_ref().err().and_then(|e| e.refusal()),
+        Some(Refusal::NotAutomatic(reason)) if reason.contains(limit)
+    )
+}
+
+/// What an Allowance's limits hold (Paykit spec 8.3), each alone: a payment over the
+/// per-payment maximum never fits; a payment over the day's count waits for the next day and
+/// is then paid; a payment the lifetime limit has no room left for never fits. Each payment
+/// is made once, credited and receipted, and nothing that doesn't fit is paid.
 async fn limits(world: &World) -> TestResult {
     let mut parties = Box::pin(parties(world)).await?;
     let (key, _) = Box::pin(accepted(
@@ -322,12 +362,21 @@ async fn limits(world: &World) -> TestResult {
     let paid =
         |outcome: &paykit_sdk::Result<PayOutcome>| matches!(outcome, Ok(PayOutcome::Paid { .. }));
 
+    // Never fits: over the per-payment maximum, with the lifetime and the day untouched.
+    let over = Box::pin(one_time(world, wallet, shop, "0.0005", "over")).await?;
+    let outcome = Box::pin(wallet.pay_under_allowance(&over, &key))
+        .await
+        .outcome;
+    assert!(never_fits(&outcome, "per_payment"), "{outcome:?}");
+    assert_eq!(method_calls(rail), 0);
+
     let first = Box::pin(one_time(world, wallet, shop, "0.00025", "first")).await?;
     let outcome = Box::pin(wallet.pay_under_allowance(&first, &key))
         .await
         .outcome;
     assert!(paid(&outcome), "{outcome:?}");
-    assert_eq!(rail.all_executions().len(), 1);
+    assert_eq!(method_calls(rail), 1);
+    Box::pin(credited_once(wallet, shop, &first)).await?;
 
     // Fits later: the day's one payment is spent. The payment waits, and goes the next day.
     let second = Box::pin(one_time(world, wallet, shop, "0.00025", "second")).await?;
@@ -336,52 +385,35 @@ async fn limits(world: &World) -> TestResult {
         .outcome;
     assert!(
         matches!(
-            outcome.as_ref().map_err(|e| e.refusal()),
-            Err(Some(Refusal::NotNow(_)))
+            outcome.as_ref().err().and_then(|e| e.refusal()),
+            Some(Refusal::NotNow(_))
         ),
         "{outcome:?}"
     );
-    assert_eq!(rail.all_executions().len(), 1);
+    assert_eq!(method_calls(rail), 1);
     world.advance_ms(DAY_MS);
     Box::pin(wallet.receive(None)).await?;
     let outcome = Box::pin(wallet.pay_under_allowance(&second, &key))
         .await
         .outcome;
     assert!(paid(&outcome), "{outcome:?}");
-    assert_eq!(rail.all_executions().len(), 2);
+    assert_eq!(method_calls(rail), 2);
+    Box::pin(credited_once(wallet, shop, &second)).await?;
     let usage = Box::pin(wallet.reconcile_allowance(&key))
         .await?
         .ok_or("the Allowance shows no usage")?;
     assert_eq!((usage.spent(), usage.reserved()), (2, 0), "{usage:?}");
 
-    // Never fits: over the per-payment maximum, whatever the day.
+    // Never fits: 0.0005 of the 0.0006 lifetime is spent and nothing is reserved to release,
+    // so 0.0002 more never fits, though it is within the per-payment range and the day's count.
     world.advance_ms(DAY_MS);
     Box::pin(wallet.receive(None)).await?;
-    let over = Box::pin(one_time(world, wallet, shop, "0.0005", "over")).await?;
-    let outcome = Box::pin(wallet.pay_under_allowance(&over, &key))
-        .await
-        .outcome;
-    assert!(
-        matches!(
-            outcome.as_ref().map_err(|e| e.refusal()),
-            Err(Some(Refusal::NotAutomatic(_)))
-        ),
-        "{outcome:?}"
-    );
-    // Never fits: 0.0005 of the 0.0006 lifetime is spent, and nothing is reserved to
-    // release, so 0.0002 more never fits.
     let rest = Box::pin(one_time(world, wallet, shop, "0.0002", "rest")).await?;
     let outcome = Box::pin(wallet.pay_under_allowance(&rest, &key))
         .await
         .outcome;
-    assert!(
-        matches!(
-            outcome.as_ref().map_err(|e| e.refusal()),
-            Err(Some(Refusal::NotAutomatic(_)))
-        ),
-        "{outcome:?}"
-    );
-    assert_eq!(rail.all_executions().len(), 2);
+    assert!(never_fits(&outcome, "lifetime"), "{outcome:?}");
+    assert_eq!(method_calls(rail), 2);
     Ok(())
 }
 
@@ -422,7 +454,15 @@ async fn restored_behind(world: &World) -> TestResult {
     ))
     .await?;
 
-    let mut restored = Box::pin(super::restore::restore(world, &backup, rail)).await?;
+    let mut restored = Box::pin(Paykit::restore(
+        super::app_env(world, Arc::new(MemoryStore::new())),
+        PaykitConfig::default(),
+        &backup,
+        rail.clone(),
+        Arc::new(super::HostTimer),
+    ))
+    .await?;
+    Box::pin(restored.receive(None)).await?;
     Box::pin(finish_listing(&mut restored)).await?;
     reconciled(&mut restored).await?;
     let already_paid = |outcome: &paykit_sdk::Result<PayOutcome>| {
@@ -432,13 +472,13 @@ async fn restored_behind(world: &World) -> TestResult {
         )
     };
 
-    // Restored behind, the wallet still finds the first period paid: its claim answers for
-    // it, and it is never paid again (Paykit spec 7.2).
+    // Restored behind, the wallet still finds the first period paid: the period record it
+    // reads again shows it paid, and it is never paid again (Paykit spec 7.2).
     let again = Box::pin(restored.pay_period_under_allowance(&request, &periods[0]))
         .await
         .outcome;
     assert!(already_paid(&again), "{again:?}");
-    assert_eq!(rail.all_executions().len(), 1);
+    assert_eq!(method_calls(rail), 1);
 
     // The seller answers the restored wallet's request to send again what it may have
     // missed, and the user confirms the request held since the restore (Paykit spec 7.2,
@@ -454,32 +494,52 @@ async fn restored_behind(world: &World) -> TestResult {
 
     // Under the Allowance, execution is refused and nothing is executed: the old device
     // advanced the Allowance's ledger after the backup, which this installation can't
-    // establish (Paykit spec 8.3, "Resuming the same executor"). The kind of this refusal is
-    // being made definite; for now the executor asks for the user's confirmation, which is
-    // refused too.
+    // establish (Paykit spec 8.3, "Resuming the same executor"). At v0.2 the executor asks
+    // for the user's confirmation, and the confirmation is refused for now; the kind of this
+    // refusal is being made definite.
     let refused = Box::pin(restored.pay_period_under_allowance(&request, &periods[1]))
         .await
-        .outcome;
-    let Err(refused) = refused else {
-        return Err(format!("executed under the Allowance: {refused:?}").into());
+        .outcome
+        .expect_err("executed under the Allowance");
+    let Some(Refusal::AllowanceConfirmationNeeded { hold }) = refused.refusal() else {
+        return Err(format!("not asked to confirm the executor: {refused:?}").into());
     };
-    if let Some(Refusal::AllowanceConfirmationNeeded { hold }) = refused.refusal() {
-        let confirmed =
-            Box::pin(restored.confirm_allowance_executor(hold, UserConfirmed::new())).await;
-        assert!(confirmed.is_err(), "{confirmed:?}");
-    }
+    let confirmed = Box::pin(restored.confirm_allowance_executor(hold, UserConfirmed::new()))
+        .await
+        .expect_err("the executor was confirmed");
+    assert!(
+        matches!(confirmed.refusal(), Some(Refusal::NotNow(_))),
+        "{confirmed:?}"
+    );
     let again = Box::pin(restored.pay_period_under_allowance(&request, &periods[1]))
         .await
-        .outcome;
-    assert!(again.is_err(), "{again:?}");
-    assert_eq!(rail.all_executions().len(), 1);
+        .outcome
+        .expect_err("executed under the Allowance");
+    assert!(
+        matches!(
+            again.refusal(),
+            Some(Refusal::AllowanceConfirmationNeeded { .. })
+        ),
+        "{again:?}"
+    );
+    assert_eq!(method_calls(rail), 1);
 
-    // The user's ways forward. By hand, the period is paid once.
-    let paid = Box::pin(restored.pay_period(&request, &periods[1], PayOptions::default()))
-        .await
-        .outcome?;
-    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
-    assert_eq!(rail.all_executions().len(), 2);
+    // The user's ways forward. By hand, the period is paid once, credited and receipted.
+    let due = Due {
+        request,
+        sale,
+        period: periods[1],
+        published: "lnbc-allowance",
+    };
+    Box::pin(period_paid_and_receipted(
+        &mut restored,
+        shop,
+        rail,
+        due,
+        How::ByHand,
+    ))
+    .await?;
+    assert_eq!(method_calls(rail), 2);
     let again = Box::pin(restored.pay_period(&request, &periods[1], PayOptions::default()))
         .await
         .outcome;
@@ -499,8 +559,10 @@ async fn restored_behind(world: &World) -> TestResult {
         terms("0.001", "0.0005", None)?,
     ))
     .await?;
-    // At v0.2 a subscription stays under the Allowance it was accepted under: it isn't
-    // moved to the new one, and its next period, under the ended Allowance, is paid by hand.
+    // The protocol lets the user move the subscription's future periods to the new Allowance
+    // (Paykit spec 8.3), but this version offers no call to do it: accepting it again under
+    // the new Allowance moves nothing, and its next period, under the ended Allowance, is
+    // paid by hand, credited and receipted.
     let moved = Box::pin(restored.accept_subscription_under_allowance(&request, &renewed)).await;
     assert!(
         matches!(
@@ -521,14 +583,25 @@ async fn restored_behind(world: &World) -> TestResult {
         ),
         "{ended:?}"
     );
-    assert_eq!(rail.all_executions().len(), 2);
-    let paid = Box::pin(restored.pay_period(&request, &periods[2], PayOptions::default()))
-        .await
-        .outcome?;
-    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
-    assert_eq!(rail.all_executions().len(), 3);
+    assert_eq!(method_calls(rail), 2);
+    let due = Due {
+        request,
+        sale,
+        period: periods[2],
+        published: "lnbc-allowance",
+    };
+    Box::pin(period_paid_and_receipted(
+        &mut restored,
+        shop,
+        rail,
+        due,
+        How::ByHand,
+    ))
+    .await?;
+    assert_eq!(method_calls(rail), 3);
 
-    // The new Allowance pays a new subscription accepted under it, once.
+    // The new Allowance pays a new subscription accepted under it, once, credited and
+    // receipted.
     let (draft, renewed_periods) = hourly_periods(world, "lnbc-renewed", false, 1)?;
     let sent = Box::pin(shop.send_request(restored.identity(), draft)).await?;
     let renewed_request = sent.request.ok_or("the request was not sent")?;
@@ -565,7 +638,7 @@ async fn restored_behind(world: &World) -> TestResult {
         How::UnderAllowance,
     ))
     .await?;
-    assert_eq!(rail.all_executions().len(), 4);
+    assert_eq!(method_calls(rail), 4);
     let usage = Box::pin(restored.reconcile_allowance(&renewed))
         .await?
         .ok_or("the new Allowance shows no usage")?;
@@ -578,6 +651,6 @@ async fn restored_behind(world: &World) -> TestResult {
             .outcome;
         assert!(already_paid(&again), "{again:?}");
     }
-    assert_eq!(rail.all_executions().len(), 4);
+    assert_eq!(method_calls(rail), 4);
     Ok(())
 }
