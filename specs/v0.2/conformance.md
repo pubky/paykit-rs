@@ -548,7 +548,11 @@ A restore that isn't clean marks every counterparty its deny list holds at its n
 
 ### Restored delivery origin
 
-After a restore, delivery from a carried outbox or stored signed plaintext requires current evidence that the exact original delivery remains pending. A backup taken before a give-up may contain the outbox entry and no unknown-delivery duty. Another backup may hold only the record's signed bytes after the terminal duty was acknowledged. Neither case permits automatic delivery or a replacement. The host reconciles the possible effect. A delivery proved still pending is subject to the original deadline, current send authority and the record checks of Section 7.2, What a restore loses; these runtime cases have no Paykit vector.
+After a restore, delivery from a carried outbox or stored signed plaintext requires current evidence that the exact original delivery remains pending. A backup taken before a give-up may contain the outbox entry and no unknown-delivery duty. Another backup may hold only the record's signed bytes after the terminal duty was acknowledged. Neither case permits automatic delivery or a replacement, except a carried stop (Restored stops, below). The host reconciles the possible effect. A delivery proved still pending is subject to the original deadline, current send authority and the record checks of Section 7.2, What a restore loses; these runtime cases have no Paykit vector.
+
+### Restored stops
+
+A carried stop (Section 7.2, What a restore loses) adds no reply grant, leaves one that exists as it is, and passes no hold: a payee's cancellation and an end its user is shown to have made may pass a block; a payer's cancellation, a rejection and an end of unknown origin wait (Section 8.1). Required cases: two restorations produce one stop at the recipient; the record unreadable, then readable; the record without the stop while the request or Allowance is open, the stop removed and the user told durably, the notice surviving a reload; the counterparty's own stop in the record, ours removed with no notice; the record paused as divergent, the stop waiting until the record reads unpaused; the replay deadline passed; no reply grant written where none existed; the counterparty blocked.
 
 ### Time remaining for dispatch
 
