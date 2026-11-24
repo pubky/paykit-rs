@@ -95,9 +95,12 @@
         ]
       },
       {
-        "hashed_bytes_hex": "000000167075626b792d7377697463682f76312f706f6c6963790000000a7061796b69745f7061790000000800000000000000010000000a7061796b69745f706179",
+        "hashed_bytes_hex": "000000207075626b792d7377697463682f76312f7065726d616e656e742d706f6c6963790000000a7061796b69745f7061790000000800000000000000010000000a7061796b69745f706179000000080000000000000000",
         "name": "block_floor",
-        "policy_hash": "T2nnvFGNVnBeOE5yZLMxNFEekVzGbPsON87MmBPWrqQ",
+        "permanent": {
+          "generation": null
+        },
+        "policy_hash": "s5ASsveGo8b2p6eAoo1lp4Rxg0-A8XP_SfZkS-EPgg4",
         "read_scope": "paykit_pay",
         "write_scopes": [
           "paykit_pay"
@@ -267,7 +270,7 @@
         "identity": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
         "key_material_hex": "0000000b736574746c656d656e747300000020687e2bc0b6e33d6792dbcb03ac90890fcef00403496d51ba4bd67ebefa8318f1000000203d3c7d0751d2b1a451b8c37acc13a4bd2fab38464b617448c83b77ac928c33fc",
         "mark_settlement_tag_hex": "a2d2cb72f49c902268dbf518",
-        "name": "settlements bucket of the bitcoin-txid settlement of the payment without a request",
+        "name": "settlements bucket of the settlement of the payment without a request",
         "natural_key": "AAAACAAAAAAAAAEY",
         "natural_key_hex": "000000080000000000000118",
         "occurrence": "payee record of a payment without a request",
@@ -304,7 +307,7 @@
         "record_key": "lXpvw55qV559azeD0y-UUFqNPPzpZx_0eU36urtRHIs"
       }
     ],
-    "description": "Wire 1.5, Switch wire 1.5: the record keys of Paykit's natural keys, each in its collection under its policy, blinded with the naming key of the identity whose switch holds it (identity, keys.json): natural_key (and natural_key_hex) is the natural key, blinded_natural_key its blind, derive(\"pubky-switch/v1/name\", naming_key, natural_key), key_material_hex the input of the record key, lp(collection, blinded_natural_key, policy_hash), and record_key derive(\"pubky-switch/v1/record\", collection, blinded_natural_key, policy_hash). The request hashes are those of messages.json's payment_request, payment_request_recurring (its February period, 1772236800) and payment_request_labelled, whose payee record is under the policy of its label shop1. The last is the settlements bucket of the bitcoin-txid settlement of the payment without a request, its settlement_id, held at bob's switch: settlement_tag_input_hex is lp(settlement ID), blinded_settlement_tag_input its blind, settlement_tag_hex the settlement's tag, derive(\"paykit/v1/settlement\", \"tag\", blinded_settlement_tag_input), bucket u16_be(tag[0..2]) >> 6, mark_settlement_tag_hex bytes 2 to 13 of the tag, which its mark stores, and natural_key lp(u64(bucket)); occurrence_tag_hex is the first 8 bytes of derive(\"paykit/v1/settlement\", \"occurrence\", occurrence_blinded_natural_key), the blind of the natural key of the occurrence it was credited to, bob's payee record of that payment."
+    "description": "Wire 1.5, Switch wire 1.5: the record keys of Paykit's natural keys, each in its collection under its policy, blinded with the naming key of the identity whose switch holds it (identity, keys.json): natural_key (and natural_key_hex) is the natural key, blinded_natural_key its blind, derive(\"pubky-switch/v1/name\", naming_key, natural_key), key_material_hex the input of the record key, lp(collection, blinded_natural_key, policy_hash), and record_key derive(\"pubky-switch/v1/record\", collection, blinded_natural_key, policy_hash). The request hashes are those of messages.json's payment_request, payment_request_recurring (its February period, 1772236800) and payment_request_labelled, whose payee record is under the policy of its label shop1. The last is the settlements bucket of the settlement of the payment without a request, whose settlement ID is the UTF-8 bytes of settlement_id, given as such rather than read from a proof, held at bob's switch: settlement_tag_input_hex is lp(settlement ID), blinded_settlement_tag_input its blind, settlement_tag_hex the settlement's tag, derive(\"paykit/v1/settlement\", \"tag\", blinded_settlement_tag_input), bucket u16_be(tag[0..2]) >> 6, mark_settlement_tag_hex bytes 2 to 13 of the tag, which its mark stores, and natural_key lp(u64(bucket)); occurrence_tag_hex is the first 8 bytes of derive(\"paykit/v1/settlement\", \"occurrence\", occurrence_blinded_natural_key), the blind of the natural key of the occurrence it was credited to, bob's payee record of that payment."
   },
   "request_hash": [
     {

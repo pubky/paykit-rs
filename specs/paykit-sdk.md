@@ -1,5 +1,12 @@
 # Paykit SDK Architecture
 
+> **This is the Paykit v0.1 SDK document.** It doesn't describe Paykit v0.2. The v0.2 SDK
+> is the [`paykit-sdk`](../paykit-sdk) crate: its documentation is the crate's own
+> ([`paykit-sdk/src/lib.rs`](../paykit-sdk/src/lib.rs), built with
+> `cargo doc -p paykit-sdk`), and the protocol it implements is the v0.2 spec set in
+> [`specs/v0.2`](v0.2/README.md) ([`spec.md`](v0.2/spec.md),
+> [`wire-format.md`](v0.2/wire-format.md)).
+
 ## Goal
 
 Describe the Paykit SDK layer that sits above Paykit Library.

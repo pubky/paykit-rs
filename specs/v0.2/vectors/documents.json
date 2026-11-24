@@ -605,7 +605,7 @@
         "switch_accepts": true
       }
     ],
-    "description": "Wire 3.1: certificates whose permissions are well formed but aren't exactly the list Paykit's table derives from their scopes (paykit_permissions). Each is the wallet's certificate of this file's certificates with scopes and permissions changed, signed by alice's identity key; the signatures verify. The switch takes them and enforces exactly that list (switch_accepts), while Paykit's verifiers, apps and payers, refuse them. The lists that aren't well formed, which every verifier refuses, are the Switch set's permission_rejections. reason is the prototype's wording at a Paykit verifier."
+    "description": "Wire 3.1: certificates whose permissions are well formed but aren't exactly the list Paykit's table derives from their scopes (paykit_permissions). Each is the wallet's certificate of this file's certificates with scopes and permissions changed, signed by alice's identity key; the signatures verify. The switch takes them and enforces exactly that list (switch_accepts), while Paykit's verifiers, apps and payers, refuse them. The lists that aren't well formed, which every verifier refuses, are the Switch set's permission_rejections. reason is paykit-lib's wording at a Paykit verifier."
   },
   "certificates": {
     "cases": [
@@ -862,7 +862,7 @@
         "switch_accepts": false
       }
     ],
-    "description": "Wire 3.1, Switch wire 3.1: certificates every verifier refuses for their labelled selling scopes paykit_request:<label> (a label is 1 to 32 characters of a-z, 0-9 and -, starting with a letter or digit; at most 8 per certificate; never beside plain paykit_request, which covers every label). Each is the hosted certificate with scopes changed and permissions derived from them, signed by bob's identity key; reason is the prototype's wording. switch_accepts says whether the switch takes it: its generic scope rule refuses a label of 33 characters, one that isn't valid, an empty one and plain paykit_request beside paykit_request:shop1, while nine labels break only Paykit's bound of 8."
+    "description": "Wire 3.1, Switch wire 3.1: certificates every verifier refuses for their labelled selling scopes paykit_request:<label> (a label is 1 to 32 characters of a-z, 0-9 and -, starting with a letter or digit; at most 8 per certificate; never beside plain paykit_request, which covers every label). Each is the hosted certificate with scopes changed and permissions derived from them, signed by bob's identity key; reason is paykit-lib's wording. switch_accepts says whether the switch takes it: its generic scope rule refuses a label of 33 characters, one that isn't valid, an empty one and plain paykit_request beside paykit_request:shop1, while nine labels break only Paykit's bound of 8."
   },
   "multi_protocol_certificates": {
     "accepted": [
