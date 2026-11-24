@@ -706,9 +706,7 @@ impl Paykit {
                         Some((&exact_grant, entry.at)),
                         purpose,
                     )?;
-                    results
-                        .confirms(entry.attempt_id, claim, seq, None)
-                        .then_some(claim)
+                    results.confirmed(entry.attempt_id, claim, seq)
                 }) {
                     claims.insert(entry.attempt_id, opening);
                 } else if let Some(payment) = dispatched.get(&entry.attempt_id).filter(|payment| {
@@ -753,16 +751,30 @@ impl Paykit {
                         Some((&exact_grant, 0)),
                         purpose,
                     )?;
-                    results
-                        .confirms(entry.attempt_id, claim, seq, None)
-                        .then_some(claim)
+                    results.confirmed(entry.attempt_id, claim, seq)
                 }) {
                     claims.insert(entry.attempt_id, opening);
+                } else if read
+                    .view
+                    .attempt(&entry.attempt_id.to_bytes())
+                    .is_some_and(|shown| shown.outcome == pubky_switch_core::claims::Outcome::Done)
+                {
+                    // A compacted failure its claim shows done, which doesn't verify: counting
+                    // it released could leave a payment uncounted (Paykit spec 8.3, `failed`
+                    // releases).
+                    return Ok(None);
                 }
             }
         }
-        let facts = Box::pin(self.allowance_outcomes(&ledger, &claims, &dispatched)).await?;
-        let counting = facts.clone();
+        let (facts, undated) =
+            Box::pin(self.allowance_outcomes(&ledger, &claims, &dispatched)).await?;
+        // A proof only this app's copy of a payer record shows counts the attempt spent,
+        // though it isn't copied into the ledger: a failure is released only while no proof
+        // of payment is known (Paykit spec 8.3, `failed` releases).
+        let mut counting = facts.clone();
+        for id in undated {
+            counting.entry(id).or_default().paid = true;
+        }
         let mut retired = if ledger.count == 0 {
             HashMap::new()
         } else {
@@ -886,6 +898,7 @@ impl Paykit {
                     .failed
                     .iter()
                     .find(|entry| entry.attempt_id == dispatch.attempt_id);
+                let failed_in_totals = failed.is_some();
                 let compacted = retired.get(&dispatch.attempt_id);
                 let (compacted, failed) = match (compacted, failed) {
                     (Some(Retired::PreviouslyFailed(_)), Some(_)) => return Ok(None),
@@ -907,6 +920,12 @@ impl Paykit {
                             )
                         })
                     {
+                        return Ok(None);
+                    }
+                    if failed_in_totals && compacted.is_none() {
+                        // A compacted failure this proof shows paid counts spent, but the
+                        // usage above released it: nothing is paid until a ledger counts it
+                        // (Paykit spec 8.3, `failed` releases).
                         return Ok(None);
                     }
                     retired.remove(&dispatch.attempt_id);

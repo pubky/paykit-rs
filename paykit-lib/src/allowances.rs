@@ -1003,8 +1003,8 @@ pub enum Counting {
     Released,
 }
 
-/// Evidence used to count an attempt (Paykit spec 8.3, Paykit wire 5.5).
-/// Claim state alone never proves a failed payment was not dispatched. Callers must
+/// Evidence used to count an attempt (Paykit spec 8.3, Paykit wire 5.5). A verified failed
+/// claim releases the attempt until a done claim or payer proof shows it paid. Callers must
 /// validate and bind this evidence to the entry's attempt, obligation, Allowance,
 /// amount, asset and owner before using it to count usage.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

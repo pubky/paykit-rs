@@ -236,6 +236,28 @@ impl<'a> ClaimResults<'a> {
         }
     }
 
+    /// The claim state to count for a read showing `claim`: a failure the read shows gives
+    /// way to a later `done` this app holds signed for the same attempt, since a read can lag
+    /// behind the claim, and a later `done` spends a failed attempt again (Paykit spec 8.3,
+    /// `failed` releases). `None` when the state the read shows doesn't verify.
+    pub(super) fn confirmed(
+        &self,
+        id: paykit_lib::AttemptId,
+        claim: ReservationClaim,
+        opened: u64,
+    ) -> Option<ReservationClaim> {
+        if matches!(claim.state, ClaimState::Failed { .. }) {
+            let done = ReservationClaim {
+                state: ClaimState::Done,
+                ..claim
+            };
+            if self.confirms(id, done, opened, None) {
+                return Some(done);
+            }
+        }
+        self.confirms(id, claim, opened, None).then_some(claim)
+    }
+
     pub(super) fn confirms(
         &self,
         id: paykit_lib::AttemptId,

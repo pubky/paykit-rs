@@ -2810,6 +2810,79 @@ async fn test_a_pending_attempt_that_fails_gives_its_amount_and_count_back() {
 }
 
 #[tokio::test]
+async fn test_a_proof_the_payer_record_cant_be_read_for_keeps_the_payment_counted() {
+    use paykit_lib::allowances::EntryOutcome;
+    use pubky_switch_client::testing::Fault;
+
+    let (world, mut payer, mut shop, key) = Box::pin(first_grant()).await;
+    world.rail.set_history_payer(payer.identity());
+    let request = Box::pin(request_from(
+        &mut shop,
+        payer.identity(),
+        draft("7", world.clock.now_ms()),
+    ))
+    .await;
+    Box::pin(payer.receive(None)).await.unwrap();
+    world.rail.next(paykit_sdk::rail::Behaviour::Fail);
+    let failed = Box::pin(payer.pay_under_allowance(&request, &key))
+        .await
+        .outcome
+        .unwrap();
+    let paykit_sdk::PayOutcome::Failed { attempt_id, .. } = failed else {
+        panic!("{failed:?}");
+    };
+    let obligation = only_ledger(&payer).await.0.entries[0].obligation;
+    assert!(world.rail.hold_history_outcome(&attempt_id));
+    world
+        .clock
+        .advance_ms(32 * pubky_switch_core::records::DAY_MS);
+    Box::pin(payer.receive(None)).await.unwrap();
+    assert!(payer
+        .app_mut()
+        .read_claim(&obligation)
+        .await
+        .unwrap()
+        .is_none());
+    // The failed attempt paid after all, and the proof lands in the payer record, but the
+    // record can't be read again while the executor copies outcomes.
+    let records = payer.app().records_of("payer_activity").await.unwrap();
+    assert_eq!(records.len(), 1);
+    let unreadable = || Fault::Unreachable {
+        path: format!("/records/{}", pubky_switch_core::enc::b64(&records[0].key)),
+        after: 0,
+    };
+    world.rail.complete_after_failure(&attempt_id);
+    world.alice.switch().fail_next(unreadable());
+    Box::pin(payer.resume_payments()).await.unwrap();
+    assert_eq!(
+        only_ledger(&payer).await.0.entries[0].outcome,
+        Some(EntryOutcome::Failed)
+    );
+    // This app's copy of the record holds the proof: the 7 stay counted, not released.
+    world.alice.switch().fail_next(unreadable());
+    let usage = Box::pin(payer.reconcile_allowance(&key))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!((usage.lifetime().as_str(), usage.released()), ("7", 0));
+    // Once the record reads again, the proof is copied into the ledger, once.
+    Box::pin(payer.resume_payments()).await.unwrap();
+    let (done, revision) = only_ledger(&payer).await;
+    assert_eq!(done.entries[0].outcome, Some(EntryOutcome::Done));
+    Box::pin(payer.resume_payments()).await.unwrap();
+    assert_eq!(only_ledger(&payer).await.1, revision);
+    let usage = Box::pin(payer.reconcile_allowance(&key))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (usage.lifetime().as_str(), usage.spent(), usage.released()),
+        ("7", 1, 0)
+    );
+    assert_eq!(world.rail.executions(&attempt_id), 1);
+}
+
+#[tokio::test]
 async fn test_resume_copies_the_payers_later_payment_proof_once() {
     use paykit_lib::allowances::EntryOutcome;
 
@@ -3030,18 +3103,19 @@ async fn confirm_foreign_failure_under(
     let entry = held.entries[0].clone();
     let dispatched = u64::from(case == ForeignFailure::AfterDispatch);
     assert_eq!(world.rail.executions(&entry.attempt_id), dispatched);
-    // While the 9 are reserved, 95 waits for them to come back.
+    // While the 9 are reserved, 95 waits for them to come back, refused by the limit that
+    // fails first.
     let waits = Box::pin(payer.pay_under_allowance(&larger, &key))
         .await
         .outcome
         .unwrap_err();
-    assert!(
-        matches!(
-            waits.refusal(),
-            Some(paykit_sdk::Refusal::NotNow(
-                paykit_sdk::NotNowReason::AllowanceLimit { .. }
-            ))
-        ),
+    assert_eq!(
+        waits.refusal(),
+        Some(&paykit_sdk::Refusal::NotNow(
+            paykit_sdk::NotNowReason::AllowanceLimit {
+                limit: first_limit.into()
+            }
+        )),
         "{waits:?}"
     );
     let before_copy = Box::pin(payer.backup()).await.unwrap();
@@ -3072,10 +3146,13 @@ async fn confirm_foreign_failure_under(
             });
     }
     // The receive that takes the renewed certificate copies the failure.
+    let ledger_key = payer.app().records_of("allowance_ledgers").await.unwrap()[0].key;
+    let writes = world.record_writes(&world.alice, &ledger_key);
     Box::pin(payer.receive(None)).await.unwrap();
+    assert_eq!(world.record_writes(&world.alice, &ledger_key), writes + 1);
     if case == ForeignFailure::LostCopy {
-        // The copy's answer was lost and the receive went on: a reopened wallet finds the
-        // write and counts it once.
+        // The copy's answer was lost and the receive went on: the service applied it, and a
+        // reopened wallet finds the write and counts it once.
         assert_eq!(only_ledger(&payer).await.0.entries[0].outcome, None);
         drop(payer);
         payer =
@@ -3099,6 +3176,7 @@ async fn confirm_foreign_failure_under(
     Box::pin(payer.receive(None)).await.unwrap();
     Box::pin(payer.resume_payments()).await.unwrap();
     assert_eq!(only_ledger(&payer).await.1, revision);
+    assert_eq!(world.record_writes(&world.alice, &ledger_key), writes + 1);
     assert_eq!(world.rail.executions(&entry.attempt_id), dispatched);
 
     if case == ForeignFailure::RestoredBeforeCopy {

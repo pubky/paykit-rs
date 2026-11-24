@@ -771,7 +771,7 @@ Two rules override a code's case. A failure with a `keptBatch` comes as `Outcome
 | `pending_proposals_full` | `HeldForUserReason::PendingProposalsFull` | `NeedsUser` | Eight of this wallet's Allowance proposals to the counterparty are pending: show them; one answered makes room, and a conflicted one counts until the user discards or withdraws it. |
 | `allowance_ledger_full` | `HeldForUserReason::AllowanceLedgerFull` | `NeedsUser` | The Allowance ledger has no room for this payment: show it; earlier payments' outcomes resolving may make room, or not. The user may pay by hand. |
 | `call_again` | `NotNowReason::CallAgain` | `RetryLater` | Make the same call again. |
-| `allowance_limit` | `NotNowReason::AllowanceLimit` | `RetryLater` | The Allowance limit has no room now; pay when its window rolls. |
+| `allowance_limit` | `NotNowReason::AllowanceLimit` | `RetryLater` | The Allowance limit has no room now; pay when its window rolls or an earlier attempt still reserved comes back failed. |
 | `answer_outcome_unknown` | `HeldForUserReason::AnswerOutcomeUnknown` | `NeedsUser` | Whether the earlier Allowance answer was delivered isn't known: show it; a `receive` may learn it, or its delivery may have failed for good. |
 | `not_now` | a `NotNowReason` the bindings don't know | `RetryLater` | Call again later. |
 | `counterparty_blocked` | `HeldForUserReason::CounterpartyBlocked` | `NeedsUser` | The deny list holds the counterparty: the user unblocks it, then call again. |

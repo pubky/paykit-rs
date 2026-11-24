@@ -141,14 +141,21 @@ impl Paykit {
         )))
     }
 
+    /// The attempts among `attempts` a payer proof shows paid: first those whose proof the
+    /// current payer record holds in a dated write, which may be copied into the ledger, then
+    /// those only this app's copy of the record shows, which can't be dated now. Either is
+    /// the payer's own signed proof of the attempt under the Allowance, so both count it
+    /// spent (Paykit wire 5.5, Counting); an attempt is never released for a proof that
+    /// couldn't be read again.
     async fn dated_allowance_payments(
         &mut self,
         ledger: &Ledger,
         attempts: &HashMap<AttemptId, ([u8; 32], &Decimal)>,
         dispatched: &HashMap<AttemptId, &crate::rail::AllowanceDispatch>,
         before: Option<&AppliedRecord>,
-    ) -> Result<Vec<AttemptId>> {
+    ) -> Result<(Vec<AttemptId>, Vec<AttemptId>)> {
         let mut paid_attempts = Vec::new();
+        let mut undated = Vec::new();
         for activity in self.payer_records().await? {
             let Some((id, obligation)) = self.allowance_proof(&activity, ledger)? else {
                 continue;
@@ -156,6 +163,7 @@ impl Paykit {
             if attempts.get(&id).is_none_or(|(key, _)| key != &obligation) {
                 continue;
             }
+            undated.push(id);
             let target = ActivityTarget::payer(
                 activity.natural_key_with(&self.identity(), &|endpoint, proof| {
                     self.rail.settlement_id(endpoint, proof)
@@ -198,7 +206,8 @@ impl Paykit {
                 }
             }
         }
-        Ok(paid_attempts)
+        undated.retain(|id| !paid_attempts.contains(id));
+        Ok((paid_attempts, undated))
     }
 
     /// Reconstruct one copied successor from an already accepted predecessor. A
@@ -303,6 +312,7 @@ impl Paykit {
                 Some(current),
             ))
             .await?
+            .0
             {
                 facts.entry(id).or_default().paid = true;
             }
@@ -315,14 +325,15 @@ impl Paykit {
 
     /// The verified evidence for each attempt the ledger counts (Paykit spec 8.3): its
     /// authenticated claim, and whether a dated payer proof bound to the Allowance shows it
-    /// paid. A failure counts only from a verified claim or a recorded outcome, never from
-    /// this installation's own journal.
+    /// paid; with the attempts only this app's copy of a payer record shows paid, which
+    /// count spent but aren't copied into the ledger. A failure counts only from a verified
+    /// claim or a recorded outcome, never from this installation's own journal.
     pub(super) async fn allowance_outcomes(
         &mut self,
         ledger: &Ledger,
         claims: &HashMap<AttemptId, ReservationClaim>,
         dispatched: &HashMap<AttemptId, &crate::rail::AllowanceDispatch>,
-    ) -> Result<HashMap<AttemptId, AttemptEvidence>> {
+    ) -> Result<(HashMap<AttemptId, AttemptEvidence>, Vec<AttemptId>)> {
         let mut facts: HashMap<_, _> = claims
             .iter()
             .map(|(&id, claim)| (id, AttemptEvidence::from(claim.state)))
@@ -343,13 +354,13 @@ impl Paykit {
             )
             .collect();
         if attempts.is_empty() {
-            return Ok(facts);
+            return Ok((facts, Vec::new()));
         }
-        for id in
-            Box::pin(self.dated_allowance_payments(ledger, &attempts, dispatched, None)).await?
-        {
+        let (dated, undated) =
+            Box::pin(self.dated_allowance_payments(ledger, &attempts, dispatched, None)).await?;
+        for id in dated {
             facts.entry(id).or_default().paid = true;
         }
-        Ok(facts)
+        Ok((facts, undated))
     }
 }
