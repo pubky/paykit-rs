@@ -2453,15 +2453,9 @@ fn list_effect(cx: &mut ReceiveContext<'_>, stored: &StoredMessage, seq: u64) ->
         }
         Some(RecordContent::Unreadable(_)) => return hold_list(cx, &target, stored, None),
     };
-    // A value that reads and binds ends the hold over an unread record.
-    if was_unread {
-        keep_local(
-            cx,
-            LocalWrite::Delete {
-                key: unread.into_bytes(),
-            },
-        );
-    }
+    // A value that reads and binds is taken, and the mark of the record once unread stays:
+    // what the unreadable value held is still unknown, so a later absence holds the list
+    // (Paykit spec 6).
     if let Some(record) = next_list_record(held, stored) {
         cx.put_record(&target, &record.to_json()?, Vec::new())?;
     }
@@ -3151,14 +3145,11 @@ impl Paykit {
                         .entry(op);
                 self.submit(batch).await?;
             }
-            // The record holds the list, and reads and binds: the hold goes, and with it
-            // any mark of the record unread.
+            // The record holds the list, and reads and binds: the hold goes. A mark of the
+            // record once unread stays, so a later absence holds the list (Paykit spec 6).
             None => {
                 let mut tx = Tx::default();
                 tx.delete(&key::held_list(&record_key));
-                if was_unread {
-                    tx.delete(&unread);
-                }
                 self.local_commit(tx).await?
             }
         }

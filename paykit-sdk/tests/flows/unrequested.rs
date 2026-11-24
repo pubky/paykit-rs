@@ -3297,6 +3297,69 @@ async fn test_unrequested_list_keeping_every_known_mark_after_a_delete_stays_hel
 }
 
 #[tokio::test]
+async fn test_unrequested_unread_mark_kept_after_the_record_reads_again() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut phone = w.wallet("phone").await;
+    let mut tool = w.wallet("tool").await;
+    let mut shop = w.shop().await;
+    w.list_to_alice(
+        &mut shop,
+        &[wallet.app_id(), phone.app_id()],
+        list_version(1, 1),
+    )
+    .await;
+    wallet.receive(None).await.unwrap();
+    let paid = wallet
+        .pay_without_request(to_bob(&w, "0.0015", "btc-bitcoin-p2wpkh"))
+        .await
+        .outcome
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    let (_, marked) = list_record(&wallet, &w).await;
+    // A faulty own app writes a value that doesn't read; the phone holds the list over it.
+    // The marked record is then written back and reads again, and the phone is backed up.
+    let target = shop_list_target(&w, &shop);
+    let key = wallet.app().record_key(&target).unwrap();
+    tool.app_mut().read_record(&target).await.unwrap();
+    put_list_record(
+        &mut tool,
+        &target,
+        Some(&serde_json::json!({ "not": "a list record" })),
+    )
+    .await;
+    phone.receive(None).await.unwrap();
+    assert_eq!(phone.held_lists().await.unwrap().len(), 1);
+    put_list_record(&mut tool, &target, Some(&marked)).await;
+    for _ in 0..2 {
+        phone.receive(None).await.unwrap();
+    }
+    let backup = phone.backup().await.unwrap();
+    drop(phone);
+    // The record is deleted, which the phone never sees, and the service forgets it.
+    put_list_record(&mut tool, &target, None).await;
+    w.alice.switch().drop_record(&key).unwrap();
+    // Restored, the phone gets the list again and reads the key absent: it once read a value
+    // it couldn't, so the list stays held, never written afresh without the mark (Paykit
+    // spec 6).
+    let mut restored = restored_onto(&w, crate::common::store(), &backup).await;
+    w.list_to_alice(&mut shop, &[restored.app_id()], list_version(1, 1))
+        .await;
+    for _ in 0..2 {
+        restored.receive(None).await.unwrap();
+    }
+    let again = restored
+        .pay_without_request(to_bob(&w, "0.0015", "btc-bitcoin-p2wpkh"))
+        .await
+        .outcome;
+    assert!(
+        !matches!(again, Ok(PayOutcome::Paid { .. })),
+        "the paid single-use endpoint was paid again: {again:?}"
+    );
+    assert_eq!(w.rail.all_executions().len(), 1);
+}
+
+#[tokio::test]
 async fn test_unrequested_list_held_over_an_unreadable_record_stays_held_over_a_forgotten_delete() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
