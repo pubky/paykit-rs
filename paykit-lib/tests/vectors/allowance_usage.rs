@@ -149,15 +149,14 @@ const DESCRIPTION: &str =
 amount and count of counted entries in the period containing t (anchored) or with t < at + \
 60 s + L (rolling), the lifetime amount including compacted totals, and entry counts \
 reserved, spent and released. A ledger or claim done, or a validated payer proof, spends. \
-Open and unknown claims reserve entries without an outcome. Every failed attempt spends \
-immediately, whoever wrote the failure, while its claim remains and after it is gone. \
-Only durable journal evidence bound to the attempt proving it ended before the payment \
-method's call and can never dispatch releases it; a restored journal, a reported failure \
-or user confirmation alone is insufficient. Done or a paid proof overrides release. An \
-entry without an outcome whose claim is gone spends. Compacted totals.failed items use \
+Open and unknown claims reserve entries without an outcome. Every failed attempt is \
+released, whoever wrote the failure, while its claim remains and after it is gone: it \
+counts in no amount and no count. Done or a paid proof overrides the release and spends. \
+An entry without an outcome whose claim is gone spends. Compacted totals.failed items use \
 the same rule for lifetime usage. Candidates are checked against every limit; refused_by \
 names the first limit that refuses. failure_evidence holds pure counting inputs: evidence \
-means already validated local journal and payer-proof evidence, not a shared record member; \
+means already validated payer-proof evidence (paid), not a shared record member, and the \
+failure itself comes from the claim, the entry or the compacted item; \
 Callers must bind it to the attempt, obligation, Allowance, amount, asset and owner. Its \
 compacted cases replace the entry with one totals.failed item. period_limit_spellings \
 checks duplicate terms by wire spelling; period_limit_members checks required members. \
@@ -282,15 +281,15 @@ pub(crate) fn generate(keys: &Keys) {
     for (index, name) in [
         (
             3,
-            "outcomes: open and unknown reserve; failed attempts spend; missing claims spend",
+            "outcomes: open and unknown reserve; failed attempts are released; missing claims spend",
         ),
         (
             6,
-            "failures by either app spend; done overrides a failed ledger outcome",
+            "failures by either app are released; done overrides a failed ledger outcome",
         ),
         (
             7,
-            "compacted failed attempts spend while claims remain and after they are gone",
+            "compacted failed attempts are released while claims remain and after they are gone",
         ),
     ] {
         cases.push((Place::At(format!("/cases/{index}/name")), json!(name)));
@@ -428,8 +427,7 @@ fn failure_cases(v: &Value) -> Vec<Value> {
             None,
             false,
             false,
-            false,
-            false,
+            true,
         ),
         (
             "another app failed",
@@ -437,8 +435,7 @@ fn failure_cases(v: &Value) -> Vec<Value> {
             None,
             false,
             false,
-            false,
-            false,
+            true,
         ),
         (
             "failed ledger, claim gone",
@@ -446,120 +443,62 @@ fn failure_cases(v: &Value) -> Vec<Value> {
             Some(FailedOutcome),
             false,
             false,
-            false,
-            false,
-        ),
-        (
-            "unknown dispatch",
-            Some(Unknown),
-            None,
-            false,
-            false,
-            false,
-            false,
-        ),
-        ("open attempt", Some(Open), None, false, false, false, false),
-        (
-            "no outcome, claim gone",
-            None,
-            None,
-            false,
-            false,
-            false,
-            false,
-        ),
-        (
-            "never dispatched, owner failed",
-            Some(Failed { by_owner: true }),
-            None,
-            true,
-            false,
-            false,
             true,
         ),
+        ("unknown dispatch", Some(Unknown), None, false, false, false),
+        ("open attempt", Some(Open), None, false, false, false),
+        ("no outcome, claim gone", None, None, false, false, false),
         (
-            "never dispatched, failed ledger, claim gone",
+            "paid proof overrides a failure",
             None,
             Some(FailedOutcome),
             true,
             false,
             false,
-            true,
         ),
         (
-            "paid proof overrides never dispatched",
-            None,
-            Some(FailedOutcome),
-            true,
-            true,
-            false,
-            false,
-        ),
-        (
-            "done claim overrides never dispatched",
+            "done claim overrides a failure",
             Some(Done),
             Some(FailedOutcome),
-            true,
             false,
             false,
             false,
         ),
-        (
-            "done ledger overrides never dispatched",
-            None,
-            Some(Paid),
-            true,
-            false,
-            false,
-            false,
-        ),
+        ("done ledger spends", None, Some(Paid), false, false, false),
         (
             "compacted owner failure",
             Some(Failed { by_owner: true }),
             Some(FailedOutcome),
             false,
-            false,
             true,
-            false,
+            true,
         ),
         (
             "compacted failure, claim gone",
             None,
             Some(FailedOutcome),
             false,
-            false,
-            true,
-            false,
-        ),
-        (
-            "compacted never dispatched",
-            None,
-            Some(FailedOutcome),
-            true,
-            false,
             true,
             true,
         ),
         (
-            "compacted paid proof overrides never dispatched",
+            "compacted paid proof overrides a failure",
             None,
             Some(FailedOutcome),
             true,
             true,
-            true,
             false,
         ),
         (
-            "compacted done claim overrides never dispatched",
+            "compacted done claim overrides a failure",
             Some(Done),
             Some(FailedOutcome),
-            true,
             false,
             true,
             false,
         ),
     ];
-    cases.into_iter().map(|(name, claim, outcome, never_dispatched, paid, compacted, released)| {
+    cases.into_iter().map(|(name, claim, outcome, paid, compacted, released)| {
         let mut entry = entry.clone();
         match outcome {
             Some(Paid) => entry["outcome"] = json!("done"),
@@ -583,14 +522,14 @@ fn failure_cases(v: &Value) -> Vec<Value> {
             l["entries"] = json!([]);
             l["totals"]["failed"] = json!([{ "attempt_id": entry["attempt_id"], "obligation": entry["obligation"], "value": entry["value"] }]);
         }
-        let evidence = AttemptEvidence { claim, paid, never_dispatched };
+        let evidence = AttemptEvidence { claim, paid };
         let attempt = AttemptId::parse(st(&entry, "attempt_id")).unwrap();
         let u = usage(&AllowanceTerms::from_json(&terms).unwrap(), &ledger(&l), &HashMap::from([(attempt, evidence)]), time(st(&v["cases"][3], "t"))).unwrap();
         // Independent exact expected amount prevents regeneration blessing an undercount.
         assert_eq!(u.lifetime().as_str(), if released { "0" } else { "0.01" }, "{name}");
         json!({ "name": name, "terms": terms, "ledger": l, "claims": claims,
             "t": v["cases"][3]["t"], "attempt_id": entry["attempt_id"],
-            "evidence": { "never_dispatched": never_dispatched, "paid": paid },
+            "evidence": { "paid": paid },
             "usage": usage_json(&u), "candidate": { "amount": "0.01", "allowed": released } })
     }).collect()
 }
@@ -601,7 +540,6 @@ fn check_failure_case(case: &Value) {
     let counted = evidence
         .entry(AttemptId::parse(st(case, "attempt_id")).unwrap())
         .or_default();
-    counted.never_dispatched = case["evidence"]["never_dispatched"].as_bool().unwrap();
     counted.paid = case["evidence"]["paid"].as_bool().unwrap();
     let u = usage(
         &terms,
