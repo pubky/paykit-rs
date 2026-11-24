@@ -4828,12 +4828,10 @@ async fn test_executor_grant_before_a_provider_loss_pays_nothing() {
     // under the loss's hold, and its usage waits for repair (Paykit spec 8.3, "After
     // provider loss").
     let refused = Box::pin(subscription_refused(&world, &mut shop, &mut payer, &key)).await;
-    assert!(
-        matches!(
-            refused,
-            paykit_sdk::Refusal::AllowanceConfirmationNeeded { .. }
-        ),
-        "{refused:?}"
+    let hold = payer.allowance(&key).await.unwrap().hold;
+    assert_eq!(
+        refused,
+        paykit_sdk::Refusal::AllowanceConfirmationNeeded { hold }
     );
     assert!(world.rail.all_executions().is_empty());
 }
@@ -4945,13 +4943,15 @@ async fn test_executor_lost_generation_key_still_listed_pays_nothing() {
     // The grant from before the loss pays nothing: the user confirms the Allowance again
     // under the loss's hold, and its usage waits for repair (Paykit spec 8.3, "After
     // provider loss").
+    // The earlier grant's evidence verifies under the still-listed key, but is from before
+    // the loss: reconciliation establishes nothing from it.
+    assert!(granted(&payer, &key).await);
+    assert!(payer.reconcile_allowance(&key).await.unwrap().is_none());
     let refused = Box::pin(subscription_refused(&world, &mut shop, &mut payer, &key)).await;
-    assert!(
-        matches!(
-            refused,
-            paykit_sdk::Refusal::AllowanceConfirmationNeeded { .. }
-        ),
-        "{refused:?}"
+    let hold = payer.allowance(&key).await.unwrap().hold;
+    assert_eq!(
+        refused,
+        paykit_sdk::Refusal::AllowanceConfirmationNeeded { hold }
     );
     assert!(world.rail.all_executions().is_empty());
 }
@@ -5430,23 +5430,29 @@ async fn test_executor_restore_after_a_provider_loss_pays_nothing_under_the_earl
     drop(payer);
     let mut restored = Box::pin(restored_on_a_new_device(&world, &backup)).await;
     restored.app_mut().invite(&shop.identity()).await.unwrap();
+    // The earlier grant's evidence verifies under the still-listed key, but is from before
+    // the loss: reconciliation establishes nothing from it.
+    assert!(granted(&restored, &key).await);
+    assert!(restored.reconcile_allowance(&key).await.unwrap().is_none());
     // Nothing written: the record isn't read as the grant's write needs yet.
     let hold = restored.allowance(&key).await.unwrap().hold;
+    let before = Box::pin(regrant::confirmed(&restored, &key)).await;
     let refused = Box::pin(restored.confirm_allowance_executor(&hold, UserConfirmed::new()))
         .await
         .unwrap_err();
-    assert!(
-        matches!(refused.refusal(), Some(paykit_sdk::Refusal::NotNow(_))),
-        "{refused}"
+    assert_eq!(
+        refused.refusal(),
+        Some(&paykit_sdk::Refusal::NotNow(
+            "the Allowance record isn't read as writing on it needs yet".into()
+        ))
     );
+    assert_eq!(Box::pin(regrant::confirmed(&restored, &key)).await, before);
     // Paid nothing: the user confirms the Allowance again under the loss's hold first.
     let refused = Box::pin(subscription_refused(&world, &mut shop, &mut restored, &key)).await;
-    assert!(
-        matches!(
-            refused,
-            paykit_sdk::Refusal::AllowanceConfirmationNeeded { .. }
-        ),
-        "{refused:?}"
+    let hold = restored.allowance(&key).await.unwrap().hold;
+    assert_eq!(
+        refused,
+        paykit_sdk::Refusal::AllowanceConfirmationNeeded { hold }
     );
     assert!(world.rail.all_executions().is_empty());
 }
@@ -5472,22 +5478,17 @@ async fn test_executor_restore_of_a_backup_from_before_the_grant_across_a_change
     // paid. The user can still end the Allowance.
     assert!(!restored.allowance(&key).await.unwrap().consented);
     let hold = restored.allowance(&key).await.unwrap().hold;
+    let expected = paykit_sdk::Refusal::NotNow(
+        "this app's grant is held, but its consent isn't on this device".into(),
+    );
     for refused in [
         Box::pin(restored.confirm_allowance_executor(&hold, UserConfirmed::new())).await,
         Box::pin(restored.resume_allowance_executor(&key)).await,
     ] {
-        let refused = refused.unwrap_err();
-        assert!(
-            matches!(refused.refusal(), Some(paykit_sdk::Refusal::NotNow(_))),
-            "{refused}"
-        );
+        assert_eq!(refused.unwrap_err().refusal(), Some(&expected));
     }
     let paid = Box::pin(pays_under(&world, &mut shop, &mut restored, &key, "1")).await;
-    let refused = paid.outcome.unwrap_err();
-    assert!(
-        matches!(refused.refusal(), Some(paykit_sdk::Refusal::NotNow(_))),
-        "{refused}"
-    );
+    assert_eq!(paid.outcome.unwrap_err().refusal(), Some(&expected));
     assert!(world.rail.all_executions().is_empty());
     Box::pin(restored.end_allowance(&key)).await.unwrap();
     assert_eq!(
@@ -5643,7 +5644,9 @@ async fn test_executor_older_in_place_restore_keeps_a_kept_end_and_its_removal()
         Box::pin(crate::allowances::consent_entry(&restored, &key)).await,
         Some(json!({ "removed": { "reason": "ended" } }))
     );
-    let confirmed = Box::pin(restored.confirm_allowance_executor(&key, UserConfirmed::new())).await;
+    let hold = restored.allowance(&key).await.unwrap().hold;
+    let confirmed =
+        Box::pin(restored.confirm_allowance_executor(&hold, UserConfirmed::new())).await;
     assert!(confirmed.is_err(), "{confirmed:?}");
     let paid = Box::pin(restored.pay_under_allowance(&request, &key))
         .await
@@ -5690,8 +5693,8 @@ async fn test_executor_older_in_place_restore_keeps_a_kept_end_and_its_removal()
 async fn test_executor_pays_nothing_under_the_shared_post_loss_hold() {
     // Paykit spec 8.1; Paykit wire 5.6, Shared post-loss hold: after a declared provider loss
     // the executor pays no one-time request under the Allowance, one created long after the
-    // loss included. A confirmation of the executor after the loss is refused for now, since
-    // it can't establish the original grant and ledger, and changes nothing.
+    // loss included. A confirmation of the executor after the loss writes the grant again at
+    // the current generation, and the shared hold still pays nothing.
     let (world, mut payer, mut shop, key) = Box::pin(first_grant()).await;
     world.clock.advance_ms(60_000);
     crate::provider_loss::declare_loss(&world);
@@ -5699,9 +5702,16 @@ async fn test_executor_pays_nothing_under_the_shared_post_loss_hold() {
     // The user's confirmation after the loss writes the grant once more, at the current
     // generation; it establishes no usage authority, and the shared hold stays.
     let hold = payer.allowance(&key).await.unwrap().hold;
+    let (_, grants) = Box::pin(regrant::confirmed(&payer, &key)).await;
     Box::pin(payer.confirm_allowance_executor(&hold, UserConfirmed::new()))
         .await
         .unwrap();
+    Box::pin(payer.receive(None)).await.unwrap();
+    let generation = payer.app().own_identity().generation();
+    assert_eq!(
+        Box::pin(regrant::confirmed(&payer, &key)).await,
+        (generation, grants + 1)
+    );
     let now = world.clock.now_ms();
     world
         .clock

@@ -58,7 +58,7 @@ async fn record(payer: &Paykit, key: &[u8; 32]) -> AllowanceRecord {
 }
 
 /// The generation the user last confirmed the Allowance at `key` in, and its grant count.
-async fn confirmed(payer: &Paykit, key: &[u8; 32]) -> (u64, usize) {
+pub(super) async fn confirmed(payer: &Paykit, key: &[u8; 32]) -> (u64, usize) {
     let held = record(payer, key).await;
     let generation = held
         .current_grant(&payer.identity())
