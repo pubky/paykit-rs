@@ -85,6 +85,26 @@ async fn inbox(world: &World) -> Result<(), Box<dyn Error>> {
     );
 
     payer.shutdown().await?;
+    assert!(matches!(
+        payer.spam_count(payee.into()).await,
+        Err(WalletError::Closed)
+    ));
+    assert!(matches!(
+        payer.extension_messages().await,
+        Err(WalletError::Closed)
+    ));
+    assert!(matches!(
+        payer
+            .acknowledge_extension_message(payee.into(), MSG_ID.into())
+            .await,
+        Err(WalletError::Closed)
+    ));
+    assert!(matches!(
+        payer
+            .send_extension(payee.into(), KIND.into(), vec![], "{}".into())
+            .await,
+        Err(WalletError::Closed)
+    ));
     let reopened = host(world, root.path(), account).load(app_id).await?;
     assert!(reopened.extension_messages().await?.is_empty());
     // A kept entry that fails to decode must surface a storage error on the host's read.
@@ -113,6 +133,38 @@ fn test_extensions_payer_inbox_on_scripted() {
 #[test]
 fn test_extensions_payer_inbox_on_service() {
     run(Backend::Service, inbox);
+}
+
+async fn send_extension(world: &World) -> super::TestResult {
+    let root = tempfile::tempdir()?;
+    let account = Arc::new(Account::open(root.path(), world.clock().clone()));
+    let scopes = crate::WalletScopes {
+        contacts: true,
+        extensions: vec!["paykit-cap".into()],
+        ..Default::default()
+    };
+    let (_, wallet, _, _) = Box::pin(super::wallet::enrolled_wallet(
+        world,
+        root.path(),
+        account,
+        scopes,
+        None,
+    ))
+    .await?;
+    let recipient = world.identity("other-buyer")?.public();
+    let id = wallet
+        .send_extension(recipient.into(), KIND.into(), vec![], "{}".into())
+        .await?;
+    pubky_switch_core::json::check_uuid_v4(&id)?;
+    assert!(wallet.message_delivery(id).await?.is_some());
+    wallet.shutdown().await?;
+    Ok(())
+}
+
+#[test]
+fn test_extensions_send_returns_a_message_id() {
+    run(Backend::Scripted, send_extension);
+    run(Backend::Service, send_extension);
 }
 
 #[test]

@@ -304,7 +304,7 @@ impl WalletHost {
     pub(crate) async fn load_app(&self, env: AppEnv, id: [u8; 16]) -> Result<Paykit, PaykitError> {
         Paykit::load(
             env,
-            Default::default(),
+            self.config.clone(),
             id,
             self.rail.clone(),
             self.timer.clone(),

@@ -1,5 +1,5 @@
-use crate::{NativeWallet, WalletError, WalletHost, WalletStore, WalletStoreSession};
-use paykit_sdk::AppScopes;
+use crate::{NativeWallet, WalletError, WalletHost, WalletScopes, WalletStore, WalletStoreSession};
+use paykit_sdk::RequestedScopes;
 use pubky_switch_client::app::Protocol;
 use pubky_switch_client::store::StoreError;
 use pubky_switch_core::{
@@ -153,7 +153,8 @@ impl WalletEnrollment {
         })
         .await
     }
-    /// Sign the one-time payer request bound to the host's exact Pubky authentication request.
+    /// Sign the chosen scopes and bind them to the original Pubky authentication request
+    /// (Paykit spec 3.1, 3.2, Switch wire 3.9). Retry with the same effective scope set.
     pub async fn prepare_enrollment(
         &self,
         reference: Vec<u8>,
@@ -161,6 +162,7 @@ impl WalletEnrollment {
         client_key: Vec<u8>,
         capabilities: String,
         auth_secret: Vec<u8>,
+        scopes: WalletScopes,
     ) -> Result<EnrollmentRequest, WalletError> {
         let this = self.clone();
         crate::runtime::run(async move {
@@ -179,6 +181,7 @@ impl WalletEnrollment {
                     secret: fixed(auth_secret, "auth secret")?,
                 };
                 let id = keys.app_id_bytes();
+                let scopes = RequestedScopes::try_from(scopes)?.scopes;
                 let signed = match request {
                     Some(prior) => {
                         let req =
@@ -186,7 +189,12 @@ impl WalletEnrollment {
                         if req.body().app_id != id {
                             return Err(StoreError::Corrupt.into());
                         }
-                        if !req.binds(&auth) || prior.secret != auth.secret {
+                        let original = &req.body().scopes;
+                        if !req.binds(&auth)
+                            || prior.secret != auth.secret
+                            || original.len() != scopes.len()
+                            || !scopes.iter().all(|scope| original.contains(scope))
+                        {
                             return Err(WalletError::EnrollmentConflict);
                         }
                         req
@@ -194,11 +202,7 @@ impl WalletEnrollment {
                     None => {
                         check_caps(&auth.caps, &id, &[])
                             .map_err(|_| WalletError::invalid("capabilities"))?;
-                        let body = AppRequestBody::new(
-                            &keys,
-                            AppScopes::new().pay().build()?.scopes,
-                            &auth,
-                        );
+                        let body = AppRequestBody::new(&keys, scopes, &auth);
                         let req = AppRequest::sign(&keys, body)
                             .map_err(|_| WalletError::invalid("app request"))?;
                         EnrollmentState::Pending {
@@ -319,8 +323,8 @@ impl PendingRequest {
 
 #[uniffi::export]
 impl WalletHost {
-    /// Install the payer from its protected original approval. Repeating this operation
-    /// after either the app commit or the enrollment commit opens the same application.
+    /// Install the wallet from its protected original approval (Paykit spec 3.2). Repeating
+    /// this operation after either commit opens the same application.
     pub async fn complete_enrollment(
         &self,
         reference: Vec<u8>,
@@ -374,7 +378,7 @@ impl WalletHost {
                                     ))) => {
                                         Paykit::join(
                                             env,
-                                            Default::default(),
+                                            host.config.clone(),
                                             JoinRequest {
                                                 identity,
                                                 keys,

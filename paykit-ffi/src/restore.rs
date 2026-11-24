@@ -48,7 +48,7 @@ impl WalletHost {
             this.open_wallet(id, async |env| {
                 Ok(Paykit::restore(
                     env,
-                    Default::default(),
+                    this.config.clone(),
                     &backup,
                     this.rail.clone(),
                     this.timer.clone(),

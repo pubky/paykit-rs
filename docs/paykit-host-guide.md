@@ -32,6 +32,20 @@ Paykit layer and installs the payment journal with the client state. The
 `*_with_protocols` constructors allow other protocols on the same App ID. Keep
 the exact Paykit protocol instance supplied to the registration closure.
 
+In Kotlin and Swift, pass `WalletScopes` to `prepareEnrollment`. Choose the
+roles this app needs. A request scope covers every sale, while `requestLabels`
+limits the app to the named labels. The SDK derives required scopes and Switch
+permissions. Keep the same scope set and authentication request when resuming
+a pending enrollment (Paykit spec 3.1, 3.2).
+
+Pass an optional `WalletConfig` to `WalletHost` for join, load and restore.
+Each omitted setting keeps the SDK default. Use `sellingLabel` for the label on
+outgoing requests, `orphanAfterS` for the attempt's orphan age in seconds, and
+`resendBudget` for the maximum number of messages re-sent to each requester per day.
+Register handled message kinds in `extensionKinds` and ask for their prefixes
+at enrollment. Public Payment Endpoints require the unlabelled request scope
+and `publishesRecord` enabled (Paykit spec 3.3, 4, 7.2, 9, Switch spec 4.2).
+
 The one-time payment path uses these SDK calls. Keep the receive summary so
 the host can handle its duty events. List received requests and show the
 selected request's payee and amount. Call `pay_request` with
@@ -189,6 +203,12 @@ access with another protocol.
 Use the SDK states below to explain payment progress in the wallet's own words.
 The wallet chooses how to present each state. While a payment may already have
 gone through, keep that uncertainty clear and follow the reconciliation rules.
+
+A Kotlin or Swift wallet can return no entry from `messageDelivery` after
+delivery retention expires or after a restore. A retry can be refused after
+an earlier try was accepted and its answer was lost. When delivery is
+`Failed`, check the request or record before sending a replacement (Switch
+spec 11, 12.4).
 
 After loading, read the durable journal with `Paykit::payments()`. Match the
 existing `PaymentView::attempt_id` and use its `stage` to track progress. A durable
