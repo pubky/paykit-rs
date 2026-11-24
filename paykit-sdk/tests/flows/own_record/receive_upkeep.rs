@@ -179,3 +179,89 @@ async fn test_own_record_homeserver_write_owed_told_at_the_receive() {
     let summary = shop.receive(None).await.unwrap();
     assert_eq!(summary.app_record_owed, None, "{summary:?}");
 }
+
+#[tokio::test]
+async fn test_own_record_unchanged_record_with_its_homeserver_write_owed_told() {
+    // The record goes to the client unchanged at the upkeep, and its Homeserver write, owed
+    // since the last one failed, fails again: the receive tells the host it is owed.
+    let w = World::new();
+    let mut shop = w
+        .join_with(
+            &w.bob,
+            "shop",
+            paykit_sdk::AppScopes::new()
+                .request()
+                .pay()
+                .build()
+                .unwrap(),
+            super::publishing(),
+            crate::common::store(),
+        )
+        .await;
+    w.rail
+        .set_endpoint_identifiers(vec![endpoint("btc-onchain-address")]);
+    w.homeserver.fail_writes(1, false);
+    let signed = shop.receive(None).await.unwrap();
+    assert!(signed.app_record_owed.is_some(), "{signed:?}");
+    let held = shop.app().record().clone();
+    // Nothing to change now; every Homeserver write of this receive fails, the client's own
+    // at its read and the upkeep's.
+    w.homeserver.fail_writes(4, false);
+    let unchanged = shop.receive(None).await.unwrap();
+    assert_eq!(shop.app().record(), &held);
+    let owed = unchanged.app_record_owed.unwrap();
+    assert!(owed.contains("Homeserver"), "{owed}");
+}
+
+#[tokio::test]
+async fn test_own_record_unknown_store_result_told_at_a_receive_that_skips_the_upkeep() {
+    // The store can't tell whether the wallet's last write of its record was applied. Its
+    // account is then gone at the switch: the receive returns at once, before the upkeep,
+    // and still tells the host the record is owed until the app is loaded again.
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let w = World::new();
+    let base = crate::common::store();
+    let faulty = std::sync::Arc::new(super::UnknownOnce {
+        inner: std::sync::Arc::clone(&base),
+        armed: AtomicBool::new(false),
+    });
+    let wallet = w
+        .wallet_on(
+            "wallet",
+            std::sync::Arc::clone(&faulty)
+                as std::sync::Arc<dyn pubky_switch_client::store::StateStore>,
+        )
+        .await;
+    let wallet_id = wallet.app_id();
+    drop(wallet);
+    let transport = std::sync::Arc::new(crate::erasure::ErasedSwitch {
+        inner: std::sync::Arc::clone(&w.router),
+        erased: AtomicBool::new(false),
+    });
+    let mut wallet = w
+        .load_with_transport(
+            &w.alice,
+            std::sync::Arc::clone(&faulty)
+                as std::sync::Arc<dyn pubky_switch_client::store::StateStore>,
+            wallet_id,
+            std::sync::Arc::clone(&transport)
+                as std::sync::Arc<dyn pubky_switch_client::transport::Transport>,
+        )
+        .await;
+    wallet.receive(None).await.unwrap();
+    w.rail
+        .set_endpoint_identifiers(vec![endpoint("btc-onchain-address")]);
+    faulty.armed.store(true, Ordering::SeqCst);
+    assert!(wallet.update_own_record().await.is_err());
+    transport.erased.store(true, Ordering::SeqCst);
+    w.homeserver
+        .remove(w.alice_id(), pubky_switch_core::records::IDENTITY_PATH);
+    for _ in 0..4 {
+        assert!(wallet.receive(None).await.is_err());
+        w.clock.advance_ms(6 * crate::common::HOUR_MS);
+    }
+    let summary = wallet.receive(None).await.unwrap();
+    assert!(summary.account_gone, "{summary:?}");
+    let owed = summary.app_record_owed.unwrap();
+    assert!(owed.contains("loaded again"), "{owed}");
+}
