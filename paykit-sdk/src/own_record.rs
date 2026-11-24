@@ -344,13 +344,9 @@ impl Paykit {
             // Nothing is signed while the record this handle holds may not be the one stored,
             // so the record isn't brought up to date until the app is loaded again.
             Ok(Tended::Held) => Ok(Some(OWED_UNTIL_LOADED.to_string())),
-            // The switch holds the record and its Homeserver write failed: the client writes it
-            // again at a later read.
-            Ok(
-                Tended::Signed(Publication::Owed { .. })
-                | Tended::Unchanged(Publication::Owed { .. }),
-            ) => Ok(Some(PUBLICATION_OWED.to_string())),
-            Ok(Tended::Signed(_) | Tended::Unchanged(_)) => Ok(None),
+            Ok(Tended::Signed(publication) | Tended::Unchanged(publication)) => {
+                Ok(publication_owed(&publication).map(str::to_string))
+            }
             Err(error) => upkeep_outcome(error, &before, &self.own_standing()),
         }
     }
@@ -636,8 +632,50 @@ pub(crate) enum Tended {
 
 /// Why the record is owed when the switch holds it and its Homeserver write failed
 /// ([`Paykit::tend_own_record_at_receive`]). Shown to hosts as it is.
-const PUBLICATION_OWED: &str = "the app record's copy on the Homeserver couldn't be written; \
-     it is written again at a later receive";
+/// Why the app record's public copy on the Homeserver is owed, where the record stands as
+/// `publication` after the upkeep (Switch spec 4.2); `None` where no copy is owed. Shown to
+/// hosts as it is.
+fn publication_owed(publication: &Publication) -> Option<&'static str> {
+    match publication {
+        // The switch holds the record and its Homeserver write failed: the client writes it
+        // again at a later read.
+        Publication::Owed { .. } => Some(
+            "the app record's copy on the Homeserver couldn't be written; it is written again \
+             at a later receive",
+        ),
+        // The copy is missing and the app shares its keys with other devices: it is written
+        // back once the switch has shown the app current, at a later receive.
+        Publication::AwaitingRead => Some(
+            "the app record's copy on the Homeserver is missing; it is written back once the \
+             switch shows the app current, at a later receive",
+        ),
+        // The switch has accepted no record of the app yet, as after a provider loss or a
+        // restore from a backup that carries none: nothing is published until it does.
+        Publication::NothingAccepted => Some(
+            "the switch has accepted no app record yet; its copy on the Homeserver is \
+             written once it does",
+        ),
+        // A newer record choice of the app's own is unresolved, and the accepted copy is
+        // repaired only once it settles.
+        Publication::AwaitingRecord => Some(
+            "the app record's copy on the Homeserver waits for a newer change of the record to \
+             settle",
+        ),
+        // The app doesn't publish its record: no copy is ever owed.
+        Publication::NotPublishing
+        // The Homeserver holds the newest record the switch accepted.
+        | Publication::Published
+        // The Homeserver holds a later record of the app than the switch accepted, which
+        // nothing writes over.
+        | Publication::Superseded
+        // Nothing is owed as far as the client knows; only its check of the copy failed,
+        // and it checks again at the next read.
+        | Publication::Unchecked { .. } => None,
+        // A state this version doesn't know: told, so the host doesn't take the copy as
+        // published.
+        _ => Some("the app record's copy on the Homeserver is in a state this version doesn't know"),
+    }
+}
 
 /// Why the record is owed while the store can't tell whether the last write of it was
 /// applied ([`Paykit::tend_own_record_at_receive`]). Shown to hosts as it is.
@@ -915,6 +953,27 @@ mod upkeep_tests {
             );
         }
         assert_eq!(own_record_left_owed(&PaykitError::corrupt()), None);
+    }
+
+    #[test]
+    fn test_own_record_publication_owed_for_every_state_that_leaves_the_copy_owed() {
+        let failed = || TransportError::Timeout;
+        for (publication, owed) in [
+            (Publication::Owed { error: failed() }, true),
+            (Publication::AwaitingRead, true),
+            (Publication::NothingAccepted, true),
+            (Publication::AwaitingRecord, true),
+            (Publication::NotPublishing, false),
+            (Publication::Published, false),
+            (Publication::Superseded, false),
+            (Publication::Unchecked { error: failed() }, false),
+        ] {
+            assert_eq!(
+                publication_owed(&publication).is_some(),
+                owed,
+                "{publication:?}"
+            );
+        }
     }
 
     #[test]

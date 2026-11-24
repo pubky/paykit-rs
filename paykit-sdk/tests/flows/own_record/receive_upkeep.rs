@@ -265,3 +265,64 @@ async fn test_own_record_unknown_store_result_told_at_a_receive_that_skips_the_u
     let owed = summary.app_record_owed.unwrap();
     assert!(owed.contains("loaded again"), "{owed}");
 }
+
+#[tokio::test]
+async fn test_own_record_missing_copy_on_shared_keys_told_until_written_back() {
+    // Alice's wallet runs on two devices that share its keys, and the record's copy on the
+    // Homeserver goes missing: another device may have deleted it to leave, so the client
+    // writes it back only once the switch shows the app current. The second device's read
+    // waits for a data epoch's scope key, so it reads no feed to its end and shows nothing
+    // current: the receive tells the host the copy is owed. Once the key comes, the next
+    // receive reads the feed, writes the copy back and clears that.
+    let w = World::new();
+    let mut first = w
+        .join_with(
+            &w.alice,
+            "wallet",
+            paykit_sdk::AppScopes::new()
+                .request()
+                .pay()
+                .build()
+                .unwrap(),
+            super::publishing(),
+            crate::common::store(),
+        )
+        .await;
+    first.receive(None).await.unwrap();
+    let backup = first.backup().await.unwrap();
+    let mut second = Paykit::restore(
+        w.env(&w.alice, crate::common::store()),
+        super::publishing(),
+        &backup,
+        std::sync::Arc::clone(&w.rail) as std::sync::Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    // The host marks the device as one of several sharing the app's keys.
+    second.app_mut().set_multi_device(true).await.unwrap();
+    second.receive(None).await.unwrap();
+    let path = pubky_switch_core::records::app_record_path(&second.app_id());
+    let alice = w.alice_id();
+    w.alice.next_doc(|body| body.data_epoch += 1).unwrap();
+    w.homeserver.remove(alice, &path);
+    w.clock
+        .advance_ms(pubky_switch_client::app::PUBLISHED_CHECK_MS + 1);
+    let summary = second.receive(None).await.unwrap();
+    assert!(summary.scope_keys_awaited, "{summary:?}");
+    let owed = summary.app_record_owed.unwrap();
+    assert!(owed.contains("missing"), "{owed}");
+    assert!(w.homeserver.file(alice, &path).is_none());
+    crate::certificate::store_bundle(&w, second.app_id(), &second.app().cert().clone());
+    let mut cleared = None;
+    for _ in 0..3 {
+        let summary = second.receive(None).await.unwrap();
+        if !summary.scope_keys_awaited {
+            cleared = Some(summary);
+            break;
+        }
+    }
+    let summary = cleared.expect("the key comes");
+    assert_eq!(summary.app_record_owed, None, "{summary:?}");
+    assert!(w.homeserver.file(alice, &path).is_some());
+}

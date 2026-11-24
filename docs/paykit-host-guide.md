@@ -140,13 +140,21 @@ for one of these reasons:
   carry;
 - the own switch doesn't answer;
 - the record's copy on the Homeserver couldn't be written;
+- the record's copy on the Homeserver is missing while the app runs on devices
+  that share its keys: another device may have removed it to leave, so it is
+  written back, and the reason clears, at the first receive that reads the
+  feed to its end and so shows the app current;
+- the switch has accepted no record of the app yet, as after a provider loss
+  or a restore from a backup that carries none: the copy is written once it
+  does;
+- a newer change of the record is still settling, and the copy waits for it;
 - a renewal is due and the record has an expiry policy this version doesn't
   know, which a newer version brings up to date.
 
 A receive whose read stopped, or that returned early, skips the upkeep and
-says nothing of these. Any other upkeep failure fails the receive. In the first
-three cases the record is tried again at the next receive that tries the
-upkeep, and `update_own_record` tries it at once and returns its outcome.
+says nothing of these. Any other upkeep failure fails the receive. The record
+is tried again at the next receive that tries the upkeep, and
+`update_own_record` tries it at once and returns its outcome.
 
 While the store couldn't tell whether the last write of the record was applied,
 every receive sets `app_record_owed`: neither a receive's upkeep nor
