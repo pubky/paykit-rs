@@ -107,7 +107,11 @@ impl Wallets {
         ))
         .await?;
         // A newly joined app needs its first listing before it can show requests (Paykit spec 8.1).
-        refusal(payer.recurring_requests().await, "needs_user", "not_now")?;
+        refusal(
+            payer.recurring_requests().await,
+            "retry_later",
+            "records_not_listed",
+        )?;
         receive(&payer).await?;
         let shop = world.identity("shop")?;
         let mut issuer = Box::pin(signer::serving(world, "shop")).await?;

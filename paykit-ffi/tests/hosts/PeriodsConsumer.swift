@@ -52,8 +52,8 @@ func checkPeriods(fixture: CheckoutFixture, wallet: NativeWallet) async throws {
     do {
         _ = try await restored.recurringRequests()
         preconditionFailure("listed recurring requests before the restored records were read")
-    } catch WalletError.NeedsUser(let failure) {
-        precondition(failure.code() == "not_now")
+    } catch WalletError.RetryLater(let failure) {
+        precondition(failure.code() == "records_not_listed")
     }
     try await restored.shutdown()
     let remaining = try await wallet.recurringRequests()
