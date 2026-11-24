@@ -209,14 +209,8 @@ fn timestamp(ms: u64, field: &str) -> Result<u64, WalletError> {
 }
 
 fn metadata(bytes: &[u8]) -> Result<Map<String, Value>, WalletError> {
-    use paykit_lib::kinds::OPAQUE_MEMBERS;
-    use pubky_switch_core::json::{check_json_as, Doc};
-
-    // Check the original bytes for duplicate keys before decoding the opaque object (Paykit wire 1.1).
-    let message = [br#"{"body":{"metadata":"#.as_slice(), bytes, b"}}"].concat();
-    check_json_as(&message, Doc::Message(OPAQUE_MEMBERS))
-        .map_err(|_| WalletError::invalid("metadata_json"))?;
-    serde_json::from_slice(bytes).map_err(|_| WalletError::invalid("metadata_json"))
+    crate::opaque::object(bytes, crate::opaque::Place::Metadata)
+        .ok_or_else(|| WalletError::invalid("metadata_json"))
 }
 
 impl TryFrom<RequestDraft> for sdk::RequestDraft {
@@ -332,7 +326,8 @@ impl From<sdk::PayeeStatus> for PayeeStatus {
 /// One Billing Period's record as this app holds it (Paykit spec 8.2, Paykit wire 5.3).
 #[derive(uniffi::Record)]
 pub struct PeriodView {
-    /// The period record key, which `verify_payment` and `confirm_payment` take (Paykit wire 5.3).
+    /// The period record key (Paykit wire 5.3). `verify_payment` and `confirm_payment` take
+    /// the key a `PayeeRequest` lists; the payer's key for the same period is another one.
     pub record: Vec<u8>,
     /// The Billing Period (Paykit wire 4.4).
     pub billing_period: BillingPeriod,
@@ -343,7 +338,8 @@ pub struct PeriodView {
     pub paid: bool,
     /// Whether the payee issued a receipt for this period (Paykit wire 4.11).
     pub credited: bool,
-    /// The receipt shown for the credit, when present (Paykit wire 4.11).
+    /// The receipt shown for the credit, when present (Paykit wire 4.11). Its Payment Reference
+    /// is unset here: the request's is on the request itself.
     pub receipt: Option<Receipt>,
 }
 
@@ -584,6 +580,13 @@ impl TryFrom<ResendSelection> for sdk::ResendSelection {
             .into_iter()
             .map(|h| fixed(h, "request_hashes"))
             .collect::<Result<_, _>>()?;
+        if selection
+            .msg_ids
+            .iter()
+            .any(|id| pubky_switch_core::json::check_uuid_v4(id).is_err())
+        {
+            return Err(WalletError::invalid("msg_ids"));
+        }
         let mut value = Self::default()
             .with_msg_ids(selection.msg_ids)
             .with_request_hashes(hashes);
@@ -594,6 +597,52 @@ impl TryFrom<ResendSelection> for sdk::ResendSelection {
             value = value.with_accepted_until_ms(timestamp(at, "accepted_until_ms")?);
         }
         Ok(value)
+    }
+}
+
+// Debug shows the shape of what the host gave, never its text: references, payloads and
+// metadata can identify a buyer.
+impl std::fmt::Debug for RequestDestination {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Endpoints { endpoints } => f
+                .debug_struct("Endpoints")
+                .field("endpoints", endpoints)
+                .finish(),
+            Self::RequiredApp { .. } => f.write_str("RequiredApp"),
+            Self::Any => f.write_str("Any"),
+        }
+    }
+}
+
+impl std::fmt::Debug for RequestDraft {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RequestDraft")
+            .field("destination", &self.destination)
+            .field("payment_reference_bytes", &self.payment_reference.len())
+            .field("recurring", &self.recurrence.is_some())
+            .field("metadata_bytes", &self.metadata_json.as_ref().map(Vec::len))
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for ReceiptDetails {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReceiptDetails")
+            .field("store_only", &self.store_only)
+            .field("metadata_bytes", &self.metadata_json.as_ref().map(Vec::len))
+            .field("unmarked_credit_confirmed", &self.unmarked_credit_confirmed)
+            .field("maybe_credited_confirmed", &self.maybe_credited_confirmed)
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for SignedReceipt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SignedReceipt")
+            .field("msg_id", &self.msg_id)
+            .field("plaintext_bytes", &self.plaintext.len())
+            .finish_non_exhaustive()
     }
 }
 

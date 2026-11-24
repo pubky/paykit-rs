@@ -380,6 +380,8 @@ impl NativeWallet {
     ) -> Result<PaymentResult, WalletError> {
         let request = id.try_into()?;
         let period = period.try_into()?;
+        // The host's choice is checked before anything else (Paykit spec 7.2).
+        price.price()?;
         let rail = self.rail();
         self.with_wallet(move |app| {
             Box::pin(async move {
