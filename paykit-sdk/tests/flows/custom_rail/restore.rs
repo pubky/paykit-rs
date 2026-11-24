@@ -145,7 +145,7 @@ async fn restore(
 }
 
 #[tokio::test]
-async fn test_payee_deletion_offline_custom_receipt_waits_for_its_method() {
+async fn test_payee_receipt_offline_custom_receipt_waits_for_its_method() {
     let Payment {
         world: w,
         shop,
@@ -169,11 +169,6 @@ async fn test_payee_deletion_offline_custom_receipt_waits_for_its_method() {
     .await;
     seller_wallet
         .app_mut()
-        .delete_record(&target, Vec::new())
-        .await
-        .unwrap();
-    seller_wallet
-        .app_mut()
         .put_record(&target, &proof_only, Vec::new())
         .await
         .unwrap();
@@ -187,19 +182,16 @@ async fn test_payee_deletion_offline_custom_receipt_waits_for_its_method() {
         .unwrap()
         .is_empty());
     unavailable.receive(None).await.unwrap();
-    assert!(unavailable
-        .payee_deletion_notices()
-        .await
-        .unwrap()
-        .is_empty());
     let backup = unavailable.backup().await.unwrap();
     drop(unavailable);
-    let mut restored = Box::pin(restore(&w, &device, &backup, rail)).await.unwrap();
+    // On an empty store, the receipt comes from the backup alone.
+    let mut restored = Box::pin(restore(&w, &store(), &backup, rail))
+        .await
+        .unwrap();
     let kept = restored.retained_payee_receipts().await.unwrap();
     assert_eq!(kept.len(), 1);
     assert_eq!(kept[0].receipt.message().msg_id, receipt);
     assert_eq!(kept[0].record, key);
-    assert!(kept[0].deletions.is_empty());
     restored.receive(None).await.unwrap();
     let writes = w.record_writes(&w.bob, &key);
     assert_eq!(restored.confirm_payment(&key).await.unwrap(), None);
@@ -226,7 +218,7 @@ async fn receipt_row(shop: &Paykit) -> serde_json::Value {
 }
 
 #[tokio::test]
-async fn test_payee_deletion_unresolved_source_limit_preserves_the_installation() {
+async fn test_payee_receipt_unresolved_source_limit_preserves_the_installation() {
     let Payment {
         world: w,
         mut shop,
@@ -307,7 +299,7 @@ async fn test_payee_deletion_unresolved_source_limit_preserves_the_installation(
 }
 
 #[tokio::test]
-async fn test_payee_deletion_a_misplaced_custom_receipt_does_not_count_as_credit() {
+async fn test_payee_receipt_a_misplaced_custom_receipt_does_not_count_as_credit() {
     let Payment {
         world: w,
         mut shop,

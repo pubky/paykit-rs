@@ -40,9 +40,8 @@ use paykit_lib::{Label, PaykitKindRules};
 use pubky_switch_client::app::{
     decode_local_state, AppBackup, AppError, Collection as SwitchCollection, Effect, LocalView,
     LocalWrite, LossActions, MissedEntries, OpaqueRule, Outcome, Protocol, ProtocolLayer,
-    ProviderLoss, PutBack, PutBackSuccessor, ReceiveContext, ReceivedMessage, RecordDeletion,
-    RecordExpiry, RecordMarkContext, RecordRepair, RecordSuccessor, ResendNeeded, RestoreContext,
-    StoreFailure, WriteBase,
+    ProviderLoss, PutBack, ReceiveContext, ReceivedMessage, RecordDeletion, RecordExpiry,
+    RecordMarkContext, ResendNeeded, RestoreContext, StoreFailure, WriteBase,
 };
 use pubky_switch_client::app::{DenyListChange, DenyListGap};
 use pubky_switch_client::error::StoreError;
@@ -657,11 +656,7 @@ pub(crate) fn restore_paykit_layer(
         delivery_notices.insert(key, notice);
     }
     let mut history = crate::deletions::RestoredReceipts::default();
-    for prefix in [
-        key::PAYEE_DELETIONS,
-        key::RETAINED_RECEIPTS,
-        key::CREDIT_HOLDS,
-    ] {
+    for prefix in [key::RETAINED_RECEIPTS, key::CREDIT_HOLDS] {
         let previous = restoring
             .previous_local_scan(prefix.as_bytes())
             .map_err(|_| "the installation's payee history cannot be read")?;
@@ -1347,9 +1342,7 @@ pub(crate) fn restore_paykit_layer(
                 settlement_marks.insert(key, value);
                 continue;
             }
-            family @ (StateKey::PayeeDeletion { .. }
-            | StateKey::RetainedReceipt(..)
-            | StateKey::CreditHold(_)) => {
+            family @ (StateKey::RetainedReceipt(..) | StateKey::CreditHold(_)) => {
                 history
                     .local(&key, &value, &family, &binder, settlement, false)
                     .map_err(|err| {
@@ -2500,20 +2493,10 @@ impl Protocol for PaykitProtocol {
                 )?,
             }));
         }
-        crate::deletions::observe_payee_deletion(deletion, cx, &|endpoint, proof| {
-            self.settlement_id(endpoint, proof)
-        })
-    }
-
-    fn record_put_back_successor(
-        &self,
-        deletion: &RecordDeletion<'_>,
-        successor: &RecordSuccessor<'_>,
-        cx: &ReceiveContext<'_>,
-    ) -> Result<PutBackSuccessor, StoreFailure> {
-        crate::deletions::receipt_publication(deletion, successor, cx, &|endpoint, proof| {
-            self.settlement_id(endpoint, proof)
-        })
+        // No other collection's delete is put back or observed. Activity records are never
+        // deleted, as their policy names a delete scope no app holds (Paykit spec 6,
+        // "Records never deleted").
+        Ok(None)
     }
 
     /// Whether a newer write goes back on what the app saw (Paykit wire 5.3, 5.4): drops or
@@ -2543,7 +2526,7 @@ impl Protocol for PaykitProtocol {
             );
         }
         // Nothing seen of the record yet, as at its first read: nothing to go back on.
-        self.regression(collection, seen?, value, base.held, base.repair.as_ref())
+        self.regression(collection, seen?, value, base.held)
     }
 }
 
@@ -2600,7 +2583,6 @@ impl PaykitProtocol {
         seen: &[u8],
         value: Option<&[u8]>,
         built_on: bool,
-        repair: Option<&RecordRepair>,
     ) -> Option<String> {
         let own = self.own()?;
         let value = value?;
@@ -2618,9 +2600,6 @@ impl PaykitProtocol {
                 if side == ActivitySide::Payee
                     && held.lost_to_delete.is_some()
                     && later.lost_to_delete != held.lost_to_delete
-                    && !repair.is_some_and(|r| {
-                        crate::deletions::restores_payee_marker(r, seen, &later, &own.identity)
-                    })
                 {
                     return Some(
                         "Paykit wire 5: a later write drops the deletion restriction".into(),
@@ -2829,7 +2808,7 @@ mod tests {
         let p = protocol();
         assert_eq!(p.record_seen("payer_activity", None, Some(b"{}")), None);
         assert_eq!(
-            p.regression("payer_activity", b"{}", Some(b"{}"), false, None),
+            p.regression("payer_activity", b"{}", Some(b"{}"), false),
             None
         );
     }
@@ -3389,21 +3368,21 @@ mod receive_tests {
         };
         let (seen, moved) = (seen.to_json().unwrap(), moved.to_json().unwrap());
         assert_eq!(
-            p.regression("payer_activity", &seen, Some(&moved), false, None),
+            p.regression("payer_activity", &seen, Some(&moved), false),
             None
         );
         // Built on the version the app holds, the one that attempted the period, the same
         // write moves an attempted period: a regression.
         assert!(p
-            .regression("payer_activity", &seen, Some(&moved), true, None)
+            .regression("payer_activity", &seen, Some(&moved), true)
             .is_some());
         assert_eq!(
-            p.regression("payer_activity", &seen, Some(&moved), false, None),
+            p.regression("payer_activity", &seen, Some(&moved), false),
             None
         );
         // Dropping the entry again is a regression.
         assert!(p
-            .regression("payer_activity", &moved, Some(&seen), false, None)
+            .regression("payer_activity", &moved, Some(&seen), false)
             .is_some());
     }
 
@@ -3594,20 +3573,17 @@ mod receive_tests {
         };
         let seen = open(None);
         let ended = open(Some(end));
-        assert_eq!(
-            p.regression("allowances", &seen, Some(&ended), false, None),
-            None
-        );
+        assert_eq!(p.regression("allowances", &seen, Some(&ended), false), None);
         assert_eq!(
             p.record_seen("allowances", Some(&seen), Some(&ended)),
             Some(ended.clone())
         );
         // A later write that drops the end seen is refused, as is one that doesn't read.
         assert!(p
-            .regression("allowances", &ended, Some(&seen), false, None)
+            .regression("allowances", &ended, Some(&seen), false)
             .is_some());
         assert!(p
-            .regression("allowances", &seen, Some(b"{}"), false, None)
+            .regression("allowances", &seen, Some(b"{}"), false)
             .is_some());
     }
 
@@ -3757,7 +3733,6 @@ mod receive_tests {
             &seen.to_json().unwrap(),
             Some(&later.to_json().unwrap()),
             false,
-            None,
         )
     }
 
@@ -4554,6 +4529,48 @@ mod receive_tests {
     }
 
     #[test]
+    fn test_protocol_record_regression_on_a_dropped_deletion_restriction() {
+        let alice = Party::new("alice", "wallet", &["paykit_pay", "paykit_contacts"]);
+        let bob = Party::new(
+            "bob",
+            "shop",
+            &["paykit_request", "paykit_settlements", "paykit_contacts"],
+        );
+        let p = protocol_of(&bob);
+        let request = bob.message(&alice, "paykit.payment_request", vec![], request_body());
+        let mut seen = activity::empty(ActivitySide::Payee, alice.id());
+        activity::place(&mut seen, activity::Role::Request, request);
+        seen.lost_to_delete = Some([9; 32]);
+        let kept = seen.to_json().unwrap();
+        // A later write keeping the restriction is fine.
+        assert_eq!(
+            p.regression("payee_activity", &kept, Some(&kept), false),
+            None
+        );
+        // One dropping or changing it is flagged (Paykit wire 5).
+        let mut dropped = seen.clone();
+        dropped.lost_to_delete = None;
+        assert!(p
+            .regression(
+                "payee_activity",
+                &kept,
+                Some(&dropped.to_json().unwrap()),
+                false
+            )
+            .is_some());
+        let mut changed = seen;
+        changed.lost_to_delete = Some([10; 32]);
+        assert!(p
+            .regression(
+                "payee_activity",
+                &kept,
+                Some(&changed.to_json().unwrap()),
+                false
+            )
+            .is_some());
+    }
+
+    #[test]
     fn test_protocol_record_regression_on_a_dropped_role() {
         let alice = Party::new("alice", "wallet", &["paykit_pay", "paykit_contacts"]);
         let bob = Party::new(
@@ -4568,7 +4585,7 @@ mod receive_tests {
         let seen = seen.to_json().unwrap();
         // The same record and one with more are fine.
         assert_eq!(
-            p.regression("payer_activity", &seen, Some(&seen), false, None),
+            p.regression("payer_activity", &seen, Some(&seen), false),
             None
         );
         let cancel = bob.message(
@@ -4581,7 +4598,7 @@ mod receive_tests {
         activity::place(&mut more, activity::Role::Cancellation, cancel);
         let more = more.to_json().unwrap();
         assert_eq!(
-            p.regression("payer_activity", &seen, Some(&more), false, None),
+            p.regression("payer_activity", &seen, Some(&more), false),
             None
         );
         // Dropping the request is a regression; so is a value that doesn't read.
@@ -4589,16 +4606,13 @@ mod receive_tests {
             .to_json()
             .unwrap();
         assert!(p
-            .regression("payer_activity", &more, Some(&dropped), false, None)
+            .regression("payer_activity", &more, Some(&dropped), false)
             .is_some());
         assert!(p
-            .regression("payer_activity", &seen, Some(b"{}"), false, None)
+            .regression("payer_activity", &seen, Some(b"{}"), false)
             .is_some());
         // A delete isn't one.
-        assert_eq!(
-            p.regression("payer_activity", &seen, None, false, None),
-            None
-        );
+        assert_eq!(p.regression("payer_activity", &seen, None, false), None);
         // The mark follows the newest value that reads.
         assert_eq!(
             p.record_seen("payer_activity", Some(&seen), Some(&more)),

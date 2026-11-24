@@ -15,17 +15,11 @@ use crate::{
 };
 use paykit_lib::{
     bodies::Conversion,
-    derive::natural_key,
     periods::{AnchoredRule, Recurrence, Unit},
-    records::StoredMessage,
-    Body, Collection, Label,
 };
 use paykit_sdk::{self as sdk, AppScopes, Paykit, RequestRef};
-use pubky_switch_client::{
-    app::{Collection as SwitchCollection, LocalWrite, RecordTarget},
-    store::MemoryStore,
-};
-use pubky_switch_core::{json::check_uuid_v4, message::MessagePlaintext, sig::SignedDoc};
+use pubky_switch_client::{app::LocalWrite, store::MemoryStore};
+use pubky_switch_core::json::check_uuid_v4;
 use pubky_switch_harness::{parties::Asking, Backend, World};
 use std::{
     error::Error,
@@ -375,7 +369,7 @@ async fn requests_and_receipts(world: &World) -> TestResult {
     let account = Arc::new(Account::open(root.path(), world.clock().clone()));
     account.park.store(false, Ordering::SeqCst);
     let label = "orders";
-    let (_, wallet, _, mut owner) = Box::pin(enrolled_wallet(
+    let (_, wallet, _, _) = Box::pin(enrolled_wallet(
         world,
         root.path(),
         account.clone(),
@@ -516,63 +510,6 @@ async fn requests_and_receipts(world: &World) -> TestResult {
         Some(MessageDelivery::Accepted { .. })
     ));
 
-    let mut sibling = Box::pin(join(
-        world,
-        &mut owner,
-        "buyer",
-        "history",
-        AppScopes::new().request().build()?,
-        &wallet,
-    ))
-    .await?;
-    Box::pin(receive(&mut sibling)).await?;
-    let collection = Collection::PayeeActivity;
-    let target = RecordTarget::new(
-        SwitchCollection::new(
-            collection.name(),
-            collection.policy(Some(&Label::new(label)?)),
-        ),
-        &natural_key::request_record(&request.payee, &request.request_hash),
-    );
-    let deletion = sibling.app_mut().delete_record(&target, vec![]).await?;
-    while wallet.receive().await?.more {}
-    let retained = wallet.retained_payee_receipts().await?;
-    let [kept] = retained.as_slice() else {
-        return Err("expected one retained receipt".into());
-    };
-    assert_eq!(kept.record, record);
-    let signed = &kept.receipt;
-    assert_eq!(signed.msg_id, receipt_id);
-    assert_eq!(signed.sender, request.payee);
-    let original = StoredMessage::new(
-        request.payee,
-        &SignedDoc {
-            body: signed.certificate_body.clone(),
-            sig: signed.certificate_signature.clone(),
-        },
-        MessagePlaintext::decode(&signed.plaintext)?,
-        signed.accepted_at_ms,
-        &peer,
-    )?;
-    assert_eq!(original.message().msg_id, receipt_id);
-    assert!(
-        matches!(original.body(), Body::PaymentReceipt(receipt) if receipt.attempt_id == outcome.attempt_id())
-    );
-    let [observed] = kept.deletions.as_slice() else {
-        return Err("expected one observed deletion".into());
-    };
-    assert_eq!(observed.version.generation, deletion.version.generation);
-    assert_eq!(observed.version.version, deletion.version.version);
-    assert_eq!(
-        observed.writer.as_deref(),
-        Some(sibling.app_id().as_slice())
-    );
-    assert_eq!(observed.page_time_ms, Some(world.now_ms()));
-    assert!(wallet
-        .payee_deletion_notices()
-        .await?
-        .iter()
-        .any(|notice| notice.details().deletion == observed.delete));
     wallet.shutdown().await?;
     Ok(())
 }

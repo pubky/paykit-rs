@@ -72,7 +72,7 @@ For a divergent request, show the original record, collection, version and warni
 
 A one-time obligation can appear in `reconcile` with a provider-loss boundary and an empty attempt list. Show the original obligation and boundary, including that another wallet may already have paid it at the old service. Only if the user states it was unpaid, pass that boundary’s `payment` to `confirmNotPaidBeforeLoss`. A `LossChanged` refusal requires a fresh report and a new decision. The statement applies only to that obligation and loss. Other attempt uncertainties still require their original outcomes.
 
-After an interrupted payment, shut down the old handle, reopen the same App ID and use `resumePayments` to look up the original attempt. Use `reconcile` for obligations with an unknown outcome and show the remaining doubt before any user-confirmed resolution. `requestReceipts` returns the signed seller receipt after it arrives. On a newly restored store that lookup can be held until the first inventory completes. `notices` and the payee deletion notices each have their own acknowledgement, separate from feed duties.
+After an interrupted payment, shut down the old handle, reopen the same App ID and use `resumePayments` to look up the original attempt. Use `reconcile` for obligations with an unknown outcome and show the remaining doubt before any user-confirmed resolution. `requestReceipts` returns the signed seller receipt after it arrives. On a newly restored store that lookup can be held until the first inventory completes. `notices` have their own acknowledgement, separate from feed duties.
 
 ## Generate both languages
 

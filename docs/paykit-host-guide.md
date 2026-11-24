@@ -560,8 +560,8 @@ The wallet that holds the identity key can restore the signer on a new installat
 
 ## Notices and errors
 
-Read `notices` and `payee_deletion_notices` by their stable identities. Acknowledge
-each through its matching SDK API after recording or showing it.
+Read `notices` by their stable identities. Acknowledge each through its matching SDK
+API after recording or showing it.
 
 Notices through a restore. Identity notices (`BlockFloorHeld`, `FloorRaiseWaiting`,
 `AutomaticPaymentsHeld`) aren't restored: the restored wallet tells them again while
@@ -605,17 +605,7 @@ never holds back one the SDK took. Show the host's duties, such as
 `AppEvent::ListsUnverified` after a restore or a provider loss (kept peers or
 reply grants not verified yet, or lists the backup left out), and acknowledge
 each once the user has seen it. Use the app-wide `App::ack_events` only after the
-other responsible protocols have handled their duties too. Keep the deletion
-notice and any surviving confirmed receipt together when showing a missing
-shared record.
-
-For a one-time request, continue calling `receive(None)` after a restart or
-backup restore. A wallet that verifies the original deletion and the preceding
-record in the current service generation can restore its issued receipt to
-shared data. It preserves compatible fields added by the merchant's other
-wallets. If one has already published the complete record, the recovering
-wallet accepts it without another write. The next scheduled poll can report
-the new cursor to the service. Acknowledging the deletion notice leaves the credit restriction in force.
+other responsible protocols have handled their duties too.
 
 | Case | What to show or do |
 |---|---|
