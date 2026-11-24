@@ -1,5 +1,4 @@
 use crate::{NativeWallet, WalletError};
-use std::sync::Arc;
 
 /// What a notice tells the user.
 #[derive(uniffi::Enum)]
@@ -208,40 +207,6 @@ pub struct WalletNotice {
     /// such time.
     pub lost_until_ms: Option<u64>,
 }
-/// The original retained deletion notice that the host can acknowledge.
-#[derive(uniffi::Object)]
-pub struct DeletionNotice(paykit_sdk::PayeeDeletionNotice);
-/// A deletion to show the user (Paykit spec 6).
-#[derive(uniffi::Record)]
-pub struct DeletedRecord {
-    /// The record the delete named.
-    pub record: Vec<u8>,
-    /// The generation of the deletion.
-    pub generation: u64,
-    /// The sequence of the signed deletion in its generation.
-    pub version: u64,
-    /// The authenticated deletion revision.
-    pub deletion: Vec<u8>,
-    /// The deleting App ID when the app could prove its predecessor was protected.
-    pub writer: Option<Vec<u8>>,
-    /// The verified service time of the original feed page, absent on a listing alone.
-    pub page_time_ms: Option<u64>,
-}
-#[uniffi::export]
-impl DeletionNotice {
-    /// Read the authenticated deletion and the affected record before acknowledging it.
-    pub fn details(&self) -> DeletedRecord {
-        let n = &self.0;
-        DeletedRecord {
-            record: n.record.into(),
-            generation: n.generation,
-            version: n.version,
-            deletion: n.delete.into(),
-            writer: n.writer.map(Vec::from),
-            page_time_ms: n.page_time_ms,
-        }
-    }
-}
 #[uniffi::export]
 impl NativeWallet {
     /// List the Paykit notices awaiting individual acknowledgment.
@@ -283,29 +248,5 @@ impl NativeWallet {
     pub async fn acknowledge_notice(&self, id: String) -> Result<(), WalletError> {
         self.with_wallet(move |app| Box::pin(async move { Ok(app.acknowledge_notice(&id).await?) }))
             .await
-    }
-    /// List pending notices about deleted payee records.
-    pub async fn payee_deletion_notices(&self) -> Result<Vec<Arc<DeletionNotice>>, WalletError> {
-        self.with_wallet(|app| {
-            Box::pin(async move {
-                Ok(app
-                    .payee_deletion_notices()
-                    .await?
-                    .into_iter()
-                    .map(|n| Arc::new(DeletionNotice(n)))
-                    .collect())
-            })
-        })
-        .await
-    }
-    /// Acknowledge the exact deletion notice after handling it.
-    pub async fn acknowledge_payee_deletion(
-        &self,
-        notice: Arc<DeletionNotice>,
-    ) -> Result<(), WalletError> {
-        self.with_wallet(move |app| {
-            Box::pin(async move { Ok(app.acknowledge_payee_deletion(&notice.0).await?) })
-        })
-        .await
     }
 }

@@ -2,8 +2,8 @@
 use std::collections::{btree_map::Entry, BTreeMap};
 
 use super::{
-    payee_natural_key, period_parent, receipt_binding, signed_request, CreditHold, PayeeDeletion,
-    ReceiptBinding, ReceiptEvidence, ReceiptSource, SourceDecision,
+    payee_natural_key, period_parent, receipt_binding, signed_request, CreditHold, ReceiptBinding,
+    ReceiptEvidence, ReceiptSource, SourceDecision,
 };
 use crate::error::{PaykitError, Result};
 use crate::receive::Settlement;
@@ -17,7 +17,6 @@ use pubky_switch_client::app::{LocalWrite, RestoreContext};
 /// Imported notice assertions never strengthen the previous installation's facts.
 #[derive(Default)]
 pub(crate) struct RestoredReceipts {
-    deletions: BTreeMap<String, PayeeDeletion>,
     receipts: BTreeMap<String, ReceiptEvidence>,
     holds: BTreeMap<String, CreditHold>,
 }
@@ -33,14 +32,6 @@ impl RestoredReceipts {
         previous: bool,
     ) -> Result<()> {
         match family {
-            state::StateKey::PayeeDeletion { .. } => {
-                let d = state::restored::<PayeeDeletion>(key, value, binder)?;
-                let d = if previous { d } else { d.restored() };
-                self.deletions
-                    .entry(d.key())
-                    .and_modify(|held| held.supplement(&d))
-                    .or_insert(d);
-            }
             state::StateKey::RetainedReceipt(..) => {
                 let mut r = state::restored::<ReceiptEvidence>(key, value, binder)?;
                 let (decision, _) = r.resolve(
@@ -188,14 +179,9 @@ impl RestoredReceipts {
     }
 
     pub(crate) fn writes(self) -> Result<Vec<LocalWrite>> {
-        self.deletions
+        self.receipts
             .into_iter()
             .map(|(k, v)| state::local_put(&k, &v))
-            .chain(
-                self.receipts
-                    .into_iter()
-                    .map(|(k, v)| state::local_put(&k, &v)),
-            )
             .chain(
                 self.holds
                     .into_iter()

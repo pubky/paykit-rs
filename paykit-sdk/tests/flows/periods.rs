@@ -5596,21 +5596,14 @@ async fn test_payee_deletion_rejects_a_signed_receipt_for_a_different_period_sta
     period.starts_at += 1;
     // The activity key uses whole seconds. The signed start still belongs to this key.
     assert_eq!(period.start_secs(), january().start_secs());
-    Box::pin(credit_after_wrong_period(period, false)).await;
+    Box::pin(credit_after_wrong_period(period)).await;
 }
 
 #[tokio::test]
 async fn test_payee_deletion_rejects_a_signed_receipt_for_a_different_period_end() {
     let mut period = january();
     period.ends_at += 1;
-    Box::pin(credit_after_wrong_period(period, false)).await;
-}
-
-#[tokio::test]
-async fn test_payee_deletion_a_missing_signed_request_leaves_prior_credit_unresolved() {
-    let mut period = january();
-    period.ends_at += 1;
-    Box::pin(credit_after_wrong_period(period, true)).await;
+    Box::pin(credit_after_wrong_period(period)).await;
 }
 
 /// Alice's payment to the fixed invoice with the proof and receipt signed by both apps.
@@ -5646,7 +5639,7 @@ async fn signed_period_payment(
     record
 }
 
-async fn credit_after_wrong_period(period: PeriodRef, missing_request: bool) {
+async fn credit_after_wrong_period(period: PeriodRef) {
     let w = World::new();
     let mut shop = w.shop().await;
     let mut wallet = w.wallet("wallet").await;
@@ -5676,26 +5669,6 @@ async fn credit_after_wrong_period(period: PeriodRef, missing_request: bool) {
         Some(Refusal::CreditHistoryLost)
     ));
     seller_wallet.receive(None).await.unwrap();
-    let parent_target = payee_request_at(&request);
-    let parent_key = shop.app().record_key(&parent_target).unwrap();
-    let parent = seller_wallet
-        .app()
-        .shared_record(&parent_key)
-        .await
-        .unwrap()
-        .unwrap()
-        .content;
-    if missing_request {
-        seller_wallet
-            .app_mut()
-            .delete_record(&parent_target, Vec::new())
-            .await
-            .unwrap();
-        shop.app_mut()
-            .read_record_fresh(&parent_target)
-            .await
-            .unwrap();
-    }
     seller_wallet
         .app_mut()
         .delete_record(&target, Vec::new())
@@ -5727,23 +5700,6 @@ async fn credit_after_wrong_period(period: PeriodRef, missing_request: bool) {
         paykit_sdk::ReceiptDetails::new()
             .with_maybe_credited_confirmed(pubky_switch_client::app::UserConfirmed::new())
     };
-    if missing_request {
-        let count = w.record_writes(&w.bob, &other);
-        assert!(matches!(
-            shop.confirm_payment_with(&other, confirmed())
-                .await
-                .unwrap_err()
-                .refusal(),
-            Some(Refusal::HeldForUser(_))
-        ));
-        assert_eq!(w.record_writes(&w.bob, &other), count);
-        seller_wallet
-            .app_mut()
-            .put_record(&parent_target, parent.value().unwrap(), Vec::new())
-            .await
-            .unwrap();
-        shop.receive(None).await.unwrap();
-    }
     assert!(shop
         .confirm_payment_with(&other, confirmed())
         .await
@@ -5752,17 +5708,16 @@ async fn credit_after_wrong_period(period: PeriodRef, missing_request: bool) {
 }
 
 #[tokio::test]
-async fn test_payee_deletion_a_retained_receipt_blocks_the_same_settlement_for_any_payer() {
+async fn test_periods_a_retained_receipt_blocks_the_same_settlement_for_any_payer() {
     let w = World::new();
-    let mut shop = w.shop().await;
-    let mut wallet = w.wallet("wallet").await;
-    let mut seller_wallet = w
-        .join(
-            &w.bob,
-            "seller-wallet",
-            AppScopes::new().request().build().unwrap(),
-        )
+    let device = store();
+    let scopes = || AppScopes::new().request().build().unwrap();
+    let mut shop = w
+        .join_with(&w.bob, "shop", scopes(), Default::default(), device.clone())
         .await;
+    let backup = shop.backup().await.unwrap();
+    let mut wallet = w.wallet("wallet").await;
+    let mut seller_wallet = w.join(&w.bob, "seller-wallet", scopes()).await;
     let mut carol_wallet = w
         .join(&w.carol, "wallet", AppScopes::new().pay().build().unwrap())
         .await;
@@ -5781,13 +5736,33 @@ async fn test_payee_deletion_a_retained_receipt_blocks_the_same_settlement_for_a
     shop.receive(None).await.unwrap();
     let target = payee_period_at(&request, january());
     let key = shop.app().record_key(&target).unwrap();
+    let unreceipted = shop
+        .app()
+        .shared_record(&key)
+        .await
+        .unwrap()
+        .unwrap()
+        .content;
     let receipt = shop.confirm_payment(&key).await.unwrap().unwrap();
+    // Another own app writes the record back to its value before the receipt, and the
+    // shop is restored in place from a backup older than the receipt: it keeps the
+    // receipt it held (Paykit spec 6, "Verified receipts").
     seller_wallet.receive(None).await.unwrap();
     seller_wallet
         .app_mut()
-        .delete_record(&target, Vec::new())
+        .put_record(&target, unreceipted.value().unwrap(), Vec::new())
         .await
         .unwrap();
+    drop(shop);
+    let mut shop = Paykit::restore(
+        w.env(&w.bob, device),
+        Default::default(),
+        &backup,
+        w.rail.clone(),
+        w.timer(),
+    )
+    .await
+    .unwrap();
     shop.receive(None).await.unwrap();
     assert_eq!(
         shop.retained_payee_receipts().await.unwrap()[0]
@@ -5924,8 +5899,6 @@ async fn test_payee_deletion_an_offline_period_receipt_keeps_its_original_signed
     let kept = shop.retained_payee_receipts().await.unwrap();
     assert_eq!(kept.len(), 1);
     assert_eq!(kept[0].receipt.message().msg_id, original);
-    assert!(kept[0].deletions.is_empty());
-    assert!(shop.payee_deletion_notices().await.unwrap().is_empty());
     assert_eq!(w.record_writes(&w.bob, &key), before);
 }
 

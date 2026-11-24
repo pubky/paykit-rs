@@ -1624,20 +1624,6 @@ impl Stored for crate::settlement_marks::ObservedMark {
     }
 }
 
-impl sealed::Sealed for crate::deletions::PayeeDeletion {}
-
-impl Stored for crate::deletions::PayeeDeletion {
-    fn bind(&self, key: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
-        if matches!(family, StateKey::PayeeDeletion{record,..} if self.matches(record))
-            && key == self.key()
-        {
-            Ok(())
-        } else {
-            corrupt()
-        }
-    }
-}
-
 impl sealed::Sealed for crate::deletions::ReceiptEvidence {}
 impl Stored for crate::deletions::ReceiptEvidence {
     fn bind(&self, key: &str, _: &StateKey, binder: &Binder<'_>) -> Result<()> {
@@ -1986,11 +1972,6 @@ pub(crate) mod key {
     }
     pub(crate) fn credit_hold(record: &[u8; 32]) -> String {
         format!("{CREDIT_HOLDS}{}", b64(record))
-    }
-    pub(crate) const PAYEE_DELETIONS: &str = "del/";
-
-    pub(crate) fn payee_deletions_at(record: &[u8; 32]) -> String {
-        format!("{PAYEE_DELETIONS}{}/", b64(record))
     }
 
     pub(crate) const ASKS: &str = "ask/";
@@ -2540,13 +2521,6 @@ pub(crate) enum StateKey {
     RetainedReceipt([u8; 32]),
     /// A credit restriction on a record from the previous installation.
     CreditHold([u8; 32]),
-    /// One observed deletion and the state of its warning.
-    PayeeDeletion {
-        record: [u8; 32],
-        generation: u64,
-        version: u64,
-        delete: [u8; 32],
-    },
     /// `j/<attempt ID>`: a journal entry.
     Journal(AttemptId),
     /// The original Switch batch ID of a paid offline attempt.
@@ -2937,17 +2911,6 @@ impl StateKey {
                         }
                     }
                     "ch" => Self::CreditHold(b64_32(rest)?),
-                    "del" => {
-                        let (record, rest) = rest.split_once('/')?;
-                        let (generation, rest) = rest.split_once('/')?;
-                        let (version, hash) = rest.split_once('/')?;
-                        Self::PayeeDeletion {
-                            record: b64_32(record)?,
-                            generation: number(generation)?,
-                            version: number(version)?,
-                            delete: b64_32(hash)?,
-                        }
-                    }
                     "j" | "off" => {
                         let attempt = AttemptId::parse(rest).ok()?;
                         if attempt.to_text() != rest {

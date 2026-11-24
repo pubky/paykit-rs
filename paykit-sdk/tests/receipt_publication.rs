@@ -1,10 +1,6 @@
-//! Another wallet of the same seller can recover an already-issued receipt after the issuing shop restarts.
+//! A buyer's wallet keeps the receipt an enrolled seller issued.
 #![recursion_limit = "256"]
 
-#[path = "receipt_publication/marked.rs"]
-mod marked;
-#[path = "receipt_publication/older_backup.rs"]
-mod older_backup;
 #[path = "receipt_publication/payer_history.rs"]
 mod payer_history;
 
@@ -23,18 +19,12 @@ use paykit_lib::records::{ActivityRecord, ActivitySide, StoredMessage};
 use paykit_lib::{Asset, Decimal, PaymentAmount};
 use paykit_sdk::rail::FakeRail;
 use paykit_sdk::{
-    AppScopes, PayOptions, PayOutcome, PayeeStatus, Paykit, ReceiptsOf, Refusal, RequestDraft,
-    RequestRef, RequestedScopes, Timer,
+    AppScopes, PayOptions, PayOutcome, PayeeStatus, Paykit, Refusal, RequestDraft, RequestRef,
+    RequestedScopes, Timer,
 };
-use pubky_switch_client::app::{
-    Collection as SwitchCollection, RecordTarget, DEFAULT_CURSOR_DEFER_MS,
-};
-use pubky_switch_client::client::answers::FeedQuery;
+use pubky_switch_client::app::{Collection as SwitchCollection, RecordTarget};
 use pubky_switch_client::store::MemoryStore;
 use pubky_switch_client::transport::BoxFuture;
-use pubky_switch_client::{Credentials, SwitchClient};
-use pubky_switch_core::ops::{Condition, OpKind, SignedOp};
-use pubky_switch_core::shared::ApplicationRef;
 use pubky_switch_harness::{parties::Asking, Backend, World};
 use pubky_switch_signer::{Protocols, Signer};
 
@@ -159,59 +149,6 @@ async fn paid_request(
     Ok((buyer, request, sale.record))
 }
 
-#[derive(Copy, Clone, Debug)]
-enum Restart {
-    Cold,
-    Fresh,
-    InPlace,
-}
-
-#[derive(Copy, Clone, Debug, PartialEq)]
-enum Shared {
-    Deleted,
-    ProofOnly,
-    ExtendedProof,
-    Issued,
-}
-
-#[tokio::test]
-async fn test_reopened_shop_conditionally_publishes_over_the_exact_deletion() -> TestResult {
-    on_both_services(Shared::Deleted, Restart::Cold).await
-}
-
-#[tokio::test]
-async fn test_reopened_shop_conditionally_adds_its_receipt_to_the_other_wallets_record(
-) -> TestResult {
-    on_both_services(Shared::ProofOnly, Restart::Cold).await
-}
-
-#[tokio::test]
-async fn test_reopened_shop_preserves_a_later_update_to_the_other_wallets_proof() -> TestResult {
-    on_both_services(Shared::ExtendedProof, Restart::Cold).await
-}
-
-#[tokio::test]
-async fn test_fresh_shop_backup_preserves_the_pending_receipt_publication() -> TestResult {
-    on_both_services(Shared::ProofOnly, Restart::Fresh).await
-}
-
-#[tokio::test]
-async fn test_in_place_shop_restore_preserves_the_pending_receipt_publication() -> TestResult {
-    on_both_services(Shared::ProofOnly, Restart::InPlace).await
-}
-
-#[tokio::test]
-async fn test_reopened_shop_accepts_an_already_published_complete_receipt() -> TestResult {
-    on_both_services(Shared::Issued, Restart::Cold).await
-}
-
-async fn on_both_services(shared: Shared, restart: Restart) -> TestResult {
-    with_issued_sale(async |world, sale| {
-        Box::pin(publish_after_restart(world, sale, shared, restart)).await
-    })
-    .await
-}
-
 async fn with_issued_sale(scenario: impl AsyncFn(&World, IssuedSale) -> TestResult) -> TestResult {
     for backend in [Backend::Scripted, Backend::Service] {
         let Some(world) = World::start(backend)? else {
@@ -227,77 +164,13 @@ async fn with_issued_sale(scenario: impl AsyncFn(&World, IssuedSale) -> TestResu
     Ok(())
 }
 
-/// Inspect the signed record operation a wallet holds, with the enrolled writer's certificate.
-async fn record_op(
-    wallet: &Paykit,
-    key: [u8; 32],
-    writer: &pubky_switch_core::records::AppCert,
-) -> TestResult<SignedOp> {
-    wallet
-        .app()
-        .shared_evidence()
-        .await?
-        .ops
-        .into_iter()
-        .filter_map(|kept| SignedOp::verify_with_cert(&kept.op, writer, &wallet.identity()).ok())
-        .find(|op| matches!(&op.body().kind, OpKind::RecordPut(p) if p.key == key))
-        .ok_or_else(|| "missing signed record operation".into())
-}
-
-async fn service_cursor(client: &SwitchClient) -> TestResult<u64> {
-    Ok(client
-        .feed(FeedQuery {
-            limit: Some(0),
-            ..Default::default()
-        })
-        .await?
-        .cursor)
-}
-
-async fn shared_position(client: &SwitchClient, key: &[u8; 32]) -> TestResult<(u64, u64)> {
-    let record = client.record(key).await?.view;
-    Ok((record.version, service_cursor(client).await?))
-}
-
 const SHOP: &str = "https://shop.payment.test";
 
-fn shop_client(
-    world: &World,
-    signer: &Signer,
-    wallet: &Paykit,
-    name: &str,
-) -> TestResult<SwitchClient> {
-    let identity = wallet.identity();
-    Ok(SwitchClient::new(
-        SHOP,
-        identity,
-        Credentials::App {
-            identity,
-            keys: world.app_keys(&world.identity("shop")?, name)?,
-            cert: wallet.app().cert().clone(),
-        },
-        signer
-            .identity_doc()?
-            .ok_or("missing identity document")?
-            .service_key_of(1),
-        world.transport(),
-        world.clock().clone(),
-    )?)
-}
-
 struct IssuedSale {
-    seller: Signer,
     buyer: Paykit,
     shop: Paykit,
-    seller_wallet: Paykit,
-    store: Arc<MemoryStore>,
     rail: Arc<FakeRail>,
     request: RequestRef,
-    key: [u8; 32],
-    target: RecordTarget,
-    observer: SwitchClient,
-    original: serde_json::Value,
-    proof_only: serde_json::Value,
     receipt: StoredMessage,
 }
 
@@ -315,23 +188,12 @@ async fn issued_sale(world: &World) -> TestResult<IssuedSale> {
         &rail,
     )
     .await?;
-    let store = Arc::new(MemoryStore::new());
-    let (mut shop, seller) = join(
+    let (mut shop, _) = join(
         world,
         seller,
         "shop",
         "issuer",
         AppScopes::new().request().manage_contacts().build()?,
-        store.clone(),
-        &rail,
-    )
-    .await?;
-    let (mut seller_wallet, seller) = join(
-        world,
-        seller,
-        "shop",
-        "seller-wallet",
-        AppScopes::new().request().build()?,
         Arc::new(MemoryStore::new()),
         &rail,
     )
@@ -346,300 +208,30 @@ async fn issued_sale(world: &World) -> TestResult<IssuedSale> {
     ))
     .await?;
     let identity = shop.identity();
-    let observer = shop_client(world, &seller, &shop, "issuer")?;
-    let target = RecordTarget::new(
-        SwitchCollection::new(
-            Collection::PayeeActivity.name(),
-            Collection::PayeeActivity.fixed_policy(),
-        ),
-        &natural_key::request_record(&identity, &request.request_hash),
-    );
-    let prior = shop
-        .app()
-        .shared_record(&key)
-        .await?
-        .ok_or("missing paid request")?;
-    let proof_only: serde_json::Value =
-        serde_json::from_slice(prior.content.value().ok_or("missing proof")?)?;
     let issued = shop
         .confirm_payment(&key)
         .await?
         .ok_or("missing issued receipt")?;
-    let prior = shop
+    let record = shop
         .app()
         .shared_record(&key)
         .await?
         .ok_or("missing issued activity")?;
-    let mut original: serde_json::Value =
-        serde_json::from_slice(prior.content.value().ok_or("missing issued record")?)?;
-    original["proof"]["cert"]["merchant_note"] = "collected".into();
-    shop.app_mut()
-        .put_record(&target, &serde_json::to_vec(&original)?, vec![])
-        .await?;
-    let read = |bytes: &[u8]| ActivityRecord::read(bytes, &identity, ActivitySide::Payee);
-    let receipt = read(&serde_json::to_vec(&original)?)?
-        .receipt
-        .ok_or("original receipt missing")?;
+    let receipt = ActivityRecord::read(
+        record.content.value().ok_or("missing issued record")?,
+        &identity,
+        ActivitySide::Payee,
+    )?
+    .receipt
+    .ok_or("issued receipt missing")?;
     assert_eq!(receipt.message().msg_id, issued);
     shop.receive(None).await?;
-    seller_wallet.receive(None).await?;
     shop.app_mut().flush_cursor().await?;
     Ok(IssuedSale {
-        seller,
         buyer,
         shop,
-        seller_wallet,
-        store,
         rail,
         request,
-        key,
-        target,
-        observer,
-        original,
-        proof_only,
         receipt,
     })
-}
-
-async fn publish_after_restart(
-    world: &World,
-    sale: IssuedSale,
-    shared: Shared,
-    restart: Restart,
-) -> TestResult {
-    let IssuedSale {
-        mut buyer,
-        mut shop,
-        mut seller_wallet,
-        store,
-        rail,
-        request,
-        key,
-        target,
-        observer,
-        original,
-        proof_only,
-        receipt,
-        ..
-    } = sale;
-    let identity = shop.identity();
-    let id = shop.app_id();
-    let cert = shop.app().cert().clone();
-    let issued = receipt.message().msg_id.clone();
-    let read = |bytes: &[u8]| ActivityRecord::read(bytes, &identity, ActivitySide::Payee);
-    let delete = seller_wallet
-        .app_mut()
-        .delete_record(&target, vec![])
-        .await?;
-    // The shop observes the deletion before its conditional publication reaches the service.
-    world.unreachable("POST", "/ops");
-    shop.app_mut().receive(None).await?;
-    assert_eq!(world.faults_left(), 0);
-    let notice = shop
-        .payee_deletion_notices()
-        .await?
-        .pop()
-        .ok_or("missing deletion notice")?;
-    assert_eq!(notice.writer, Some(seller_wallet.app_id()));
-    let before = service_cursor(&observer).await?;
-    assert!(
-        before < delete.version.version,
-        "cursor {before} passed delete {:?}",
-        delete.version
-    );
-    shop.acknowledge_payee_deletion(&notice).await?;
-    let backup = shop.backup().await?;
-    let delete_ref = ApplicationRef {
-        generation: delete.version.generation,
-        seq: delete.version.version,
-        item_hash: notice.delete,
-    };
-    let (current, reference) = if shared == Shared::Deleted {
-        (delete.version, delete_ref)
-    } else {
-        let mut value = if shared == Shared::Issued {
-            original.clone()
-        } else {
-            proof_only
-        };
-        value["proof"]["cert"]["shipping_note"] = "delivered".into();
-        let eager = seller_wallet
-            .app_mut()
-            .put_record(
-                &target,
-                &serde_json::to_vec(&value)?,
-                vec![Condition::RecordCurrent {
-                    key,
-                    revision: delete_ref,
-                    deleted: true,
-                }],
-            )
-            .await?;
-        let op = record_op(&seller_wallet, key, seller_wallet.app().cert()).await?;
-        let reference = ApplicationRef {
-            generation: eager.version.generation,
-            seq: eager.version.version,
-            item_hash: op.item_hash()?,
-        };
-        if shared == Shared::ExtendedProof {
-            value["proof"]["cert"]["shipment_id"] = "package-5".into();
-            let updated = seller_wallet
-                .app_mut()
-                .put_record(
-                    &target,
-                    &serde_json::to_vec(&value)?,
-                    vec![Condition::RecordCurrent {
-                        key,
-                        revision: reference,
-                        deleted: false,
-                    }],
-                )
-                .await?;
-            let op = record_op(&seller_wallet, key, seller_wallet.app().cert()).await?;
-            let reference = ApplicationRef {
-                generation: updated.version.generation,
-                seq: updated.version.version,
-                item_hash: op.item_hash()?,
-            };
-            (updated.version, reference)
-        } else {
-            (eager.version, reference)
-        }
-    };
-    drop(shop);
-    let mut shop = match restart {
-        Restart::Cold => {
-            Box::pin(Paykit::load(
-                world.app_env(store),
-                Default::default(),
-                id,
-                rail.clone(),
-                Arc::new(TestTimer),
-            ))
-            .await?
-        }
-        Restart::Fresh | Restart::InPlace => {
-            let store = match restart {
-                Restart::Fresh => Arc::new(MemoryStore::new()),
-                _ => store,
-            };
-            Box::pin(Paykit::restore(
-                world.app_env(store),
-                Default::default(),
-                &backup,
-                rail.clone(),
-                Arc::new(TestTimer),
-            ))
-            .await?
-        }
-    };
-    let reopened = shared_position(&observer, &key).await?;
-    shop.app_mut().read_record_fresh(&target).await?;
-    let fresh = shared_position(&observer, &key).await?;
-    shop.receive(None).await?;
-    let received = shared_position(&observer, &key).await?;
-    seller_wallet.app_mut().read_record_fresh(&target).await?;
-    seller_wallet.receive(None).await?;
-    let final_record = seller_wallet
-        .app()
-        .shared_record(&key)
-        .await?
-        .ok_or("missing final activity")?;
-    assert!(!final_record.flagged && !final_record.not_taken && final_record.authenticated);
-    let bytes = final_record
-        .content
-        .value()
-        .ok_or("missing published activity")?;
-    let restored = read(bytes)?.receipt.ok_or("receipt was not published")?;
-    assert_eq!(restored.hash(), receipt.hash());
-    assert_eq!(restored.message().msg_id, issued);
-    let published: serde_json::Value = serde_json::from_slice(bytes)?;
-    assert_eq!(published["proof"]["cert"]["merchant_note"], "collected");
-    if shared != Shared::Deleted {
-        assert_eq!(published["proof"]["cert"]["shipping_note"], "delivered");
-    }
-    if shared == Shared::ExtendedProof {
-        assert_eq!(published["proof"]["cert"]["shipment_id"], "package-5");
-    }
-    if shared == Shared::Issued {
-        assert_eq!(final_record.version, current);
-        assert_eq!(final_record.writer, seller_wallet.app_id());
-    } else {
-        assert!(final_record.version.version > current.version);
-        assert_eq!(final_record.writer, id);
-        let signed = record_op(&seller_wallet, key, &cert).await?;
-        let OpKind::RecordPut(put) = &signed.body().kind else {
-            unreachable!()
-        };
-        assert_eq!(put.expected_version, current);
-        assert_eq!(put.policy, target.collection.policy);
-        assert!(signed
-            .body()
-            .conditions
-            .contains(&Condition::RecordCurrent {
-                key,
-                revision: reference,
-                deleted: shared == Shared::Deleted,
-            }));
-    }
-    let at_application = [reopened, fresh, received]
-        .into_iter()
-        .find(|(version, _)| *version == final_record.version.version)
-        .ok_or("no applied publication at the service")?;
-    for (version, cursor) in [reopened, fresh, received] {
-        if version < final_record.version.version {
-            assert!(
-                cursor < delete.version.version,
-                "cursor {cursor} before publication"
-            );
-        }
-    }
-    // Publication may release the deletion before the shop has read its own replacement.
-    shop.receive(None).await?;
-    let next_local = shop.app().cursor().seq;
-    let next_service = service_cursor(&observer).await?;
-    assert!(next_local >= final_record.version.version);
-    // The service can learn the committed local position on a later ordinary poll.
-    world.advance_ms(DEFAULT_CURSOR_DEFER_MS + 1);
-    shop.receive(None).await?;
-    let after = service_cursor(&observer).await?;
-    assert!(
-        after >= final_record.version.version,
-        "cursor {after} after reading the shared replacement"
-    );
-    assert!(shop.payee_deletion_notices().await?.is_empty());
-    let retained = shop.retained_payee_receipts().await?;
-    assert_eq!(retained.len(), 1);
-    assert_eq!(retained[0].receipt.hash(), receipt.hash());
-    assert!(matches!(
-        shop.confirm_payment(&key).await.unwrap_err().refusal(),
-        Some(Refusal::CreditHistoryLost)
-    ));
-    buyer.receive(None).await?;
-    let listed = buyer.receipts(ReceiptsOf::Request(request)).await?;
-    assert_eq!(listed.len(), 1);
-    assert_eq!(listed[0].msg_id, issued);
-    assert_eq!(rail.all_executions().values().sum::<u64>(), 1);
-    seller_wallet.app_mut().read_record_fresh(&target).await?;
-    assert_eq!(
-        seller_wallet
-            .app()
-            .shared_record(&key)
-            .await?
-            .ok_or("missing final record")?
-            .version,
-        final_record.version
-    );
-    println!(
-        "issued receipt publication {}",
-        serde_json::json!({
-            "backend": format!("{:?}", world.backend()), "current": format!("{shared:?}"), "restart": format!("{restart:?}"),
-            "delete": delete.version.version, "compared": current.version, "published": final_record.version.version,
-            "cursor_before": before, "cursor_at_publication": at_application.1,
-            "cursor_after_receive": received.1, "next_local": next_local, "next_service": next_service,
-            "cursor_after": after, "receipt_hash": pubky_switch_core::enc::b64(&receipt.hash()),
-            "writer": pubky_switch_core::enc::b64(&final_record.writer), "rail_executions": 1,
-        })
-    );
-    Ok(())
 }

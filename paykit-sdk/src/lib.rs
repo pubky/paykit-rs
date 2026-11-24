@@ -97,7 +97,7 @@ pub use activity::Role;
 pub use allowances::{AllowanceRole, AllowanceStatus, AllowanceView, SentAllowance};
 pub use approval::{AppScopes, RequestedScopes};
 pub use conversion::{PricedPayment, RateSource};
-pub use deletions::{PayeeDeletionNotice, PayeeReceiptDeletion, RetainedPayeeReceipt};
+pub use deletions::RetainedPayeeReceipt;
 pub use destination::IDENTITY_GRACE_MS;
 pub use divergent::DivergentRecord;
 pub use error::{PaykitError, Refusal, Result};

@@ -2,7 +2,7 @@
 
 use crate::{
     fixed, lists::list_endpoints, Amount, BillingPeriod, ListEndpoint, MessageDelivery,
-    NativeWallet, Receipt, RequestId, Version, WalletError,
+    NativeWallet, Receipt, RequestId, WalletError,
 };
 use paykit_lib::{
     bodies::Conversion,
@@ -489,15 +489,14 @@ impl TryFrom<ReceiptDetails> for sdk::ReceiptDetails {
     }
 }
 
-/// The original signed receipt and the deletions observed for it (Paykit spec 6).
+/// A verified receipt the payee app keeps, with its original signature (Paykit spec 6,
+/// "Verified receipts").
 #[derive(uniffi::Record)]
 pub struct RetainedReceipt {
     /// The original activity record key (Paykit wire 5.3).
     pub record: Vec<u8>,
     /// The original verified receipt signed by the payee (Paykit wire 4.11, 5.2).
     pub receipt: SignedReceipt,
-    /// The observed deletions, possibly empty after restoring a receipt (Paykit spec 6).
-    pub deletions: Vec<ReceiptDeletion>,
 }
 
 /// A Payment Receipt with its signed message frame and app certificate (Paykit wire 4.11, 5.2).
@@ -517,19 +516,6 @@ pub struct SignedReceipt {
     pub accepted_at_ms: Option<u64>,
 }
 
-/// A deletion observed for a retained receipt (Paykit spec 6).
-#[derive(uniffi::Record)]
-pub struct ReceiptDeletion {
-    /// The signed deletion's item hash (Switch wire 6.6).
-    pub delete: Vec<u8>,
-    /// The deletion's generation and sequence (Switch wire 1.7).
-    pub version: Version,
-    /// The deleting App ID when the signed predecessor held the receipt (Paykit spec 6).
-    pub writer: Option<Vec<u8>>,
-    /// The original verified feed page's service time, in Unix milliseconds (Switch spec 8.2).
-    pub page_time_ms: Option<u64>,
-}
-
 impl From<sdk::RetainedPayeeReceipt> for RetainedReceipt {
     fn from(value: sdk::RetainedPayeeReceipt) -> Self {
         let receipt = value.receipt;
@@ -544,16 +530,6 @@ impl From<sdk::RetainedPayeeReceipt> for RetainedReceipt {
                 plaintext: receipt.plaintext().encode(),
                 accepted_at_ms: receipt.accepted_at(),
             },
-            deletions: value
-                .deletions
-                .into_iter()
-                .map(|d| ReceiptDeletion {
-                    delete: d.delete.into(),
-                    version: d.version.into(),
-                    writer: d.writer.map(Vec::from),
-                    page_time_ms: d.page_time_ms,
-                })
-                .collect(),
         }
     }
 }
