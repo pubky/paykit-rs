@@ -291,21 +291,24 @@ pub struct ReceiveSummary {
     /// until no record the refusal names shows `writes_waiting`, and only then calls again.
     /// Every record paused, whenever, is in [`Paykit::divergent_records`].
     pub divergent: Vec<crate::DivergentRecord>,
-    /// The app record's upkeep at this receive (Paykit spec 4) failed short of a wallet-wide
-    /// stop: why, in fixed text. The record stays as last signed, or its change stays owed by
-    /// the client, and is tried again at the next receive, or at once by
-    /// [`Paykit::update_own_record`], which returns its outcome. No other step of the receive
-    /// depends on the record, and each ran. A wallet-wide stop still ends the receive with its
-    /// error.
+    /// The app record couldn't be brought up to date at the latest receive that tried (Paykit
+    /// spec 4), and the receive went on: why, as fixed text to show. The record stays as last
+    /// signed, or its change stays owed by the client, and is tried again at the next receive,
+    /// or at once by [`Paykit::update_own_record`], which returns its outcome. The receive goes
+    /// on past such a failure only when every later step would take the same failure as one
+    /// to try again later; any other failure ends the receive with its error.
     pub app_record_owed: Option<String>,
+    /// Whether this receive tried the app record's upkeep: a summary of two reads keeps the
+    /// earlier read's `app_record_owed` when the later one didn't.
+    upkeep_tried: bool,
 }
 
 impl ReceiveSummary {
     /// The summary of two receives, `earlier` and then `self`, as one: the events, messages,
     /// re-sends and records paused of both, in order; the worse held cursor (ahead over
-    /// unknown over clean); the data epochs either awaited, ascending and unique. Current
-    /// state, including the cursor, certificate status and an app record owed, comes from the
-    /// later read.
+    /// unknown over clean); the data epochs either awaited, ascending and unique; an app
+    /// record owed from the later read that tried its upkeep. Current state, including the
+    /// cursor and certificate status, comes from the later read.
     fn after(mut self, earlier: Self) -> Self {
         let report = &mut self.report;
         report.events.splice(0..0, earlier.report.events);
@@ -324,6 +327,10 @@ impl ReceiveSummary {
         self.key_epochs_awaited.sort_unstable();
         self.key_epochs_awaited.dedup();
         self.scope_keys_awaited |= !self.key_epochs_awaited.is_empty();
+        if !self.upkeep_tried {
+            self.app_record_owed = earlier.app_record_owed;
+            self.upkeep_tried = earlier.upkeep_tried;
+        }
         self
     }
 }
@@ -1254,7 +1261,8 @@ impl Paykit {
         // A restore's listing may need several reads. Clear its mark only when the client
         // finishes the listing with the required scope keys.
         let mut app_record_owed = None;
-        if !report.stopped {
+        let upkeep_tried = !report.stopped;
+        if upkeep_tried {
             Box::pin(self.records_listed(keys_held_before)).await?;
             // A `missed` item whose end isn't known holds every open request until a read
             // completes: this one did, so the hold is bounded by the service time verified
@@ -1377,6 +1385,7 @@ impl Paykit {
             account_gone: false,
             divergent,
             app_record_owed,
+            upkeep_tried,
         })
     }
 
@@ -1416,6 +1425,36 @@ mod tests {
     use crate::requests::{RequestDraft, RequestRef};
     use crate::resend::ResendSelection;
     use crate::timer::Timer;
+
+    /// A read whose summary says `owed`, having tried the app record's upkeep or not.
+    fn upkeep_read(owed: Option<&str>, tried: bool) -> ReceiveSummary {
+        ReceiveSummary {
+            app_record_owed: owed.map(String::from),
+            upkeep_tried: tried,
+            ..ReceiveSummary::default()
+        }
+    }
+
+    #[test]
+    fn test_receive_summary_keeps_the_app_record_owed_past_a_read_that_skipped_the_upkeep() {
+        // A first read made for an outgoing call reported the record owed; the next read
+        // stopped or returned early, skipping the upkeep: the host is still told.
+        let both = upkeep_read(None, false).after(upkeep_read(Some("earlier"), true));
+        assert_eq!(both.app_record_owed.as_deref(), Some("earlier"));
+        // And a later read that skipped it too keeps it again.
+        let all = upkeep_read(None, false).after(both);
+        assert_eq!(all.app_record_owed.as_deref(), Some("earlier"));
+    }
+
+    #[test]
+    fn test_receive_summary_clears_the_app_record_owed_after_an_upkeep_that_went_through() {
+        // The later read tried the upkeep: its outcome is the latest, so one that went
+        // through clears the earlier reason, and one that failed gives its own.
+        let both = upkeep_read(None, true).after(upkeep_read(Some("earlier"), true));
+        assert_eq!(both.app_record_owed, None);
+        let both = upkeep_read(Some("later"), true).after(upkeep_read(Some("earlier"), true));
+        assert_eq!(both.app_record_owed.as_deref(), Some("later"));
+    }
 
     fn assert_send<T: Send>(_: &T) {}
 

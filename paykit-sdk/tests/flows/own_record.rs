@@ -587,6 +587,11 @@ async fn test_own_record_edit_after_an_unknown_store_result_waits_for_a_load() {
     };
     assert!(text.contains("load the app again"), "{text}");
     assert_eq!(shop.app().record(), &record);
+    // A receive's upkeep doesn't sign either, and tells the host the record is owed until the
+    // app is loaded again.
+    let summary = shop.receive(None).await.unwrap();
+    let owed = summary.app_record_owed.unwrap();
+    assert!(owed.contains("loaded again"), "{owed}");
     let app_id = shop.app_id();
     drop(shop);
     // Loaded again, the app holds the withdrawal, and adding B never brings A back.
@@ -1768,8 +1773,8 @@ async fn test_own_record_renewal_without_request_scope_signs_no_endpoint() {
     w.rail.set_endpoint_identifiers(oversized_capabilities());
     let path = app_record_path(&wallet.app_id());
     let writes = w.homeserver.writes(&w.alice_id(), &path);
-    // The receive goes on past the failed clean-up: the records the renewal adds are listed,
-    // and the host is told the record is owed.
+    // The receive goes on past the failed clean-up: the records are listed under the renewed
+    // certificate, and the host is told the record is owed.
     let summary = wallet.receive(None).await.unwrap();
     assert!(summary.app_record_owed.is_some(), "{summary:?}");
     assert_eq!(summary.records_unlisted, None, "{summary:?}");

@@ -1,7 +1,7 @@
 //! The app record's upkeep at a receive is held to its own outcome (Paykit spec 4): none of
-//! the receive's other steps depends on the record, so a failure that is only the
-//! publisher's leaves the record owed, the receive's other work done and the host told in the
-//! summary; a wallet-wide stop still ends the receive at once.
+//! the receive's other steps depends on the record, so a failure every later step would take
+//! as one to try again later leaves the record owed, the receive's other work done and the
+//! host told in the summary; any other failure still ends the receive at once.
 
 use paykit_sdk::{Paykit, RequestRef, RequestStatus};
 use pubky_switch_client::clock::Clock;
@@ -18,13 +18,13 @@ enum UpkeepFailure {
     /// The payment method pays a list the record can't carry: the Switch client refuses the
     /// update before anything is signed (Switch wire 6.1).
     Uncarriable,
-    /// The switch refuses the record's delivery for good.
-    SwitchRefuses,
+    /// The own switch answers the record's delivery that it is unavailable now.
+    SwitchUnavailable,
     /// The own switch can't be reached for the record's delivery.
     Unreachable,
-    /// The switch answers the record's delivery that the app's certificate expired: a
-    /// wallet-wide stop (Switch spec 3.6).
-    Stop,
+    /// The switch answers the record's delivery with `code`, which a later write would take
+    /// as a refusal, or as a wallet-wide stop, rather than one to try again later.
+    Refused(ErrorCode),
 }
 
 /// Alice's wallet with bob's request stored unrecorded, its record's write refused, and
@@ -52,12 +52,10 @@ async fn upkeep_due_over_pending_work(w: &World, failure: UpkeepFailure) -> (Pay
     };
     match failure {
         UpkeepFailure::Uncarriable => w.rail.set_endpoint_identifiers(oversized_capabilities()),
-        UpkeepFailure::SwitchRefuses => {
+        UpkeepFailure::SwitchUnavailable => {
             w.rail
                 .set_endpoint_identifiers(vec![endpoint("btc-onchain-address")]);
-            w.alice
-                .switch()
-                .fail_next(fault(ErrorCode::PermissionMissing));
+            w.alice.switch().fail_next(fault(ErrorCode::Unavailable));
         }
         UpkeepFailure::Unreachable => {
             w.rail
@@ -67,16 +65,16 @@ async fn upkeep_due_over_pending_work(w: &World, failure: UpkeepFailure) -> (Pay
                 after: 0,
             });
         }
-        UpkeepFailure::Stop => {
+        UpkeepFailure::Refused(code) => {
             w.rail
                 .set_endpoint_identifiers(vec![endpoint("btc-onchain-address")]);
-            w.alice.switch().fail_next(fault(ErrorCode::CertExpired));
+            w.alice.switch().fail_next(fault(code));
         }
     }
     (wallet, request)
 }
 
-/// The upkeep fails short of a wallet-wide stop: the stored request is written and bob's
+/// The upkeep fails as a later step would try again later: the stored request is written and bob's
 /// cancellation placed over it in the same receive, and the summary tells the host the
 /// record is owed. A later receive brings the record up to date.
 async fn work_done_past_failed_upkeep(failure: UpkeepFailure) {
@@ -116,8 +114,8 @@ async fn test_own_record_uncarriable_capabilities_leave_the_receive_work_done() 
 }
 
 #[tokio::test]
-async fn test_own_record_refused_delivery_leaves_the_receive_work_done() {
-    work_done_past_failed_upkeep(UpkeepFailure::SwitchRefuses).await;
+async fn test_own_record_unavailable_switch_leaves_the_receive_work_done() {
+    work_done_past_failed_upkeep(UpkeepFailure::SwitchUnavailable).await;
 }
 
 #[tokio::test]
@@ -125,17 +123,30 @@ async fn test_own_record_unreachable_delivery_leaves_the_receive_work_done() {
     work_done_past_failed_upkeep(UpkeepFailure::Unreachable).await;
 }
 
-#[tokio::test]
-async fn test_own_record_upkeep_stop_ends_the_receive() {
+/// The upkeep's delivery is answered with `code`: the receive ends with that answer, as
+/// before, and nothing after the upkeep ran.
+async fn receive_ended_by_the_upkeep(code: ErrorCode) {
     let w = World::new();
-    let (mut wallet, request) = upkeep_due_over_pending_work(&w, UpkeepFailure::Stop).await;
+    let (mut wallet, request) =
+        upkeep_due_over_pending_work(&w, UpkeepFailure::Refused(code)).await;
     let error = wallet.receive(None).await.unwrap_err();
-    assert_eq!(error.code(), Some(ErrorCode::CertExpired), "{error:?}");
-    // Nothing after the upkeep ran: the request is still unrecorded and bob's cancellation
-    // only kept.
+    assert_eq!(error.code(), Some(code), "{error:?}");
+    // The request is still unrecorded and bob's cancellation only kept.
     assert_eq!(
         wallet.request(&request).await.unwrap().status,
         RequestStatus::Unrecorded
     );
     assert!(!kept(&wallet, "kc/").await.is_empty());
+}
+
+#[tokio::test]
+async fn test_own_record_upkeep_stop_ends_the_receive() {
+    // A wallet-wide stop (Switch spec 3.6).
+    receive_ended_by_the_upkeep(ErrorCode::CertExpired).await;
+}
+
+#[tokio::test]
+async fn test_own_record_upkeep_refused_by_the_switch_ends_the_receive() {
+    // A refusal the stored entries' writes would count toward their window, not try again.
+    receive_ended_by_the_upkeep(ErrorCode::PermissionMissing).await;
 }
