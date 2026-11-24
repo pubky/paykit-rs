@@ -1585,9 +1585,11 @@ async fn test_replies_kept_past_30_days_refused_by_the_switch_given_up_with_the_
 
 #[tokio::test]
 async fn test_replies_kept_past_30_days_over_quota_given_up_with_the_notice() {
-    // As the write-fails test, but each write placing the replies is refused for good
+    // As the write-fails test, but the write placing the first reply is refused for room
     // (`429 quota_exceeded`), not unreachable, 31 days after their acceptance: a reply is kept
-    // at most 30 days (Paykit spec 8.1), so both are given up, the host told.
+    // at most 30 days (Paykit spec 8.1), so it is given up, the host told. The second reply's
+    // write waits behind the first one's batch, which the client keeps, and the room refusal
+    // of that batch's resend is the first batch's: the second reply waits, uncounted.
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
@@ -1606,17 +1608,17 @@ async fn test_replies_kept_past_30_days_over_quota_given_up_with_the_notice() {
         });
     }
     shop.receive(None).await.unwrap();
-    assert!(shop
-        .app()
-        .protocol_scan("paykit", b"pr/")
-        .await
-        .unwrap()
-        .is_empty());
+    assert_eq!(
+        shop.app()
+            .protocol_scan("paykit", b"pr/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     let notices = shop.notices().await.unwrap();
-    assert_eq!(notices.len(), 2, "{notices:?}");
-    assert!(notices
-        .iter()
-        .all(|n| n.kind == paykit_sdk::NoticeKind::MessageGivenUp));
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert_eq!(notices[0].kind, paykit_sdk::NoticeKind::MessageGivenUp);
 }
 
 #[tokio::test]
