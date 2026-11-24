@@ -335,6 +335,8 @@ async fn test_resume_returns_a_host_transport_failure_behind_a_kept_outcome_writ
             &pubky_switch_client::app::AppError::Transport(error.clone()),
             "{resumed:?}"
         );
+        // The first payment keeps its proof and its outcome is still to write.
+        assert_eq!(stage(&wallet, &first).await, Stage::RailPaid, "{error:?}");
         let second_stage = stage(&wallet, &second).await;
         assert!(
             matches!(second_stage, Stage::Finished | Stage::AcceptanceOwed),
