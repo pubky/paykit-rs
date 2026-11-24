@@ -1985,75 +1985,6 @@ async fn test_unrequested_list_held_for_a_refused_write_stays_held_over_a_later_
 }
 
 #[tokio::test]
-async fn test_unrequested_kept_placement_past_its_window_not_applied_over_a_forgotten_delete() {
-    use pubky_switch_client::app::OpBatch;
-    use pubky_switch_client::testing::Fault;
-
-    let w = World::new();
-    let mut wallet = w.wallet("wallet").await;
-    let mut phone = w.wallet("phone").await;
-    let mut shop = w.shop().await;
-    let unreachable = || Fault::Unreachable {
-        path: "/ops".into(),
-        after: 0,
-    };
-    // The wallet's first write of the list is refused: it holds the list, the key absent.
-    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 1))
-        .await;
-    crate::common::refuse_writes(&w.alice, 2);
-    wallet.receive(None).await.unwrap();
-    assert_eq!(wallet.held_lists().await.unwrap().len(), 1);
-    // Its placement onto the absent key doesn't reach the switch: the batch is kept.
-    w.alice.switch().fail_next(unreachable());
-    let _ = wallet.receive(None).await;
-    let target = shop_list_target(&w, &shop);
-    let key = wallet.app().record_key(&target).unwrap();
-    assert_eq!(w.record_writes(&w.alice, &key), 0);
-    // The phone, another own app, writes the list, pays its single-use endpoint and deletes
-    // the record; the wallet sees all of it, its kept batch still not reaching the switch.
-    w.list_to_alice(&mut shop, &[phone.app_id()], list_version(1, 1))
-        .await;
-    phone.receive(None).await.unwrap();
-    let paid = phone
-        .pay_without_request(to_bob(&w, "0.0015", "btc-bitcoin-p2wpkh"))
-        .await
-        .outcome
-        .unwrap();
-    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
-    phone.app_mut().read_record(&target).await.unwrap();
-    let op = phone
-        .app_mut()
-        .record_op(&target, None, Vec::new())
-        .await
-        .unwrap();
-    phone
-        .app_mut()
-        .submit_batch(OpBatch::for_protocol("paykit").entry(op))
-        .await
-        .unwrap();
-    w.alice.switch().fail_next(unreachable());
-    let _ = wallet.receive(None).await;
-    let writes = w.record_writes(&w.alice, &key);
-    // The service forgets the delete, past the kept create's window: sent again, built on
-    // the absent key, it doesn't apply. The list stays held and its paid endpoint unpaid.
-    w.alice.switch().drop_record(&key).unwrap();
-    w.clock.advance_ms(PAST_THE_PLACEMENT_WINDOW_MS);
-    let _ = wallet.receive(None).await;
-    wallet.receive(None).await.unwrap();
-    assert_eq!(w.record_writes(&w.alice, &key), writes);
-    let again = wallet
-        .pay_without_request(to_bob(&w, "0.0015", "btc-bitcoin-p2wpkh"))
-        .await
-        .outcome;
-    assert!(
-        !matches!(again, Ok(PayOutcome::Paid { .. })),
-        "the paid single-use endpoint was paid again: {again:?}"
-    );
-    assert_eq!(w.rail.all_executions().len(), 1);
-    assert_eq!(wallet.held_lists().await.unwrap().len(), 1);
-}
-
-#[tokio::test]
 async fn test_unrequested_unmarked_create_over_a_forgotten_delete_keeps_the_list_held() {
     for fresh in [false, true] {
         let w = World::new();
@@ -2487,71 +2418,6 @@ async fn test_unrequested_other_list_at_the_same_version_over_a_forgotten_delete
         );
         assert!(w.rail.all_executions().is_empty());
     }
-}
-
-/// Longer than a held list's placement may apply in, from the service time it is sent at.
-const PAST_THE_PLACEMENT_WINDOW_MS: u64 = 10 * 60 * 1000;
-
-/// The wallet holds bob's shop list because its first write was refused, and its
-/// placement onto the absent key doesn't reach the switch: the batch is kept.
-async fn placement_kept_unsent(w: &World, wallet: &mut Paykit, shop: &mut Paykit) -> [u8; 32] {
-    use pubky_switch_client::testing::Fault;
-    w.list_to_alice(shop, &[wallet.app_id()], list_version(1, 1))
-        .await;
-    crate::common::refuse_writes(&w.alice, 2);
-    wallet.receive(None).await.unwrap();
-    assert_eq!(wallet.held_lists().await.unwrap().len(), 1);
-    w.alice.switch().fail_next(Fault::Unreachable {
-        path: "/ops".into(),
-        after: 0,
-    });
-    let _ = wallet.receive(None).await;
-    let key = wallet.app().record_key(&shop_list_target(w, shop)).unwrap();
-    assert_eq!(w.record_writes(&w.alice, &key), 0);
-    key
-}
-
-#[tokio::test]
-async fn test_unrequested_placement_sent_past_its_window_refused_and_built_again() {
-    use pubky_switch_client::testing::Fault;
-    let w = World::new();
-    let mut wallet = w.wallet("wallet").await;
-    let mut shop = w.shop().await;
-    let key = placement_kept_unsent(&w, &mut wallet, &mut shop).await;
-    // Sent again past its window, the kept placement is refused and its batch ends; the
-    // placement built again at that pass doesn't reach the switch either.
-    w.clock.advance_ms(PAST_THE_PLACEMENT_WINDOW_MS);
-    w.alice.switch().fail_next(Fault::Unreachable {
-        path: "/ops".into(),
-        after: 1,
-    });
-    let _ = wallet.receive(None).await;
-    assert_eq!(w.record_writes(&w.alice, &key), 0);
-    assert_eq!(wallet.held_lists().await.unwrap().len(), 1);
-    // The placement built again applies, and the list is placed.
-    wallet.receive(None).await.unwrap();
-    wallet.receive(None).await.unwrap();
-    assert_eq!(w.record_writes(&w.alice, &key), 1);
-    assert!(wallet.held_lists().await.unwrap().is_empty());
-    let paid = wallet
-        .pay_without_request(to_bob(&w, "0.0015", "btc-bitcoin-p2wpkh"))
-        .await
-        .outcome;
-    assert!(matches!(paid, Ok(PayOutcome::Paid { .. })), "{paid:?}");
-}
-
-#[tokio::test]
-async fn test_unrequested_placement_sent_again_within_its_window_places_the_list() {
-    let w = World::new();
-    let mut wallet = w.wallet("wallet").await;
-    let mut shop = w.shop().await;
-    let key = placement_kept_unsent(&w, &mut wallet, &mut shop).await;
-    // A slow first send: the kept placement goes at the next pass, within its window.
-    w.clock.advance_ms(60 * 1000);
-    wallet.receive(None).await.unwrap();
-    wallet.receive(None).await.unwrap();
-    assert_eq!(w.record_writes(&w.alice, &key), 1);
-    assert!(wallet.held_lists().await.unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -3484,4 +3350,82 @@ async fn test_unrequested_list_held_over_an_unreadable_record_stays_held_over_a_
     );
     assert_eq!(w.rail.all_executions().len(), 1);
     assert_eq!(restored.held_lists().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn test_unrequested_held_list_over_an_absent_key_never_created_over_a_forgotten_delete() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut phone = w.wallet("phone").await;
+    let mut tool = w.wallet("tool").await;
+    let mut shop = w.shop().await;
+    // The wallet holds the list over the absent key, its first write refused, and its next
+    // pass sends nothing that reaches the switch, or a create built then would be kept.
+    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 1))
+        .await;
+    crate::common::refuse_writes(&w.alice, 2);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(wallet.held_lists().await.unwrap().len(), 1);
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+            path: "/ops".into(),
+            after: 0,
+        });
+    let _ = wallet.receive(None).await;
+    let target = shop_list_target(&w, &shop);
+    let key = wallet.app().record_key(&target).unwrap();
+    assert_eq!(w.record_writes(&w.alice, &key), 0);
+    for _ in 0..3 {
+        if !w.alice.switch().unreached_bodies().is_empty() {
+            break;
+        }
+        // The wallet sent nothing: another app's writes, never sent again, meet the faults
+        // left.
+        let op = tool
+            .app_mut()
+            .record_op(
+                &payment_list_target(&w.bob_id(), &[7; 16]),
+                None,
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        let batch = pubky_switch_client::app::OpBatch::for_protocol("paykit").entry(op);
+        assert!(tool.app_mut().submit_batch(batch).await.is_err());
+    }
+    assert!(!w.alice.switch().unreached_bodies().is_empty());
+    // The phone writes the list, pays its single-use endpoint and deletes the record; the
+    // service forgets the delete, all inside five minutes.
+    w.list_to_alice(&mut shop, &[phone.app_id()], list_version(1, 1))
+        .await;
+    phone.receive(None).await.unwrap();
+    let paid = phone
+        .pay_without_request(to_bob(&w, "0.0015", "btc-bitcoin-p2wpkh"))
+        .await
+        .outcome
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    phone.app_mut().read_record(&target).await.unwrap();
+    put_list_record(&mut phone, &target, None).await;
+    w.alice.switch().drop_record(&key).unwrap();
+    let writes = w.record_writes(&w.alice, &key);
+    // The wallet's next passes create nothing at the key: a held list's create over an
+    // apparently absent key is withheld (Paykit wire 5, "Incomplete protected-record
+    // contract"), so no list without the mark is written there for another app to take.
+    w.clock.advance_ms(60 * 1000);
+    for _ in 0..2 {
+        wallet.receive(None).await.unwrap();
+    }
+    assert_eq!(w.record_writes(&w.alice, &key), writes);
+    assert_eq!(wallet.held_lists().await.unwrap().len(), 1);
+    let again = wallet
+        .pay_without_request(to_bob(&w, "0.0015", "btc-bitcoin-p2wpkh"))
+        .await
+        .outcome;
+    assert!(
+        !matches!(again, Ok(PayOutcome::Paid { .. })),
+        "the paid single-use endpoint was paid again: {again:?}"
+    );
+    assert_eq!(w.rail.all_executions().len(), 1);
 }

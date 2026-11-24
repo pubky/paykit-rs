@@ -2512,23 +2512,6 @@ pub(crate) fn list_version(stored: &StoredMessage) -> Option<ListVersion> {
     }
 }
 
-/// How long after the service time it is built at a held list's create may apply
-/// (Switch wire 6.3 `server_time_in`): five minutes. A create onto an absent key can't tell
-/// a key never written from a delete the service forgot since (Paykit spec 6, "Creation and
-/// later writes"), so one kept in a batch the client sends again must not land long after
-/// the absence it was built on: past its window it is refused, its batch ends, the list
-/// stays held, and the next pass builds it again from what this app holds then, under the
-/// rules of a delete seen. Five minutes covers a slow send, a lost answer and the resend at
-/// the next receive; a create refused for it costs only another write at the next pass.
-/// It narrows the case, and doesn't close it: the service forgets a delete once every own
-/// app has acknowledged it (Switch spec 10.3), which can take seconds with every app
-/// reading, so a kept create sent again inside the window can still land over a forgotten
-/// delete. This app then takes nothing of it ([`LostListRecord`]), but another own app that
-/// never saw the delete could pay a single-use endpoint the delete took. The full close, a
-/// kept create not sent once the app has seen a write or a delete at its key, is the
-/// client's to make.
-pub(crate) const PLACEMENT_WINDOW_MS: u64 = 5 * 60 * 1000;
-
 /// [`hold_list`] over a record that doesn't read or bind, kept at `unread`
 /// ([`key::list_record_unread`]): what it holds is unknown, so a later absence of the
 /// record, such as a delete this app never saw and the service forgot, holds the list too
@@ -3127,12 +3110,12 @@ impl Paykit {
             // or a restore before the first listing: the absence decides nothing yet, so the
             // list stays held (Paykit spec 8.1, "Records not listed yet").
             None if self.side_unlisted(RecordSide::Payer).await? => return Ok(()),
-            // Seen deleted, or held over unread: an absence now, such as a delete the service
-            // forgot or a restore into a fresh store, says nothing of the marks the record
-            // held. The list stays held (Paykit spec 6). A list held because its first write
-            // was refused is placed on the absent key once a write of it lands.
-            None if lost.is_some() || was_unread => return Ok(()),
-            None => None,
+            // Absent: a held list is never created over an absent key. The key may be a
+            // delete the service forgot, whose single-use marks a create would drop, and the
+            // Switch gives no proof of a record's lineage yet (Paykit spec 6; wire 5,
+            // "Incomplete protected-record contract"). The list stays held; a newer list, a
+            // request's own destination and the payee's public endpoints still pay.
+            None => return Ok(()),
             // Only a value that binds at this key, and never over a delete seen (Paykit spec
             // 6; wire 5 and 5.4).
             Some(RecordContent::Value(value)) => {
@@ -3154,28 +3137,14 @@ impl Paykit {
             }
             Some(RecordContent::Unreadable(_)) => return Ok(()),
         };
-        let creates = held.is_none();
         match next_list_record(held, &list) {
             // The write carries no local write: a batch that settles late could otherwise
             // drop a newer hold. The hold goes at a later pass, once the record holds the list.
             Some(record) => {
                 let value = record.to_json()?;
-                // A create applies only within its window of the service time it is built
-                // at ([`PLACEMENT_WINDOW_MS`]); with none verified yet, it waits.
-                let conditions = if creates {
-                    let Some(now) = self.service_time() else {
-                        return Ok(());
-                    };
-                    let end = now
-                        .checked_add(PLACEMENT_WINDOW_MS)
-                        .ok_or_else(crate::error::PaykitError::corrupt)?;
-                    vec![pubky_switch_client::app::server_time_in(None, Some(end))]
-                } else {
-                    Vec::new()
-                };
                 let op = self
                     .app
-                    .record_op(&target, Some(&value), conditions)
+                    .record_op(&target, Some(&value), Vec::new())
                     .await?;
                 let batch =
                     pubky_switch_client::app::OpBatch::for_protocol(crate::protocol::BACKUP_NAME)
