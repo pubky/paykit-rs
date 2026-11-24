@@ -171,7 +171,8 @@ impl WalletFailure {
         self.settlement_bucket
     }
     /// For `settlement_warning_unsaved`, what this call did to the bucket's warning in the
-    /// store: wrote none, or may have written it. `None` for every other code.
+    /// store: wrote none, or can't tell the outcome of its lookup or its write. `None` for
+    /// every other code.
     pub fn settlement_warning_outcome(&self) -> Option<SettlementWarningOutcome> {
         self.settlement_warning
     }
@@ -671,7 +672,7 @@ pub enum SettlementWarningOutcome {
     /// has yet to, either way.
     Failed,
     /// The store can't tell the outcome of this call's lookup or write of the warning: it may
-    /// be saved.
+    /// be saved, by this call or an earlier one.
     OutcomeUnknown,
 }
 

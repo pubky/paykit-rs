@@ -908,3 +908,126 @@ async fn test_notices_raised_after_the_backup_kept_through_an_in_place_restore()
     assert_eq!(notices[0].kind, NoticeKind::PaidAfterFailed);
     assert_eq!(notices[0].attempt_id, Some(attempt_id));
 }
+
+/// The key and value of `app`'s one notice of a payment of `kind`, as its local state keeps it.
+async fn payment_notice(app: &Paykit, kind: &str) -> (Vec<u8>, serde_json::Value) {
+    let held = app.app().protocol_scan("paykit", b"nt/").await.unwrap();
+    let mut found = held.into_iter().filter_map(|(key, value)| {
+        let value: serde_json::Value = serde_json::from_slice(&value).unwrap();
+        (value["d"]["kind"] == kind && value["d"]["attempt_id"].is_string()).then_some((key, value))
+    });
+    let one = found.next().expect("a payment notice");
+    assert!(found.next().is_none());
+    one
+}
+
+/// Keep `value` at `key` of `app`'s local state, acknowledged as `acknowledged` and raised at
+/// `raised_at_ms`: as the wallet would after an acknowledgement, or a raise of the notice again.
+async fn put_notice(
+    app: &mut Paykit,
+    key: &[u8],
+    mut value: serde_json::Value,
+    acknowledged: bool,
+    raised_at_ms: u64,
+) {
+    value["d"]["acknowledged"] = acknowledged.into();
+    value["d"]["raised_at_ms"] = raised_at_ms.into();
+    app.app_mut()
+        .protocol_commit(
+            "paykit",
+            &[pubky_switch_client::app::LocalWrite::Put {
+                key: key.to_vec(),
+                value: serde_json::to_vec(&value).unwrap(),
+            }],
+        )
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_notices_held_payment_raised_again_after_the_backup_listed_after_an_in_place_restore()
+{
+    use crate::certificate::{list, renew};
+    use paykit_sdk::AppScopes;
+    let w = World::new();
+    let storage = store();
+    let mut wallet = w.wallet_on("wallet", Arc::clone(&storage)).await;
+    let me = wallet.app_id();
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    w.rail.next(Behaviour::Hang);
+    let PayOutcome::Pending { attempt_id, .. } = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .outcome
+        .unwrap()
+    else {
+        panic!("in flight");
+    };
+    let first = wallet.app().cert().clone();
+    let reduced = renew(&w, me, &AppScopes::new().contacts().build().unwrap(), 1_000);
+    let _ = wallet.receive(None).await;
+    list(&w, me, &first, &reduced);
+    wallet.receive(None).await.unwrap();
+    wallet.resume_payments().await.unwrap();
+    let (key, value) = payment_notice(&wallet, "held_without_pay").await;
+    // Acknowledged, then backed up; dropped by a resume under `paykit_pay` and raised again
+    // later, unseen, when the app lost it again.
+    let raised = value["d"]["raised_at_ms"].as_u64().unwrap();
+    put_notice(&mut wallet, &key, value.clone(), true, raised).await;
+    let backup = wallet.backup().await.unwrap();
+    put_notice(&mut wallet, &key, value, false, raised + 60_000).await;
+    drop(wallet);
+    // Restored in place, the installation's notice wins: listed, never hidden by the
+    // backup's acknowledgement (Paykit spec 7.2).
+    let wallet = restored_in_place(&w, storage, &backup).await;
+    let notices = wallet.notices().await.unwrap();
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert_eq!(notices[0].kind, NoticeKind::HeldWithoutPay);
+    assert_eq!(notices[0].attempt_id, Some(attempt_id));
+}
+
+#[tokio::test]
+async fn test_notices_acknowledged_after_the_backup_stays_acknowledged_after_an_in_place_restore() {
+    let w = World::new();
+    let storage = store();
+    let wallet = w.wallet_on("wallet", Arc::clone(&storage)).await;
+    let (mut wallet, mut shop, _) = paid_after_failed_by(&w, wallet).await;
+    w.clock.advance_ms(PAST_THE_CLAIM_MS);
+    wallet.receive(None).await.unwrap();
+    wallet.resume_payments().await.unwrap();
+    receipt(&mut shop).await;
+    wallet.receive(None).await.unwrap();
+    let (key, value) = payment_notice(&wallet, "paid_after_failed").await;
+    let backup = wallet.backup().await.unwrap();
+    // Acknowledged in the installation after the backup, which kept it unacknowledged.
+    let raised = value["d"]["raised_at_ms"].as_u64().unwrap();
+    put_notice(&mut wallet, &key, value, true, raised).await;
+    drop(wallet);
+    let wallet = restored_in_place(&w, storage, &backup).await;
+    assert!(wallet.notices().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_notices_acknowledged_of_a_payment_the_backup_lacks_dropped_at_an_in_place_restore() {
+    let w = World::new();
+    let storage = store();
+    let mut wallet = w.wallet_on("wallet", Arc::clone(&storage)).await;
+    let backup = wallet.backup().await.unwrap();
+    let (mut wallet, mut shop, _) = paid_after_failed_by(&w, wallet).await;
+    w.clock.advance_ms(PAST_THE_CLAIM_MS);
+    wallet.receive(None).await.unwrap();
+    wallet.resume_payments().await.unwrap();
+    receipt(&mut shop).await;
+    wallet.receive(None).await.unwrap();
+    let (key, value) = payment_notice(&wallet, "paid_after_failed").await;
+    let raised = value["d"]["raised_at_ms"].as_u64().unwrap();
+    put_notice(&mut wallet, &key, value, true, raised).await;
+    drop(wallet);
+    // The backup from before the payment holds no journal entry for it: the acknowledged
+    // notice, which only that entry kept, isn't carried, and the restore goes through.
+    let wallet = restored_in_place(&w, storage, &backup).await;
+    let held = wallet.app().protocol_scan("paykit", b"nt/").await.unwrap();
+    assert!(held.iter().all(|(k, _)| k != &key), "{held:?}");
+}

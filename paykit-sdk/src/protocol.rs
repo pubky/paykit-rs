@@ -838,9 +838,12 @@ pub(crate) fn restore_paykit_layer(
         stop_notices.insert(at.into_bytes(), held);
     }
     // And its notices of payments, keyed by their attempt and kind: a restore keeps each one
-    // either side holds, so a notice the installation raised after the backup, which nothing
-    // raises again, isn't lost (Paykit spec 7.2, "What a restore loses"). One the host
-    // acknowledged after the backup can be listed again. A fresh store has none. A message's
+    // either side holds, the installation's where both do, so a notice the installation
+    // raised after the backup isn't lost (Paykit spec 7.2, "What a restore loses"). A
+    // `PaidAfterFailed` is raised again at its key only once an acknowledgement dropped it,
+    // and a `HeldWithoutPay` once a resume under `paykit_pay` did: either way the
+    // installation's copy is the later one. One the host acknowledged after the backup,
+    // which acknowledging deleted, can be listed again. A fresh store has none. A message's
     // notice is the backup's: its kind, origin and kept entry can differ from the
     // installation's at one key, and its own restore steps write it.
     let mut notices: std::collections::BTreeMap<Vec<u8>, crate::notices::KeptNotice> =
@@ -1468,18 +1471,11 @@ pub(crate) fn restore_paykit_layer(
                     writes.push(LocalWrite::Put { key, value });
                     continue;
                 }
-                // Merged with the installation's: acknowledged if either side is, raised at
-                // the earlier time.
-                match notices.entry(key) {
-                    std::collections::btree_map::Entry::Occupied(mut held) => {
-                        let held = held.get_mut();
-                        held.acknowledged |= notice.acknowledged;
-                        held.raised_at_ms = held.raised_at_ms.min(notice.raised_at_ms);
-                    }
-                    std::collections::btree_map::Entry::Vacant(slot) => {
-                        slot.insert(notice);
-                    }
-                }
+                // The installation's notice at this key is the newer one, as raised or
+                // acknowledged since the backup, and wins: no flag of the backup's is merged
+                // into it, so an acknowledgement before the backup never hides a notice raised
+                // again after it. The backup's is taken only where the installation has none.
+                notices.entry(key).or_insert(notice);
                 continue;
             }
         };

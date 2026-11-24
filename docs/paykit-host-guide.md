@@ -459,14 +459,19 @@ Notices through a restore. Identity notices (`BlockFloorHeld`, `FloorRaiseWaitin
 `AutomaticPaymentsHeld`) aren't restored: the restored wallet tells them again while
 they hold, at its load or a later receive. A restore onto a fresh store brings back the
 backup's notices. A restore in place, over the installation that kept running after the
-backup, keeps every notice of a payment (`PaidAfterFailed`, `HeldWithoutPay`), of a
-settlement and of an outgoing delivery that either side holds, so one raised after the
-backup isn't lost. A notice the host acknowledged after the backup can be listed again:
-record notices by their identities, and show again only the ones not recorded. A
-message's notice (`MessageGivenUp` and the Allowance notices) and a
-`BlockedMessagesLost` are the backup's, except that a held stop the installation told
-keeps the installation's notice: one raised after the backup is lost at a restore in
-place. Handle Switch
+backup, keeps, kind by kind:
+- `PaidAfterFailed`, `HeldWithoutPay` and the Allowance notices
+  (`AllowancePlacementExpired`, `AllowanceAcceptanceBeforeLoss`,
+  `AllowanceWithdrawalConfirmed`): the installation's where it holds one, else the
+  backup's, so one raised after the backup isn't lost;
+- the settlement notices, `PossiblyDelivered`, `ListDeliveryUnknown` and
+  `DroppedMessagesLost`: both sides', merged;
+- `MessageGivenUp` and `BlockedMessagesLost`: the backup's, except that a held stop the
+  installation told keeps its notice. One raised after the backup is lost.
+
+A notice the host acknowledged after the backup, which acknowledging deleted, can be
+listed again: record notices by their identities, and show again only the ones not
+recorded. Handle Switch
 duty events from `ReceiveSummary::report`. Call `receive` on startup and after a
 feed wake. It returns one bounded report. Use `more` to decide when to read another
 page. `ReceiveSummary::report.more` says the read stopped on one of its per-call
@@ -727,7 +732,7 @@ Two rules override a code's case. A failure with a `keptBatch` comes as `Outcome
 | `invalid_protocol_data` | other `paykit_lib::Error` | `Permanent` | Network or stored data breaks a Paykit rule. |
 | `conflict` | `PaykitError::Conflict` | `NotSent` | Read the current state, decide again, then call again. |
 | `homeserver` | `PaykitError::Homeserver` | `RetryLater` | The Homeserver couldn't be read now: call again later. |
-| `settlement_warning_unsaved` | `PaykitError::SettlementNoticeUnavailable` | `NeedsUser` | The Switch refused a new settlement bucket for lack of a record slot, and the wallet couldn't save or check that bucket's warning. Show the warning for `settlement_bucket()` if the host has yet to show it; it grants no consent to issue another receipt. `settlement_warning_outcome()` says what this call did to the warning: `Failed` when it wrote none, and when its lookup of an earlier warning failed, whether one is saved already is unverified; `OutcomeUnknown` when its write may have applied. The marked receipt and its delivery are still kept under `kept_batch()`, and that batch may still apply. `service_code()` and `quota_limit()` give the Switch's answer. |
+| `settlement_warning_unsaved` | `PaykitError::SettlementNoticeUnavailable` | `NeedsUser` | The Switch refused a new settlement bucket for lack of a record slot, and the wallet couldn't save or check that bucket's warning. Show the warning for `settlement_bucket()` if the host has yet to show it; it grants no consent to issue another receipt. `settlement_warning_outcome()` says what this call did to the warning: `Failed` when it wrote none, and when its lookup of an earlier warning failed, whether one is saved already is unverified; `OutcomeUnknown` when the store can't tell the outcome of its lookup or its write: it may be saved, by this call or an earlier one. The marked receipt and its delivery are still kept under `kept_batch()`, and that batch may still apply. `service_code()` and `quota_limit()` give the Switch's answer. |
 | `unclassified` | a Paykit failure the bindings don't know | `OutcomeUnknown` | Reconcile before trying again. |
 | `client_unclassified` | a Switch client failure the bindings don't know | `OutcomeUnknown` | Reconcile before trying again. |
 | `method_unclassified` | a method failure the bindings don't know | `OutcomeUnknown` | Reconcile before trying again. |
