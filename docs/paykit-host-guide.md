@@ -470,8 +470,11 @@ backup, keeps, kind by kind:
   installation told keeps its notice. One raised after the backup is lost.
 
 A notice the host acknowledged after the backup, which acknowledging deleted, can be
-listed again: record notices by their identities, and show again only the ones not
-recorded. Handle Switch
+listed again after the restore: the same occurrence comes back with the same `id` and
+`raised_at_ms`, and the host may skip one it recorded acknowledging with both. A notice
+raised again is a new occurrence with the same `id` and a later `raised_at_ms`, such as a
+`HeldWithoutPay` whose hold started again, or an identity notice told again while its
+hold stands: show it as the table below says. Handle Switch
 duty events from `ReceiveSummary::report`. Call `receive` on startup and after a
 feed wake. It returns one bounded report. Use `more` to decide when to read another
 page. `ReceiveSummary::report.more` says the read stopped on one of its per-call
