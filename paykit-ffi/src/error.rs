@@ -317,16 +317,22 @@ pub(crate) fn refusal_category(kind: &crate::RefusalKind) -> (Category, &'static
         K::FloorHeld => (NeedsUser, "floor_held"),
         // Confirmed with `confirm_allowance_executor` once the user has seen the Allowance.
         K::AllowanceConfirmationNeeded { .. } => (NeedsUser, "allowance_confirmation_needed"),
-        // The SDK gives its reason as text only, and the reasons span every case, from a wait
-        // to an alarm: shown to the user, it is never retried by itself.
-        K::NotNow => (NeedsUser, "not_now"),
+        // The user answers first, or is shown a hold on one record; every reason of this
+        // refusal comes as `NeedsUser`.
+        K::HeldForUser { reason } => (NeedsUser, held_for_user_code(reason)),
+        // A wait: every reason of this refusal comes as `RetryLater`.
+        K::NotNow { reason } => (RetryLater, not_now_code(reason)),
+        // A recovery step of the wallet as a whole: every reason comes as `Recovery`.
+        K::RecoveryNeeded { reason } => (Recovery, recovery_code(reason)),
         K::WaitingForList {
             device_clock_behind: false,
         } => (RetryLater, "waiting_for_list"),
-        // The list expired only by the service's time: the device clock is behind it.
+        // The list expired only by the service's time: the device clock is behind it. A newer
+        // list clears it as well as a corrected clock, so it waits too; the code tells the
+        // host to show the clock.
         K::WaitingForList {
             device_clock_behind: true,
-        } => (NeedsUser, "waiting_for_list_clock_behind"),
+        } => (RetryLater, "waiting_for_list_clock_behind"),
         K::SwitchUnavailable => (RetryLater, "switch_unavailable"),
         K::PaymentInProgress => (RetryLater, "payment_in_progress"),
         K::BeingHandledByOtherWallet => (RetryLater, "being_handled_by_other_wallet"),
@@ -362,6 +368,57 @@ pub(crate) fn refusal_category(kind: &crate::RefusalKind) -> (Category, &'static
         // holds that obligation for good; the refusal doesn't say which yet.
         K::RecordHeld => (NeedsUser, "record_held"),
         K::CertificateRefused => (Recovery, "certificate_refused"),
+    }
+}
+
+/// The stable code of each wait.
+fn not_now_code(reason: &crate::NotNowKind) -> &'static str {
+    use crate::NotNowKind as R;
+    match reason {
+        R::RecordsUnlisted { .. } => "records_unlisted",
+        R::RecordsNotListed => "records_not_listed",
+        R::ScopeKeysAwaited => "scope_keys_awaited",
+        R::ValueAwaitsKey => "value_awaits_key",
+        R::FloorUnreadable => "floor_unreadable",
+        R::FloorRaiseWaiting => "floor_raise_waiting",
+        R::NoServiceTime => "no_service_time",
+        R::ReadAgain => "read_again",
+        R::EarlierWriteUnresolved => "earlier_write_unresolved",
+        R::AwaitingCounterparty => "awaiting_counterparty",
+        R::Full => "full",
+        R::AttemptCheck => "attempt_check",
+        R::CallAgain => "call_again",
+        R::ReloadRequired => "reload_required",
+        R::AllowanceLimit { .. } => "allowance_limit",
+        R::AnswerOutcomeUnknown => "answer_outcome_unknown",
+        R::SwitchClient => "switch_client_wait",
+        R::Unknown => "not_now",
+    }
+}
+
+/// The stable code of each answer the user gives first.
+fn held_for_user_code(reason: &crate::HeldForUserKind) -> &'static str {
+    use crate::HeldForUserKind as R;
+    match reason {
+        R::CounterpartyBlocked => "counterparty_blocked",
+        R::HeldFromAutomatic => "held_from_automatic",
+        R::ActivityBaseChanged => "activity_base_changed",
+        R::CancellationOrderUnknown => "cancellation_order_unknown",
+        R::PublicationConflict => "publication_conflict",
+        R::RecordUnreadable => "record_unreadable",
+        R::AllowanceNotResumed => "allowance_not_resumed",
+        R::AllowanceExecutionHeld => "allowance_execution_held",
+        R::Unknown => "held_for_user",
+    }
+}
+
+/// The stable code of each recovery step.
+fn recovery_code(reason: &crate::RecoveryKind) -> &'static str {
+    use crate::RecoveryKind as R;
+    match reason {
+        R::PayerPassOwed => "payer_pass_owed",
+        R::RecoveryAccessMissing => "recovery_access_missing",
+        R::Unknown => "recovery_needed",
     }
 }
 

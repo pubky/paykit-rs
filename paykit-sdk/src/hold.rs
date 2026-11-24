@@ -858,8 +858,8 @@ impl Paykit {
     /// # Errors
     ///
     /// [`Refusal::NotNow`] while the app can't tell whether it holds the request: its record
-    /// is sealed under a scope key the app doesn't hold yet, or a value that doesn't read, or
-    /// it is missing from a copy that may lack records; [`Refusal::NotFound`] when the copy
+    /// is sealed under a scope key the app doesn't hold yet, or it is missing from a copy
+    /// that may lack records; [`Refusal::HeldForUser`] while its value doesn't read; [`Refusal::NotFound`] when the copy
     /// holds no record of it. [`Refusal::HeldAfterRestore`] with the current hold when
     /// `held` differs; nothing is confirmed. A store failure.
     pub async fn confirm_possibly_cancelled(
@@ -1012,7 +1012,7 @@ impl Paykit {
         if self.unlisted().await?.is_none() {
             return Ok(());
         }
-        self.list_records("Retry the original action")
+        self.list_records(crate::ListingRetry::OriginalAction)
             .await
             .map_err(|error| {
                 if unanswered(&error) {
@@ -1040,7 +1040,7 @@ impl Paykit {
     /// keeps values the app can't open, and keeping the certificate then would mark them
     /// listed for good. Every listing of Paykit's comes here. Only a receive takes a
     /// certificate, so none is taken during the listing.
-    pub(crate) async fn list_records(&mut self, retry: &'static str) -> Result<()> {
+    pub(crate) async fn list_records(&mut self, retry: crate::ListingRetry) -> Result<()> {
         self.refuse_while_scope_keys_missing().await?;
         // A certificate change or missed feed requires a new pass. The client's owed
         // listing shares its continuation with list_collections and finishes on receive.
@@ -1050,7 +1050,7 @@ impl Paykit {
                 Some(Unlisted::Certificate | Unlisted::Missed)
             )
         {
-            return Err(listing_continues("Call receive again"));
+            return Err(listing_continues(crate::ListingRetry::Receive));
         }
         let signed = self.app.cert().signed().clone();
         if self.app.list_collections().await? {
@@ -1096,7 +1096,7 @@ impl Paykit {
         if !owed || !self.holds_scope_keys() {
             return Ok(None);
         }
-        match self.list_records("Call receive again").await {
+        match self.list_records(crate::ListingRetry::Receive).await {
             Ok(()) => Ok(None),
             Err(error) if local_failure(&error) => Err(error),
             Err(error) => Ok(Some(error.to_string())),
@@ -1127,7 +1127,8 @@ impl Paykit {
             .is_some())
     }
 
-    /// Refused as not now while [`Paykit::payer_pass_owed`].
+    /// Refused with [`crate::RecoveryReason::PayerPassOwed`] while [`Paykit::payer_pass_owed`]:
+    /// a reconcile runs the pass (Paykit spec 7.3).
     pub(crate) async fn refuse_while_payer_pass_owed(&self) -> Result<()> {
         if self.payer_pass_owed().await? {
             return Err(payer_pass_refusal().into());
@@ -1924,40 +1925,24 @@ fn own_signed(
     stored.sender() == *own && stored.cert().app_id() == *app_id
 }
 
-/// The refusal while the shared records aren't listed since a restore.
 /// The refusal while a reconcile owes the payer pass since a restore.
 pub(crate) fn payer_pass_refusal() -> Refusal {
-    Refusal::NotNow(
-        "Paykit spec 7.3: no reconcile under pay has read the payer's obligations since the \
-         restore"
-            .into(),
-    )
+    Refusal::RecoveryNeeded(crate::RecoveryReason::PayerPassOwed)
 }
 
-fn listing_continues(retry: &str) -> crate::error::PaykitError {
-    Refusal::NotNow(format!(
-        "the shared records aren't listed yet. {retry} to continue the listing"
-    ))
-    .into()
+/// The refusal while a listing goes on, naming the call that continues it.
+fn listing_continues(retry: crate::ListingRetry) -> crate::error::PaykitError {
+    Refusal::NotNow(crate::NotNowReason::RecordsUnlisted { retry }).into()
 }
 
+/// The refusal while the shared records aren't listed since a restore.
 pub(crate) fn unlisted() -> crate::error::PaykitError {
-    Refusal::NotNow(
-        "Switch spec 8.2, 8.3, 12.4 step 2.1: the shared records aren't listed since the \
-         restore, the missed item or under the certificate held now"
-            .into(),
-    )
-    .into()
+    Refusal::NotNow(crate::NotNowReason::RecordsNotListed).into()
 }
 
 /// The refusal while a wider certificate's scope keys are missing.
 fn keys_awaited() -> crate::error::PaykitError {
-    Refusal::NotNow(
-        "Switch spec 3.5: waiting for the scope keys of the certificate taken, which the \
-         signer stores when it is next online"
-            .into(),
-    )
-    .into()
+    Refusal::NotNow(crate::NotNowReason::ScopeKeysAwaited).into()
 }
 
 /// Whether a record's value isn't open for now only: sealed under a scope key the app
@@ -1974,12 +1959,7 @@ pub(crate) fn awaits_key(content: &RecordContent) -> bool {
 /// The refusal of a write over a value that is only waiting for its scope key
 /// ([`awaits_key`]).
 pub(crate) fn value_awaits_key() -> crate::error::PaykitError {
-    Refusal::NotNow(
-        "Switch spec 3.5: waiting for the scope keys the record's value is sealed under, which \
-         the signer stores when it is next online"
-            .into(),
-    )
-    .into()
+    Refusal::NotNow(crate::NotNowReason::ValueAwaitsKey).into()
 }
 
 /// A listing the network or the switch couldn't answer now, as a payment's switch read

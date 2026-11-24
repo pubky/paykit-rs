@@ -120,8 +120,8 @@ private suspend fun restoreCheckout(
             try {
                 wallet.confirmRestoredRegistrations(emptyList())
                 error("the stale restore question was accepted")
-            } catch (error: WalletException.NeedsUser) {
-                checkNotNull(error.failure.refusal()).use { check(it.kind() is RefusalKind.NotNow) }
+            } catch (error: WalletException.NotSent) {
+                checkNotNull(error.failure.refusal()).use { check(it.kind() is RefusalKind.Usage) }
             }
             check(wallet.restoreState().registrations == state.registrations)
             suspend fun interruptConfirmation(failure: EnrollmentStore.AnswerFailure) {
@@ -215,7 +215,7 @@ private suspend fun NativeWallet.lossReport(): WalletReconciliation {
     repeat(12) {
         try {
             return reconcile()
-        } catch (error: WalletException.NeedsUser) {
+        } catch (error: WalletException.RetryLater) {
             if (error.failure.refusal()?.kind() !is RefusalKind.NotNow) throw error
         }
     }

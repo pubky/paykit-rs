@@ -615,7 +615,13 @@ async fn finish_restored_reconciliation(restored: &mut paykit_sdk::Paykit) {
                 return;
             }
             Err(paykit_sdk::PaykitError::Refused(paykit_sdk::Refusal::NotNow(reason))) => {
-                assert!(reason.contains("Call reconcile again"), "{reason}");
+                assert_eq!(
+                    reason,
+                    paykit_sdk::NotNowReason::RecordsUnlisted {
+                        retry: paykit_sdk::ListingRetry::Reconcile
+                    },
+                    "{reason}"
+                );
             }
             Err(error) => panic!("{error}"),
         }
@@ -1293,6 +1299,38 @@ async fn test_executor_pays_the_period_of_its_accepted_subscription() {
         .unwrap()
         .is_empty());
     assert_eq!(world.rail.pay_calls(&attempt), 1);
+}
+
+#[tokio::test]
+async fn test_executor_refuses_a_request_outside_its_allowance_as_not_automatic() {
+    // A one-time request priced by conversion doesn't qualify under an Allowance: final for
+    // automatic payment, which no wait changes; the user may still pay it by hand (Paykit
+    // spec 8.3).
+    use paykit_lib::bodies::Conversion;
+    use paykit_lib::{Asset, Decimal, Rate};
+
+    let (world, mut payer, mut shop, key) = Box::pin(first_grant()).await;
+    world.rail.set_history_payer(payer.identity());
+    let rate = Rate::new(Asset::new("btc").unwrap(), Decimal::new("2").unwrap()).unwrap();
+    let request = Box::pin(request_from(
+        &mut shop,
+        payer.identity(),
+        draft("1", world.clock.now_ms()).with_conversion(Conversion::Fixed(vec![rate])),
+    ))
+    .await;
+    Box::pin(payer.receive(None)).await.unwrap();
+    let refused = Box::pin(payer.pay_under_allowance(&request, &key))
+        .await
+        .outcome
+        .unwrap_err();
+    assert!(
+        matches!(
+            refused.refusal(),
+            Some(paykit_sdk::Refusal::NotAutomatic(why)) if why.contains("does not qualify")
+        ),
+        "{refused:?}"
+    );
+    assert!(world.rail.all_executions().is_empty());
 }
 
 #[tokio::test]
@@ -2919,9 +2957,9 @@ async fn confirm_foreign_failure(case: ForeignFailure) {
             .outcome
             .unwrap_err();
         let expected = if case == ForeignFailure::BeforeDispatch {
-            paykit_sdk::Refusal::NotNow(
-                "the lifetime limit has no room while another app's failed attempt holds it: the user can release that attempt (reserved_by_other_apps)".into(),
-            )
+            paykit_sdk::Refusal::NotNow(paykit_sdk::NotNowReason::AllowanceLimit {
+                limit: "lifetime".into(),
+            })
         } else {
             paykit_sdk::Refusal::NotAutomatic("the lifetime limit has no room".into())
         };
@@ -3168,7 +3206,15 @@ async fn test_allowance_refuses_an_earlier_failed_attempt_outside_its_ledger() {
         .await
         .outcome
         .unwrap_err();
-    assert!(error.to_string().contains("earlier attempt"), "{error}");
+    assert!(
+        matches!(
+            error.refusal(),
+            Some(paykit_sdk::Refusal::NotNow(
+                paykit_sdk::NotNowReason::EarlierWriteUnresolved(_)
+            ))
+        ),
+        "{error}"
+    );
     let claim = payer
         .app_mut()
         .read_claim(&obligation)
@@ -3894,8 +3940,8 @@ async fn test_executor_refused_confirmation_leaves_no_approval() {
         .expect_err("the counterparty is blocked");
     assert_eq!(
         refused.refusal(),
-        Some(&paykit_sdk::Refusal::NotNow(
-            "the counterparty is blocked".into()
+        Some(&paykit_sdk::Refusal::HeldForUser(
+            paykit_sdk::HeldForUserReason::CounterpartyBlocked("the counterparty is blocked")
         )),
         "{refused:?}"
     );
@@ -3995,7 +4041,11 @@ async fn reconciled(app: &mut paykit_sdk::Paykit) {
             Err(error) => assert!(
                 matches!(
                     error.refusal(),
-                    Some(paykit_sdk::Refusal::NotNow(reason)) if reason.contains("Call reconcile again")
+                    Some(paykit_sdk::Refusal::NotNow(
+                        paykit_sdk::NotNowReason::RecordsUnlisted {
+                            retry: paykit_sdk::ListingRetry::Reconcile
+                        }
+                    ))
                 ),
                 "{error:?}"
             ),
@@ -5376,14 +5426,16 @@ async fn test_executor_restore_after_a_change_whose_key_is_no_longer_listed_pays
             .unwrap_err()
             .refusal(),
         Some(&paykit_sdk::Refusal::NotNow(
-            "the executor cannot establish the original Allowance grant and ledger".into(),
+            paykit_sdk::NotNowReason::ReadAgain(
+                "the executor cannot establish the original Allowance grant and ledger"
+            )
         ))
     );
     assert_eq!(
         Box::pin(subscription_refused(&world, &mut shop, &mut restored, &key)).await,
-        paykit_sdk::Refusal::NotNow(
-            "the accepted executor grant, ledger or wallet history is unavailable".into(),
-        )
+        paykit_sdk::Refusal::NotNow(paykit_sdk::NotNowReason::ReadAgain(
+            "the accepted executor grant, ledger or wallet history is unavailable"
+        ))
     );
     assert!(world.rail.all_executions().is_empty());
 }
@@ -5417,7 +5469,9 @@ async fn test_executor_restore_after_a_provider_loss_pays_nothing_under_the_earl
     assert_eq!(
         refused.refusal(),
         Some(&paykit_sdk::Refusal::NotNow(
-            "the Allowance record isn't read as writing on it needs yet".into()
+            paykit_sdk::NotNowReason::ReadAgain(
+                "the Allowance record isn't read as writing on it needs yet"
+            )
         ))
     );
     assert_eq!(Box::pin(regrant::confirmed(&restored, &key)).await, before);
@@ -5452,9 +5506,10 @@ async fn test_executor_restore_of_a_backup_from_before_the_grant_across_a_change
     // paid. The user can still end the Allowance.
     assert!(!restored.allowance(&key).await.unwrap().consented);
     let hold = restored.allowance(&key).await.unwrap().hold;
-    let expected = paykit_sdk::Refusal::NotNow(
-        "this app's grant is held, but its consent isn't on this device".into(),
-    );
+    let expected =
+        paykit_sdk::Refusal::HeldForUser(paykit_sdk::HeldForUserReason::AllowanceExecutionHeld(
+            "this app's grant is held, but its consent isn't on this device",
+        ));
     for refused in [
         Box::pin(restored.confirm_allowance_executor(&hold, UserConfirmed::new())).await,
         Box::pin(restored.resume_allowance_executor(&key)).await,
@@ -5823,7 +5878,9 @@ async fn proposal_across_a_move(establish: bool) {
         assert_eq!(
             refused.refusal(),
             Some(&paykit_sdk::Refusal::NotNow(
-                "the executor cannot establish the original Allowance grant and ledger".into()
+                paykit_sdk::NotNowReason::ReadAgain(
+                    "the executor cannot establish the original Allowance grant and ledger"
+                )
             ))
         );
         assert!(!granted(&payer, &key).await);

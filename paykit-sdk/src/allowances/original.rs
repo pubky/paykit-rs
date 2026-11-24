@@ -306,8 +306,10 @@ pub(crate) fn restore_originals(
 }
 
 fn unconfirmed() -> PaykitError {
-    Refusal::NotNow("the approving wallet has no verified original Allowance application".into())
-        .into()
+    Refusal::NotNow(crate::NotNowReason::ReadAgain(
+        "the approving wallet has no verified original Allowance application",
+    ))
+    .into()
 }
 
 impl Paykit {

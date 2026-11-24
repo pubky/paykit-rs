@@ -128,9 +128,9 @@ impl Paykit {
             .recovery_request_permitted(&counterparty, &selection.request(), None)
             .await?
         {
-            return Err(Refusal::NotNow(
-                "the outcome of an overlapping recovery request is unknown".into(),
-            )
+            return Err(Refusal::NotNow(crate::NotNowReason::EarlierWriteUnresolved(
+                "the outcome of an overlapping recovery request is unknown",
+            ))
             .into());
         }
         let signed = self.resend_request_message(counterparty, selection)?;

@@ -158,8 +158,8 @@ private suspend fun resumeRefusal(issuer: String, left: Boolean, request: Reques
                 try {
                     wallet.requestReceipts(request)
                     error("read receipts before the restored records were listed")
-                } catch (error: WalletException.NeedsUser) {
-                    check(error.failure.code() == "not_now")
+                } catch (error: WalletException.RetryLater) {
+                    check(error.failure.code() == "records_not_listed")
                     checkNotNull(error.failure.refusal()).use { check(it.kind() is RefusalKind.NotNow) }
                 }
             }

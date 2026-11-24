@@ -1073,7 +1073,12 @@ async fn test_certificate_renewal_dropping_pay_rechecks_no_failed_payment() {
 /// Whether `error` is the refusal while no reconcile under `paykit_pay` has run the payer pass
 /// since a restore.
 fn payer_pass_owed(error: &PaykitError) -> bool {
-    matches!(error.refusal(), Some(Refusal::NotNow(reason)) if reason.contains("Paykit spec 7.3"))
+    matches!(
+        error.refusal(),
+        Some(Refusal::RecoveryNeeded(
+            paykit_sdk::RecoveryReason::PayerPassOwed
+        ))
+    )
 }
 
 #[tokio::test]
@@ -1652,7 +1657,12 @@ async fn test_certificate_renewal_reading_more_listing_refused_holds_reads_until
     assert!(wallet.app().listing_owed().await.unwrap());
     let waiting = wallet.reconcile().await.unwrap_err();
     assert!(
-        matches!(waiting.refusal(), Some(Refusal::NotNow(reason)) if reason.contains("Call receive again")),
+        matches!(
+            waiting.refusal(),
+            Some(Refusal::NotNow(paykit_sdk::NotNowReason::RecordsUnlisted {
+                retry: paykit_sdk::ListingRetry::Receive
+            }))
+        ),
         "{waiting:?}"
     );
     let summary = wallet.receive(None).await.unwrap();
@@ -2034,7 +2044,12 @@ async fn test_certificate_wider_without_keys_holds_a_new_payment_and_a_reconcile
 
 /// The refusal while a wider certificate's scope keys are missing: not now, saying so.
 fn waits_for_keys(error: &PaykitError) -> bool {
-    matches!(error.refusal(), Some(Refusal::NotNow(why)) if why.contains("scope keys"))
+    matches!(
+        error.refusal(),
+        Some(Refusal::NotNow(
+            paykit_sdk::NotNowReason::ScopeKeysAwaited | paykit_sdk::NotNowReason::ValueAwaitsKey
+        ))
+    )
 }
 
 #[tokio::test]
@@ -3594,7 +3609,9 @@ async fn test_reconcile_waits_for_the_last_collection_of_the_wallet() {
         .count();
     assert!(matches!(
         result.unwrap_err().refusal(),
-        Some(Refusal::NotNow(reason)) if reason.contains("Call reconcile again")
+        Some(Refusal::NotNow(paykit_sdk::NotNowReason::RecordsUnlisted {
+            retry: paykit_sdk::ListingRetry::Reconcile
+        }))
     ));
     assert_eq!(pages, budget);
 
@@ -3628,7 +3645,9 @@ async fn test_reconcile_waits_for_the_last_collection_of_the_wallet() {
         } else {
             assert!(matches!(
                 result.unwrap_err().refusal(),
-                Some(Refusal::NotNow(reason)) if reason.contains("Call reconcile again")
+                Some(Refusal::NotNow(paykit_sdk::NotNowReason::RecordsUnlisted {
+                    retry: paykit_sdk::ListingRetry::Reconcile
+                }))
             ));
         }
     }

@@ -570,10 +570,13 @@ async fn test_own_record_edit_after_an_unknown_store_result_waits_for_a_load() {
     // The record this handle holds may not be the one stored: reading its endpoints is
     // refused, naming the way out.
     let refused = shop.own_public_endpoints().unwrap_err();
-    let PaykitError::Refused(Refusal::NotNow(text)) = &refused else {
-        panic!("{refused:?}");
-    };
-    assert!(text.contains("load the app again"), "{text}");
+    assert!(
+        matches!(
+            &refused,
+            PaykitError::Refused(Refusal::NotNow(paykit_sdk::NotNowReason::ReloadRequired))
+        ),
+        "{refused:?}"
+    );
     // Adding B on this handle would build on the record it still holds, with A: refused,
     // naming the way out, and nothing is signed.
     let record = shop.app().record().clone();
@@ -581,10 +584,13 @@ async fn test_own_record_edit_after_an_unknown_store_result_waits_for_a_load() {
         .set_public_endpoint(b.clone(), payload("bc1q"))
         .await
         .unwrap_err();
-    let PaykitError::Refused(Refusal::NotNow(text)) = &refused else {
-        panic!("{refused:?}");
-    };
-    assert!(text.contains("load the app again"), "{text}");
+    assert!(
+        matches!(
+            &refused,
+            PaykitError::Refused(Refusal::NotNow(paykit_sdk::NotNowReason::ReloadRequired))
+        ),
+        "{refused:?}"
+    );
     assert_eq!(shop.app().record(), &record);
     let app_id = shop.app_id();
     drop(shop);
@@ -648,10 +654,13 @@ async fn test_own_record_edit_after_an_unknown_read_result_waits_for_a_load() {
         .set_public_endpoint(endpoint("btc-onchain-address"), payload("bc1q"))
         .await
         .unwrap_err();
-    let PaykitError::Refused(Refusal::NotNow(text)) = &refused else {
-        panic!("{refused:?}");
-    };
-    assert!(text.contains("load the app again"), "{text}");
+    assert!(
+        matches!(
+            &refused,
+            PaykitError::Refused(Refusal::NotNow(paykit_sdk::NotNowReason::ReloadRequired))
+        ),
+        "{refused:?}"
+    );
     assert_eq!(shop.app().record(), &record);
 }
 
@@ -729,10 +738,13 @@ async fn test_own_record_unknown_identity_refresh_stops_edits_and_upkeep() {
         .set_public_endpoint(endpoint("btc-onchain-address"), payload("bc1q"))
         .await
         .unwrap_err();
-    let PaykitError::Refused(Refusal::NotNow(text)) = &refused else {
-        panic!("{refused:?}");
-    };
-    assert!(text.contains("load the app again"), "{text}");
+    assert!(
+        matches!(
+            &refused,
+            PaykitError::Refused(Refusal::NotNow(paykit_sdk::NotNowReason::ReloadRequired))
+        ),
+        "{refused:?}"
+    );
     let record = restored.app().record().clone();
     restored.receive(None).await.unwrap();
     assert_eq!(restored.app().record(), &record);

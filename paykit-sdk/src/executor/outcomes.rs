@@ -76,7 +76,9 @@ impl Paykit {
         }
         let checked = Box::pin(self.executor_base(record, LedgerRead::Inventory))
             .await?
-            .ok_or_else(|| Refusal::NotNow("cannot verify the current Allowance ledger".into()))?;
+            .ok_or(Refusal::NotNow(crate::NotNowReason::ReadAgain(
+                "cannot verify the current Allowance ledger",
+            )))?;
         Ok(checked.facts.other_failures)
     }
 

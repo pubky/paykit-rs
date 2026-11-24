@@ -729,11 +729,10 @@ impl Paykit {
     /// asked nothing until then (Paykit wire 5.6, Raising).
     pub(crate) async fn refuse_while_raise_owed_to(&self, to: &[u8; 32]) -> Result<()> {
         if self.raise_holds_asks_to(to).await? {
-            return Err(Refusal::NotNow(
+            return Err(Refusal::NotNow(crate::NotNowReason::EarlierWriteUnresolved(
                 "Paykit wire 5.6: no one is asked while a floor raise this app owes isn't \
-                 written"
-                    .into(),
-            )
+                 written",
+            ))
             .into());
         }
         Ok(())
@@ -1305,14 +1304,9 @@ impl Paykit {
     }
 }
 
-const UNREADABLE_FLOOR: &str = "Paykit wire 5.6: the block floor can't be read now";
-
-const RAISE_WAITING: &str =
-    "Paykit wire 5.6: a block floor raise left unwritten waits before it is tried again";
-
 /// The refusal while a raise left unwritten waits ([`RaiseRetry`]).
 fn raise_waiting() -> crate::error::PaykitError {
-    Refusal::NotNow(RAISE_WAITING.into()).into()
+    Refusal::NotNow(crate::NotNowReason::FloorRaiseWaiting).into()
 }
 
 /// The rollback alarm's reason for a floor seen live that reads absent with no provider loss.
@@ -1321,7 +1315,7 @@ const ABSENT_FLOOR: &str =
 
 /// The refusal while the floor a raise builds on can't be read.
 pub(crate) fn unreadable_floor() -> crate::error::PaykitError {
-    Refusal::NotNow(UNREADABLE_FLOOR.into()).into()
+    Refusal::NotNow(crate::NotNowReason::FloorUnreadable).into()
 }
 
 /// Report an unavailable floor for retryable service failures. Preserve definite refusals,
@@ -1348,9 +1342,12 @@ pub(crate) fn floor_write_error(error: crate::error::PaykitError) -> crate::erro
     }
 }
 
-/// Whether the floor is temporarily unavailable.
+/// Whether the floor is temporarily unavailable: told by the reason, never by its text.
 pub(crate) fn is_unreadable_floor(error: &crate::error::PaykitError) -> bool {
-    matches!(error.refusal(), Some(Refusal::NotNow(why)) if why == UNREADABLE_FLOOR)
+    matches!(
+        error.refusal(),
+        Some(Refusal::NotNow(crate::NotNowReason::FloorUnreadable))
+    )
 }
 
 /// Whether a raise couldn't be written: the floor can't be read now, the divergence hold
@@ -1359,7 +1356,10 @@ pub(crate) fn is_unreadable_floor(error: &crate::error::PaykitError) -> bool {
 pub(crate) fn is_raise_unwritten(error: &crate::error::PaykitError) -> bool {
     is_unreadable_floor(error)
         || matches!(error.refusal(), Some(Refusal::FloorHeld))
-        || matches!(error.refusal(), Some(Refusal::NotNow(why)) if why == RAISE_WAITING)
+        || matches!(
+            error.refusal(),
+            Some(Refusal::NotNow(crate::NotNowReason::FloorRaiseWaiting))
+        )
 }
 
 /// Whether a raise a read of the lists tried stays owed and the read goes on: unwritten
@@ -1907,6 +1907,29 @@ mod tests {
         ] {
             assert!(is_unreadable_floor(&floor_write_error(client(error))));
         }
+    }
+
+    #[test]
+    fn test_floor_unreadable_told_by_its_reason() {
+        assert!(is_unreadable_floor(&unreadable_floor()));
+        assert_eq!(
+            unreadable_floor().to_string(),
+            "refused: not now: Paykit wire 5.6: the block floor can't be read now"
+        );
+    }
+
+    #[test]
+    fn test_floor_unreadable_not_told_by_text_alone() {
+        use crate::NotNowReason;
+        // Another wait whose text reads the same is not the floor's: only the reason tells.
+        let text = NotNowReason::FloorUnreadable.to_string();
+        let same_text: crate::error::PaykitError =
+            Refusal::NotNow(NotNowReason::SwitchClient(text.clone())).into();
+        assert!(!is_unreadable_floor(&same_text));
+        let other: crate::error::PaykitError =
+            Refusal::NotNow(NotNowReason::ReadAgain("the deny list must be read again")).into();
+        assert!(!is_unreadable_floor(&other));
+        assert!(!is_unreadable_floor(&Refusal::Usage(text).into()));
     }
 
     #[test]

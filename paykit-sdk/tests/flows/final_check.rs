@@ -937,7 +937,7 @@ async fn test_final_check_first_dispatch_payee_copy_aged_during_the_own_read_not
         matches!(
             refused.refusal(),
             Some(paykit_sdk::Refusal::AttemptFailed(inner))
-                if matches!(&**inner, paykit_sdk::Refusal::NotNow(why) if why.contains("budget"))
+                if matches!(&**inner, paykit_sdk::Refusal::NotNow(paykit_sdk::NotNowReason::AttemptCheck(why)) if why.contains("budget"))
         ),
         "{refused:?}"
     );
@@ -1886,7 +1886,7 @@ async fn test_fence_attempt_past_its_pre_dispatch_budget_not_paid() {
         matches!(
             refused.refusal(),
             Some(paykit_sdk::Refusal::AttemptFailed(inner))
-                if matches!(&**inner, paykit_sdk::Refusal::NotNow(why) if why.contains("budget"))
+                if matches!(&**inner, paykit_sdk::Refusal::NotNow(paykit_sdk::NotNowReason::AttemptCheck(why)) if why.contains("budget"))
         ),
         "{refused:?}"
     );

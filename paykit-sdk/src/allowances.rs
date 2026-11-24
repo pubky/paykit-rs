@@ -1863,10 +1863,10 @@ impl Paykit {
     /// A seller proposes with this method. The payer uses [`Self::propose_executable_allowance`]
     /// to confirm its terms and automatic payment before signing P. Proposing requires both
     /// `paykit_allowance` and `paykit_contacts`.
-    /// [`Refusal::ScopeMissing`] identifies a missing scope. [`Refusal::NotNow`] is returned
-    /// while sends to `to` are held because the deny list holds it, or the copy of
-    /// the lists isn't known after a read tried now (Paykit spec 8.1, "Blocked counterparties"),
-    /// with nothing signed, written or queued; [`PaykitError::Lib`] with `Validation` for terms
+    /// [`Refusal::ScopeMissing`] identifies a missing scope. While sends to `to` are held,
+    /// with nothing signed, written or queued (Paykit spec 8.1, "Blocked counterparties"):
+    /// [`Refusal::HeldForUser`] while the deny list holds it, and [`Refusal::NotNow`] while
+    /// the copy of the lists isn't known after a read tried now; [`PaykitError::Lib`] with `Validation` for terms
     /// that break Paykit wire 4.15, with nothing sent; the client's errors. A failure that leaves
     /// the batch kept (the network, `429`, `503`) is no error: the proposal is reported sent,
     /// [`MessageDelivery::Kept`], and goes with the app's next write or read.
@@ -1933,13 +1933,13 @@ impl Paykit {
             self.require_payer_choice(execution.as_ref())?;
         }
         Box::pin(self.require_sends_allowed(&to)).await?;
-        let count = count.ok_or_else(|| {
-            Refusal::NotNow("the current pending proposals have not been read".into())
-        })?;
+        let count = count.ok_or(Refusal::NotNow(crate::NotNowReason::ReadAgain(
+            "the current pending proposals have not been read",
+        )))?;
         if count >= pending::LIMIT {
-            return Err(Refusal::NotNow(
-                "eight own proposals to this counterparty are already pending".into(),
-            )
+            return Err(Refusal::NotNow(crate::NotNowReason::Full(
+                "eight own proposals to this counterparty are already pending",
+            ))
             .into());
         }
         let allowance_id = AllowanceId::generate()?;
@@ -1975,9 +1975,9 @@ impl Paykit {
             )
             .await?;
         if !pending::is_create(&write.1) {
-            return Err(Refusal::NotNow(
-                "the new Allowance ID already has a pending record".into(),
-            )
+            return Err(Refusal::NotNow(crate::NotNowReason::CallAgain(
+                "the new Allowance ID already has a pending record",
+            ))
             .into());
         }
         let mut tx = Tx::default();
@@ -2287,7 +2287,10 @@ impl Paykit {
                 .ok_or(Refusal::NotFound)?;
             // Nothing is sent for a conflicted Allowance (Paykit spec 8.3, "Conflicted").
             if self.unresolved_for_allowance(record, &held).await? {
-                return Err(Refusal::NotNow("Allowance conflict check pending".into()).into());
+                return Err(Refusal::NotNow(crate::NotNowReason::ReadAgain(
+                    "Allowance conflict check pending",
+                ))
+                .into());
             }
             if held.conflicted.is_some() || Box::pin(self.conflict_kept(record)).await? {
                 return Err(Refusal::AllowanceConflicted.into());
@@ -2302,7 +2305,9 @@ impl Paykit {
                 if rejected(&held) {
                     Refusal::Rejected
                 } else {
-                    Refusal::NotNow("the permanent Allowance has no verified acceptance".into())
+                    Refusal::NotNow(crate::NotNowReason::ReadAgain(
+                        "the permanent Allowance has no verified acceptance",
+                    ))
                 }
             })?;
             let refs = vec![held.proposal.hash(), accepted.hash()];

@@ -594,12 +594,8 @@ fn first_kept_stop(
     if applicable.is_empty() {
         return Ok(None);
     }
-    let first = first_received(&applicable, |a, b| compare_received(a.0, b.0, &order)).ok_or_else(
-        || {
-            Refusal::NotNow(
-                "the order of the request's cancellations is unknown after provider loss".into(),
-            )
-        },
+    let first = first_received(&applicable, |a, b| compare_received(a.0, b.0, &order)).ok_or(
+        Refusal::HeldForUser(crate::HeldForUserReason::CancellationOrderUnknown),
     )?;
     Ok(Some(applicable.swap_remove(first).1))
 }
@@ -711,7 +707,8 @@ impl Paykit {
     ///
     /// # Errors
     ///
-    /// [`Refusal::NotNow`] while sends to `to` are held, with nothing recorded or queued;
+    /// [`Refusal::HeldForUser`] while the deny list holds `to`, and [`Refusal::NotNow`] while
+    /// its copy isn't known, with nothing recorded or queued;
     /// [`Refusal::ScopeMissing`] without `paykit_request` or a label; [`Refusal::Label`];
     /// [`PaykitError::Lib`] with `Validation` for a draft that breaks Paykit wire 4.5, such
     /// as a payment deadline of the other kind of request, or both kinds; the
@@ -1005,9 +1002,10 @@ impl Paykit {
     ) -> Result<Option<pubky_switch_client::app::SharedRecord>> {
         let held = self.activity_write_base(key).await?;
         if held.as_ref().is_some_and(|r| r.flagged || r.not_taken) {
-            return Err(
-                Refusal::NotNow("the current payee activity was not accepted".into()).into(),
-            );
+            return Err(Refusal::NotNow(crate::NotNowReason::ReadAgain(
+                "the current payee activity was not accepted",
+            ))
+            .into());
         }
         Ok(held)
     }
@@ -1197,14 +1195,11 @@ impl Paykit {
                 )
             }
             // A period record whose request record the app holds but can't open or bind yet,
-            // sealed under a scope key it doesn't hold or a value that doesn't read: not now,
-            // as `payer_request` answers for a request record held but not open; the credit
-            // is tried again once it opens.
+            // as `payer_request` answers for a request record held but not open: a wait while
+            // it is sealed under a scope key the app doesn't hold, a hold on that record while
+            // its value doesn't read; the credit is tried again once it opens.
             None if self.request_record_held(&target, &bound).await? => {
-                return Err(Refusal::NotNow(
-                    "Paykit wire 5.3: the period's request record is held but not open".into(),
-                )
-                .into());
+                return Err(self.request_record_not_open(&target, &bound).await?.into());
             }
             None if binding == RecordBinding::Unrequested => (
                 proof.amount.clone().ok_or(Refusal::NotFound)?,
@@ -1561,9 +1556,10 @@ impl Paykit {
             )?;
             let msg_id = signed.msg_id().to_owned();
             if !activity::place(&mut activity, Role::Receipt, self.own_copy(&signed)?) {
-                return Err(
-                    Refusal::NotNow("the receipt message ID was already used".into()).into(),
-                );
+                return Err(Refusal::NotNow(crate::NotNowReason::CallAgain(
+                    "the receipt message ID was already used",
+                ))
+                .into());
             }
             let target = target.record_target();
             let entry = self
@@ -1719,9 +1715,9 @@ impl Paykit {
     /// a response or a cancellation, so no payment and no response is decided from it
     /// (Paykit spec 8.1, one response per request).
     /// The refusal of a call on the payer's request record at `target`, which the app doesn't
-    /// hold open: not now for a record held that it can't open, sealed under a scope key it
-    /// doesn't hold yet or a value that doesn't read, and for one absent while the copy of
-    /// the payer's records may lack records (Paykit spec 8.1, "Records not listed yet"):
+    /// hold open: not now for a record held sealed under a scope key it doesn't hold yet, and
+    /// for one absent while the copy of the payer's records may lack records (Paykit spec
+    /// 8.1, "Records not listed yet"); held for the user for a value that doesn't read:
     /// either may hold a response or a cancellation. [`Refusal::NotFound`] only for a record
     /// absent or deleted from a copy that lacks none.
     pub(crate) async fn request_record_refusal(
@@ -1736,8 +1732,10 @@ impl Paykit {
         Ok(match content {
             Some(content) if crate::hold::awaits_key(&content) => crate::hold::value_awaits_key(),
             Some(RecordContent::Value(_) | RecordContent::Unreadable(_)) => {
-                Refusal::NotNow("Paykit wire 5.3: the request record held doesn't read".into())
-                    .into()
+                Refusal::HeldForUser(crate::HeldForUserReason::RecordUnreadable(
+                    "Paykit wire 5.3: the request record held doesn't read",
+                ))
+                .into()
             }
             _ if self.side_unlisted(crate::hold::RecordSide::Payer).await? => {
                 crate::hold::unlisted()
@@ -2634,14 +2632,18 @@ impl Paykit {
             let fresh = self.current_period_activity(&target, None).await?;
             let request_key = self.activity_key(&target)?;
             let held = self.app.shared_record(&request_key).await?;
+            // A copy not current or not authenticated waits for a read; a pause that blocks
+            // automatic acceptance is the user's to confirm (Paykit spec 8.1).
             if !matches!(fresh, Some(ref current) if current.to_json()? == record.to_json()?)
                 || !held.is_some_and(|r| r.authenticated && !r.doubtful)
-                || self.pause_at(&request_key).await?.blocks_automatic()
             {
-                return Err(Refusal::NotNow(
-                    "the current subscription is not available for automatic acceptance".into(),
-                )
+                return Err(Refusal::NotNow(crate::NotNowReason::ReadAgain(
+                    "the current subscription is not available for automatic acceptance",
+                ))
                 .into());
+            }
+            if self.pause_at(&request_key).await?.blocks_automatic() {
+                return Err(crate::pay::AutomaticHold::Paused.refusal().into());
             }
             let conditions = self.app.record_condition(&request_key).await?;
             let reservation = Box::pin(self.allowance_reservation(key, &request.payee)).await?;

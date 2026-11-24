@@ -831,6 +831,40 @@ fn refused_for_good(refusal: &ClientRefusal) -> bool {
     )
 }
 
+/// What holds a request from automatic payment (Paykit spec 7.2, 8.1; Paykit wire 5.6).
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum AutomaticHold {
+    /// The deny list holds the payee.
+    Blocked,
+    /// The block floor holds the request, as this app holds the floor.
+    Floor(crate::floor::SharedFloor),
+    /// A restore's or a `missed` item's hold the user hasn't confirmed.
+    Restore,
+    /// A pause that blocks automatic payment.
+    Paused,
+}
+
+impl AutomaticHold {
+    /// The user answers a block, a floor known to hold the request, a hold or a pause: by an
+    /// unblock, a confirmation or a payment by hand. A floor not known waits for a read of
+    /// it.
+    pub(crate) fn refusal(self) -> Refusal {
+        match self {
+            Self::Floor(crate::floor::SharedFloor::Unknown) => {
+                Refusal::NotNow(crate::NotNowReason::ReadAgain(
+                    "this request is held from automatic payment while the block floor isn't \
+                     known",
+                ))
+            }
+            // Held for good (Paykit wire 5.6, Divergent floor): the refusal that names it.
+            Self::Floor(crate::floor::SharedFloor::Divergent) => Refusal::FloorHeld,
+            Self::Blocked | Self::Floor(_) | Self::Restore | Self::Paused => {
+                Refusal::HeldForUser(crate::HeldForUserReason::HeldFromAutomatic)
+            }
+        }
+    }
+}
+
 /// What a first dispatch does with what held it at the pay gate.
 enum FirstHold {
     /// Returned as it is: nothing is paid and the attempt stays `Attempted`, known
@@ -844,9 +878,9 @@ fn first_dispatch_hold(held: Held) -> FirstHold {
     match held {
         // Writes still go on in reconcile mode and with the clocks apart: the attempt is
         // closed, so a later payment of the obligation isn't held behind it.
-        Held::Client(refusal @ ClientRefusal::NotNow(_)) => {
-            FirstHold::Fail(Refusal::NotNow(refusal.to_string()))
-        }
+        Held::Client(refusal @ ClientRefusal::NotNow(_)) => FirstHold::Fail(Refusal::NotNow(
+            crate::NotNowReason::SwitchClient(refusal.to_string()),
+        )),
         Held::Client(refusal) => FirstHold::Return(held_back(refusal)),
         Held::Check(refusal @ Refusal::NotCurrent(_)) => FirstHold::Return(refusal.into()),
         Held::OwnIdentity(refusal) | Held::Check(refusal) => FirstHold::Fail(refusal),
@@ -858,11 +892,15 @@ fn repeat_hold(held: Held, attempt_id: AttemptId) -> Result<PayOutcome> {
     match held {
         // No payment of this app goes on without its own identity.json confirmed.
         Held::OwnIdentity(refusal) => Err(refusal.into()),
-        // What may pass later: reconcile mode or the clocks, or the payee's identity.json not
-        // confirmed yet.
+        // What may pass later: reconcile mode or the clocks, the payee's identity.json not
+        // confirmed yet, or the payer pass a reconcile owes since a restore, which a repeat
+        // waits for (Paykit spec 7.3).
         Held::Client(ClientRefusal::NotNow(_))
         | Held::Check(
-            Refusal::NotNow(_) | Refusal::IdentityUnavailable(_) | Refusal::IdentityUnconfirmed,
+            Refusal::NotNow(_)
+            | Refusal::RecoveryNeeded(crate::RecoveryReason::PayerPassOwed)
+            | Refusal::IdentityUnavailable(_)
+            | Refusal::IdentityUnconfirmed,
         ) => Ok(PayOutcome::Pending { attempt_id }),
         // An alarm, an app that left, a recovery notice or a restore question: returned, so
         // the caller recovers rather than waits.
@@ -1475,14 +1513,19 @@ impl Paykit {
             }
             let reservation = Box::pin(self.allowance_reservation(&key, &request.payee)).await?;
             reservation.request(&record, claim.as_ref(), None)?;
-            if blocked
-                || self.floor_holds(&stored).await?
-                || self.held(&record_key, &record).await?
-                || self.pause_at(&record_key).await?.blocks_automatic()
-            {
-                return Err(
-                    Refusal::NotNow("this request is held from automatic payment".into()).into(),
-                );
+            let hold = if blocked {
+                Some(AutomaticHold::Blocked)
+            } else if self.floor_holds(&stored).await? {
+                Some(AutomaticHold::Floor(self.shared_floor().await?))
+            } else if self.held(&record_key, &record).await? {
+                Some(AutomaticHold::Restore)
+            } else if self.pause_at(&record_key).await?.blocks_automatic() {
+                Some(AutomaticHold::Paused)
+            } else {
+                None
+            };
+            if let Some(hold) = hold {
+                return Err(hold.refusal().into());
             }
             Some(reservation)
         } else {
@@ -1534,7 +1577,7 @@ impl Paykit {
             .await?;
         if blocked {
             let amount = paid.ok_or_else(|| {
-                Refusal::NotNow(
+                Refusal::Destination(
                     "Paykit spec 8.1: the blocked payment's transfer amount is unknown".into(),
                 )
             })?;
@@ -1764,7 +1807,7 @@ impl Paykit {
             .await?;
         if blocked {
             let amount = paid.ok_or_else(|| {
-                Refusal::NotNow(
+                Refusal::Destination(
                     "Paykit spec 8.1: the blocked payment's transfer amount is unknown".into(),
                 )
             })?;
@@ -2647,10 +2690,13 @@ impl Paykit {
             .into());
         }
         if options.quote_only {
-            return Err(Refusal::NotNow(format!(
-                "a current Private Payment List is needed to quote this endpoint{note}"
-            ))
-            .into());
+            let why = if device_clock_behind {
+                "a current Private Payment List is needed to quote this endpoint; a list expired \
+                 by the service's time: the device clock is behind it"
+            } else {
+                "a current Private Payment List is needed to quote this endpoint"
+            };
+            return Err(Refusal::NotNow(crate::NotNowReason::AwaitingCounterparty(why)).into());
         }
         // With nothing to ask but a paused app, as a payment naming one, the payment waits for
         // the user's confirmation of its record, not for a list (Paykit spec 8.4).
@@ -3366,7 +3412,11 @@ impl Paykit {
         attempted.stage = Stage::Attempted;
         batch = batch.local(self.journal_write(&attempted)?);
         if Box::pin(self.period_recovery_held(&entry)).await? {
-            return Err(Refusal::NotNow(crate::loss::LOSS_DOUBT.into()).into());
+            return Err(Refusal::MayBePaid {
+                reason: crate::loss::LOSS_DOUBT.into(),
+                doubt: None,
+            }
+            .into());
         }
         // The attempt ID is journaled before the write (Paykit spec 7.2), once the batch is
         // built: a batch that can't be built leaves no open entry behind it.
@@ -3441,9 +3491,9 @@ impl Paykit {
             return self
                 .fail_attempt(
                     &mut entry,
-                    Refusal::NotNow(
-                        "the applied Allowance reservation could not be established".into(),
-                    ),
+                    Refusal::NotNow(crate::NotNowReason::AttemptCheck(
+                        "the applied Allowance reservation could not be established",
+                    )),
                 )
                 .await;
         }
@@ -3454,7 +3504,10 @@ impl Paykit {
         // resolve (Switch spec 12.5, 12.6): nothing is written there.
         let Some(claim) = claim else {
             return self
-                .fail_attempt(&mut entry, Refusal::NotNow("no attempt proof".into()))
+                .fail_attempt(
+                    &mut entry,
+                    Refusal::NotNow(crate::NotNowReason::AttemptCheck("no attempt proof")),
+                )
                 .await;
         };
         let Some(opened_at_ms) = claim
@@ -3464,7 +3517,7 @@ impl Paykit {
             return self
                 .fail_attempt(
                     &mut entry,
-                    Refusal::NotNow("no attempt in its proof".into()),
+                    Refusal::NotNow(crate::NotNowReason::AttemptCheck("no attempt in its proof")),
                 )
                 .await;
         };
@@ -3573,7 +3626,10 @@ impl Paykit {
         }
         self.app.read_claim(obligation).await?;
         self.service_time().ok_or_else(|| {
-            Refusal::NotNow("Switch spec 10.1: no service time verified".into()).into()
+            Refusal::NotNow(crate::NotNowReason::NoServiceTime(
+                "Switch spec 10.1: no service time verified",
+            ))
+            .into()
         })
     }
 
@@ -5695,19 +5751,18 @@ impl Paykit {
     fn within_budget(&self, answered: &Answered, now: u64) -> std::result::Result<(), Refusal> {
         let age = answered.age_ms(now).saturating_add(CLOCK_TOLERANCE_MS);
         if age >= crate::PRE_DISPATCH_BUDGET_MS {
-            return Err(Refusal::NotNow(
-                "Switch spec 10.2: the attempt is past its pre-dispatch budget".into(),
-            ));
+            return Err(Refusal::NotNow(crate::NotNowReason::AttemptCheck(
+                "Switch spec 10.2: the attempt is past its pre-dispatch budget",
+            )));
         }
         if self
             .app
             .cert()
             .expired_at(answered.opened_at_ms.saturating_add(age))
         {
-            return Err(Refusal::NotNow(
-                "Switch spec 3.2: the app's certificate expires within the pre-dispatch budget"
-                    .into(),
-            ));
+            return Err(Refusal::NotNow(crate::NotNowReason::AttemptCheck(
+                "Switch spec 3.2: the app's certificate expires within the pre-dispatch budget",
+            )));
         }
         Ok(())
     }
@@ -6136,7 +6191,8 @@ mod tests {
         }
         // Writes go on: the attempt is closed, as before the client's refusal was typed.
         let wait = ClientRefusal::NotNow("reconcile mode".into());
-        let FirstHold::Fail(Refusal::NotNow(why)) = first_dispatch_hold(Held::Client(wait.clone()))
+        let FirstHold::Fail(Refusal::NotNow(crate::NotNowReason::SwitchClient(why))) =
+            first_dispatch_hold(Held::Client(wait.clone()))
         else {
             panic!("reconcile mode left the attempt open");
         };
@@ -6166,12 +6222,54 @@ mod tests {
             Ok(PayOutcome::Pending { .. })
         ));
         assert!(matches!(
-            repeat_hold(Held::Check(Refusal::NotNow("not yet".into())), attempt),
+            repeat_hold(
+                Held::Check(Refusal::NotNow(crate::NotNowReason::ReadAgain("not yet"))),
+                attempt
+            ),
             Ok(PayOutcome::Pending { .. })
         ));
+        // The payer pass a reconcile owes is waited for, never "may be paid" (Paykit spec 7.3).
+        assert!(matches!(
+            repeat_hold(Held::Check(crate::hold::payer_pass_refusal()), attempt),
+            Ok(PayOutcome::Pending { .. })
+        ));
+
         assert!(matches!(
             repeat_hold(Held::Check(Refusal::Destination("expired".into())), attempt),
             Ok(PayOutcome::Uncertain { .. })
+        ));
+    }
+
+    #[test]
+    fn test_pay_automatic_hold_is_the_users_to_answer() {
+        use crate::floor::SharedFloor;
+        for hold in [
+            AutomaticHold::Blocked,
+            AutomaticHold::Floor(SharedFloor::Known(Some(70))),
+            AutomaticHold::Restore,
+            AutomaticHold::Paused,
+        ] {
+            assert_eq!(
+                hold.refusal(),
+                Refusal::HeldForUser(crate::HeldForUserReason::HeldFromAutomatic),
+                "{hold:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_pay_automatic_hold_names_a_divergent_floor() {
+        assert_eq!(
+            AutomaticHold::Floor(crate::floor::SharedFloor::Divergent).refusal(),
+            Refusal::FloorHeld
+        );
+    }
+
+    #[test]
+    fn test_pay_automatic_hold_waits_for_a_floor_not_known() {
+        assert!(matches!(
+            AutomaticHold::Floor(crate::floor::SharedFloor::Unknown).refusal(),
+            Refusal::NotNow(crate::NotNowReason::ReadAgain(why)) if why.contains("block floor")
         ));
     }
 

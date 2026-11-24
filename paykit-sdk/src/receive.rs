@@ -3062,6 +3062,14 @@ pub struct HeldList {
     pub msg_id: String,
 }
 
+/// Why a send waits while the copy of the deny list isn't known (Paykit spec 8.1).
+pub(crate) const DENY_COPY_UNKNOWN: &str =
+    "Paykit spec 8.1: sends to the counterparty are held while the deny list's copy isn't known";
+
+/// Why a send waits while the copy of the deny list holds the counterparty (Paykit spec 8.1).
+pub(crate) const SENDS_BLOCKED: &str =
+    "Paykit spec 8.1: sends to the counterparty are held while the deny list holds it";
+
 impl Paykit {
     /// The Private Payment Lists held because their `payment_lists` record doesn't read, is
     /// absent, or was seen deleted (Paykit wire 5.4): a durable notice for the host. One held
@@ -3936,10 +3944,9 @@ impl Paykit {
         // entries, so neither an unblock at the new service nor leaving one out of the upload
         // can be told apart from a removal of nothing: the unblock waits for the step.
         if self.loss_lists().await? == LossLists::Before {
-            return Err(crate::error::Refusal::NotNow(
-                "a provider loss's list upload isn't ready: unblock again after the next receive"
-                    .into(),
-            )
+            return Err(crate::error::Refusal::NotNow(crate::NotNowReason::ReadAgain(
+                "a provider loss's list upload isn't ready: unblock again after the next receive",
+            ))
             .into());
         }
         Box::pin(self.first_read_before_writing()).await?;
@@ -4261,9 +4268,9 @@ impl Paykit {
     }
 
     /// Refuse a send the user asks for to `pubky` while sends to it are held
-    /// ([`Paykit::sends_held`]), with [`crate::Refusal::NotNow`]: a due or unknown deny
-    /// list is read first ([`Paykit::refresh_lists_when_due`]), and a read that fails leaves
-    /// it held. Called before anything of the send is signed, recorded or queued.
+    /// ([`Paykit::sends_held`]): a due or unknown deny list is read first
+    /// ([`Paykit::refresh_lists_when_due`]), and a read that fails leaves it held. Called
+    /// before anything of the send is signed, recorded or queued.
     pub(crate) async fn refuse_while_sends_held(
         &mut self,
         pubky: &[u8; 32],
@@ -4272,13 +4279,20 @@ impl Paykit {
         self.require_sends_allowed(pubky).await
     }
 
-    /// Check the deny list after this operation has already tried its due read.
+    /// Check the deny list after this operation has already tried its due read (Paykit spec
+    /// 8.1, "Blocked counterparties"): [`crate::Refusal::NotNow`] while the copy isn't known,
+    /// which a read of the lists clears, and [`crate::Refusal::HeldForUser`] while the copy
+    /// holds `pubky`, which the user unblocking it clears.
     pub(crate) async fn require_sends_allowed(&self, pubky: &[u8; 32]) -> crate::error::Result<()> {
-        if self.sends_held(pubky).await? {
-            return Err(crate::error::Refusal::NotNow(
-                "Paykit spec 8.1: sends to the counterparty are held while the deny list holds \
-                 it or its copy isn't known"
+        if !self.deny_copy_known().await? {
+            return Err(
+                crate::error::Refusal::NotNow(crate::NotNowReason::ReadAgain(DENY_COPY_UNKNOWN))
                     .into(),
+            );
+        }
+        if self.denied_as_last_read(pubky).await? {
+            return Err(crate::error::Refusal::HeldForUser(
+                crate::HeldForUserReason::CounterpartyBlocked(SENDS_BLOCKED),
             )
             .into());
         }

@@ -2732,7 +2732,10 @@ async fn test_periods_send_details_never_writes_over_a_period_record_that_doesnt
         .await
         .unwrap_err();
     assert!(
-        matches!(refusal(&refused), Refusal::NotNow(_)),
+        matches!(
+            refusal(&refused),
+            Refusal::HeldForUser(paykit_sdk::HeldForUserReason::RecordUnreadable(_))
+        ),
         "{refused:?}"
     );
     // What the switch holds, as the seller wallet reads it: its own write, not written over.

@@ -903,7 +903,10 @@ impl Paykit {
                 .map(|index| marks.swap_remove(index));
             match count_blocked(existing, &marks, sender, (from, until), false) {
                 BlockedCount::Held => {
-                    return Err(Refusal::NotNow("the block marks are full".into()).into())
+                    return Err(Refusal::NotNow(crate::NotNowReason::Full(
+                        "the block marks are full",
+                    ))
+                    .into())
                 }
                 BlockedCount::Dropped => {
                     tx.put(

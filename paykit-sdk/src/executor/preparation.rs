@@ -228,5 +228,8 @@ impl Paykit {
 }
 
 pub(super) fn unavailable() -> PaykitError {
-    Refusal::NotNow("the previous Allowance ledger write is unresolved".into()).into()
+    Refusal::NotNow(crate::NotNowReason::EarlierWriteUnresolved(
+        "the previous Allowance ledger write is unresolved",
+    ))
+    .into()
 }

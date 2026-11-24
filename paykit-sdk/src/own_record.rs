@@ -300,7 +300,7 @@ impl Paykit {
                 }
                 _ => {
                     return Err(
-                        Refusal::NotNow("unknown Switch app-record expiry policy".into()).into(),
+                        Refusal::Usage("unknown Switch app-record expiry policy".into()).into(),
                     );
                 }
             };
@@ -400,12 +400,7 @@ impl Paykit {
     /// stored ([`Paykit::set_public_endpoints`]).
     fn own_record_known(&self) -> Result<()> {
         if self.own_record_unknown {
-            return Err(Refusal::NotNow(
-                "the store couldn't tell whether the last write of the app's record was \
-                 applied: load the app again (Paykit::load) before editing its record"
-                    .into(),
-            )
-            .into());
+            return Err(Refusal::NotNow(crate::NotNowReason::ReloadRequired).into());
         }
         Ok(())
     }

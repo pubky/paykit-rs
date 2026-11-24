@@ -425,10 +425,24 @@ pub(crate) fn period_key(payee: &[u8; 32], request_hash: &[u8; 32], period: &Per
     natural_key::period_record(payee, request_hash, period.start_secs())
 }
 
-/// The refusal of a write over a period record held as a value the app can't read: not now,
-/// never written over (Paykit spec 8.1).
+/// The refusal of a write over a period record held as a value the app can't read: never
+/// written over, it waits to be rewritten or recovered (Paykit spec 8.1; Paykit wire 5.3).
 fn period_record_unread() -> PaykitError {
-    Refusal::NotNow("Paykit wire 5.3: the period record held doesn't read".into()).into()
+    Refusal::HeldForUser(crate::HeldForUserReason::RecordUnreadable(
+        "Paykit wire 5.3: the period record held doesn't read",
+    ))
+    .into()
+}
+
+/// [`Paykit::request_record_not_open`] for the request record's content as held.
+fn not_open_refusal(held: Option<&RecordContent>) -> Refusal {
+    if held.is_some_and(crate::hold::awaits_key) {
+        Refusal::NotNow(crate::NotNowReason::ValueAwaitsKey)
+    } else {
+        Refusal::HeldForUser(crate::HeldForUserReason::RecordUnreadable(
+            "Paykit wire 5.3: the period's request record is held but not open",
+        ))
+    }
 }
 
 /// Period records with their keys, by the key of the request record they belong to.
@@ -573,6 +587,26 @@ impl Paykit {
         Ok(self.read_activity(&request, held.as_ref()))
     }
 
+    /// The refusal of a credit whose period record's request record, held, doesn't open or
+    /// bind (Paykit wire 5.3): a wait while its value is sealed under a scope key the app
+    /// doesn't hold yet ([`crate::hold::awaits_key`]), a hold on that record while it doesn't
+    /// read.
+    pub(crate) async fn request_record_not_open(
+        &self,
+        target: &ActivityTarget,
+        bound: &ActivityRecord,
+    ) -> Result<Refusal> {
+        let held = match self.payee_period_parent(target, bound) {
+            Some(request) => self
+                .app
+                .shared_record(&self.activity_key(&request)?)
+                .await?
+                .map(|held| held.content),
+            None => None,
+        };
+        Ok(not_open_refusal(held.as_ref()))
+    }
+
     /// Whether the app holds, though it may not open or bind it, the payee's request record
     /// a period record `bound` at `target` belongs to: any content but a delete.
     pub(crate) async fn request_record_held(
@@ -611,8 +645,9 @@ impl Paykit {
     /// # Errors
     ///
     /// [`Refusal::ScopeMissing`] without `paykit_request` or a label; [`Refusal::NotFound`] for a
-    /// record this app doesn't hold, or a period record; [`Refusal::NotNow`] while sends to
-    /// the payer are held, before anything else is judged, with nothing written or queued;
+    /// record this app doesn't hold, or a period record; [`Refusal::HeldForUser`] while the
+    /// deny list holds the payer, and [`Refusal::NotNow`] while its copy isn't known, before
+    /// anything else is judged, with nothing written or queued;
     /// [`Refusal::Usage`] for a one-time
     /// request, or a period that holds 8 details already; [`Refusal::NotSubscribed`] before
     /// the payer's acceptance; [`Refusal::Rejected`] or [`Refusal::Cancelled`];
@@ -620,9 +655,10 @@ impl Paykit {
     /// [`crate::PaykitError::Lib`] with `Validation` for details that break Paykit wire 4.9
     /// against the request, such as a period that isn't one of its own, one that doesn't
     /// take details now, or details expired on the highest service time verified;
-    /// [`Refusal::NotNow`] while the period record's value waits for its scope key, is held
-    /// as a value that doesn't read, or the switch holds a newer write of it this app
-    /// refused, and while no service time is verified to judge the period by;
+    /// [`Refusal::NotNow`] while the period record's value waits for its scope key, and while
+    /// no service time is verified to judge the period by; [`Refusal::HeldForUser`] while
+    /// it is held as a value that doesn't read, or the switch holds a newer write of it this
+    /// app refused;
     /// [`Refusal::SwitchUnavailable`] when the records can't be read again now;
     /// [`crate::PaykitError::Conflict`] when the record kept changing; the client's errors.
     /// A failure that leaves the batch kept (the network, `429`, `503`) is no error: the
@@ -738,10 +774,9 @@ impl Paykit {
                     .into());
                 }
                 Window::NoTime => {
-                    return Err(Refusal::NotNow(
-                        "Paykit spec 8.2: no service time verified yet to judge the period by"
-                            .into(),
-                    )
+                    return Err(Refusal::NotNow(crate::NotNowReason::NoServiceTime(
+                        "Paykit spec 8.2: no service time verified yet to judge the period by",
+                    ))
                     .into());
                 }
             }
@@ -987,8 +1022,8 @@ impl Paykit {
     /// [`Refusal::NoDestination`] for a later period of a request with
     /// `per_period_endpoints` until its signed details supply a usable destination;
     /// [`Refusal::PeriodNotStarted`]; [`Refusal::AttemptedPeriodsFull`];
-    /// [`Refusal::NotNow`] while the period record's value waits for its scope key or
-    /// doesn't read.
+    /// [`Refusal::NotNow`] while the period record's value waits for its scope key;
+    /// [`Refusal::HeldForUser`] while it doesn't read.
     pub async fn pay_period(
         &mut self,
         request: &RequestRef,
@@ -1230,21 +1265,25 @@ impl Paykit {
             )
             .await?;
         // A blocked payee's period is paid only once the user confirms it (Paykit spec 8.1).
-        let blocked = if options.quote_only {
-            // Acting on a fresh deny-list read can publish an unblock floor. Leave it to
-            // the real dispatch; a quote never authorizes that write.
-            if self.floor_write_is_kept().await? {
-                return Err(crate::floor::unreadable_floor());
-            }
-            if self.denied_as_last_read(&request.payee).await? {
-                return Err(Refusal::NotNow("the payee is blocked".into()).into());
-            }
-            false
-        } else if automatic {
-            self.denied(&request.payee).await?
-        } else {
-            self.denied_for_user(&request.payee).await?
-        };
+        let blocked =
+            if options.quote_only {
+                // Acting on a fresh deny-list read can publish an unblock floor. Leave it to
+                // the real dispatch; a quote never authorizes that write.
+                if self.floor_write_is_kept().await? {
+                    return Err(crate::floor::unreadable_floor());
+                }
+                if self.denied_as_last_read(&request.payee).await? {
+                    return Err(Refusal::HeldForUser(
+                        crate::HeldForUserReason::CounterpartyBlocked("the payee is blocked"),
+                    )
+                    .into());
+                }
+                false
+            } else if automatic {
+                self.denied(&request.payee).await?
+            } else {
+                self.denied_for_user(&request.payee).await?
+            };
         let obligation =
             self.obligation(&request.payee, &request.request_hash, period.start_secs());
         let restored = self.restored_attempts(&obligation).await?;
@@ -1268,10 +1307,10 @@ impl Paykit {
             let accepted_at = held
                 .filter(|r| r.authenticated && !r.doubtful)
                 .and_then(|r| r.written_at_ms)
-                .ok_or_else(|| {
-                    // A later read can authenticate the write.
-                    Refusal::NotNow("no proof dates the accepted subscription's write".into())
-                })?;
+                // A later read can authenticate the write.
+                .ok_or(Refusal::NotNow(crate::NotNowReason::ReadAgain(
+                    "no proof dates the accepted subscription's write",
+                )))?;
             if accepted_at >= period.ends_at {
                 return Err(Refusal::NotAutomatic(
                     "the Billing Period ended before the verified subscription acceptance".into(),
@@ -1394,7 +1433,7 @@ impl Paykit {
         };
         if blocked {
             let amount = paid.ok_or_else(|| {
-                Refusal::NotNow(
+                Refusal::Destination(
                     "Paykit spec 8.1: the blocked payment's transfer amount is unknown".into(),
                 )
             })?;
@@ -1552,8 +1591,8 @@ impl Paykit {
     ///
     /// # Errors
     ///
-    /// [`Refusal::NotNow`] for a period record held whose value doesn't read, never written
-    /// over; the client's errors.
+    /// [`Refusal::HeldForUser`] for a period record held whose value doesn't read, never
+    /// written over; the client's errors.
     async fn period_attempt_write(
         &mut self,
         target: &ActivityTarget,
@@ -1641,6 +1680,35 @@ impl Paykit {
             }
         }
         Ok((finished, conditions))
+    }
+}
+
+#[cfg(test)]
+mod not_open_tests {
+    use super::*;
+    use pubky_switch_client::app::Unopened;
+
+    #[test]
+    fn test_periods_request_record_waiting_for_its_key_waits() {
+        let sealed = RecordContent::Unreadable(Unopened::KeyNotHeld { data_epoch: 2 });
+        assert_eq!(
+            not_open_refusal(Some(&sealed)),
+            Refusal::NotNow(crate::NotNowReason::ValueAwaitsKey)
+        );
+    }
+
+    #[test]
+    fn test_periods_request_record_that_does_not_read_is_held_for_the_user() {
+        for held in [
+            Some(RecordContent::Value(b"{".to_vec())),
+            Some(RecordContent::Unreadable(Unopened::DoesNotOpen)),
+            None,
+        ] {
+            assert!(matches!(
+                not_open_refusal(held.as_ref()),
+                Refusal::HeldForUser(crate::HeldForUserReason::RecordUnreadable(_))
+            ));
+        }
     }
 }
 

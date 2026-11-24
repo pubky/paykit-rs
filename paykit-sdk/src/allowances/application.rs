@@ -82,8 +82,11 @@ pub(super) fn restore_seals(
     saved: &[SealedValue],
     commitment: [u8; 32],
 ) -> Result<()> {
-    let held =
-        || crate::error::Refusal::NotNow("the original Allowance write is not current".into());
+    let held = || {
+        crate::error::Refusal::NotNow(crate::NotNowReason::ReadAgain(
+            "the original Allowance write is not current",
+        ))
+    };
     if operations.len() != saved.len() {
         return Err(held().into());
     }

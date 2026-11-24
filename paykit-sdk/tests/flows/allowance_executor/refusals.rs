@@ -97,11 +97,6 @@ fn terms_with(changes: serde_json::Value) -> AllowanceTerms {
     AllowanceTerms::from_json(&json).unwrap()
 }
 
-/// A temporary refusal, with its reason.
-fn not_now(reason: &str) -> Refusal {
-    Refusal::NotNow(reason.into())
-}
-
 /// Bob's app sends alice's wallet a second, different proposal of the Allowance at `key`,
 /// which conflicts it.
 async fn conflict(w: &World, payer: &mut Paykit, key: &[u8; 32]) {
@@ -347,7 +342,9 @@ async fn test_allowance_refusals_blocked_counterparty_pauses_until_unblocked() {
     assert_eq!(payer.allowance(&key).await.unwrap().blocked, Some(true));
     assert_eq!(
         refused(Box::pin(payer.pay_under_allowance(&request, &key)).await),
-        not_now("the counterparty is blocked")
+        paykit_sdk::Refusal::HeldForUser(paykit_sdk::HeldForUserReason::CounterpartyBlocked(
+            "the counterparty is blocked"
+        ))
     );
     assert!(w.rail.all_executions().is_empty());
     // Unblocked, the counterparty's next request is paid. One dated before the block stays
@@ -402,7 +399,9 @@ async fn test_allowance_refusals_unanswered_proposal_is_not_now() {
     let request = Box::pin(one_time(&w, &mut shop, &mut payer, "1")).await;
     assert_eq!(
         refused(Box::pin(payer.pay_under_allowance(&request, &second.record)).await),
-        not_now("the Allowance isn't accepted yet")
+        paykit_sdk::Refusal::NotNow(paykit_sdk::NotNowReason::AwaitingCounterparty(
+            "the Allowance isn't accepted yet"
+        ))
     );
     assert!(w.rail.all_executions().is_empty());
 }
@@ -416,7 +415,9 @@ async fn test_allowance_refusals_terms_not_active_yet_is_not_now() {
     let request = Box::pin(one_time(&w, &mut shop, &mut payer, "1")).await;
     assert_eq!(
         refused(Box::pin(payer.pay_under_allowance(&request, &key)).await),
-        not_now("the Allowance's terms aren't active yet")
+        paykit_sdk::Refusal::NotNow(paykit_sdk::NotNowReason::CallAgain(
+            "the Allowance's terms aren't active yet"
+        ))
     );
     assert!(w.rail.all_executions().is_empty());
 }
@@ -451,7 +452,9 @@ async fn test_allowance_refusals_lifetime_limit_waits_while_reserved_then_is_fin
     let second = Box::pin(one_time(&w, &mut shop, &mut payer, "50")).await;
     assert_eq!(
         refused(Box::pin(payer.pay_under_allowance(&second, &key)).await),
-        not_now("the lifetime limit has no room")
+        paykit_sdk::Refusal::NotNow(paykit_sdk::NotNowReason::AllowanceLimit {
+            limit: "lifetime".into()
+        })
     );
     // Once the 70 are paid, nothing is reserved, and no room comes back.
     w.rail.settle(&attempt_id, true);
@@ -567,7 +570,7 @@ async fn test_allowance_refusals_view_flag_matches_the_payment_refusal() {
         "{paid:?}"
     );
 
-    // Accepted, but never taken up by this app: no flag; the payment waits.
+    // Accepted, but never taken up by this app: no flag; the payment is held for the host.
     let second = Box::pin(payer.propose_executable_allowance(
         shop.identity(),
         terms(),
@@ -595,7 +598,13 @@ async fn test_allowance_refusals_view_flag_matches_the_payment_refusal() {
     ))
     .await;
     assert!(
-        !shown && matches!(paid, Err(Refusal::NotNow(_))),
+        !shown
+            && matches!(
+                paid,
+                Err(Refusal::HeldForUser(
+                    paykit_sdk::HeldForUserReason::AllowanceExecutionHeld(_)
+                ))
+            ),
         "{paid:?}"
     );
 
@@ -793,7 +802,9 @@ async fn test_allowance_refusals_confirmation_waits_while_blocked() {
     assert!(!payer.allowance(&key).await.unwrap().confirmation_needed);
     assert_eq!(
         refusal_of(Box::pin(payer.resume_allowance_executor(&key)).await),
-        not_now("the counterparty is blocked")
+        paykit_sdk::Refusal::HeldForUser(paykit_sdk::HeldForUserReason::CounterpartyBlocked(
+            "the counterparty is blocked"
+        ))
     );
     // Unblocked, the user is asked, confirms, and the counterparty's next request is paid.
     Box::pin(payer.unblock(&shop.identity())).await.unwrap();
@@ -955,7 +966,9 @@ async fn test_allowance_refusals_kept_grant_write_is_not_now_until_it_lands() {
         .expect_err("the grant's batch is kept");
     // While the batch can't be sent again, the resume and a payment under the Allowance
     // wait for it, and the user is asked nothing.
-    let kept = not_now("the executor grant's write waits to be sent again");
+    let kept = paykit_sdk::Refusal::NotNow(paykit_sdk::NotNowReason::EarlierWriteUnresolved(
+        "the executor grant's write waits to be sent again",
+    ));
     w.alice.switch().fail_next(unreachable());
     assert_eq!(
         refusal_of(Box::pin(payer.resume_allowance_executor(&key)).await),
@@ -1082,9 +1095,9 @@ async fn test_allowance_refusals_missed_mark_waits_with_its_reason() {
         )
         .await
         .unwrap();
-    let waits = not_now(
+    let waits = paykit_sdk::Refusal::NotNow(paykit_sdk::NotNowReason::ReadAgain(
         "a missed item holds every Allowance until the next receive marks it for confirmation",
-    );
+    ));
     assert_eq!(
         refusal_of(Box::pin(payer.resume_allowance_executor(&key)).await),
         waits
@@ -1368,7 +1381,9 @@ async fn test_allowance_refusals_grant_after_the_backup_asks_no_confirmation() {
     assert!(!view.consented && !view.confirmation_needed, "{view:?}");
     assert_eq!(
         refusal_of(Box::pin(payer.resume_allowance_executor(&key)).await),
-        not_now("this app's grant is held, but its consent isn't on this device")
+        paykit_sdk::Refusal::HeldForUser(paykit_sdk::HeldForUserReason::AllowanceExecutionHeld(
+            "this app's grant is held, but its consent isn't on this device"
+        ))
     );
 }
 

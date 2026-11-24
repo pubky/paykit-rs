@@ -97,8 +97,10 @@ pub(super) enum Acceptance {
 }
 
 fn not_current() -> PaykitError {
-    Refusal::NotNow("the current pending proposal and Allowance could not be verified".into())
-        .into()
+    Refusal::NotNow(crate::NotNowReason::ReadAgain(
+        "the current pending proposal and Allowance could not be verified",
+    ))
+    .into()
 }
 
 pub(super) fn absent(key: [u8; 32]) -> Condition {
@@ -618,9 +620,9 @@ impl Paykit {
         };
         let previous = intent.message.stored(&intent.peer)?;
         if previous.body().kind() != kind {
-            return Err(Refusal::NotNow(
-                "an earlier answer to this proposal is awaiting settlement".into(),
-            )
+            return Err(Refusal::NotNow(crate::NotNowReason::EarlierWriteUnresolved(
+                "an earlier answer to this proposal is awaiting settlement",
+            ))
             .into());
         }
         let msg_id = &previous.message().msg_id;
@@ -634,10 +636,7 @@ impl Paykit {
                 Box::pin(self.retry_prepared_answer(key, &intent)).await?;
                 Ok(Some(msg_id.clone()))
             }
-            _ => Err(Refusal::NotNow(
-                "the original Allowance answer has no verified outcome".into(),
-            )
-            .into()),
+            _ => Err(Refusal::NotNow(crate::NotNowReason::AnswerOutcomeUnknown).into()),
         }
     }
 
@@ -796,10 +795,9 @@ impl Paykit {
             let ledger = match self.acceptance(p, reply, peer, id).await? {
                 Acceptance::Eligible { ledger } => ledger,
                 Acceptance::BeforeLoss => {
-                    return Err(Refusal::NotNow(
-                        "the proposal predates the Allower's provider loss".into(),
-                    )
-                    .into());
+                    // A proposal from before the Allower's provider loss is never accepted:
+                    // only a new proposal goes on (Paykit spec 7.3, 8.3).
+                    return Err(Refusal::AllowanceEnded.into());
                 }
                 Acceptance::MissingExecutionScope => {
                     return Err(Refusal::ScopeMissing("paykit_allowance_execute".into()).into());

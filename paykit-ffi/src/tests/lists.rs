@@ -92,7 +92,7 @@ async fn check_sharing(wallet: &NativeWallet, recipient: &[u8; 32]) -> TestResul
         .ok_or("payer published a list")?;
     let (case, failure) = categorized(error).ok_or("expected a publication refusal")?;
     assert_eq!(case, "needs_user");
-    assert_eq!(failure.code(), "not_now");
+    assert_eq!(failure.code(), "scope_missing");
 
     for result in [
         wallet.publish_list_to(vec![1; 31]).await,
@@ -266,8 +266,7 @@ async fn check_conflicts(wallet: &NativeWallet, recipient: &[u8; 32]) -> TestRes
         let (case, failure) = error
             .and_then(categorized)
             .ok_or("expected a publication counter refusal")?;
-        assert_eq!(case, "needs_user");
-        assert_eq!(failure.code(), "not_now");
+        assert_eq!((case, failure.code().as_str()), ("retry_later", "read_again"));
     }
     Ok(())
 }

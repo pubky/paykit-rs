@@ -130,30 +130,32 @@ impl Paykit {
     fn require_recovery_reader(&self) -> Result<()> {
         self.refresh_own()?;
         let cert = self.app.cert();
-        if !self.own_identity_fresh()
-            || !self.holds(RECOVERY)
-            || !self
+        let reader = RecoveryReader {
+            fresh: self.own_identity_fresh(),
+            current: self
                 .app
                 .own_identity()
                 .current_now(&self.app_id(), &cert.hash())
-            || cert.expired_at(self.now())
-            || self
-                .app
-                .scope_key(self.app.data_epoch(), RECOVERY)
-                .is_none()
-        {
-            return Err(Refusal::NotNow("the wallet needs current recovery access".into()).into());
-        }
-        Ok(())
+                && !cert.expired_at(self.now()),
+            access: self.holds(RECOVERY)
+                && self
+                    .app
+                    .scope_key(self.app.data_epoch(), RECOVERY)
+                    .is_some(),
+        };
+        reader
+            .refusal()
+            .map_or(Ok(()), |refusal| Err(refusal.into()))
     }
 
     async fn refresh_recovery_reader(&mut self) -> Result<()> {
         let refreshed = self.app.refresh_identity().await;
         self.note_own_record_write(&refreshed);
         if refreshed?.confirmed_at().is_none() {
-            return Err(
-                Refusal::NotNow("current recovery access cannot be verified".into()).into(),
-            );
+            return Err(Refusal::NotNow(crate::NotNowReason::ReadAgain(
+                "current recovery access cannot be verified",
+            ))
+            .into());
         }
         self.require_recovery_reader()
     }
@@ -172,7 +174,12 @@ impl Paykit {
                     && doc.body().recovery_from.is_some()
                     && doc.body().recovery_from == self.app.own_identity().body().recovery_from
             })
-            .ok_or_else(|| Refusal::NotNow("the recovery opening is not available".into()).into())
+            .ok_or_else(|| {
+                Refusal::NotNow(crate::NotNowReason::ReadAgain(
+                    "the recovery opening is not available",
+                ))
+                .into()
+            })
     }
 
     /// Read the opening and the explicit removals for the provider loss the wallet
@@ -181,7 +188,9 @@ impl Paykit {
     ///
     /// # Errors
     ///
-    /// [`Refusal::NotNow`] until the current grant, key and opening are available.
+    /// [`Refusal::NotNow`] until the own `identity.json` is confirmed fresh and the opening is
+    /// available; [`Refusal::NotCurrent`] while the app's certificate isn't current or has
+    /// expired; [`Refusal::RecoveryNeeded`] while the app lacks the recovery scope or its key.
     /// [`Refusal::LossChanged`] if a different loss now decides. Identity and store
     /// errors propagate.
     pub async fn recovery_members(&mut self) -> Result<Option<RecoveryMembers>> {
@@ -213,17 +222,100 @@ impl Paykit {
         }
         self.refresh_recovery_reader().await?;
         if self.current_opening(&loss).await?.hash() != members.opening {
-            return Err(
-                Refusal::NotNow("the recovery opening changed during the read".into()).into(),
-            );
+            return Err(Refusal::NotNow(crate::NotNowReason::ReadAgain(
+                "the recovery opening changed during the read",
+            ))
+            .into());
         }
         if self.app.own_identity().version() != identity_version {
-            return Err(Refusal::NotNow(
-                "the app directory changed during the recovery read".into(),
-            )
+            return Err(Refusal::NotNow(crate::NotNowReason::ReadAgain(
+                "the app directory changed during the recovery read",
+            ))
             .into());
         }
         self.require_recovery_reader()?;
         Ok(Some(members))
+    }
+}
+
+/// What the app holds for a recovery read: its own `identity.json` confirmed fresh, a
+/// certificate listed as current and not expired, and the recovery scope with its key.
+#[derive(Clone, Copy, Debug)]
+struct RecoveryReader {
+    fresh: bool,
+    current: bool,
+    access: bool,
+}
+
+impl RecoveryReader {
+    /// The refusal of a recovery read, by what clears it: a read of the own identity, a
+    /// current certificate, or the recovery access the signer gives.
+    fn refusal(self) -> Option<Refusal> {
+        if !self.fresh {
+            Some(Refusal::NotNow(crate::NotNowReason::ReadAgain(
+                "the own identity.json is not confirmed fresh for the recovery read",
+            )))
+        } else if !self.current {
+            Some(Refusal::NotCurrent(
+                "the app's certificate is not current for the recovery read".into(),
+            ))
+        } else if !self.access {
+            Some(Refusal::RecoveryNeeded(
+                crate::RecoveryReason::RecoveryAccessMissing,
+            ))
+        } else {
+            None
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const READER: RecoveryReader = RecoveryReader {
+        fresh: true,
+        current: true,
+        access: true,
+    };
+
+    #[test]
+    fn test_recovery_reader_with_current_access_reads() {
+        assert_eq!(READER.refusal(), None);
+    }
+
+    #[test]
+    fn test_recovery_reader_waits_for_a_fresh_identity() {
+        let stale = RecoveryReader {
+            fresh: false,
+            ..READER
+        };
+        assert!(matches!(
+            stale.refusal(),
+            Some(Refusal::NotNow(crate::NotNowReason::ReadAgain(_)))
+        ));
+    }
+
+    #[test]
+    fn test_recovery_reader_not_current_without_a_current_certificate() {
+        let expired = RecoveryReader {
+            current: false,
+            ..READER
+        };
+        assert!(matches!(expired.refusal(), Some(Refusal::NotCurrent(_))));
+    }
+
+    #[test]
+    fn test_recovery_reader_needs_the_recovery_access() {
+        let missing = RecoveryReader {
+            access: false,
+            ..READER
+        };
+        assert_eq!(
+            missing.refusal(),
+            Some(Refusal::RecoveryNeeded(
+                crate::RecoveryReason::RecoveryAccessMissing
+            ))
+        );
     }
 }

@@ -191,6 +191,29 @@ struct Decisive {
     statements_count: bool,
 }
 
+/// Why a statement about `loss` doesn't count against `decisive`, the loss that decides the
+/// doubt now, or `None` when it counts (Paykit spec 7.3): another loss decides; the loss is
+/// followed but its step hasn't run, which the step clears; or no loss is followed, which
+/// leaves nothing to state.
+fn statement_refused(decisive: Option<Decisive>, loss: &LossBoundary) -> Option<Refusal> {
+    match decisive {
+        Some(Decisive {
+            boundary,
+            statements_count: true,
+        }) if boundary == *loss => None,
+        Some(Decisive { boundary, .. }) if boundary != *loss => Some(Refusal::LossChanged {
+            decisive: Some(boundary),
+        }),
+        Some(_) => Some(Refusal::NotNow(crate::NotNowReason::ReadAgain(
+            "Paykit spec 7.3: the provider loss followed has no step run yet, so nothing is in \
+             doubt after it",
+        ))),
+        None => Some(Refusal::Usage(
+            "Paykit spec 7.3: no provider loss is kept, so nothing is in doubt after one".into(),
+        )),
+    }
+}
+
 impl Paykit {
     async fn decisive_loss(&self) -> Result<Option<Decisive>> {
         let kept = self.local_get::<LossBoundary>(key::LOSS_BOUNDARY).await?;
@@ -345,8 +368,9 @@ impl Paykit {
     /// # Errors
     ///
     /// [`crate::Refusal::LossChanged`] when `loss` isn't the loss that decides the doubt now,
-    /// with the one that does; [`crate::Refusal::NotNow`] while the app keeps no provider
-    /// loss: none followed, or the one followed, `loss`, has no step run yet.
+    /// with the one that does; [`crate::Refusal::Usage`] while the app follows no provider
+    /// loss, so nothing is in doubt after one; [`crate::Refusal::NotNow`] while the one
+    /// followed, `loss`, has no step run yet.
     /// [`crate::PaykitError::Lib`] for a certificate Paykit refuses; a store failure.
     pub async fn confirm_not_paid_before_loss(
         &mut self,
@@ -357,24 +381,8 @@ impl Paykit {
         // A delivery operation for the whole call (Paykit spec 8.1).
         let _delivery = self.delivery_operation();
         self.refresh_own()?;
-        match self.decisive_loss().await? {
-            Some(Decisive {
-                boundary,
-                statements_count: true,
-            }) if boundary == *loss => {}
-            Some(Decisive { boundary, .. }) if boundary != *loss => {
-                return Err(Refusal::LossChanged {
-                    decisive: Some(boundary),
-                }
-                .into());
-            }
-            _ => {
-                return Err(Refusal::NotNow(
-                    "Paykit spec 7.3: no provider loss is kept, so nothing is in doubt after one"
-                        .into(),
-                )
-                .into());
-            }
+        if let Some(refusal) = statement_refused(self.decisive_loss().await?, loss) {
+            return Err(refusal.into());
         }
         self.local_put(&key::not_paid_before_loss(obligation), &true)
             .await
@@ -485,6 +493,45 @@ mod tests {
         LocalWrite::DeletePrefix {
             prefix: key::NOT_PAID_BEFORE_LOSS.as_bytes().to_vec(),
         }
+    }
+
+    #[test]
+    fn test_loss_statement_counts_for_the_kept_loss() {
+        let kept = Decisive {
+            boundary: at(2),
+            statements_count: true,
+        };
+        assert_eq!(statement_refused(Some(kept), &at(2)), None);
+        let other = Decisive {
+            boundary: at(3),
+            statements_count: true,
+        };
+        assert_eq!(
+            statement_refused(Some(other), &at(2)),
+            Some(Refusal::LossChanged {
+                decisive: Some(at(3))
+            })
+        );
+    }
+
+    #[test]
+    fn test_loss_statement_waits_for_the_followed_loss_step() {
+        let followed = Decisive {
+            boundary: at(2),
+            statements_count: false,
+        };
+        assert!(matches!(
+            statement_refused(Some(followed), &at(2)),
+            Some(Refusal::NotNow(crate::NotNowReason::ReadAgain(_)))
+        ));
+    }
+
+    #[test]
+    fn test_loss_statement_without_a_loss_is_a_usage_error() {
+        assert!(matches!(
+            statement_refused(None, &at(2)),
+            Some(Refusal::Usage(_))
+        ));
     }
 
     #[test]

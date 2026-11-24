@@ -73,6 +73,7 @@ mod periods;
 mod protocol;
 mod publish;
 pub mod rail;
+mod refusal_reasons;
 #[cfg(feature = "test-support")]
 pub use executor::with_early_ledger_compaction;
 mod receipt_delivery;
@@ -137,6 +138,7 @@ pub use receive::{
     HeldList, KEPT_MESSAGE_MS, LISTS_REFRESH_MS, MAX_KEPT_REPLIES, MAX_KEPT_REPLIES_PER_SENDER,
 };
 pub use reconcile::{Doubtful, ReconcileReport, Resolution};
+pub use refusal_reasons::{HeldForUserReason, ListingRetry, NotNowReason, RecoveryReason};
 pub use requests::{
     AcceptOptions, MessageDelivery, PayeeActivity, PayeeStatus, RequestDraft, RequestRef,
     RequestStatus, RequestView, SentMessage, SentRequest,

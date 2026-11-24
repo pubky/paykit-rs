@@ -143,11 +143,10 @@ impl ReceiptSource {
             match other {
                 Self::Bound { .. } => *self = other,
                 Self::Pending(more) => {
+                    // More source keys than a retained receipt holds: its credit history
+                    // can't be kept (Paykit spec 6).
                     if keys.union(&more).count() > MAX_RECEIPT_SOURCES {
-                        return Err(Refusal::NotNow(
-                            "too many source keys for a retained receipt".into(),
-                        )
-                        .into());
+                        return Err(Refusal::CreditHistoryLost.into());
                     }
                     keys.extend(more);
                 }
@@ -824,9 +823,9 @@ impl Paykit {
             }
         }
         if incomplete {
-            return Err(Refusal::NotNow(
-                "the signed request of a retained receipt is unavailable".into(),
-            )
+            return Err(Refusal::NotNow(crate::NotNowReason::ReadAgain(
+                "the signed request of a retained receipt is unavailable",
+            ))
             .into());
         }
         Ok(false)

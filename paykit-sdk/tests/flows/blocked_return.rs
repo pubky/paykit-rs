@@ -6267,7 +6267,12 @@ async fn test_blocked_return_kept_floor_batch_holds_an_open_restore_verdict() {
         .await
         .expect_err("reconcile mode waits for the kept floor batch");
     assert!(
-        matches!(refused.refusal(), Some(paykit_sdk::Refusal::NotNow(why)) if why.contains("floor")),
+        matches!(
+            refused.refusal(),
+            Some(paykit_sdk::Refusal::NotNow(
+                paykit_sdk::NotNowReason::FloorUnreadable
+            ))
+        ),
         "{refused:?}"
     );
     assert_eq!(verdict(&restored).await, serde_json::json!("open"));
