@@ -637,7 +637,9 @@ pub async fn test_callback_answers(
             Err(_) => "refused",
         }
     }
-    fn served<T>(answer: Result<Result<T, HomeserverError>, tokio::time::error::Elapsed>) -> &'static str {
+    fn served<T>(
+        answer: Result<Result<T, HomeserverError>, tokio::time::error::Elapsed>,
+    ) -> &'static str {
         match answer {
             Err(_) => "no_answer",
             Ok(Ok(_)) => "answered",
@@ -651,7 +653,10 @@ pub async fn test_callback_answers(
         let owner = vec![7; 32];
         let mut answers = vec![
             format!("store.get={}", stored(store.get(space.clone(), vec![1]))),
-            format!("store.acquire={}", stored(store.acquire(space.clone(), owner.clone()))),
+            format!(
+                "store.acquire={}",
+                stored(store.acquire(space.clone(), owner.clone()))
+            ),
             format!(
                 "store.commit_if={}",
                 stored(store.commit_if(space.clone(), owner.clone(), Vec::new()))
@@ -693,7 +698,8 @@ pub async fn test_callback_answers(
         ));
         answers.push(format!(
             "method.payment={}",
-            match tokio::time::timeout(limit, method.payment("AAAAAAAAAAAAAAAAAAAAAA".into())).await {
+            match tokio::time::timeout(limit, method.payment("AAAAAAAAAAAAAAAAAAAAAA".into())).await
+            {
                 Err(_) => "no_answer",
                 Ok(Ok(_)) => "answered",
                 Ok(Err(MethodError::Unknown { .. })) => "unknown",

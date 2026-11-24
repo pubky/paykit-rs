@@ -12,16 +12,47 @@ CALLBACK_WRAPPERS = (
     "uniffiTraitInterfaceCallAsyncWithError",
 )
 GENERATED_CATCH = "catch(e: kotlin.Exception)"
+GENERATED_TEXT = "FfiConverterString.lower(e.toString())"
+# Only this fixed text crosses to Rust for a failed callback, never the host's own.
+FIXED_TEXT = 'FfiConverterString.lower("host callback failed")'
+# What isn't an Exception, and a coroutine's cancellation, go on as before once Paykit has its
+# answer: the platform still reports an Error, and cancellation still cancels.
+RETHROW = ("if (e !is kotlin.Exception || "
+           "e is kotlin.coroutines.cancellation.CancellationException) throw e")
+
+
+def _patch_wrapper(body, name):
+    """Patch one wrapper's text, checking each piece on its own."""
+    if body.count(GENERATED_CATCH) != 1 or body.count(GENERATED_TEXT) != 1:
+        raise ValueError(f"unexpected generated catch in {name}")
+    body = body.replace(GENERATED_CATCH, "catch(e: kotlin.Throwable)")
+    body = body.replace(GENERATED_TEXT, FIXED_TEXT)
+    if "Async" in name:
+        # The answer goes to Rust first; the async wrapper then leaves its coroutine.
+        marker = "return@coroutineBlock"
+        if body.count(marker) != 1:
+            raise ValueError(f"unexpected generated return in {name}")
+        indent = body[:body.index(marker)].rsplit("\n", 1)[1]
+        return body.replace(marker, RETHROW + "\n" + indent + marker)
+    # The sync wrapper writes the unexpected-failure status, then rethrows.
+    status = "callStatus.error_buf = " + FIXED_TEXT
+    if body.count(status) != 1:
+        raise ValueError(f"unexpected generated status in {name}")
+    at = body.index(status) + len(status)
+    indent = body[:body.index(status)].rsplit("\n", 1)[1]
+    return body[:at] + "\n" + indent + RETHROW + body[at:]
 
 
 def catch_throwable(kotlin):
-    """Make each generated callback wrapper catch every Throwable, not only Exception.
+    """Make each generated callback wrapper answer every Throwable, not only Exception.
 
     A Kotlin Error (an AssertionError, an OutOfMemoryError) thrown by a host callback otherwise
     escapes the wrapper: a sync call then leaves its status at success with a zeroed answer,
     and an async call never answers. Caught, it answers as an unexpected failure, which the
-    wallet reads as an unknown outcome. Any change in the generated text fails here, so an
-    upgrade of the generator can't drop this.
+    wallet reads as an unknown outcome, with a fixed text; then an Error, and a coroutine's
+    cancellation, are thrown on, so the platform reports them as before. Each wrapper is
+    checked on its own, and any change in the generated text fails here, so an upgrade of the
+    generator can't drop this.
     """
     if kotlin.count(GENERATED_CATCH) != len(CALLBACK_WRAPPERS):
         raise ValueError("expected one generated catch in each callback wrapper")
@@ -29,11 +60,9 @@ def catch_throwable(kotlin):
         match = re.search(rf"^internal inline fun ?<[^>]*> {name}\(", kotlin, re.MULTILINE)
         if not match:
             raise ValueError(f"missing generated callback wrapper {name}")
-        at = kotlin.find(GENERATED_CATCH, match.end())
-        following = kotlin.find("\ninternal ", match.end())
-        if at < 0 or (0 <= following < at):
-            raise ValueError(f"missing generated catch in {name}")
-        kotlin = kotlin[:at] + "catch(e: kotlin.Throwable)" + kotlin[at + len(GENERATED_CATCH):]
+        end = kotlin.find("\ninternal ", match.end())
+        end = len(kotlin) if end < 0 else end
+        kotlin = kotlin[:match.start()] + _patch_wrapper(kotlin[match.start():end], name) + kotlin[end:]
     return kotlin
 
 

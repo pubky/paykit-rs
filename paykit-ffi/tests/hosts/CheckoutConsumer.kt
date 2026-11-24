@@ -465,17 +465,41 @@ private class DyingCallbacks : ReceiptReader(), WalletStore {
 }
 
 /// A callback that dies with an Error answers as unknown at once, never as success: a store
-/// write isn't read as committed or released, and a `pay` stays possibly sent.
+/// write isn't read as committed or released, and a `pay` stays possibly sent. The platform
+/// still reports each Error: JNA's callback handler for a sync callback, the default uncaught
+/// handler for an async one.
 private fun dyingCallbacks() = runBlocking {
-    val host = DyingCallbacks()
-    val proof = """{"settlement":"a1"}""".toByteArray()
-    val answered = testMethodAnswers(host, testDeclaration, testEndpoints, proof)
-    check(answered.selected == null && answered.selectionFailure == "method_unknown")
-    check(answered.transferAmount == null && answered.settlementId == null)
-    check(testCallbackAnswers(host, host, host) == listOf(
-        "store.get=unknown", "store.acquire=unknown", "store.commit_if=unknown", "store.release=unknown",
-        "home.get=unknown", "home.put=unknown", "method.pay=possibly_sent", "method.payment=unknown",
-    ))
+    val died = { e: Throwable -> e is AssertionError && e.message == "callback died" }
+    val synced = AtomicInteger()
+    val awaited = AtomicInteger()
+    val previousCallbackHandler = com.sun.jna.Native.getCallbackExceptionHandler()
+    val previousThreadHandler = Thread.getDefaultUncaughtExceptionHandler()
+    com.sun.jna.Native.setCallbackExceptionHandler { callback, e ->
+        if (died(e)) synced.incrementAndGet() else previousCallbackHandler.uncaughtException(callback, e)
+    }
+    Thread.setDefaultUncaughtExceptionHandler { thread, e ->
+        if (died(e)) awaited.incrementAndGet() else previousThreadHandler?.uncaughtException(thread, e)
+    }
+    try {
+        val host = DyingCallbacks()
+        val proof = """{"settlement":"a1"}""".toByteArray()
+        val answered = testMethodAnswers(host, testDeclaration, testEndpoints, proof)
+        check(answered.selected == null && answered.selectionFailure == "method_unknown")
+        check(answered.transferAmount == null && answered.settlementId == null)
+        check(testCallbackAnswers(host, host, host) == listOf(
+            "store.get=unknown", "store.acquire=unknown", "store.commit_if=unknown", "store.release=unknown",
+            "home.get=unknown", "home.put=unknown", "method.pay=possibly_sent", "method.payment=unknown",
+        ))
+        // Every callback ran and reported its Error: three of the method's and four of the
+        // store's sync calls, two of the Homeserver's and two of the method's async calls.
+        withTimeout(10_000) {
+            while (synced.get() < 7 || awaited.get() < 4) delay(10)
+        }
+        check(synced.get() == 7 && awaited.get() == 4)
+    } finally {
+        com.sun.jna.Native.setCallbackExceptionHandler(previousCallbackHandler)
+        Thread.setDefaultUncaughtExceptionHandler(previousThreadHandler)
+    }
 }
 
 /// Text the switch gave never leaves the bindings: not in a message, a description or a reason.
