@@ -1,11 +1,44 @@
-"""Protect the default descriptions of binding values that can contain wallet data."""
+"""Make the generated host callbacks answer every failure, and protect the default
+descriptions of binding values that can contain wallet data."""
 from pathlib import Path
 import re
 import sys
 
+# The generated wrappers around a host callback: sync and async, with and without a typed error.
+CALLBACK_WRAPPERS = (
+    "uniffiTraitInterfaceCall",
+    "uniffiTraitInterfaceCallWithError",
+    "uniffiTraitInterfaceCallAsync",
+    "uniffiTraitInterfaceCallAsyncWithError",
+)
+GENERATED_CATCH = "catch(e: kotlin.Exception)"
+
+
+def catch_throwable(kotlin):
+    """Make each generated callback wrapper catch every Throwable, not only Exception.
+
+    A Kotlin Error (an AssertionError, an OutOfMemoryError) thrown by a host callback otherwise
+    escapes the wrapper: a sync call then leaves its status at success with a zeroed answer,
+    and an async call never answers. Caught, it answers as an unexpected failure, which the
+    wallet reads as an unknown outcome. Any change in the generated text fails here, so an
+    upgrade of the generator can't drop this.
+    """
+    if kotlin.count(GENERATED_CATCH) != len(CALLBACK_WRAPPERS):
+        raise ValueError("expected one generated catch in each callback wrapper")
+    for name in CALLBACK_WRAPPERS:
+        match = re.search(rf"^internal inline fun ?<[^>]*> {name}\(", kotlin, re.MULTILINE)
+        if not match:
+            raise ValueError(f"missing generated callback wrapper {name}")
+        at = kotlin.find(GENERATED_CATCH, match.end())
+        following = kotlin.find("\ninternal ", match.end())
+        if at < 0 or (0 <= following < at):
+            raise ValueError(f"missing generated catch in {name}")
+        kotlin = kotlin[:at] + "catch(e: kotlin.Throwable)" + kotlin[at + len(GENERATED_CATCH):]
+    return kotlin
+
 
 def redact(kotlin_path, swift_path):
-    kotlin = kotlin_path.read_text()
+    kotlin = catch_throwable(kotlin_path.read_text())
     # UniFFI's Long buffer length already matches the JNA signature. Kotlin 2.3
     # diagnoses the redundant conversion when the consumer treats warnings as errors.
     length = "getByteBuffer(0, this.len.toLong())"

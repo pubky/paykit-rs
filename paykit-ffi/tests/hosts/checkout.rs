@@ -619,6 +619,92 @@ pub struct MethodAnswers {
     pub settlement_id: Option<Vec<u8>>,
 }
 
+/// What the wallet makes of each host callback that fails, as `<callback>=<answer>` lines, for
+/// the host tests to check that a callback which dies, by any throw, answers as unknown and
+/// never as success. Each async call is bounded, so one that never answers shows as
+/// `no_answer`.
+#[uniffi::export]
+pub async fn test_callback_answers(
+    store: Arc<dyn WalletStore>,
+    home: Arc<dyn crate::WalletHomeserver>,
+    method: Arc<dyn PaymentMethod>,
+) -> Result<Vec<String>, WalletError> {
+    use crate::{HomeserverError, MethodError, StorageError};
+    fn stored<T>(answer: Result<T, StorageError>) -> &'static str {
+        match answer {
+            Ok(_) => "answered",
+            Err(StorageError::Unknown) => "unknown",
+            Err(_) => "refused",
+        }
+    }
+    fn served<T>(answer: Result<Result<T, HomeserverError>, tokio::time::error::Elapsed>) -> &'static str {
+        match answer {
+            Err(_) => "no_answer",
+            Ok(Ok(_)) => "answered",
+            Ok(Err(HomeserverError::Unavailable)) => "unknown",
+            Ok(Err(_)) => "refused",
+        }
+    }
+    let limit = Duration::from_secs(2);
+    crate::runtime::run(async move {
+        let space = String::from("callback-check");
+        let owner = vec![7; 32];
+        let mut answers = vec![
+            format!("store.get={}", stored(store.get(space.clone(), vec![1]))),
+            format!("store.acquire={}", stored(store.acquire(space.clone(), owner.clone()))),
+            format!(
+                "store.commit_if={}",
+                stored(store.commit_if(space.clone(), owner.clone(), Vec::new()))
+            ),
+            format!("store.release={}", stored(store.release(space, owner))),
+        ];
+        let identity = vec![5; 32];
+        let path = String::from("/pub/example");
+        answers.push(format!(
+            "home.get={}",
+            served(tokio::time::timeout(limit, home.get(identity.clone(), path.clone())).await)
+        ));
+        answers.push(format!(
+            "home.put={}",
+            served(tokio::time::timeout(limit, home.put(identity, path, vec![1])).await)
+        ));
+        let payment = crate::MethodPayment {
+            endpoint: "btc-lightning-bolt11".into(),
+            payload: "lnbc1checkout".into(),
+            amount: Amount {
+                asset: "btc".into(),
+                value: "7".into(),
+            },
+            attempt_id: "AAAAAAAAAAAAAAAAAAAAAA".into(),
+            payment_reference: None,
+        };
+        // A `pay` that fails is possibly sent: the wallet keeps the attempt open and asks
+        // the lookup later (Paykit spec 7.2).
+        answers.push(format!(
+            "method.pay={}",
+            match tokio::time::timeout(limit, method.pay(payment)).await {
+                Err(_) => "no_answer",
+                Ok(Ok(_)) => "answered",
+                Ok(Err(error)) => match paykit_sdk::RailError::from(error) {
+                    paykit_sdk::RailError::Unavailable(_) => "possibly_sent",
+                    _ => "refused",
+                },
+            }
+        ));
+        answers.push(format!(
+            "method.payment={}",
+            match tokio::time::timeout(limit, method.payment("AAAAAAAAAAAAAAAAAAAAAA".into())).await {
+                Err(_) => "no_answer",
+                Ok(Ok(_)) => "answered",
+                Ok(Err(MethodError::Unknown { .. })) => "unknown",
+                Ok(Err(_)) => "refused",
+            }
+        ));
+        Ok(answers)
+    })
+    .await
+}
+
 /// Call `method`'s synchronous callbacks as Paykit does for the test checkout's endpoint,
 /// with `proof_json` as the proof.
 #[uniffi::export]

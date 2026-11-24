@@ -4,6 +4,7 @@ use pubky_switch_harness::{Backend, World};
 use std::{error::Error, sync::Arc};
 
 mod allowances;
+mod bindings_script;
 mod executor;
 mod extensions;
 mod host_calls;

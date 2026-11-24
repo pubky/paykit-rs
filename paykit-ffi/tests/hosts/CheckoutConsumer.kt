@@ -446,6 +446,38 @@ private fun throwingCallbacks() {
     }
 }
 
+/// A host whose callbacks die with an Error, not an Exception: the store, the Homeserver and
+/// the payment method.
+private class DyingCallbacks : ReceiptReader(), WalletStore {
+    private fun die(): Nothing = throw AssertionError("callback died")
+    override fun get(namespace: String, key: ByteArray): ByteArray? = die()
+    override fun scan(namespace: String, prefix: ByteArray, after: ByteArray?, limit: UInt): List<StoreEntry> = die()
+    override fun acquire(namespace: String, owner: ByteArray): Boolean = die()
+    override fun release(namespace: String, owner: ByteArray) = die()
+    override fun commitIf(namespace: String, owner: ByteArray, writes: List<StoreWrite>): Boolean = die()
+    override suspend fun get(identity: ByteArray, path: String): ByteArray? = die()
+    override suspend fun put(identity: ByteArray, path: String, bytes: ByteArray) = die()
+    override fun selectEndpoints(candidates: List<EndpointCandidate>, amount: Amount?): SelectedEndpoints = die()
+    override fun transfer(endpoint: String, payload: String, amount: Amount): MethodTransfer = die()
+    override fun settlementId(endpoint: String, proofJson: ByteArray): ByteArray? = die()
+    override suspend fun pay(payment: MethodPayment): MethodOutcome = die()
+    override suspend fun payment(attemptId: String): MethodOutcome? = die()
+}
+
+/// A callback that dies with an Error answers as unknown at once, never as success: a store
+/// write isn't read as committed or released, and a `pay` stays possibly sent.
+private fun dyingCallbacks() = runBlocking {
+    val host = DyingCallbacks()
+    val proof = """{"settlement":"a1"}""".toByteArray()
+    val answered = testMethodAnswers(host, testDeclaration, testEndpoints, proof)
+    check(answered.selected == null && answered.selectionFailure == "method_unknown")
+    check(answered.transferAmount == null && answered.settlementId == null)
+    check(testCallbackAnswers(host, host, host) == listOf(
+        "store.get=unknown", "store.acquire=unknown", "store.commit_if=unknown", "store.release=unknown",
+        "home.get=unknown", "home.put=unknown", "method.pay=possibly_sent", "method.payment=unknown",
+    ))
+}
+
 /// Text the switch gave never leaves the bindings: not in a message, a description or a reason.
 private fun outsideTextStaysInside() {
     val sentinel = "SENTINEL-outside-text"
@@ -468,6 +500,7 @@ object CheckoutConsumer {
         val restore = System.getenv("PAYKIT_TEST_RESTORE")
         if (restore == null) outsideTextStaysInside()
         if (restore == null) throwingCallbacks()
+        if (restore == null) dyingCallbacks()
         if (restore == null) CheckoutReview.entries.forEach { driveCheckout(it) }
         if (restore == null) driveConsumers()
         else driveCheckout(CheckoutReview.ORDINARY, restore)
