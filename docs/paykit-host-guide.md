@@ -130,14 +130,37 @@ returns `Publication::AwaitingRecord`, the wallet still has a newer record
 choice to settle. Keep the change pending and continue normal receives.
 A restore carrying only the accepted offer can repair its missing public copy.
 
-Each receive also brings the app record up to date after its read. When that
-upkeep fails because the rail now pays a list of endpoint identifiers the record
-can't carry, or because the own switch doesn't answer, the receive still does
-its other work and sets `ReceiveSummary::app_record_owed`. Any other upkeep
-failure fails the receive. The record is tried again at the next receive;
-`update_own_record` tries it at once and returns its outcome. A delivery the
-client kept goes again at the start of its next read, so one that keeps
-failing there fails that receive.
+Each receive also brings the app record up to date after its read. A receive
+that tries that upkeep still does its other work, and sets
+`ReceiveSummary::app_record_owed`, when the record can't be brought up to date
+for one of these reasons:
+
+- the Switch client refuses the update as one it can't sign, for example
+  because the rail now pays a list of endpoint identifiers the record can't
+  carry;
+- the own switch doesn't answer;
+- the record's copy on the Homeserver couldn't be written;
+- the record's copy on the Homeserver is missing while the app runs on devices
+  that share its keys: another device may have removed it to leave, so it is
+  written back, and the reason clears, at the first receive that reads the
+  feed to its end and so shows the app current;
+- the switch has accepted no record of the app yet, as after a provider loss
+  or a restore from a backup that carries none: the copy is written once it
+  does;
+- a newer change of the record is still settling, and the copy waits for it;
+- a renewal is due and the record has an expiry policy this version doesn't
+  know, which a newer version brings up to date.
+
+A receive whose read stopped, or that returned early, skips the upkeep and
+says nothing of these. Any other upkeep failure fails the receive. The record
+is tried again at the next receive that tries the upkeep, and
+`update_own_record` tries it at once and returns its outcome.
+
+While the store couldn't tell whether the last write of the record was applied,
+every receive sets `app_record_owed`: neither a receive's upkeep nor
+`update_own_record` changes or renews the record until the app is loaded again
+with `Paykit::load`. A delivery the client kept goes again at the start of its
+next read, so one that keeps failing there fails that receive.
 
 ## Use a Switch App built by the host
 
