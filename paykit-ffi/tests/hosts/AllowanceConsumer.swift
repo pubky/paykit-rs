@@ -141,8 +141,10 @@ func checkAllowances(fixture: CheckoutFixture, wallet: NativeWallet) async throw
         let endedStatus = try await status(record)
         precondition(UUID(uuidString: ended) != nil && endedStatus == .ended)
     }
+    // A rejected proposal is removed; a second rejection finds nothing (Paykit spec 8.3.1).
     let declined = try await incoming(.allower)
     let rejection = try await wallet.rejectAllowance(record: declined)
-    let rejectedStatus = try await status(declined)
-    precondition(UUID(uuidString: rejection) != nil && rejectedStatus == .rejected)
+    precondition(UUID(uuidString: rejection) != nil)
+    try await allowanceNotFound { _ = try await wallet.allowance(record: declined) }
+    try await allowanceNotFound { _ = try await wallet.rejectAllowance(record: declined) }
 }

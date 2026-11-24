@@ -121,7 +121,7 @@ internal suspend fun checkAllowances(fixture: CheckoutFixture, wallet: NativeWal
             check(view.counterparty.contentEquals(peer) && view.terms == terms)
             return view.record
         } finally {
-            views.forEach { it.close() }
+            views.forEach { it.destroy() }
         }
     }
     suspend fun status(record: ByteArray) = wallet.allowance(record).use { it.status }
@@ -137,6 +137,8 @@ internal suspend fun checkAllowances(fixture: CheckoutFixture, wallet: NativeWal
         check(UUID.fromString(ended).version() == 4 && status(record) == AllowanceStatus.ENDED)
     }
     val declined = incoming(AllowanceRole.ALLOWER)
+    // A rejected proposal is removed; a second rejection finds nothing (Paykit spec 8.3.1).
     check(UUID.fromString(wallet.rejectAllowance(declined)).version() == 4)
-    check(status(declined) == AllowanceStatus.REJECTED)
+    allowanceNotFound { wallet.allowance(declined) }
+    allowanceNotFound { wallet.rejectAllowance(declined) }
 }

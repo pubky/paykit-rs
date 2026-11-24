@@ -185,7 +185,9 @@ impl TryFrom<AllowanceTerms> for rules::AllowanceTerms {
             .map(|range| {
                 let minimum = decimal(range.minimum, "per_payment_amount.minimum")?;
                 let maximum = decimal(range.maximum, "per_payment_amount.maximum")?;
-                Ok::<_, WalletError>(json!({ "minimum": minimum.as_str(), "maximum": maximum.as_str() }))
+                Ok::<_, WalletError>(
+                    json!({ "minimum": minimum.as_str(), "maximum": maximum.as_str() }),
+                )
             })
             .transpose()?;
         let lifetime = terms

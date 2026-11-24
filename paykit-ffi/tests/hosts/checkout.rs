@@ -97,6 +97,8 @@ impl CheckoutFixture {
         .await?;
         issuer.claim_delivered(&approval.request).await?;
         Box::pin(seller.allow_connect(&buyer)).await?;
+        // The shop lists its records and its deny list before it sends (Paykit spec 3.1, 6).
+        Box::pin(shop_listed(&mut seller)).await?;
         Ok(Arc::new(Self {
             world: Mutex::new(Some(world)),
             host,
@@ -344,21 +346,13 @@ impl CheckoutFixture {
         crate::runtime::run(async move {
             let request: RequestRef = request.try_into()?;
             let mut seller = self.seller.lock().await;
-            for _ in 0..8 {
-                if !Box::pin(seller.receive(None)).await?.report.more {
-                    break;
-                }
-            }
-            let entry = seller
-                .payee_activity()
-                .await?
-                .into_iter()
-                .find(|entry| {
-                    entry.payer == self.buyer
-                        && entry.request_hash == Some(request.request_hash)
-                        && request.payee == self.payee
-                })
-                .ok_or(WalletError::invalid("original payer proof"))?;
+            Box::pin(shop_listed(&mut seller)).await?;
+            let found = seller.payee_activity().await?.into_iter().find(|entry| {
+                entry.payer == self.buyer
+                    && entry.request_hash == Some(request.request_hash)
+                    && request.payee == self.payee
+            });
+            let entry = found.ok_or(WalletError::invalid("original payer proof"))?;
             Box::pin(seller.confirm_payment(&entry.record))
                 .await?
                 .ok_or(WalletError::invalid("original seller receipt"))
@@ -425,8 +419,6 @@ impl CheckoutFixture {
             }))
             .map_err(paykit_sdk::PaykitError::from)?;
             let mut seller = self.seller.lock().await;
-            // Its first read lists its records before it writes (Paykit spec 6).
-            Box::pin(seller.receive(None)).await?;
             let sent = match role {
                 crate::AllowanceRole::Allower => {
                     Box::pin(seller.propose_allowance(
@@ -557,11 +549,22 @@ impl CheckoutFixture {
     }
 }
 
-/// Read the shop's feed until it lists `request`. Its first read lists its own records; a
-/// later one brings the request.
+/// Read the shop's feed until it is done and every record its scopes read is listed
+/// (Paykit spec 6).
+async fn shop_listed(seller: &mut Paykit) -> Result<(), WalletError> {
+    for _ in 0..8 {
+        let summary = Box::pin(seller.receive(None)).await?;
+        if !summary.report.more && summary.records_unlisted.is_none() {
+            return Ok(());
+        }
+    }
+    Err(WalletError::invalid("test shop listing"))
+}
+
+/// Read the shop's feed until it holds `request`.
 async fn shop_holds(seller: &mut Paykit, request: &RequestRef) -> Result<(), WalletError> {
     for _ in 0..8 {
-        Box::pin(seller.receive(None)).await?;
+        Box::pin(shop_listed(seller)).await?;
         if seller
             .requests()
             .await?
