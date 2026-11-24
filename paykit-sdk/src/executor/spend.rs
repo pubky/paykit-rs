@@ -989,7 +989,9 @@ mod tests {
         assert_eq!(room(&entries, &paid_by_history, "25"), Automatic);
         assert_eq!(room(&entries, &paid_by_history, "40"), Never);
         // 70 at the method, which reported a failure the claim doesn't show yet: still
-        // reserved, and its room may come back, so 50 waits.
+        // reserved, and its room may come back, so 50 waits. Whether the method was called
+        // makes no difference: a failure there releases too (Paykit spec 8.3, `failed`
+        // releases), so a reservation past the call is no longer judged spent.
         let failed_unwritten = [(1, evidence(ClaimState::Open, false))];
         assert_eq!(room(&entries[..1], &failed_unwritten, "50"), Automatic);
         // 80 paid, 50 released and 10 reserved: the released 50 frees nothing more, so 25

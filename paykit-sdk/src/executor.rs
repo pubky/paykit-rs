@@ -359,6 +359,30 @@ mod tests {
             .unwrap();
         assert!(unclassified.is_empty());
         assert_eq!(counted.lifetime().as_str(), "70");
+        // 10 more reserved that the history doesn't show count beside the paid 70.
+        let later = AttemptId::from_bytes([9; 16]);
+        let mut both = ledger.clone();
+        both.entries.push(LedgerEntry {
+            obligation: [4; 32],
+            attempt_id: later,
+            value: Decimal::new("10").unwrap(),
+            asset: terms.asset.clone(),
+            at: 1_001,
+            outcome: None,
+        });
+        let mut two = claims.clone();
+        two.insert(
+            later,
+            ReservationClaim {
+                obligation: [4; 32],
+                state: ClaimState::Open,
+            },
+        );
+        let mixed = read_usage(&rail, payer, &terms, &both, &two, 1_001)
+            .await
+            .unwrap();
+        assert_eq!(mixed.counted.lifetime().as_str(), "80");
+        assert_eq!(mixed.counted.reserved_amount().as_str(), "10");
         assert_eq!(
             check_limits(&terms, &counted, &Decimal::new("31").unwrap()),
             Err(LimitKind::Lifetime)

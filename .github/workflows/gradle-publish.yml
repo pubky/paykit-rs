@@ -1,0 +1,91 @@
+name: Gradle Package
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version or tag
+        required: true
+        type: string
+
+# Publishing is a maintainer's decision: it runs only for a published release or by hand, never
+# for a push or a pull request, and only this job may write packages.
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Select the release tag
+        id: release
+        env:
+          REQUESTED: ${{ inputs.version || github.event.release.tag_name }}
+        run: |
+          set -eu
+          version="${REQUESTED#v}"
+          [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+(-alpha\.[0-9]+|-rc[0-9]+)?$ ]] || {
+            echo "Expected a Paykit release version" >&2; exit 1;
+          }
+          if [[ $GITHUB_EVENT_NAME == release && $REQUESTED != "v$version" ]]; then
+            echo "The published release must use the v-prefixed package tag" >&2; exit 1
+          fi
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ steps.release.outputs.tag }}
+          persist-credentials: false
+      - name: Check the package versions in the tag
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -eu
+          workspace=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')
+          [[ $VERSION == "$workspace" ]] || { echo "Tag differs from workspace version $workspace" >&2; exit 1; }
+          grep -Fxq "version=$workspace" paykit-ffi/bindings/android/gradle.properties || {
+            echo "Android version differs from workspace version $workspace" >&2; exit 1;
+          }
+          grep -Fxq "let tag = \"v$workspace\"" Package.swift &&
+            grep -Eq '^let checksum = "[0-9a-f]{64}"$' Package.swift || {
+            echo "Missing Swift release tag or checksum" >&2; exit 1;
+          }
+          for name in Paykit.swift WalletRedaction.swift; do
+            test -s "paykit-ffi/bindings/ios/$name" || { echo "Missing $name in the release tag" >&2; exit 1; }
+          done
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+        with:
+          toolchain: stable
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
+      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
+        with:
+          gradle-version: "9.9.0"
+          cache-disabled: true
+      - name: Build the release AAR
+        run: |
+          set -eu
+          # The runner image's own Android SDK and NDK, as the Kotlin host job uses them.
+          export ANDROID_NDK_HOME="${ANDROID_NDK_LATEST_HOME:-$ANDROID_NDK_ROOT}"
+          cargo install cargo-ndk --version 4.1.2 --locked
+          paykit-ffi/build_android.sh
+      - name: Publish to GitHub Packages
+        working-directory: paykit-ffi/bindings/android
+        env:
+          GITHUB_ACTOR: ${{ github.actor }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          : "${GITHUB_ACTOR:?Missing GitHub actor}" "${GITHUB_TOKEN:?Missing GitHub Packages token}"
+          gradle --no-daemon :lib:publishMavenPublicationToGitHubPackagesRepository

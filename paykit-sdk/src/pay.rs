@@ -850,8 +850,9 @@ impl AutomaticHold {
     /// it.
     pub(crate) fn refusal(self) -> Refusal {
         match self {
-            // A floor not read yet: a later read tells it.
-            Self::Floor(crate::floor::SharedFloor::Unknown) => {
+            // A floor not read yet: a later read tells it. One that doesn't read, or is gone,
+            // is no wait: the request is paid by hand, as under any hold below.
+            Self::Floor(crate::floor::SharedFloor::Unknown(crate::floor::FloorUnknown::Unread)) => {
                 Refusal::NotNow(crate::NotNowReason::ReadAgain(
                     "this request is held from automatic payment while the block floor isn't \
                      known",
@@ -859,9 +860,15 @@ impl AutomaticHold {
             }
             // Held for good (Paykit wire 5.6, Divergent floor): the refusal that names it.
             Self::Floor(crate::floor::SharedFloor::Divergent) => Refusal::FloorHeld,
-            Self::Blocked | Self::Floor(_) | Self::Restore | Self::Paused => {
-                Refusal::HeldForUser(crate::HeldForUserReason::HeldFromAutomatic)
-            }
+            Self::Blocked
+            | Self::Floor(
+                crate::floor::SharedFloor::Known(_)
+                | crate::floor::SharedFloor::Unknown(
+                    crate::floor::FloorUnknown::Unreadable | crate::floor::FloorUnknown::Gone,
+                ),
+            )
+            | Self::Restore
+            | Self::Paused => Refusal::HeldForUser(crate::HeldForUserReason::HeldFromAutomatic),
         }
     }
 }
@@ -6292,10 +6299,18 @@ mod tests {
 
     #[test]
     fn test_pay_automatic_hold_waits_for_a_floor_not_known() {
+        use crate::floor::{FloorUnknown, SharedFloor};
         assert!(matches!(
-            AutomaticHold::Floor(crate::floor::SharedFloor::Unknown).refusal(),
+            AutomaticHold::Floor(SharedFloor::Unknown(FloorUnknown::Unread)).refusal(),
             Refusal::NotNow(crate::NotNowReason::ReadAgain(why)) if why.contains("block floor")
         ));
+        // A floor that doesn't read, or is gone, is no wait a read clears: paid by hand.
+        for durable in [FloorUnknown::Unreadable, FloorUnknown::Gone] {
+            assert_eq!(
+                AutomaticHold::Floor(SharedFloor::Unknown(durable)).refusal(),
+                Refusal::HeldForUser(crate::HeldForUserReason::HeldFromAutomatic)
+            );
+        }
     }
 
     #[test]

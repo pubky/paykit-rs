@@ -514,6 +514,9 @@ fn every_refusal_kind() -> Vec<RefusalKind> {
             reason: HeldForUserKind::RecordUnreadable,
         },
         RefusalKind::HeldForUser {
+            reason: HeldForUserKind::FloorRecordUnreadable,
+        },
+        RefusalKind::HeldForUser {
             reason: HeldForUserKind::AllowanceNotResumed,
         },
         RefusalKind::HeldForUser {
@@ -975,6 +978,7 @@ fn every_recovery_kind() -> Vec<RecoveryNeededKind> {
             | HeldForUserKind::CancellationOrderUnknown
             | HeldForUserKind::PublicationConflict
             | HeldForUserKind::RecordUnreadable
+            | HeldForUserKind::FloorRecordUnreadable
             | HeldForUserKind::AllowanceNotResumed
             | HeldForUserKind::AllowanceExecutionHeld
             | HeldForUserKind::AttemptCheck
