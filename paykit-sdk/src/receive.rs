@@ -1960,12 +1960,22 @@ fn receipt_effect(
     );
     // A claim the app keeps no view of is read from the switch first, so the receipt
     // settles it in the cursor's batch (Switch spec 10.2 row 3).
-    let read = cx.switch_claim(&obligation).map(|fetch| match fetch {
-        ClaimFetch::Read(read) => SwitchClaim::Read(Some(read.view.clone())),
-        ClaimFetch::Absent => SwitchClaim::Read(None),
-        // Refused, such as without `claims.read`.
-        _ => SwitchClaim::Refused,
-    });
+    let read = match cx.switch_claim(&obligation) {
+        Some(ClaimFetch::Read(read)) => Some(SwitchClaim::Read(Some(read.view.clone()))),
+        Some(ClaimFetch::Absent) => Some(SwitchClaim::Read(None)),
+        // An answer a later read may pass, such as `409 conflict` or `stale_epoch`, says
+        // nothing of the claim: the entry waits on the feed and reads it again
+        // ([`claim_read_refused`]).
+        Some(ClaimFetch::Refused(code))
+            if pubky_switch_core::http::ErrorCode::parse(code)
+                .is_some_and(|code| !claim_read_refused(code)) =>
+        {
+            return Err(Fail::wait_for("claim read to try again"));
+        }
+        // Refused for good, such as without `claims.read`.
+        Some(_) => Some(SwitchClaim::Refused),
+        None => None,
+    };
     let view = match failure_view(cx.claim_view(&obligation)?, read) {
         FailureView::View(view) => view,
         FailureView::Refused => return Ok(()),
@@ -2050,6 +2060,16 @@ fn admits_receipt_over_unread_record(
     }
     let scopes = cx.cert().scopes().to_vec();
     admits_new_state(cx, &stored.sender(), &scopes, stored)
+}
+
+/// Whether the switch's answer `code` to a receipt's claim read refuses it for good, so the
+/// receipt settles nothing: only an answer the same read never passes, by the Retry column
+/// of Switch spec 6.4, such as `403 permission_missing` without `claims.read`. Any other
+/// answer, after a re-read, new keys, a new timestamp or a wait, says nothing of the claim,
+/// and the read is made again later: settling nothing on it would leave a paid attempt
+/// unsettled, its late-receipt notice unraised and its journal entry not updated.
+pub(crate) fn claim_read_refused(code: pubky_switch_core::http::ErrorCode) -> bool {
+    code.retry() == pubky_switch_core::http::Retry::No
 }
 
 /// What the switch answered for a receipt's claim (Switch wire 7.4.8).
@@ -4463,6 +4483,40 @@ pub(crate) fn unrequested_of(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every answer of the switch to a receipt's claim read, by the Switch's own table
+    /// (Switch spec 6.4): refused for good only where the same read never passes.
+    #[test]
+    fn test_receive_claim_read_refused_only_when_never_unchanged() {
+        use pubky_switch_core::http::ErrorCode;
+        for code in ErrorCode::ALL {
+            // No wildcard: a code the switch adds fails to build here until it is classified.
+            let refused = match code {
+                ErrorCode::BadRequest
+                | ErrorCode::BadSignature
+                | ErrorCode::NotAdmitted
+                | ErrorCode::PermissionMissing
+                | ErrorCode::NotCurrent
+                | ErrorCode::CertExpired
+                | ErrorCode::NotFound
+                | ErrorCode::StaleIdentity
+                | ErrorCode::TooLarge => true,
+                ErrorCode::StaleTimestamp
+                | ErrorCode::Conflict
+                | ErrorCode::StaleEpoch
+                | ErrorCode::StaleGeneration
+                | ErrorCode::StaleKey
+                | ErrorCode::IdentityNeeded
+                | ErrorCode::Moved
+                | ErrorCode::RateLimited
+                | ErrorCode::QuotaExceeded
+                | ErrorCode::Staged
+                | ErrorCode::Unavailable
+                | ErrorCode::RecoveryRequired => false,
+            };
+            assert_eq!(super::claim_read_refused(code), refused, "{code:?}");
+        }
+    }
 
     #[test]
     fn test_receive_placement_passes_over_a_refused_write_not_a_store_failure() {

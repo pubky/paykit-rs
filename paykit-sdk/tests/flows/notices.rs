@@ -305,6 +305,58 @@ async fn test_notices_late_receipt_written_later_raised_by_an_own_app_from_its_k
     assert_eq!(other.notices().await.unwrap(), notices);
 }
 
+/// Alice's second wallet, joined after her first one paid bob, keeps no view of the payment's
+/// claim, so bob's receipt makes it read the claim at the switch. The read is answered `code`.
+/// Returns the second wallet and the payment's claim, the receipt not read yet.
+async fn receipt_read_answered(w: &World, code: ErrorCode) -> (Paykit, [u8; 32]) {
+    let (wallet, mut shop, _) = paid_after_failed(w).await;
+    let obligation = wallet.payments().await.unwrap()[0].obligation;
+    drop(wallet);
+    let mut other = w.wallet("second").await;
+    other.receive(None).await.unwrap();
+    receipt(&mut shop).await;
+    w.alice.switch().fail_next(Fault::Error {
+        path: "claims".into(),
+        code,
+        current: serde_json::Value::Null,
+    });
+    (other, obligation)
+}
+
+#[tokio::test]
+async fn test_notices_receipt_claim_read_to_try_again_settles_it_once_read() {
+    // `409 conflict` says nothing of the claim: the receipt waits on the feed, and once the
+    // claim reads, it settles it. Settled as refused instead, the claim would stay unsettled.
+    let w = World::new();
+    let (mut other, obligation) = receipt_read_answered(&w, ErrorCode::Conflict).await;
+    let _ = other.receive(None).await;
+    other.receive(None).await.unwrap();
+    let claim = other
+        .app_mut()
+        .read_claim(&obligation)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(claim.view.status, ClaimStatus::Settled);
+}
+
+#[tokio::test]
+async fn test_notices_receipt_claim_read_refused_for_good_settles_nothing() {
+    // `403 permission_missing` refuses the read for good: the receipt is recorded and settles
+    // nothing, as before.
+    let w = World::new();
+    let (mut other, obligation) = receipt_read_answered(&w, ErrorCode::PermissionMissing).await;
+    other.receive(None).await.unwrap();
+    assert!(other.requests().await.unwrap()[0].receipt.is_some());
+    let claim = other
+        .app_mut()
+        .read_claim(&obligation)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_ne!(claim.view.status, ClaimStatus::Settled);
+}
+
 #[tokio::test]
 async fn test_notices_receipt_within_the_claim_settles_it_and_raises_none() {
     let w = World::new();
