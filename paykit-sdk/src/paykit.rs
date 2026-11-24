@@ -405,6 +405,16 @@ pub struct Paykit {
     /// Whether the lists were read since this handle's last receive or flush began: a raise
     /// owed asks for no second read before the next one ([`Paykit::raise_owed`]).
     pub(crate) lists_read_this_pass: bool,
+    /// Whether the read of the lists in progress already left a raise unwritten: one read
+    /// counts one try, however many raises it leaves unwritten ([`crate::floor::RaiseRetry`]).
+    pub(crate) raise_tried_in_read: bool,
+    /// The latest device time this handle's retry check saw since its last unwritten try, so
+    /// a clock put back, part of the way included, ends a wait ([`crate::floor::RaiseRetry`]).
+    pub(crate) raise_clock_seen: std::sync::atomic::AtomicU64,
+    /// When this handle last left a raise unwritten, on its monotonic clock: none since it
+    /// started means every wait is over, the time waited not being known; with it, a clock set
+    /// back between checks can't hide time ([`crate::floor::RaiseRetry`]).
+    pub(crate) raise_tried_at: std::sync::Mutex<Option<std::time::Instant>>,
     /// How many activity records this handle bound ([`Paykit::activity_binds`]).
     #[cfg(feature = "test-support")]
     pub(crate) activity_binds: std::sync::atomic::AtomicU64,
@@ -480,6 +490,9 @@ impl Paykit {
             identity_told: Vec::new(),
             raise_unwritten: false,
             lists_read_this_pass: false,
+            raise_tried_in_read: false,
+            raise_clock_seen: std::sync::atomic::AtomicU64::new(0),
+            raise_tried_at: std::sync::Mutex::new(None),
             #[cfg(feature = "test-support")]
             activity_binds: std::sync::atomic::AtomicU64::new(0),
             certificates: std::sync::Mutex::default(),
@@ -493,6 +506,16 @@ impl Paykit {
     pub fn activity_binds(&self) -> u64 {
         self.activity_binds
             .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Move this handle's last unwritten floor raise try `ms` back on its monotonic clock, as
+    /// if that much had passed since it without a receive. For tests of the retry wait, whose
+    /// monotonic count no test clock drives.
+    #[cfg(feature = "test-support")]
+    pub fn age_raise_try(&self, ms: u64) {
+        if let Ok(mut at) = self.raise_tried_at.lock() {
+            *at = at.and_then(|at| at.checked_sub(std::time::Duration::from_millis(ms)));
+        }
     }
 
     /// Join from an approval (Switch spec 12.1), as a Paykit App: the client's join, with
@@ -785,7 +808,9 @@ impl Paykit {
     /// anything is written but a store failure: `InvalidData` for a backup whose certificate
     /// Paykit refuses (Paykit wire 3.1), one without Paykit's layer or one another protocol
     /// made, or a journal with a malformed entry or two open entries for one obligation that
-    /// no earlier restore left; a store failure.
+    /// no earlier restore left; for a restore in place, state of the installation's it keeps
+    /// that doesn't verify, where a restore into an empty store, which reads none of it, is
+    /// the way to recover; a store failure.
     pub async fn restore(
         env: AppEnv,
         config: PaykitConfig,
