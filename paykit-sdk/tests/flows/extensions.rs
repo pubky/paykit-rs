@@ -893,3 +893,47 @@ async fn test_extensions_unverifiable_mailbox_entry_refused_on_read_and_restore(
     .await;
     assert!(matches!(restored, Err(error) if error.to_string().contains("kept extension message")));
 }
+
+#[tokio::test]
+#[ignore = "the client signs a saved accepts change at its next read, though the registration was undone since; it needs the client to take accepts from the protocols when it signs"]
+async fn test_extensions_registration_undone_before_it_is_signed_is_never_accepted() {
+    // A registration change the client saves while it can't read the service time stays
+    // unsigned. Undone before the app reads again, it is never advertised (Switch spec 3.4).
+    let w = World::new();
+    let kept = store();
+    let shop = shop_on(&w, PaykitConfig::default(), Arc::clone(&kept)).await;
+    let app_id = shop.app_id();
+    drop(shop);
+    let mut shop = w
+        .load_with(
+            &w.bob,
+            Arc::clone(&kept),
+            app_id,
+            Arc::clone(&w.clock),
+            handling(),
+        )
+        .await;
+    w.clock.advance_ms(11 * 60 * 1000);
+    for _ in 0..2 {
+        w.bob
+            .switch()
+            .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+                path: "/feed".into(),
+                after: 0,
+            });
+    }
+    assert!(shop.receive(None).await.is_err());
+    assert!(!accepts(&shop, w.bob_id()).contains(&"paykit-cap.offer".to_owned()));
+    drop(shop);
+    let mut shop = w
+        .load_with(
+            &w.bob,
+            kept,
+            app_id,
+            Arc::clone(&w.clock),
+            PaykitConfig::default(),
+        )
+        .await;
+    shop.receive(None).await.unwrap();
+    assert!(!accepts(&shop, w.bob_id()).contains(&"paykit-cap.offer".to_owned()));
+}

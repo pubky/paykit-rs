@@ -125,6 +125,12 @@ delays signing, `PaykitError::PublicEndpointChangePending` means that the
 client retained the requested edit. Show the withdrawal as pending until the
 client signs the updated record and reports its publication.
 
+The client saves an endpoint edit before it reads the service time to sign it.
+So an edit that fails with a `transport` error may already be saved, and the
+next `receive` signs and publishes it. Call `receive` and read
+`own_public_endpoints` before trying again: sending the same map again changes
+nothing, while a different map replaces the saved edit.
+
 After restoring a backup, drive the wallet's first receive. When publication
 returns `Publication::AwaitingRecord`, the wallet still has a newer record
 choice to settle. Keep the change pending and continue normal receives.
@@ -176,10 +182,13 @@ restore reads nothing of the old installation.
 
 Every restore, in place or into a new store, installs the seen marks the backup
 carries in place of the store's own (Switch spec 12.4 "Seen marks"). When some
-were left out, the restore reports `AppEvent::SeenMarksIncomplete` once for each
-registered protocol (`WalletEventData::SeenMarksIncomplete` in the bindings). It
-is a notice, with nothing to acknowledge: from then on a record without a mark
-is checked as new. A backup made before backups carried seen marks is refused.
+were left out, the wallet reports `AppEvent::SeenMarksIncomplete` once for each
+registered protocol (`WalletEventData::SeenMarksIncomplete` in the bindings). The
+restore call itself returns only the wallet: the notice comes in the events of
+the first successful `receive` after it. A restart before then, or a receive
+that fails, can lose it. It is a notice, with nothing to acknowledge: from then on a record
+without a mark is checked as new. A backup made before backups carried seen marks
+is refused.
 
 Register the extension kinds your app handles with `PaykitConfig::with_extension_kinds`.
 After a receive, read `Paykit::extension_messages` and acknowledge each message by
