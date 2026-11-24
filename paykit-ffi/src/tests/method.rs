@@ -339,3 +339,31 @@ fn test_method_fraction_digits_come_from_the_declared_endpoints() {
     let (lightning, _) = Account::endpoints().remove(0);
     assert_eq!(rail.fraction_digits(&lightning), None);
 }
+
+#[test]
+fn test_method_paid_proof_settles_whatever_numbers_it_holds() {
+    let paid = |proof: &[u8]| {
+        crate::MethodOutcome::Paid {
+            proof_json: proof.to_vec(),
+            paid_at_ms: None,
+        }
+        .into_rail()
+    };
+    // The money moved: a proof that reads settles the payment and is carried, whatever its
+    // numbers, so a resume never meets a refusal for it.
+    for proof in [
+        br#"{"settlement":"a1","fee":1.50}"#.as_slice(),
+        br#"{"settlement":18446744073709551617}"#,
+    ] {
+        assert!(matches!(paid(proof), Ok(paykit_sdk::RailOutcome::Paid(_))));
+    }
+    // A repeated member is no refusal either: decoding keeps the last value, as it always has.
+    let Ok(paykit_sdk::RailOutcome::Paid(repeated)) = paid(br#"{"tx":"a","tx":"b"}"#) else {
+        panic!("a proof with a repeated member settles the payment");
+    };
+    assert_eq!(repeated.proof.get("tx"), Some(&serde_json::json!("b")));
+    assert!(matches!(
+        paid(b"not json"),
+        Err(paykit_sdk::RailError::Unavailable(_))
+    ));
+}

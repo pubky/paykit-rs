@@ -216,8 +216,9 @@ impl MethodOutcome {
                 proof_json,
                 paid_at_ms,
             } => {
-                let proof = serde_json::from_slice(&proof_json)
-                    .map_err(|_| RailError::Unavailable("invalid payment proof".into()))?;
+                // Decoded only: the payment is made, so a proof that reads is carried.
+                let proof = crate::opaque::object(&proof_json, crate::opaque::Place::Proof)
+                    .ok_or_else(|| RailError::Unavailable("invalid payment proof".into()))?;
                 let mut paid = RailPaid::new(proof);
                 if let Some(at) = paid_at_ms {
                     paid = paid.with_paid_at_ms(at);
