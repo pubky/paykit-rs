@@ -236,11 +236,13 @@ pub(super) fn no_executor_base() -> PaykitError {
     .into()
 }
 
-/// The ledger write was sent and applied, but its proof doesn't show the ledger at the
-/// revision written: something was sent, and no wait settles what, so it is shown.
+/// The ledger write was applied, but the switch's proof doesn't show the ledger at the
+/// revision written: an answer that breaks a rule, never a refusal, which would say nothing
+/// was written. The write stands; a later read shows the ledger.
 pub(super) fn written_unverified() -> PaykitError {
-    Refusal::HeldForUser(crate::HeldForUserReason::Unresolved(
-        "the Allowance ledger write was applied, but its proof doesn't show the ledger written",
+    PaykitError::Lib(paykit_lib::Error::Invalid(
+        "Paykit spec 8.3: the Allowance ledger write was applied, but its proof doesn't show \
+         the ledger written"
+            .into(),
     ))
-    .into()
 }

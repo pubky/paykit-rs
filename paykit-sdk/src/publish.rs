@@ -562,6 +562,13 @@ fn current_publication(record: &SharedRecord) -> Result<ListPublicationRecord> {
             .into(),
         );
     }
+    // A write not taken yet is one a later read may take: a wait.
+    if record.not_taken && record.authenticated && !record.flagged && !record.doubtful {
+        return Err(Refusal::NotNow(crate::NotNowReason::ReadAgain(
+            "Paykit spec 8.4.1: the recipient's publication counter isn't taken yet",
+        ))
+        .into());
+    }
     if !record.authenticated || record.flagged || record.not_taken || record.doubtful {
         return Err(counter_unavailable().into());
     }
@@ -1610,10 +1617,6 @@ mod tests {
                 ..held.clone()
             },
             SharedRecord {
-                not_taken: true,
-                ..held.clone()
-            },
-            SharedRecord {
                 doubtful: true,
                 ..held.clone()
             },
@@ -1625,6 +1628,19 @@ mod tests {
             let refused = current_publication(&waiting).unwrap_err();
             assert_eq!(refused.refusal(), Some(&counter_unavailable()), "{refused}");
         }
+        // A write not taken yet is one a later read may take: a wait.
+        let not_taken = current_publication(&SharedRecord {
+            not_taken: true,
+            ..held.clone()
+        })
+        .unwrap_err();
+        assert!(
+            matches!(
+                not_taken.refusal(),
+                Some(Refusal::NotNow(crate::NotNowReason::ReadAgain(_)))
+            ),
+            "{not_taken}"
+        );
         assert_eq!(current_publication(&held).unwrap(), issued);
     }
 
