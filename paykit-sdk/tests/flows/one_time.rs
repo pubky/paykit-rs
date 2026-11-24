@@ -2662,3 +2662,63 @@ async fn test_one_time_credit_requires_the_fixed_endpoint_owner() {
         );
     }
 }
+
+#[tokio::test]
+async fn test_one_time_cancellation_kept_after_an_old_backup_survives_its_in_place_restore() {
+    // The wallet is backed up, and over a month later bob's cancellation of a request it
+    // holds no record of yet arrives: the installation keeps it as the stop. Restored in
+    // place from the month-old backup, the stop keeps the time it was accepted at, a month
+    // after the backup, so it isn't given up as stale at the first read: once the request
+    // is delivered it is cancelled, never payable (Paykit spec 8.1).
+    let w = World::new();
+    let storage = crate::common::store();
+    let mut wallet = w.wallet_on("wallet", std::sync::Arc::clone(&storage)).await;
+    let _shop = w.shop().await;
+    wallet.receive(None).await.unwrap();
+    let backup = wallet.backup().await.unwrap();
+    w.clock.advance_ms(31 * 24 * crate::common::HOUR_MS);
+    let (request, hash) = unsent_request(&w);
+    let cancellation = cancel_to(&w, &[wallet.app_id()], hash);
+    let got = wallet.receive(None).await.unwrap();
+    assert!(got.applied.contains(&cancellation), "{got:?}");
+    wallet.app_mut().flush_cursor().await.unwrap();
+    drop(wallet);
+    let mut wallet = paykit_sdk::Paykit::restore(
+        w.env(&w.alice, storage),
+        paykit_sdk::PaykitConfig::default(),
+        &backup,
+        std::sync::Arc::clone(&w.rail) as std::sync::Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    wallet.receive(None).await.unwrap();
+    // The device ran after the backup: its key registrations since are its own.
+    wallet
+        .app_mut()
+        .confirm_restored_registrations(pubky_switch_client::app::UserConfirmed::new())
+        .await
+        .unwrap();
+    wallet.reconcile().await.unwrap();
+    wallet
+        .end_reconcile(pubky_switch_client::app::UserConfirmed::new())
+        .await
+        .unwrap();
+    w.deliver(&w.bob, "shop", &w.alice, &[wallet.app_id()], &request);
+    wallet.receive(None).await.unwrap();
+    let request = paykit_sdk::RequestRef {
+        payee: w.bob_id(),
+        request_hash: hash,
+    };
+    assert_eq!(
+        wallet.request(&request).await.unwrap().status,
+        RequestStatus::Cancelled
+    );
+    let options = crate::common::over_hold(&wallet, &request).await;
+    let refused = wallet.pay_request(&request, options).await.outcome;
+    assert!(
+        !matches!(refused, Ok(PayOutcome::Paid { .. })),
+        "paid a cancelled request: {refused:?}"
+    );
+    assert!(w.rail.all_executions().is_empty());
+}
