@@ -145,17 +145,33 @@ async fn test_host_calls_homeserver_past_its_limit_times_out() {
 
 #[tokio::test(start_paused = true)]
 async fn test_host_calls_running_pay_stops_counting_as_in_flight() {
-    use crate::flights::{Flights, Waited, STALE_AFTER};
-    let flights = Flights::default();
+    use crate::flights::{Waited, STALE_AFTER};
     let limit = std::time::Duration::from_secs(1);
-    let attempt = "running-attempt".to_string();
+    let rail = stalled_rail().with_own_flights();
+    let id = AttemptId::from_bytes([8; 16]);
+    // The rail's `pay` hands the host's call to its flights as this does; the SDK's payment
+    // record can't be built outside it. The host's `pay` never answers: past its limit the
+    // wallet stops waiting, possibly sent.
     let never = std::future::pending::<Result<MethodOutcome, MethodError>>();
-    let waited = within(flights.dispatch(attempt.clone(), None, never, limit)).await;
+    let waited = within(rail.flights().dispatch(id.to_text(), None, never, limit)).await;
     assert!(matches!(waited, Waited::StillRunning));
-    assert!(flights.in_flight(&attempt));
-    tokio::time::sleep(limit * STALE_AFTER).await;
-    // Past its bound the host's lookup decides, as the method contract makes it authoritative.
-    assert!(!flights.in_flight(&attempt));
+    // Until its bound, the running attempt's lookup is pending without asking the host,
+    // whose lookup would never answer here.
+    let bound = limit * STALE_AFTER;
+    tokio::time::sleep(bound - limit - std::time::Duration::from_millis(1)).await;
+    assert!(rail.flights().in_flight(&id.to_text()));
+    assert!(matches!(
+        within(rail.payment(id)).await,
+        Ok(Some(paykit_sdk::RailOutcome::Pending))
+    ));
+    // At its bound the host's lookup decides, as the method contract makes it authoritative:
+    // the host is asked, and this one doesn't answer within the lookup's own limit.
+    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    assert!(!rail.flights().in_flight(&id.to_text()));
+    assert!(matches!(
+        within(rail.payment(id)).await,
+        Err(RailError::Unavailable(_))
+    ));
 }
 
 /// What a `pay` answering after its limit leaves kept for the wallet to record.

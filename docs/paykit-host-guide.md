@@ -130,6 +130,15 @@ returns `Publication::AwaitingRecord`, the wallet still has a newer record
 choice to settle. Keep the change pending and continue normal receives.
 A restore carrying only the accepted offer can repair its missing public copy.
 
+Each receive also brings the app record up to date after its read. When that
+upkeep fails because the rail now pays a list of endpoint identifiers the record
+can't carry, or because the own switch doesn't answer, the receive still does
+its other work and sets `ReceiveSummary::app_record_owed`. Any other upkeep
+failure fails the receive. The record is tried again at the next receive;
+`update_own_record` tries it at once and returns its outcome. A delivery the
+client kept goes again at the start of its next read, so one that keeps
+failing there fails that receive.
+
 ## Use a Switch App built by the host
 
 When the host opens the Switch App, use `PaykitConfig::protocol` to build the
@@ -618,6 +627,10 @@ the new cursor to the service. Acknowledging the deletion notice leaves the cred
 | `PublicAppFailureReason::Refused` | Exclude the unusable record. Its rule failure can help diagnose the lookup. |
 | `PublicAppFailureReason::Expired` | Wait for a current record from that app. A public record reaches its limit at any finite signed deadline or at the maximum age in the payee's signed identity document (90 days by default). |
 | `PublicAppFailureReason::OverBound` | This app's endpoints did not fit within the lookup bounds. Use the reason when explaining an incomplete lookup. |
+
+## The payment method's proof
+
+A method reports a payment made with its proof, a JSON object the payee's message carries (Paykit wire 4.10). The wallet accepts any proof that reads as an object, because the money has already moved: refusing it would leave a paid payment open for good. Paykit decodes the proof before it signs the message, so a number it can't hold exactly, such as an integer above 2^64 or a fixed decimal like `1.50`, is signed with other digits (`1.5`). Write any number that must survive exactly as a string, for example `{"fee":"1.50"}`. Give each member once: a repeated member keeps only its last value.
 
 ## The payment method's settlement ID
 

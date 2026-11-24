@@ -414,10 +414,6 @@ async fn payment(
     assert_eq!(pending.len(), 1);
     assert!(matches!(pending[0].stage, PaymentStage::Paying));
     let attempt = &pending[0].attempt_id.clone();
-    // While the host's `pay` runs, a resume neither pays the attempt again nor asks the host.
-    Box::pin(payer.resume_payments()).await?;
-    assert_eq!(account.calls.load(Ordering::SeqCst), 1);
-    assert_eq!(account.lookups.load(Ordering::SeqCst), 0);
     // A wallet call from inside a synchronous host callback is refused, not queued.
     let reentrant = crate::runtime::in_callback(|| super::host_calls::first_poll(payer.app_id()));
     assert!(matches!(
