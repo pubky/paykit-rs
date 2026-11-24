@@ -852,6 +852,8 @@ pub(crate) fn restore_paykit_layer(
             // list the backup holds may be stale by any time, so the list is read again before
             // any payment (Paykit spec 8.1).
             StateKey::ListsRead => continue,
+            // How a raise was last tried belongs to the installation that tried it.
+            StateKey::RaiseRetry => continue,
             // Nor the service time the delivery hook judges by: the restore's first read
             // writes it again, and until then the device clock alone judges.
             StateKey::ServiceTime => continue,
