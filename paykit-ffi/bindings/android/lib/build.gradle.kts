@@ -36,12 +36,19 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
 }
 
+// Only libraries and bindings that paykit-ffi/build_android.sh put in place are packaged: the
+// bindings must carry the line prepare-bindings.py writes first.
 val checkBindings = tasks.register("checkBindings") {
     val main = layout.projectDirectory.dir("src/main")
     doLast {
         val libraries = listOf("arm64-v8a", "armeabi-v7a", "x86_64").map { "jniLibs/$it/libpaykit.so" }
-        for (path in libraries + "generated/kotlin/com/synonym/paykit/paykit.kt") {
+        val kotlin = "generated/kotlin/com/synonym/paykit/paykit.kt"
+        for (path in libraries + kotlin) {
             check(main.file(path).asFile.length() > 0) { "Missing $path. Run paykit-ffi/build_android.sh." }
+        }
+        val first = main.file(kotlin).asFile.useLines { it.firstOrNull() }
+        check(first == "// Prepared by paykit-ffi/prepare-bindings.py") {
+            "$kotlin was not prepared by prepare-bindings.py. Run paykit-ffi/build_android.sh."
         }
     }
 }

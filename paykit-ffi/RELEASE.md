@@ -24,9 +24,10 @@ publish workflow runs only for a release a maintainer publishes, or by hand.
 
 - Install Rust 1.91.1 or newer, Python 3.11 or newer, Git, zip and unzip.
 - Select Xcode with the iOS device and simulator SDKs and Swift 5.9 or newer.
-- Install JDK 17, Gradle 9.9.0, the Android SDK for API 36 and the NDK (r28c works
-  with API 28). Set `JAVA_HOME`, `ANDROID_HOME` and `ANDROID_NDK_HOME` to those
-  installations.
+- Install a JDK, Gradle, the Android SDK for API 36 and the NDK, and set `JAVA_HOME`,
+  `ANDROID_HOME` and `ANDROID_NDK_HOME` to those installations. The packages are
+  tested with JDK 17, Gradle 9.9.0, NDK r28c and cargo-ndk 4.1.2; the scripts
+  check that each tool is present, not its version.
 - Configure Git commit and tag signing with your registered signing key.
 - Allow the repository's Actions workflow to publish packages at
   `https://maven.pkg.github.com/pubky/paykit-rs`. The publish job uses the
@@ -54,18 +55,40 @@ version. For a release, choose one command from the following table.
 | `paykit-ffi/build.sh -r --patch all` | Next patch |
 | `paykit-ffi/build.sh -r --minor all` | Next minor with patch zero |
 
-Add `--rc` to a patch or minor bump to start that version at `-rc1`.
+Add `--rc` to a patch or minor bump to start that version at `-rc1`. The build
+refuses a version that doesn't come after the current one, such as a candidate
+of a version already final.
 The three crates inherit the workspace version. The build updates the exact
 workspace dependency, lockfile and Android version together. After both builds
 succeed, a release build writes `Package.swift` at the repository root from
 `paykit-ffi/swift/Package.release.swift`, with the release tag and the archive's
-checksum. A build without `-r` changes no version and writes no `Package.swift`.
+checksum, and copies the prepared Paykit.swift and WalletRedaction.swift into
+`paykit-ffi/bindings/ios/`, where that package reads them. If either build fails,
+the versions are restored and neither is written. A build without `-r` changes no
+version and writes nothing outside the build folders.
 
-The iOS build writes the prepared Paykit.swift and WalletRedaction.swift under
-`paykit-ffi/bindings/ios/` and the release archive at
-`paykit-ffi/dist/ios/Paykit.xcframework.zip`. Keep this exact archive for upload.
+The iOS build writes the release archive at
+`paykit-ffi/dist/ios/Paykit.xcframework.zip` and the prepared Swift sources under
+`paykit-ffi/dist/ios/Sources/Paykit/`. Keep this exact archive for upload.
 The AAR is `paykit-ffi/bindings/android/lib/build/outputs/aar/lib-release.aar`.
 For local debugging, run `paykit-ffi/build_ios.sh` or `paykit-ffi/build_android.sh`.
+
+The consumer ProGuard rules in `bindings/android/lib/consumer-rules.pro` are not
+exercised by any check here: the packages workflow compiles its consumer without
+minification. An app that minifies should run its own build against the AAR.
+
+## Versions kept in step by hand
+
+| Version | Where |
+| --- | --- |
+| Gradle 9.9.0 | `.github/workflows/packages.yml`, `.github/workflows/gradle-publish.yml`, `.github/workflows/ci.yml`, `build_android.sh` |
+| Android Gradle plugin 9.3.0 | `bindings/android/lib/build.gradle.kts`, `.github/workflows/packages.yml`, `tests/android/build.gradle.kts` |
+| JNA 5.17.0, kotlinx-coroutines 1.10.2 | `bindings/android/lib/build.gradle.kts`, `tests/android/build.gradle.kts`, `tests/hosts/build.gradle.kts` |
+| compileSdk 36, minSdk 28 | `bindings/android/lib/build.gradle.kts`, `.github/workflows/packages.yml`, `build_android.sh` (`--platform 28`, `android-36`) |
+| cargo-ndk 4.1.2 | `.github/workflows/packages.yml`, `.github/workflows/gradle-publish.yml`, `.github/workflows/ci.yml`, `build_android.sh` |
+| JDK 17 | `.github/workflows/packages.yml`, `.github/workflows/gradle-publish.yml`, `.github/workflows/ci.yml` |
+| iOS 15 | `build_ios.sh` (`IPHONEOS_DEPLOYMENT_TARGET`), `swift/Package.release.swift`, `swift/Package.swift`, `tests/Package.swift`, `.github/workflows/packages.yml` |
+| Swift tools 5.9 | `swift/Package.release.swift`, `swift/Package.swift`, `.github/workflows/packages.yml` |
 
 ## Commit and tag
 
