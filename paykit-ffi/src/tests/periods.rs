@@ -664,8 +664,11 @@ async fn running_pay(world: &World) -> TestResult {
     let mut paid = false;
     for _ in 0..200 {
         Box::pin(w.payer.resume_payments()).await?;
+        // Recorded paid: the method reported this payment made, not only a finished entry,
+        // which a recorded failure is too.
         if w.payer.payments().await?.iter().any(|p| {
             p.attempt_id == attempt
+                && p.paid_by_method
                 && matches!(
                     p.stage,
                     crate::PaymentStage::RailPaid

@@ -629,7 +629,7 @@ the new cursor to the service. Acknowledging the deletion notice leaves the cred
 A method reports a payment made with its proof, a JSON object the payer's app signs into the `paykit.payment_proof` message the payee receives (Paykit wire 4.10). The wallet accepts any proof that reads as an object, because the money has already moved: refusing it would leave a paid payment open for good. Keep a proof inside the limits that message has:
 - Its whole message, proof included, is at most 16 KiB, and a proof that takes it over leaves the payment paid with its outcome unwritten.
 - Keep its nesting shallow, well under 100 levels. The wallet's journal holds the proof a few levels down: a proof nested close to the decoder's limit of 128 is written, then can't be read back, and the wallet's payment list fails until the entry is gone.
-- Paykit decodes the proof before it signs it, so a number can lose its spelling, and a large one its value: `1.50` is signed as `1.5`, and an integer above 2^64 changes value, for example 18446744073709551617 is signed as 18446744073709552000. Write any number that must survive exactly as a string, for example `{"fee":"1.50"}`.
+- Paykit decodes the proof before it signs it, so a number can lose its spelling, and a large one its value: `1.50` is signed as `1.5`, and an integer above 2^64 changes value, for example 18446744073709551617 is signed as `1.8446744073709552e19`, which is 2^64. Write any number that must survive exactly as a string, for example `{"fee":"1.50"}`.
 - Give each member once: a repeated member keeps only its last value.
 
 ## The payment method's settlement ID
