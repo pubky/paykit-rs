@@ -10,7 +10,7 @@ use super::checkpoint::{ledger_target, AcceptedLedger};
 use super::evidence::AppliedRecord;
 use super::spend::JournalAllowance;
 use crate::state::{self, key, Binder};
-use crate::{Paykit, PaykitError, Refusal, Result};
+use crate::{Paykit, PaykitError, Result};
 
 /// The wallet stages the complete proposal before handing the batch to Switch. Only
 /// the ID Switch commits with its signed batch makes this a submitted preparation.
@@ -225,15 +225,6 @@ impl Paykit {
         }
         Ok(Some(applied))
     }
-}
-
-/// No executor checkpoint of this app for the Allowance, or one whose grant and ledger don't
-/// verify: no read takes execution up, so it is shown (Paykit spec 8.3, "Executor").
-pub(super) fn no_executor_base() -> PaykitError {
-    Refusal::HeldForUser(crate::HeldForUserReason::AllowanceExecutionHeld(
-        "this app can't establish its executor grant and ledger for the Allowance",
-    ))
-    .into()
 }
 
 /// The ledger write was applied, but the switch's proof doesn't show the ledger at the

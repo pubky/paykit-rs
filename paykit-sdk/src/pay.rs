@@ -1374,7 +1374,7 @@ impl Paykit {
     /// [`Refusal::AllowanceEnded`] (ended, or its terms expired), [`Refusal::AllowanceConflicted`],
     /// [`Refusal::Rejected`], [`Refusal::Usage`] (this app isn't its executor, or the request
     /// is another counterparty's) and [`Refusal::NotAutomatic`] (outside its terms, its
-    /// lifetime limit used up with nothing reserved or to release, set up before a provider
+    /// lifetime limit used up with nothing reserved that could come back, set up before a provider
     /// loss and never granted here, or a one-time request after a provider loss) stop
     /// automatic payment for good; [`Refusal::ScopeMissing`] stops it
     /// until the signer renews this app's certificate with the scope;

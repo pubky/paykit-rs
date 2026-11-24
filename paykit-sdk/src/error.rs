@@ -181,7 +181,7 @@ pub enum Refusal {
     /// Not paid automatically, for good: the authenticated subscription and service time
     /// don't authorize this automatic Billing Period (Paykit spec 8.2); the request or
     /// Billing Period doesn't qualify under the Allowance it is paid under, outside its terms
-    /// or with its lifetime limit used up and nothing reserved or to release; the Allowance
+    /// or with its lifetime limit used up and nothing reserved that could come back; the Allowance
     /// the payment was reserved under expired before its first dispatch; or the Allowance was
     /// set up before a provider loss and never granted here, so it can't be granted now and
     /// the user can end it and set up a new one (Paykit spec 8.3, "After provider loss"); or,

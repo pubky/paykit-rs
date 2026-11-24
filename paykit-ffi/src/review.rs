@@ -226,7 +226,7 @@ pub enum RefusalKind {
     /// Not paid automatically, for good: the subscription or service time doesn't authorize
     /// automatic payment (Paykit spec 8.2), or the request or Billing Period doesn't qualify
     /// under its Allowance: outside its terms, or its lifetime limit used up with nothing
-    /// reserved or to release, the Allowance the payment was reserved under expired before
+    /// reserved that could come back, the Allowance the payment was reserved under expired before
     /// its first dispatch, or it was set up before a provider loss and never granted here:
     /// end it and set up a new one (Paykit spec 8.3); or, after a provider loss, the request
     /// is one-time, under the shared post-loss hold (Paykit spec 8.1). The user may still pay it by hand.
@@ -514,7 +514,8 @@ pub enum NotNowKind {
     EarlierWriteUnresolved,
     /// The same call made again clears this.
     CallAgain,
-    /// An Allowance limit has no room now; its window rolling makes room.
+    /// An Allowance limit has no room now; its window rolling, or an earlier payment's
+    /// release, makes room.
     AllowanceLimit {
         /// The limit with no room.
         limit: String,

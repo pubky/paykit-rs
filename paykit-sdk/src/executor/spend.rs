@@ -107,21 +107,17 @@ enum LifetimeRoom {
     /// It fits once the entries still reserved give their room back, by their outcomes,
     /// with no one acting.
     Automatic,
-    /// It fits only once the user also releases another app's failed attempts.
-    Manual,
     /// It never fits.
     Never,
 }
 
 /// [`LifetimeRoom`] for a payment of `value`, from the same counting as `usage`: the room
-/// that may come back with no one acting is the entries `usage` holds reserved, whose
-/// outcomes are still to come, and the room only the user frees is `releasable`, the failed
-/// attempts of other apps the user may release, which count as spent until then. An entry
-/// spent or released already frees nothing more.
+/// that may come back is the entries `usage` holds reserved, whose outcomes are still to
+/// come; a failed outcome gives it back with no one acting (Paykit spec 8.3). An entry spent
+/// or released already frees nothing more.
 fn lifetime_room(
     terms: &paykit_lib::allowances::AllowanceTerms,
     usage: &paykit_lib::allowances::Usage,
-    releasable: u128,
     value: &paykit_lib::Decimal,
 ) -> LifetimeRoom {
     let Some(cap) = &terms.lifetime_amount_limit else {
@@ -133,13 +129,10 @@ fn lifetime_room(
             .checked_add(value.scaled())
             .is_some_and(|sum| sum <= cap.scaled())
     };
-    let automatic = usage.reserved_amount().scaled();
     if fits(0) {
         LifetimeRoom::Now
-    } else if fits(automatic) {
+    } else if fits(usage.reserved_amount().scaled()) {
         LifetimeRoom::Automatic
-    } else if fits(automatic.saturating_add(releasable)) {
-        LifetimeRoom::Manual
     } else {
         LifetimeRoom::Never
     }
@@ -168,10 +161,6 @@ fn limit_refusal(limit: LimitKind, period_never: bool, room: LifetimeRoom) -> cr
         // Usage of other terms: no window or release mends it (Paykit spec 8.3).
         LimitKind::InconsistentUsage => execution_held(INCONSISTENT_USAGE).into(),
         _ if period_never || room == LifetimeRoom::Never => not_automatic(&why),
-        // Room only the user gives back, releasing another app's failed attempt
-        // ([`crate::Paykit::reserved_by_other_apps`] lists it): the user's to answer, also
-        // when a period limit fails first, since no period roll makes lifetime room.
-        _ if room == LifetimeRoom::Manual => execution_held(RELEASE_HELD).into(),
         // A window rolling, or a reserved entry's outcome, gives the room back.
         _ => waits(crate::NotNowReason::AllowanceLimit {
             limit: limit.as_str().into(),
@@ -349,9 +338,6 @@ pub(crate) const SET_UP_BEFORE_LOSS: &str = "the Allowance was set up before a p
 
 /// Why an Allowance last confirmed before a provider loss waits before asking the user.
 pub(crate) const WAITS_FOR_RECORD_WRITE: &str = "the Allowance record is divergent or has messages to write first: the user confirms the record as shown, a newer write ends it, or the next receive writes the messages";
-
-/// Why a payment waits for the user to release another app's failed attempt.
-const RELEASE_HELD: &str = "the lifetime limit has no room while another app's failed attempt holds it: the user can release that attempt (reserved_by_other_apps)";
 
 /// Why a payment waits on usage that doesn't follow the Allowance's terms.
 const INCONSISTENT_USAGE: &str =
@@ -547,12 +533,7 @@ impl AllowanceReservation {
                 _ => not_automatic("the transfer does not satisfy the Allowance terms"),
             })?;
         if let Err(limit) = check_limits(&checked.terms, &checked.usage, &amount.value) {
-            let room = lifetime_room(
-                &checked.terms,
-                &checked.usage,
-                checked.facts.releasable().unwrap_or(0),
-                &amount.value,
-            );
+            let room = lifetime_room(&checked.terms, &checked.usage, &amount.value);
             return Err(limit_refusal(
                 limit,
                 period_never_fits(&checked.terms, &amount.value),
@@ -913,33 +894,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_spend_limit_refusal_holds_for_the_user_whatever_limit_fails_first() {
+    fn test_spend_limit_refusal_waits_while_room_can_come_back_whatever_limit_fails_first() {
         let refusal =
             |limit, period_never, room| limit_refusal(limit, period_never, room).refusal().cloned();
-        let held = Some(execution_held(RELEASE_HELD));
-        // Period cap 50, lifetime cap 100, 60 spent in earlier periods and 30 held by another
-        // app's failed attempt: a payment of 30 fails the period amount first, but only the
-        // user's release makes lifetime room, which no period roll gives.
-        for limit in [
-            LimitKind::PeriodAmount,
-            LimitKind::PeriodCount,
-            LimitKind::Lifetime,
+        // A period that rolls, or a reserved entry whose outcome comes back failed, gives the
+        // room back with no one acting: the payment waits, whichever limit fails first.
+        for (limit, name) in [
+            (LimitKind::PeriodAmount, "period_amount"),
+            (LimitKind::PeriodCount, "period_count"),
+            (LimitKind::Lifetime, "lifetime"),
         ] {
             assert_eq!(
-                refusal(limit, false, LifetimeRoom::Manual),
-                held,
+                refusal(limit, false, LifetimeRoom::Automatic),
+                Some(Refusal::NotNow(crate::NotNowReason::AllowanceLimit {
+                    limit: name.into()
+                })),
+                "{limit:?}"
+            );
+            // Nothing reserved could come back: no wait mends it.
+            assert_eq!(
+                refusal(limit, false, LifetimeRoom::Never),
+                Some(Refusal::NotAutomatic(format!(
+                    "the {name} limit has no room"
+                ))),
                 "{limit:?}"
             );
         }
-        // A period that rolls or a reservation that ends gives the room back.
+        // A period no payment of this size ever fits is final too.
         assert_eq!(
-            refusal(LimitKind::PeriodAmount, false, LifetimeRoom::Automatic),
-            Some(Refusal::NotNow(crate::NotNowReason::AllowanceLimit {
-                limit: "period_amount".into()
-            }))
-        );
-        assert_eq!(
-            refusal(LimitKind::PeriodAmount, false, LifetimeRoom::Never),
+            refusal(LimitKind::PeriodAmount, true, LifetimeRoom::Automatic),
             Some(Refusal::NotAutomatic(
                 "the period_amount limit has no room".into()
             ))
@@ -966,15 +949,11 @@ mod tests {
             at: 1_000,
             outcome,
         };
-        let evidence = |claim, paid, never_dispatched| AttemptEvidence {
+        let evidence = |claim, paid| AttemptEvidence {
             claim: Some(claim),
             paid,
-            never_dispatched,
         };
-        let room = |entries: &[LedgerEntry],
-                    facts: &[(u8, AttemptEvidence)],
-                    releasable: &str,
-                    value: &str| {
+        let room = |entries: &[LedgerEntry], facts: &[(u8, AttemptEvidence)], value: &str| {
             let ledger = Ledger {
                 entries: entries.to_vec(),
                 ..Ledger::empty(
@@ -988,45 +967,31 @@ mod tests {
                 .map(|(id, fact)| (AttemptId::from_bytes([*id; 16]), *fact))
                 .collect();
             let used = usage(&terms, &ledger, &facts, 2_000).unwrap();
-            lifetime_room(
-                &terms,
-                &used,
-                Decimal::parse(releasable).unwrap().scaled(),
-                &Decimal::parse(value).unwrap(),
-            )
+            lifetime_room(&terms, &used, &Decimal::parse(value).unwrap())
         };
-        use LifetimeRoom::{Automatic, Manual, Never};
-        // 70 dispatched and failed by another app, spent for good, and 10 reserved: 40
-        // never fits; 25 fits once the 10 come back.
+        use LifetimeRoom::{Automatic, Never, Now};
+        // 70 failed by another app, released, and 10 reserved: 40 fits now; 95 fits once
+        // the 10 come back.
         let entries = [entry(1, "70", None), entry(2, "10", None)];
         let facts = [
-            (
-                1,
-                evidence(ClaimState::Failed { by_owner: false }, false, false),
-            ),
-            (2, evidence(ClaimState::Open, false, false)),
+            (1, evidence(ClaimState::Failed { by_owner: false }, false)),
+            (2, evidence(ClaimState::Open, false)),
         ];
-        assert_eq!(room(&entries, &facts, "0", "40"), Never);
-        assert_eq!(room(&entries, &facts, "0", "25"), Automatic);
+        assert_eq!(room(&entries, &facts, "40"), Now);
+        assert_eq!(room(&entries, &facts, "95"), Automatic);
+        assert_eq!(room(&entries, &facts, "101"), Never);
         // 70 the method's history shows paid while its claim is still open, and 10 reserved:
         // the 70 are spent, and 25 waits for the 10; 40 never fits.
         let paid_by_history = [
-            (1, evidence(ClaimState::Open, true, false)),
-            (2, evidence(ClaimState::Open, false, false)),
+            (1, evidence(ClaimState::Open, true)),
+            (2, evidence(ClaimState::Open, false)),
         ];
-        assert_eq!(room(&entries, &paid_by_history, "0", "25"), Automatic);
-        assert_eq!(room(&entries, &paid_by_history, "0", "40"), Never);
+        assert_eq!(room(&entries, &paid_by_history, "25"), Automatic);
+        assert_eq!(room(&entries, &paid_by_history, "40"), Never);
         // 70 at the method, which reported a failure the claim doesn't show yet: still
         // reserved, and its room may come back, so 50 waits.
-        let failed_unwritten = [(1, evidence(ClaimState::Open, false, false))];
-        assert_eq!(room(&entries[..1], &failed_unwritten, "0", "50"), Automatic);
-        // 70 paid on the method with its ledger outcome unwritten, and 10 in flight: the 70
-        // are spent, so 40 never fits.
-        let facts = [
-            (1, evidence(ClaimState::Open, true, false)),
-            (2, evidence(ClaimState::Open, false, false)),
-        ];
-        assert_eq!(room(&entries, &facts, "0", "40"), Never);
+        let failed_unwritten = [(1, evidence(ClaimState::Open, false))];
+        assert_eq!(room(&entries[..1], &failed_unwritten, "50"), Automatic);
         // 80 paid, 50 released and 10 reserved: the released 50 frees nothing more, so 25
         // never fits, and 15 fits once the 10 come back.
         let entries = [
@@ -1035,32 +1000,26 @@ mod tests {
             entry(3, "10", None),
         ];
         let facts = [
-            (
-                2,
-                evidence(ClaimState::Failed { by_owner: false }, false, true),
-            ),
-            (3, evidence(ClaimState::Open, false, false)),
+            (2, evidence(ClaimState::Failed { by_owner: false }, false)),
+            (3, evidence(ClaimState::Open, false)),
         ];
-        assert_eq!(room(&entries, &facts, "0", "25"), Never);
-        assert_eq!(room(&entries, &facts, "0", "15"), Automatic);
-        // 60 paid, 25 in flight and 10 held by another app's failed attempt the user can
-        // release: 40 needs both, so the user is asked; 30 fits once the 25 come back; 50
-        // never fits.
+        assert_eq!(room(&entries, &facts, "25"), Never);
+        assert_eq!(room(&entries, &facts, "15"), Automatic);
+        // 60 paid, 25 in flight and 10 failed by another app, released: 40 and 30 fit once
+        // the 25 come back; 50 never fits.
         let entries = [
             entry(1, "60", Some(EntryOutcome::Done)),
             entry(2, "25", None),
             entry(3, "10", None),
         ];
         let facts = [
-            (2, evidence(ClaimState::Open, false, false)),
-            (
-                3,
-                evidence(ClaimState::Failed { by_owner: false }, false, false),
-            ),
+            (2, evidence(ClaimState::Open, false)),
+            (3, evidence(ClaimState::Failed { by_owner: false }, false)),
         ];
-        assert_eq!(room(&entries, &facts, "10", "40"), Manual);
-        assert_eq!(room(&entries, &facts, "10", "30"), Automatic);
-        assert_eq!(room(&entries, &facts, "10", "50"), Never);
+        assert_eq!(room(&entries, &facts, "15"), Now);
+        assert_eq!(room(&entries, &facts, "40"), Automatic);
+        assert_eq!(room(&entries, &facts, "30"), Automatic);
+        assert_eq!(room(&entries, &facts, "50"), Never);
     }
 
     #[test]

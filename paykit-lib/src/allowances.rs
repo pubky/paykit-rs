@@ -1408,9 +1408,7 @@ pub fn record_outcomes(
         };
         let outcome = if entry.outcome != Some(EntryOutcome::Done) && paid(fact) {
             EntryOutcome::Done
-        } else if entry.outcome.is_none()
-            && matches!(fact.claim, Some(ClaimState::Failed { .. }))
-        {
+        } else if entry.outcome.is_none() && matches!(fact.claim, Some(ClaimState::Failed { .. })) {
             EntryOutcome::Failed
         } else {
             continue;
@@ -2254,6 +2252,69 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_allowance_wrong_failure_goes_past_a_limit_by_at_most_its_amount() {
+        // Period limit 0.03 and 3 payments. Attempt 1 recorded failed gives its 0.01 and its
+        // count back, and three later payments fill the period again.
+        let terms = AllowanceTerms::from_json(&terms()).unwrap();
+        let mut entries = vec![entry(
+            1,
+            "0.01",
+            "2026-02-01T00:00:00.000Z",
+            Some(EntryOutcome::Failed),
+        )];
+        for id in 2..=4 {
+            entries.push(entry(
+                id,
+                "0.01",
+                &format!("2026-02-0{id}T00:00:00.000Z"),
+                Some(EntryOutcome::Done),
+            ));
+        }
+        let l = ledger(entries);
+        let at = t("2026-02-10T00:00:00.000Z");
+        let one = Decimal::parse("0.01").unwrap();
+        let mut evidence: HashMap<AttemptId, AttemptEvidence> = HashMap::new();
+        let used = super::usage(&terms, &l, &evidence, at).unwrap();
+        assert_eq!(
+            (
+                used.periods()[0].amount().as_str(),
+                used.periods()[0].count(),
+                used.released()
+            ),
+            ("0.03", 3, 1)
+        );
+        assert_eq!(
+            check_limits(&terms, &used, &one),
+            Err(LimitKind::PeriodAmount)
+        );
+        // The failure was wrong: a proof shows attempt 1 paid. It counts spent again, once,
+        // and the period goes past its limits by that attempt's amount and one count, no
+        // more; nothing further fits.
+        evidence.insert(
+            AttemptId::from_bytes([1; 16]),
+            AttemptEvidence {
+                claim: None,
+                paid: true,
+            },
+        );
+        let used = super::usage(&terms, &l, &evidence, at).unwrap();
+        assert_eq!(
+            (
+                used.periods()[0].amount().as_str(),
+                used.periods()[0].count(),
+                used.lifetime().as_str(),
+                used.spent(),
+                used.released()
+            ),
+            ("0.04", 4, "0.04", 4, 0)
+        );
+        assert_eq!(
+            check_limits(&terms, &used, &one),
+            Err(LimitKind::PeriodAmount)
+        );
     }
 
     #[test]

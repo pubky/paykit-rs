@@ -31,7 +31,7 @@ const MISSING_PAYMENT: &str =
 /// The SDK keeps the authenticated application it accepted. The spending batch must still
 /// condition on both current records and atomically open the new attempt and reservation.
 pub(super) struct ReconciledLedger {
-    pub(super) facts: super::outcomes::LedgerFacts,
+    pub(super) facts: HashMap<paykit_lib::AttemptId, paykit_lib::allowances::AttemptEvidence>,
     pub(super) signers: super::checkpoint::ReservationSigners,
     pub(super) applied_proposals: Vec<String>,
     pub(super) ledger: Ledger,
@@ -761,15 +761,8 @@ impl Paykit {
                 }
             }
         }
-        let facts = Box::pin(self.allowance_outcomes(
-            &ledger,
-            &proposed.terms.asset,
-            &exact_grant,
-            &claims,
-            &dispatched,
-        ))
-        .await?;
-        let counting = facts.signed.clone();
+        let facts = Box::pin(self.allowance_outcomes(&ledger, &claims, &dispatched)).await?;
+        let counting = facts.clone();
         let mut retired = if ledger.count == 0 {
             HashMap::new()
         } else {

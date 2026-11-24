@@ -9,7 +9,6 @@ mod ledger;
 #[cfg(feature = "test-support")]
 pub use ledger::with_early_ledger_compaction;
 mod outcomes;
-pub use outcomes::ReservedByOtherApp;
 mod preparation;
 pub(crate) use evidence::OwnWrite;
 pub(crate) use preparation::LedgerProposal;
@@ -187,7 +186,7 @@ mod tests {
         )
     }
     #[test]
-    fn test_compacted_method_failure_counts_once_and_requires_its_original_claim() {
+    fn test_compacted_method_failure_releases_and_requires_its_original_claim() {
         use paykit_lib::allowances::CompactedFailed;
         let terms = AllowanceTerms::from_json(&serde_json::json!({
             "asset":"btc","lifetime_amount_limit":"100","period_limits":[],
@@ -234,8 +233,20 @@ mod tests {
                 100_000_000,
             )
         };
+        // The verified failure releases the 70, whichever own app wrote it (Paykit spec
+        // 8.3, `failed` releases), and the method's history agrees.
         let accounting = read(dispatch.clone(), &claims).unwrap();
-        assert_eq!(accounting.counted.lifetime().as_str(), "70");
+        assert_eq!(accounting.counted.lifetime().as_str(), "0");
+        assert!(accounting.unclassified.is_empty());
+        let by_another = HashMap::from([(
+            id,
+            ReservationClaim {
+                obligation: [6; 32],
+                state: ClaimState::Failed { by_owner: false },
+            },
+        )]);
+        let accounting = read(dispatch.clone(), &by_another).unwrap();
+        assert_eq!(accounting.counted.lifetime().as_str(), "0");
         assert!(accounting.unclassified.is_empty());
         assert!(read(dispatch.clone(), &HashMap::new()).is_none());
         let mut different = dispatch.clone();
@@ -279,12 +290,14 @@ mod tests {
             at: 1_001,
             outcome: None,
         });
-        for (state, reserved, spent) in [
-            (Some(ClaimState::Open), 1, 0),
-            (Some(ClaimState::Unknown), 1, 0),
-            (Some(ClaimState::Done), 0, 1),
-            (Some(ClaimState::Failed { by_owner: true }), 0, 1),
-            (None, 0, 1),
+        // Open, unknown, done and a missing claim keep the 70 counted; a failure releases it.
+        for (state, lifetime, reserved, spent, released) in [
+            (Some(ClaimState::Open), "70", 1, 0, 0),
+            (Some(ClaimState::Unknown), "70", 1, 0, 0),
+            (Some(ClaimState::Done), "70", 0, 1, 0),
+            (Some(ClaimState::Failed { by_owner: true }), "0", 0, 0, 1),
+            (Some(ClaimState::Failed { by_owner: false }), "0", 0, 0, 1),
+            (None, "70", 0, 1, 0),
         ] {
             let claims = state
                 .map(|state| (id, ReservationClaim { obligation, state }))
@@ -301,10 +314,11 @@ mod tests {
             )
             .unwrap()
             .counted;
-            assert_eq!(usage.lifetime().as_str(), "70");
+            assert_eq!(usage.lifetime().as_str(), lifetime, "{state:?}");
             assert_eq!(
                 (usage.reserved(), usage.spent(), usage.released()),
-                (reserved, spent, 0)
+                (reserved, spent, released),
+                "{state:?}"
             );
         }
         rail.next(crate::rail::Behaviour::Hang);

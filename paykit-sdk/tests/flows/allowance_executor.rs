@@ -4,7 +4,7 @@ mod enrolled;
 mod refusals;
 mod regrant;
 
-use paykit_lib::allowances::{AllowanceTerms, Ledger};
+use paykit_lib::allowances::{AllowanceTerms, EntryOutcome, Ledger};
 use paykit_lib::records::AllowanceRecord;
 use paykit_sdk::{AllowanceRole, AllowanceStatus, AppScopes};
 use pubky_switch_client::app::{App, UserConfirmed};
@@ -269,7 +269,11 @@ async fn test_unanswered_owner_resolution_advances_the_reserved_ledger_once() {
         .await
         .unwrap()
         .expect("applied resolution");
-    assert_eq!((usage.lifetime().as_str(), usage.spent()), ("7", 1));
+    // The owner's failure releases the 7 (Paykit spec 8.3, `failed` releases).
+    assert_eq!(
+        (usage.lifetime().as_str(), usage.spent(), usage.released()),
+        ("0", 0, 1)
+    );
     let applied = reopened
         .app()
         .shared_record(&ledger.key)
@@ -361,7 +365,7 @@ async fn test_unanswered_owner_resolution_advances_the_reserved_ledger_once() {
             counted.spent(),
             counted.reserved()
         ),
-        ("10", 1, 1)
+        ("3", 0, 1)
     );
     assert_eq!(
         combined
@@ -2046,7 +2050,7 @@ async fn test_receive_copies_a_later_owner_failure_once() {
             .unwrap()
             .lifetime()
             .as_str(),
-        "5"
+        "0"
     );
     assert_eq!(world.rail.executions(&id), 1);
 }
@@ -2127,7 +2131,10 @@ async fn test_older_backup_recovers_one_signed_copy_of_two_owner_failures() {
         .await
         .unwrap()
         .expect("both owner failures precede the single copied successor");
-    assert_eq!((usage.lifetime().as_str(), usage.spent()), ("12", 2));
+    assert_eq!(
+        (usage.lifetime().as_str(), usage.spent(), usage.released()),
+        ("0", 0, 2)
+    );
     assert_eq!(only_ledger(&restored).await.1, revision);
     drop(restored);
     let mut reopened =
@@ -2194,7 +2201,10 @@ async fn test_imported_pending_outcome_copy_accepts_a_separately_verified_next_c
         .await
         .unwrap()
         .unwrap();
-    assert_eq!((usage.spent(), usage.reserved()), (1, 1));
+    assert_eq!(
+        (usage.spent(), usage.released(), usage.reserved()),
+        (0, 1, 1)
+    );
     assert!(installed
         .app()
         .protocol_scan("paykit", b"lb/")
@@ -2226,8 +2236,13 @@ async fn test_imported_pending_outcome_copy_accepts_a_separately_verified_next_c
         .unwrap()
         .expect("each of the two separate applied copies has its own evidence");
     assert_eq!(
-        (usage.lifetime().as_str(), usage.spent(), usage.reserved()),
-        ("12", 2, 0)
+        (
+            usage.lifetime().as_str(),
+            usage.spent(),
+            usage.released(),
+            usage.reserved()
+        ),
+        ("0", 0, 2, 0)
     );
     assert_eq!(only_ledger(&restored).await.1, revision);
     assert!(restored
@@ -2315,7 +2330,10 @@ async fn test_executor_restores_applied_batch_after_predecessor_key_retirement()
         .await
         .unwrap()
         .unwrap();
-    assert_eq!((usage.spent(), usage.reserved()), (2, 0));
+    assert_eq!(
+        (usage.spent(), usage.released(), usage.reserved()),
+        (0, 2, 0)
+    );
     let (_, installed) = only_ledger(&payer).await;
     assert_eq!(installed.generation, third.generation());
     let (write, installed_revision) = applied_put(payer.app(), ledger, installed).await;
@@ -2393,8 +2411,13 @@ async fn test_executor_restores_applied_batch_after_predecessor_key_retirement()
         .unwrap()
         .unwrap();
     assert_eq!(
-        (usage.lifetime().as_str(), usage.spent(), usage.reserved()),
-        ("13", 2, 1)
+        (
+            usage.lifetime().as_str(),
+            usage.spent(),
+            usage.released(),
+            usage.reserved()
+        ),
+        ("1", 0, 2, 1)
     );
     assert_eq!(only_ledger(&restored).await.1, successor);
     assert!(restored
@@ -2695,6 +2718,98 @@ async fn compacted_failure_paid_by_receipt(retire_copy_key: bool) {
 }
 
 #[tokio::test]
+async fn test_a_pending_attempt_that_fails_gives_its_amount_and_count_back() {
+    // One payment a day, 10 in all.
+    let terms = AllowanceTerms::from_json(&json!({
+        "asset": "btc", "lifetime_amount_limit": "10",
+        "period_limits": [{
+            "amount_limit": null,
+            "payment_count_limit": 1,
+            "period": {"kind": "rolling", "every": 1, "unit": "day"},
+        }],
+        "per_payment_amount": null, "active_from": null, "expires_at": null,
+        "allowed_payment_endpoint_identifiers": null
+    }))
+    .unwrap();
+    let (world, mut payer, mut shop, key) =
+        Box::pin(first_grant_in(crate::common::store(), terms)).await;
+    world.rail.set_history_payer(payer.identity());
+    // The method takes the 7 and leaves them pending: reserved, amount and count.
+    let attempt_id = Box::pin(open_funded_request(
+        &world, &mut payer, &mut shop, &key, "7",
+    ))
+    .await;
+    let (reserved, _) = only_ledger(&payer).await;
+    let entry = reserved.entries[0].clone();
+    assert_eq!((entry.attempt_id, entry.outcome), (attempt_id, None));
+    let next = Box::pin(request_from(
+        &mut shop,
+        payer.identity(),
+        draft("5", world.clock.now_ms()),
+    ))
+    .await;
+    Box::pin(payer.receive(None)).await.unwrap();
+    let waits = Box::pin(payer.pay_under_allowance(&next, &key))
+        .await
+        .outcome
+        .unwrap_err();
+    assert_eq!(
+        waits.refusal(),
+        Some(&paykit_sdk::Refusal::NotNow(
+            paykit_sdk::NotNowReason::AllowanceLimit {
+                limit: "period_count".into()
+            }
+        )),
+        "{waits:?}"
+    );
+
+    // The method answers for good that the payment failed: the ledger records it on the
+    // same entry, and the reservation comes back, amount and count (Paykit spec 8.3,
+    // `failed` releases).
+    world.rail.settle(&attempt_id, false);
+    Box::pin(payer.resume_payments()).await.unwrap();
+    let (failed, _) = only_ledger(&payer).await;
+    assert_eq!(failed.allowance_id, reserved.allowance_id);
+    assert_eq!(failed.entries.len(), 1);
+    let recorded = &failed.entries[0];
+    assert_eq!(
+        (recorded.attempt_id, recorded.obligation, recorded.outcome),
+        (attempt_id, entry.obligation, Some(EntryOutcome::Failed))
+    );
+    let usage = Box::pin(payer.reconcile_allowance(&key))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (
+            usage.lifetime().as_str(),
+            usage.periods()[0].count(),
+            usage.released()
+        ),
+        ("0", 0, 1)
+    );
+    // The 5 that waited fits now, in the same period.
+    Box::pin(payer.pay_under_allowance(&next, &key))
+        .await
+        .outcome
+        .unwrap();
+    let usage = Box::pin(payer.reconcile_allowance(&key))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (
+            usage.lifetime().as_str(),
+            usage.periods()[0].count(),
+            usage.spent(),
+            usage.released()
+        ),
+        ("5", 1, 1, 1)
+    );
+    assert_eq!(world.rail.executions(&attempt_id), 1);
+}
+
+#[tokio::test]
 async fn test_resume_copies_the_payers_later_payment_proof_once() {
     use paykit_lib::allowances::EntryOutcome;
 
@@ -2720,6 +2835,12 @@ async fn test_resume_copies_the_payers_later_payment_proof_once() {
         only_ledger(&payer).await.0.entries[0].outcome,
         Some(EntryOutcome::Failed)
     );
+    // The failure gives the 7 back.
+    let usage = Box::pin(payer.reconcile_allowance(&key))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!((usage.lifetime().as_str(), usage.released()), ("0", 1));
     let obligation = only_ledger(&payer).await.0.entries[0].obligation;
     let failed_backup = Box::pin(payer.backup()).await.unwrap();
     assert!(world.rail.hold_history_outcome(&attempt_id));
@@ -2749,14 +2870,14 @@ async fn test_resume_copies_the_payers_later_payment_proof_once() {
         Box::pin(world.load_on_clock(&world.alice, store, app_id, world.clock.clone())).await;
     Box::pin(payer.receive(None)).await.unwrap();
     assert_eq!(only_ledger(&payer).await.1, revision);
+    // The late payment counts the 7 spent again, once.
+    let usage = Box::pin(payer.reconcile_allowance(&key))
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(
-        Box::pin(payer.reconcile_allowance(&key))
-            .await
-            .unwrap()
-            .unwrap()
-            .lifetime()
-            .as_str(),
-        "7"
+        (usage.lifetime().as_str(), usage.spent(), usage.released()),
+        ("7", 1, 0)
     );
     assert_eq!(world.rail.executions(&attempt_id), 1);
     drop(payer);
@@ -2799,14 +2920,19 @@ async fn test_resume_copies_the_payers_later_payment_proof_once() {
 }
 
 #[tokio::test]
-async fn test_host_confirms_another_wallets_failure_after_the_executor_ended_before_dispatch() {
+async fn test_executor_copies_another_wallets_confirmed_failure_before_dispatch() {
     Box::pin(confirm_foreign_failure(ForeignFailure::BeforeDispatch)).await;
 }
 
 #[tokio::test]
-async fn test_host_release_holds_for_the_user_when_a_period_limit_fails_first() {
-    // Both caps 100: the period limit refuses 95 first, but only the user's release of the
-    // other wallet's 9 makes lifetime room, which no period roll gives.
+async fn test_executor_copies_another_wallets_confirmed_failure_after_dispatch() {
+    Box::pin(confirm_foreign_failure(ForeignFailure::AfterDispatch)).await;
+}
+
+#[tokio::test]
+async fn test_released_room_fits_a_payment_a_period_limit_refused_first() {
+    // Both caps 100: the period limit refuses 95 first while the other wallet's 9 are
+    // reserved; once their failure is copied, 95 fits both limits and 105 neither.
     let terms = AllowanceTerms::from_json(&json!({
         "asset": "btc", "lifetime_amount_limit": "100",
         "period_limits": [{
@@ -2827,28 +2953,31 @@ async fn test_host_release_holds_for_the_user_when_a_period_limit_fails_first() 
 }
 
 #[tokio::test]
-async fn test_host_recovers_the_confirmed_release_after_a_lost_reply() {
-    Box::pin(confirm_foreign_failure(ForeignFailure::LostRelease)).await;
+async fn test_restore_from_before_the_copy_counts_the_copied_failure_once() {
+    Box::pin(confirm_foreign_failure(ForeignFailure::RestoredBeforeCopy)).await;
 }
 
 #[tokio::test]
-async fn test_host_cannot_release_another_wallets_failure_after_dispatch() {
-    Box::pin(confirm_foreign_failure(ForeignFailure::AfterDispatch)).await;
+async fn test_executor_recovers_the_copied_failure_after_a_lost_reply() {
+    Box::pin(confirm_foreign_failure(ForeignFailure::LostCopy)).await;
 }
 
 #[derive(PartialEq)]
 enum ForeignFailure {
     BeforeDispatch,
-    LostRelease,
+    LostCopy,
     AfterDispatch,
+    RestoredBeforeCopy,
 }
 
 async fn confirm_foreign_failure(case: ForeignFailure) {
     Box::pin(confirm_foreign_failure_under(case, terms(), "lifetime")).await;
 }
 
-/// [`confirm_foreign_failure`] under `terms`, whose `first_limit` refuses a payment that
-/// never fits.
+/// Another wallet of the user confirms the executor's reserved attempt failed (Paykit spec
+/// 7.3), and the executor copies that failure into the ledger with no one acting, which gives
+/// the attempt's room back once (Paykit spec 8.3, `failed` releases). Under `terms`,
+/// `first_limit` refuses a payment that never fits.
 async fn confirm_foreign_failure_under(
     case: ForeignFailure,
     terms: AllowanceTerms,
@@ -2868,22 +2997,14 @@ async fn confirm_foreign_failure_under(
         draft("9", world.clock.now_ms()),
     ))
     .await;
-    // A larger request, sent now while the shop's certificate holds, paid only later.
+    // Larger requests, sent now while the shop's certificate holds, paid only later: one
+    // that fits once the 9 come back, and one that never fits.
     let lasting = |value: &str| {
         draft(value, world.clock.now_ms())
             .with_proposal_expires_at_ms(world.clock.now_ms() + 3_650 * 24 * HOUR_MS)
     };
-    let larger = if case != ForeignFailure::LostRelease {
-        Some(Box::pin(request_from(&mut shop, payer.identity(), lasting("95"))).await)
-    } else {
-        None
-    };
-    // One that couldn't fit even with the failed attempt released.
-    let too_large = if case == ForeignFailure::BeforeDispatch {
-        Some(Box::pin(request_from(&mut shop, payer.identity(), lasting("105"))).await)
-    } else {
-        None
-    };
+    let larger = Box::pin(request_from(&mut shop, payer.identity(), lasting("95"))).await;
+    let too_large = Box::pin(request_from(&mut shop, payer.identity(), lasting("105"))).await;
     Box::pin(payer.receive(None)).await.unwrap();
     if case == ForeignFailure::AfterDispatch {
         world.rail.next(paykit_sdk::rail::Behaviour::Hang);
@@ -2906,19 +3027,26 @@ async fn confirm_foreign_failure_under(
     }
     Box::pin(payer.receive(None)).await.unwrap();
     let (held, _) = only_ledger(&payer).await;
-    let entry = &held.entries[0];
-    assert_eq!(
-        world.rail.executions(&entry.attempt_id),
-        u64::from(case == ForeignFailure::AfterDispatch)
-    );
-
+    let entry = held.entries[0].clone();
+    let dispatched = u64::from(case == ForeignFailure::AfterDispatch);
+    assert_eq!(world.rail.executions(&entry.attempt_id), dispatched);
+    // While the 9 are reserved, 95 waits for them to come back.
+    let waits = Box::pin(payer.pay_under_allowance(&larger, &key))
+        .await
+        .outcome
+        .unwrap_err();
     assert!(
-        Box::pin(payer.reconcile_allowance(&key))
-            .await
-            .unwrap()
-            .is_some(),
-        "before certificate expiry"
+        matches!(
+            waits.refusal(),
+            Some(paykit_sdk::Refusal::NotNow(
+                paykit_sdk::NotNowReason::AllowanceLimit { .. }
+            ))
+        ),
+        "{waits:?}"
     );
+    let before_copy = Box::pin(payer.backup()).await.unwrap();
+
+    // The executor's certificate lapses, so the other wallet answers for the attempt.
     world.clock.set_ms(original.expires_at() + 1);
     Box::pin(other.receive(None)).await.unwrap();
     Box::pin(other.resolve_attempt(
@@ -2933,161 +3061,100 @@ async fn confirm_foreign_failure_under(
     let id = payer.app_id();
     let renewed = crate::certificate::renew(&world, id, &scopes, 0);
     crate::certificate::list(&world, id, &original, &renewed);
+    if case == ForeignFailure::LostCopy {
+        world
+            .alice
+            .switch()
+            .fail_next(pubky_switch_client::testing::Fault::LoseAnswerAfter {
+                path: "/ops".into(),
+                // The receive's third write is the ledger copy.
+                after: 2,
+            });
+    }
+    // The receive that takes the renewed certificate copies the failure.
     Box::pin(payer.receive(None)).await.unwrap();
+    if case == ForeignFailure::LostCopy {
+        // The copy's answer was lost and the receive went on: a reopened wallet finds the
+        // write and counts it once.
+        assert_eq!(only_ledger(&payer).await.0.entries[0].outcome, None);
+        drop(payer);
+        payer =
+            Box::pin(world.load_on_clock(&world.alice, storage.clone(), id, world.clock.clone()))
+                .await;
+        Box::pin(payer.receive(None)).await.unwrap();
+    }
     assert_eq!(
         payer.app().cert().hash(),
         renewed.hash(),
         "the renewed certificate was taken"
     );
-    world.clock.set_ms(world.clock.now_ms() + 1_000);
-    let next = crate::certificate::renew(&world, id, &scopes, 0);
-    crate::certificate::list(&world, id, &renewed, &next);
-    Box::pin(payer.receive(None)).await.unwrap();
-    assert_eq!(payer.app().cert().hash(), next.hash());
-    let shown = Box::pin(payer.reserved_by_other_apps(&key)).await.unwrap();
-    assert_eq!(shown.len(), 1);
-    assert_eq!(
-        (shown[0].attempt_id, shown[0].value.as_str()),
-        (entry.attempt_id, "9")
-    );
-    let premature =
-        Box::pin(payer.release_allowance_attempt(&key, entry.attempt_id, UserConfirmed::new()))
-            .await
-            .unwrap_err();
-    assert!(
-        matches!(premature.refusal(), Some(paykit_sdk::Refusal::Usage(_))),
-        "{premature:?}"
-    );
-
-    Box::pin(payer.resume_payments()).await.unwrap();
-    assert_eq!(
-        Box::pin(payer.reconcile_allowance(&key))
-            .await
-            .unwrap()
-            .unwrap()
-            .lifetime()
-            .as_str(),
-        "9"
-    );
-    if let Some(larger) = larger.as_ref() {
-        // The failed attempt holds 9 of the 100 the lifetime limit allows. Ended before
-        // dispatch, the user can release it, so a payment of 95 waits; dispatched, it can't
-        // be released, so the payment is refused for good.
-        // The shop's certificate is renewed too, so its destination checks.
-        let shop_old = shop.app().cert().clone();
-        let shop_id = shop.app_id();
-        let shop_scopes = AppScopes::new().allowance().request().build().unwrap();
-        let shop_renewed =
-            crate::certificate::renew_for(&world, &world.bob, "shop", shop_id, &shop_scopes, 0);
-        crate::certificate::list_for(&world.bob, shop_id, &shop_old, &shop_renewed);
-        for _ in 0..2 {
-            Box::pin(shop.receive(None)).await.unwrap();
-        }
-        assert_eq!(shop.app().cert().hash(), shop_renewed.hash());
-        let waits = Box::pin(payer.pay_under_allowance(larger, &key))
-            .await
-            .outcome
-            .unwrap_err();
-        let expected = if case == ForeignFailure::BeforeDispatch {
-            // Only the user releases the other app's attempt.
-            paykit_sdk::Refusal::HeldForUser(
-                paykit_sdk::HeldForUserReason::AllowanceExecutionHeld(
-                    "the lifetime limit has no room while another app's failed attempt holds it: the user can release that attempt (reserved_by_other_apps)",
-                ),
-            )
-        } else {
-            paykit_sdk::Refusal::NotAutomatic("the lifetime limit has no room".into())
-        };
-        assert_eq!(waits.refusal(), Some(&expected), "{waits:?}");
-        if let Some(too_large) = too_large.as_ref() {
-            let refused = Box::pin(payer.pay_under_allowance(too_large, &key))
-                .await
-                .outcome
-                .unwrap_err();
-            assert_eq!(
-                refused.refusal(),
-                Some(&paykit_sdk::Refusal::NotAutomatic(format!(
-                    "the {first_limit} limit has no room"
-                ))),
-                "{refused:?}"
-            );
-        }
-    }
-    let before_release = if case == ForeignFailure::BeforeDispatch {
-        Some(Box::pin(payer.backup()).await.unwrap())
-    } else {
-        None
-    };
-    if case == ForeignFailure::LostRelease {
-        world
-            .alice
-            .switch()
-            .fail_next(pubky_switch_client::testing::Fault::LoseAnswer {
-                path: "/ops".into(),
-            });
-    }
-    let release =
-        Box::pin(payer.release_allowance_attempt(&key, entry.attempt_id, UserConfirmed::new()))
-            .await;
-    if case == ForeignFailure::AfterDispatch {
-        let refused = release.unwrap_err();
-        assert!(matches!(
-            refused.refusal(),
-            Some(paykit_sdk::Refusal::Usage(_))
-        ));
-        assert_eq!(only_ledger(&payer).await.0.entries[0].outcome, None);
-        assert_eq!(world.rail.pay_calls(&entry.attempt_id), 1);
-        return;
-    } else if case == ForeignFailure::LostRelease {
-        let lost = release.unwrap_err();
-        assert!(lost.kept_batch().is_some(), "{lost:?}");
-    } else {
-        release.unwrap();
-    }
-    drop(payer);
-    let mut payer =
-        Box::pin(world.load_on_clock(&world.alice, storage, id, world.clock.clone())).await;
-    Box::pin(payer.receive(None)).await.unwrap();
-    assert!(Box::pin(payer.reserved_by_other_apps(&key))
-        .await
-        .unwrap()
-        .is_empty());
+    let (copied, revision) = only_ledger(&payer).await;
+    assert_eq!(copied.entries[0].outcome, Some(EntryOutcome::Failed));
     let usage = Box::pin(payer.reconcile_allowance(&key))
         .await
         .unwrap()
         .unwrap();
     assert_eq!((usage.lifetime().as_str(), usage.released()), ("0", 1));
-    let (_, revision) = only_ledger(&payer).await;
-    let repeated =
-        Box::pin(payer.release_allowance_attempt(&key, entry.attempt_id, UserConfirmed::new()))
-            .await
-            .unwrap_err();
-    assert!(matches!(
-        repeated.refusal(),
-        Some(paykit_sdk::Refusal::Usage(_))
-    ));
+    // Copied once: a later receive and resume write nothing more.
+    Box::pin(payer.receive(None)).await.unwrap();
+    Box::pin(payer.resume_payments()).await.unwrap();
     assert_eq!(only_ledger(&payer).await.1, revision);
-    assert!(world.rail.all_executions().is_empty());
-    if let Some(backup) = before_release {
+    assert_eq!(world.rail.executions(&entry.attempt_id), dispatched);
+
+    if case == ForeignFailure::RestoredBeforeCopy {
+        // A backup taken before the copy restores to the same count: the other wallet's
+        // verified claim explains the copied write.
         drop(payer);
         let mut restored = Box::pin(paykit_sdk::Paykit::restore(
             world.env(&world.alice, crate::common::store()),
             Default::default(),
-            &backup,
+            &before_copy,
             world.rail.clone(),
             world.timer(),
         ))
         .await
         .unwrap();
         Box::pin(crate::common::finish_listing(&mut restored)).await;
-        // A foreign claim authorizes no copy of Failed. The old backup lacks the
-        // later confirmation and preparation that justified this specific release.
-        assert!(Box::pin(restored.reconcile_allowance(&key))
+        let usage = Box::pin(restored.reconcile_allowance(&key))
             .await
             .unwrap()
-            .is_none());
+            .unwrap();
+        assert_eq!((usage.lifetime().as_str(), usage.released()), ("0", 1));
         assert_eq!(only_ledger(&restored).await.1, revision);
+        return;
     }
+
+    // The room is back: 95 fits, and 105 never does.
+    let shop_old = shop.app().cert().clone();
+    let shop_id = shop.app_id();
+    let shop_scopes = AppScopes::new().allowance().request().build().unwrap();
+    let shop_renewed =
+        crate::certificate::renew_for(&world, &world.bob, "shop", shop_id, &shop_scopes, 0);
+    crate::certificate::list_for(&world.bob, shop_id, &shop_old, &shop_renewed);
+    for _ in 0..2 {
+        Box::pin(shop.receive(None)).await.unwrap();
+    }
+    assert_eq!(shop.app().cert().hash(), shop_renewed.hash());
+    let refused = Box::pin(payer.pay_under_allowance(&too_large, &key))
+        .await
+        .outcome
+        .unwrap_err();
+    assert_eq!(
+        refused.refusal(),
+        Some(&paykit_sdk::Refusal::NotAutomatic(format!(
+            "the {first_limit} limit has no room"
+        ))),
+        "{refused:?}"
+    );
+    Box::pin(payer.pay_under_allowance(&larger, &key))
+        .await
+        .outcome
+        .unwrap();
+    let usage = Box::pin(payer.reconcile_allowance(&key))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!((usage.lifetime().as_str(), usage.released()), ("95", 1));
 }
 
 #[tokio::test]
