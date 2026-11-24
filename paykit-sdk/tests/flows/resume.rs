@@ -632,6 +632,78 @@ async fn test_resume_reports_a_payment_whose_outcome_another_entrys_write_sent()
     assert!(wallet.resume_payments().await.unwrap().is_empty());
 }
 
+#[tokio::test]
+async fn test_resume_reports_a_restored_failure_written_after_the_methods_history_expired() {
+    // The method reported the payment failed, and that failure couldn't be written before
+    // the backup was taken. The wallet restored from it writes the failure once the method
+    // no longer keeps its history: the recheck then drops the method's word from the entry
+    // in the same call, and the failure just written is still reported.
+    const DAY_MS: u64 = 24 * crate::common::HOUR_MS;
+    let w = World::new();
+    w.rail.set_declaration(
+        paykit_sdk::RailDeclaration::new(
+            paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
+            paykit_sdk::rail::FAKE_PAYMENT_TIME_TOLERANCE_MS,
+        )
+        .with_history(true)
+        .with_history_retention_ms(DAY_MS)
+        .with_history_survives_restore(true),
+    );
+    let mut wallet = w.wallet("wallet").await;
+    let [first, second] = two_in_flight(&w, &mut wallet).await;
+    w.rail.settle(&first, false);
+    // The failure's write and its retry on the last flush.
+    for _ in 0..2 {
+        w.alice.switch().fail_next(Fault::Unanswered {
+            path: "/ops".into(),
+            after: 0,
+        });
+    }
+    let outcomes = wallet.resume_payments().await.unwrap();
+    assert!(
+        matches!(
+            outcomes.as_slice(),
+            [PayOutcome::Pending { attempt_id: a, .. }, PayOutcome::Pending { attempt_id: b, .. }]
+                if *a == first && *b == second
+        ),
+        "{outcomes:?}"
+    );
+    assert_eq!(stage(&wallet, &first).await, Stage::RailFailed);
+    let backup = wallet.backup().await.unwrap();
+    drop(wallet);
+    w.clock.advance_ms(DAY_MS + 1);
+    let mut restored = Paykit::restore(
+        w.env(&w.alice, store()),
+        PaykitConfig::default(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    restored.receive(None).await.unwrap();
+    let outcomes = restored.resume_payments().await.unwrap();
+    assert!(
+        outcomes.iter().any(|outcome| matches!(
+            outcome,
+            PayOutcome::Failed { attempt_id, reason, .. }
+                if *attempt_id == first && reason == "the payment method reported a failure"
+        )),
+        "{outcomes:?}"
+    );
+    assert_eq!(stage(&restored, &first).await, Stage::Finished);
+    // The second, back from the backup at the method's call with no history to tell, is
+    // never reported failed: nothing says it wasn't paid.
+    assert!(
+        !outcomes.iter().any(
+            |outcome| matches!(outcome, PayOutcome::Failed { attempt_id, .. } if *attempt_id == second)
+        ),
+        "{outcomes:?}"
+    );
+    assert_eq!(w.rail.executions(&first), 1);
+    assert_eq!(w.rail.executions(&second), 1);
+}
+
 /// How the user's resolution of one of two payments in flight reached the switch.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Sent {
