@@ -95,8 +95,12 @@ class CheckoutMethod: ReceiptReader, @unchecked Sendable {
 }
 
 extension NativeWallet {
+    /// Read until the feed is done and every record the app's scopes read is listed (Paykit spec 6).
     func finishReceive() async throws {
-        for _ in 0..<8 { if !(try await receive()).more { return } }
+        for _ in 0..<8 {
+            let report = try await receive()
+            if !report.more && report.recordsUnlisted == nil { return }
+        }
         preconditionFailure("wallet did not complete its feed")
     }
 }
