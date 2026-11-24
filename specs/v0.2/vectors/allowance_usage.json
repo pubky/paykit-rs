@@ -255,24 +255,23 @@
         ]
       },
       "usage": {
-        "lifetime": "0.004",
+        "lifetime": "0.003",
         "periods": [
           {
-            "amount": "0.004",
-            "count": 4
+            "amount": "0.003",
+            "count": 3
           }
         ],
-        "released": 0,
+        "released": 1,
         "reserved": 1,
-        "spent": 3
+        "spent": 2
       }
     },
     {
       "candidates": [
         {
-          "allowed": false,
-          "amount": "0.06",
-          "refused_by": "lifetime"
+          "allowed": true,
+          "amount": "0.06"
         },
         {
           "allowed": false,
@@ -359,7 +358,7 @@
         },
         "v": 1
       },
-      "name": "outcomes: open and unknown reserve; failed attempts spend; missing claims spend",
+      "name": "outcomes: open and unknown reserve; failed attempts are released; missing claims spend",
       "t": "2026-01-08T00:00:00.000Z",
       "terms": {
         "active_from": null,
@@ -371,11 +370,11 @@
         "period_limits": []
       },
       "usage": {
-        "lifetime": "0.06",
+        "lifetime": "0.04",
         "periods": [],
-        "released": 0,
+        "released": 2,
         "reserved": 2,
-        "spent": 4
+        "spent": 2
       }
     },
     {
@@ -510,14 +509,12 @@
     {
       "candidates": [
         {
-          "allowed": false,
-          "amount": "0.08",
-          "refused_by": "lifetime"
+          "allowed": true,
+          "amount": "0.08"
         },
         {
-          "allowed": false,
-          "amount": "0.0801",
-          "refused_by": "lifetime"
+          "allowed": true,
+          "amount": "0.0801"
         }
       ],
       "claims": [
@@ -580,7 +577,7 @@
         },
         "v": 1
       },
-      "name": "failures by either app spend; done overrides a failed ledger outcome",
+      "name": "failures by either app are released; done overrides a failed ledger outcome",
       "t": "2026-01-08T00:00:00.000Z",
       "terms": {
         "active_from": null,
@@ -592,19 +589,18 @@
         "period_limits": []
       },
       "usage": {
-        "lifetime": "0.04",
+        "lifetime": "0.01",
         "periods": [],
-        "released": 0,
+        "released": 3,
         "reserved": 0,
-        "spent": 4
+        "spent": 1
       }
     },
     {
       "candidates": [
         {
-          "allowed": false,
-          "amount": "0.02",
-          "refused_by": "lifetime"
+          "allowed": true,
+          "amount": "0.02"
         },
         {
           "allowed": false,
@@ -654,7 +650,7 @@
         },
         "v": 1
       },
-      "name": "compacted failed attempts spend while claims remain and after they are gone",
+      "name": "compacted failed attempts are released while claims remain and after they are gone",
       "t": "2026-07-02T00:00:00.000Z",
       "terms": {
         "active_from": null,
@@ -666,7 +662,7 @@
         "period_limits": []
       },
       "usage": {
-        "lifetime": "0.11",
+        "lifetime": "0.08",
         "periods": [],
         "released": 0,
         "reserved": 1,
@@ -818,8 +814,8 @@
         "state": "open"
       }
     ],
-    "lifetime_after": "0.07",
-    "lifetime_before": "0.07",
+    "lifetime_after": "0.05",
+    "lifetime_before": "0.05",
     "now": "2026-03-10T00:00:00.000Z",
     "successors": {
       "cases": [
@@ -1210,12 +1206,12 @@
       ]
     }
   },
-  "description": "Allowance usage (wire 5.5, spec 8.3 with specs/allowances.md): for every period limit the amount and count of counted entries in the period containing t (anchored) or with t < at + 60 s + L (rolling), the lifetime amount including compacted totals, and entry counts reserved, spent and released. A ledger or claim done, or a validated payer proof, spends. Open and unknown claims reserve entries without an outcome. Every failed attempt spends immediately, whoever wrote the failure, while its claim remains and after it is gone. Only durable journal evidence bound to the attempt proving it ended before the payment method's call and can never dispatch releases it; a restored journal, a reported failure or user confirmation alone is insufficient. Done or a paid proof overrides release. An entry without an outcome whose claim is gone spends. Compacted totals.failed items use the same rule for lifetime usage. Candidates are checked against every limit; refused_by names the first limit that refuses. failure_evidence holds pure counting inputs: evidence means already validated local journal and payer-proof evidence, not a shared record member; Callers must bind it to the attempt, obligation, Allowance, amount, asset and owner. Its compacted cases replace the entry with one totals.failed item. period_limit_spellings checks duplicate terms by wire spelling; period_limit_members checks required members. compaction/successors checks which newer ledger versions a reader holding an older one accepts after a compaction it didn't see.",
+  "description": "Allowance usage (wire 5.5, spec 8.3 with specs/allowances.md): for every period limit the amount and count of counted entries in the period containing t (anchored) or with t < at + 60 s + L (rolling), the lifetime amount including compacted totals, and entry counts reserved, spent and released. A ledger or claim done, or a validated payer proof, spends. Open and unknown claims reserve entries without an outcome. Every failed attempt is released, whoever wrote the failure, while its claim remains and after it is gone: it counts in no amount and no count. Done or a paid proof overrides the release and spends. An entry without an outcome whose claim is gone spends. Compacted totals.failed items use the same rule for lifetime usage. Candidates are checked against every limit; refused_by names the first limit that refuses. failure_evidence holds pure counting inputs: evidence means already validated payer-proof evidence (paid), not a shared record member, and the failure itself comes from the claim, the entry or the compacted item; Callers must bind it to the attempt, obligation, Allowance, amount, asset and owner. Its compacted cases replace the entry with one totals.failed item. period_limit_spellings checks duplicate terms by wire spelling; period_limit_members checks required members. compaction/successors checks which newer ledger versions a reader holding an older one accepts after a compaction it didn't see.",
   "failure_evidence": [
     {
       "attempt_id": "1csmdhiTomzJxPwNK4iUiQ",
       "candidate": {
-        "allowed": false,
+        "allowed": true,
         "amount": "0.01"
       },
       "claims": [
@@ -1226,7 +1222,6 @@
         }
       ],
       "evidence": {
-        "never_dispatched": false,
         "paid": false
       },
       "ledger": {
@@ -1265,17 +1260,17 @@
         "period_limits": []
       },
       "usage": {
-        "lifetime": "0.01",
+        "lifetime": "0",
         "periods": [],
-        "released": 0,
+        "released": 1,
         "reserved": 0,
-        "spent": 1
+        "spent": 0
       }
     },
     {
       "attempt_id": "1csmdhiTomzJxPwNK4iUiQ",
       "candidate": {
-        "allowed": false,
+        "allowed": true,
         "amount": "0.01"
       },
       "claims": [
@@ -1286,7 +1281,6 @@
         }
       ],
       "evidence": {
-        "never_dispatched": false,
         "paid": false
       },
       "ledger": {
@@ -1325,22 +1319,21 @@
         "period_limits": []
       },
       "usage": {
-        "lifetime": "0.01",
+        "lifetime": "0",
         "periods": [],
-        "released": 0,
+        "released": 1,
         "reserved": 0,
-        "spent": 1
+        "spent": 0
       }
     },
     {
       "attempt_id": "1csmdhiTomzJxPwNK4iUiQ",
       "candidate": {
-        "allowed": false,
+        "allowed": true,
         "amount": "0.01"
       },
       "claims": [],
       "evidence": {
-        "never_dispatched": false,
         "paid": false
       },
       "ledger": {
@@ -1379,11 +1372,11 @@
         "period_limits": []
       },
       "usage": {
-        "lifetime": "0.01",
+        "lifetime": "0",
         "periods": [],
-        "released": 0,
+        "released": 1,
         "reserved": 0,
-        "spent": 1
+        "spent": 0
       }
     },
     {
@@ -1399,7 +1392,6 @@
         }
       ],
       "evidence": {
-        "never_dispatched": false,
         "paid": false
       },
       "ledger": {
@@ -1458,7 +1450,6 @@
         }
       ],
       "evidence": {
-        "never_dispatched": false,
         "paid": false
       },
       "ledger": {
@@ -1512,7 +1503,6 @@
       },
       "claims": [],
       "evidence": {
-        "never_dispatched": false,
         "paid": false
       },
       "ledger": {
@@ -1561,126 +1551,11 @@
     {
       "attempt_id": "1csmdhiTomzJxPwNK4iUiQ",
       "candidate": {
-        "allowed": true,
-        "amount": "0.01"
-      },
-      "claims": [
-        {
-          "attempt_id": "1csmdhiTomzJxPwNK4iUiQ",
-          "resolved_by_owner": true,
-          "state": "failed"
-        }
-      ],
-      "evidence": {
-        "never_dispatched": true,
-        "paid": false
-      },
-      "ledger": {
-        "acceptance": "tQTNgyJCrECEQwHkfbfTBJEITKB0b9jJYdT_bvgaXqo",
-        "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
-        "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
-        "entries": [
-          {
-            "asset": "btc",
-            "at": "2026-01-02T00:00:00.000Z",
-            "attempt_id": "1csmdhiTomzJxPwNK4iUiQ",
-            "obligation": "ONsOr1U2clGE6Cp9VqMJKmRx2jZbonIGJlqP63iPOnw",
-            "outcome": null,
-            "value": "0.01"
-          }
-        ],
-        "totals": {
-          "count": 0,
-          "failed": [],
-          "spent": ""
-        },
-        "v": 1
-      },
-      "name": "never dispatched, owner failed",
-      "t": "2026-01-08T00:00:00.000Z",
-      "terms": {
-        "active_from": null,
-        "allowed_payment_endpoint_identifiers": null,
-        "asset": "btc",
-        "expires_at": null,
-        "lifetime_amount_limit": "0.01",
-        "per_payment_amount": {
-          "maximum": "0.01",
-          "minimum": "0.0001"
-        },
-        "period_limits": []
-      },
-      "usage": {
-        "lifetime": "0",
-        "periods": [],
-        "released": 1,
-        "reserved": 0,
-        "spent": 0
-      }
-    },
-    {
-      "attempt_id": "1csmdhiTomzJxPwNK4iUiQ",
-      "candidate": {
-        "allowed": true,
-        "amount": "0.01"
-      },
-      "claims": [],
-      "evidence": {
-        "never_dispatched": true,
-        "paid": false
-      },
-      "ledger": {
-        "acceptance": "tQTNgyJCrECEQwHkfbfTBJEITKB0b9jJYdT_bvgaXqo",
-        "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
-        "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
-        "entries": [
-          {
-            "asset": "btc",
-            "at": "2026-01-02T00:00:00.000Z",
-            "attempt_id": "1csmdhiTomzJxPwNK4iUiQ",
-            "obligation": "ONsOr1U2clGE6Cp9VqMJKmRx2jZbonIGJlqP63iPOnw",
-            "outcome": "failed",
-            "value": "0.01"
-          }
-        ],
-        "totals": {
-          "count": 0,
-          "failed": [],
-          "spent": ""
-        },
-        "v": 1
-      },
-      "name": "never dispatched, failed ledger, claim gone",
-      "t": "2026-01-08T00:00:00.000Z",
-      "terms": {
-        "active_from": null,
-        "allowed_payment_endpoint_identifiers": null,
-        "asset": "btc",
-        "expires_at": null,
-        "lifetime_amount_limit": "0.01",
-        "per_payment_amount": {
-          "maximum": "0.01",
-          "minimum": "0.0001"
-        },
-        "period_limits": []
-      },
-      "usage": {
-        "lifetime": "0",
-        "periods": [],
-        "released": 1,
-        "reserved": 0,
-        "spent": 0
-      }
-    },
-    {
-      "attempt_id": "1csmdhiTomzJxPwNK4iUiQ",
-      "candidate": {
         "allowed": false,
         "amount": "0.01"
       },
       "claims": [],
       "evidence": {
-        "never_dispatched": true,
         "paid": true
       },
       "ledger": {
@@ -1704,7 +1579,7 @@
         },
         "v": 1
       },
-      "name": "paid proof overrides never dispatched",
+      "name": "paid proof overrides a failure",
       "t": "2026-01-08T00:00:00.000Z",
       "terms": {
         "active_from": null,
@@ -1739,7 +1614,6 @@
         }
       ],
       "evidence": {
-        "never_dispatched": true,
         "paid": false
       },
       "ledger": {
@@ -1763,7 +1637,7 @@
         },
         "v": 1
       },
-      "name": "done claim overrides never dispatched",
+      "name": "done claim overrides a failure",
       "t": "2026-01-08T00:00:00.000Z",
       "terms": {
         "active_from": null,
@@ -1793,7 +1667,6 @@
       },
       "claims": [],
       "evidence": {
-        "never_dispatched": true,
         "paid": false
       },
       "ledger": {
@@ -1817,7 +1690,7 @@
         },
         "v": 1
       },
-      "name": "done ledger overrides never dispatched",
+      "name": "done ledger spends",
       "t": "2026-01-08T00:00:00.000Z",
       "terms": {
         "active_from": null,
@@ -1842,7 +1715,7 @@
     {
       "attempt_id": "1csmdhiTomzJxPwNK4iUiQ",
       "candidate": {
-        "allowed": false,
+        "allowed": true,
         "amount": "0.01"
       },
       "claims": [
@@ -1853,7 +1726,6 @@
         }
       ],
       "evidence": {
-        "never_dispatched": false,
         "paid": false
       },
       "ledger": {
@@ -1889,7 +1761,7 @@
         "period_limits": []
       },
       "usage": {
-        "lifetime": "0.01",
+        "lifetime": "0",
         "periods": [],
         "released": 0,
         "reserved": 0,
@@ -1899,12 +1771,11 @@
     {
       "attempt_id": "1csmdhiTomzJxPwNK4iUiQ",
       "candidate": {
-        "allowed": false,
+        "allowed": true,
         "amount": "0.01"
       },
       "claims": [],
       "evidence": {
-        "never_dispatched": false,
         "paid": false
       },
       "ledger": {
@@ -1940,57 +1811,6 @@
         "period_limits": []
       },
       "usage": {
-        "lifetime": "0.01",
-        "periods": [],
-        "released": 0,
-        "reserved": 0,
-        "spent": 0
-      }
-    },
-    {
-      "attempt_id": "1csmdhiTomzJxPwNK4iUiQ",
-      "candidate": {
-        "allowed": true,
-        "amount": "0.01"
-      },
-      "claims": [],
-      "evidence": {
-        "never_dispatched": true,
-        "paid": false
-      },
-      "ledger": {
-        "acceptance": "tQTNgyJCrECEQwHkfbfTBJEITKB0b9jJYdT_bvgaXqo",
-        "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
-        "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
-        "entries": [],
-        "totals": {
-          "count": 0,
-          "failed": [
-            {
-              "attempt_id": "1csmdhiTomzJxPwNK4iUiQ",
-              "obligation": "ONsOr1U2clGE6Cp9VqMJKmRx2jZbonIGJlqP63iPOnw",
-              "value": "0.01"
-            }
-          ],
-          "spent": ""
-        },
-        "v": 1
-      },
-      "name": "compacted never dispatched",
-      "t": "2026-01-08T00:00:00.000Z",
-      "terms": {
-        "active_from": null,
-        "allowed_payment_endpoint_identifiers": null,
-        "asset": "btc",
-        "expires_at": null,
-        "lifetime_amount_limit": "0.01",
-        "per_payment_amount": {
-          "maximum": "0.01",
-          "minimum": "0.0001"
-        },
-        "period_limits": []
-      },
-      "usage": {
         "lifetime": "0",
         "periods": [],
         "released": 0,
@@ -2006,7 +1826,6 @@
       },
       "claims": [],
       "evidence": {
-        "never_dispatched": true,
         "paid": true
       },
       "ledger": {
@@ -2027,7 +1846,7 @@
         },
         "v": 1
       },
-      "name": "compacted paid proof overrides never dispatched",
+      "name": "compacted paid proof overrides a failure",
       "t": "2026-01-08T00:00:00.000Z",
       "terms": {
         "active_from": null,
@@ -2062,7 +1881,6 @@
         }
       ],
       "evidence": {
-        "never_dispatched": true,
         "paid": false
       },
       "ledger": {
@@ -2083,7 +1901,7 @@
         },
         "v": 1
       },
-      "name": "compacted done claim overrides never dispatched",
+      "name": "compacted done claim overrides a failure",
       "t": "2026-01-08T00:00:00.000Z",
       "terms": {
         "active_from": null,
