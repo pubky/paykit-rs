@@ -131,13 +131,13 @@ choice to settle. Keep the change pending and continue normal receives.
 A restore carrying only the accepted offer can repair its missing public copy.
 
 Each receive also brings the app record up to date after its read. When that
-upkeep fails short of a wallet-wide stop, for example because the rail now pays
-a list of endpoint identifiers the record can't carry, or the record's delivery
-to the switch failed, the receive still does its other work and sets
-`ReceiveSummary::app_record_owed`. The record is tried again at the next
-receive; `update_own_record` tries it at once and returns its outcome. A
-delivery the client kept goes again at the start of its next read, so one that
-keeps failing there fails that receive.
+upkeep fails because the rail now pays a list of endpoint identifiers the record
+can't carry, or because the own switch doesn't answer, the receive still does
+its other work and sets `ReceiveSummary::app_record_owed`. Any other upkeep
+failure fails the receive. The record is tried again at the next receive;
+`update_own_record` tries it at once and returns its outcome. A delivery the
+client kept goes again at the start of its next read, so one that keeps
+failing there fails that receive.
 
 ## Use a Switch App built by the host
 
