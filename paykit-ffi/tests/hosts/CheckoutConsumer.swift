@@ -183,9 +183,9 @@ private func restoreCheckout(
         precondition(!report.payerSkipped && answered.registrations.isEmpty)
         if action == "doubt" {
             let charged = try method.chargedAttempt()
-            let doubtful = report.doubtful.filter { $0.attempts.contains(charged) }
-            precondition(doubtful.count == 1)
-            try await reopen.resolveConfirmedAttempt(obligation: doubtful[0].obligation, attemptId: charged, resolution: .paid)
+            let attempts = report.doubtful.flatMap(\.attempts).filter { $0.attemptId() == charged }
+            guard attempts.count == 1, let attempt = attempts.first else { preconditionFailure("missing charged attempt") }
+            try await reopen.resolveConfirmedAttempt(attempt: attempt, resolution: .paid)
             let reviewed = try await reopen.reconcile()
             precondition(reviewed.doubtful.isEmpty && method.calls == 1)
         } else {
@@ -283,7 +283,10 @@ private extension NativeWallet {
         try await fixture.replaceLostProvider(second: second)
         for _ in 0..<12 {
             let read = try await receive()
-            if read.generation > before && !read.stopped && !read.more { return }
+            // Done once the records are listed under the new certificate, which waits for its
+            // scope keys first: reconciliation refuses until both (Paykit spec 6).
+            if read.generation > before && !read.stopped && !read.more && read.recordsUnlisted == nil
+                && !read.scopeKeysAwaited { return }
         }
         preconditionFailure("wallet did not follow the replacement provider")
     }
@@ -304,7 +307,12 @@ private func reviewLoss(_ wallet: NativeWallet, _ fixture: CheckoutFixture, _ re
         let rows = report.doubtful.filter { $0.requestHash == request.requestHash }
         guard rows.count == 1, let row = rows.first else { preconditionFailure("missing original pre-loss obligation") }
         precondition(!report.payerSkipped && row.payee == request.payee && row.attempts.isEmpty)
-        precondition(row.obligation.count == 32 && row.beforeLoss != nil)
+        guard let loss = row.beforeLoss, let members = try await wallet.recoveryMembers() else {
+            preconditionFailure("missing provider loss")
+        }
+        precondition(row.obligation.count == 32 && members.loss.generation == loss.generation)
+        precondition(members.loss.declaredAtMs == loss.declaredAtMs && members.loss.uncertainUntilMs == loss.uncertainUntilMs)
+        precondition(members.loss.payment == nil)
         return row
     }
     let first = try await shown()
@@ -413,7 +421,7 @@ private func driveCheckout(_ recovery: CheckoutReview, restore: String? = nil) a
     let secret = Data(repeating: 9, count: 32)
     let owner = WalletEnrollment(store: store)
     let enrolled = try await owner.beginEnrollment(reference: reference)
-    let original = try await owner.prepareEnrollment(reference: reference, clientId: "wallet.example", clientKey: Data(repeating: 8, count: 32), capabilities: enrolled.appRecordPath + ":rw", authSecret: secret, scopes: WalletScopes(pay: true))
+    let original = try await owner.prepareEnrollment(reference: reference, clientId: "wallet.example", clientKey: Data(repeating: 8, count: 32), capabilities: enrolled.appRecordPath + ":rw", authSecret: secret, scopes: WalletScopes(pay: true, recovery: recovery == .providerLoss))
     let approval = try await fixture.approve(request: original.signedRequest, secret: secret)
     try await owner.acceptApproval(reference: reference, identity: fixture.identity(), claim: approval)
     let host = fixture.host()

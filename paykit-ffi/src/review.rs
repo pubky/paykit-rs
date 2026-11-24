@@ -184,9 +184,8 @@ pub enum RefusalKind {
     AllowanceConflicted,
     /// The user must confirm this Allowance again before this app pays under it, after a missed
     /// item, a restore until it is judged clean or the user confirms, or a provider loss, for one
-    /// the user confirmed before the loss. Show the Allowance and,
-    /// once the user confirms, call `confirm_allowance_executor` (Paykit spec 8.3). No Allowance
-    /// payment, resume or confirm call is bound yet, so hosts don't receive it today.
+    /// the user confirmed before the loss. Show the view from `allowance(record)`. Once the
+    /// user confirms it, pass its `hold` to `confirm_allowance_executor` (Paykit spec 8.3).
     AllowanceConfirmationNeeded {
         /// The 32-byte record key of the Allowance to confirm.
         record: Vec<u8>,

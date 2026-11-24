@@ -318,7 +318,7 @@ async fn wallet_with_kept_mark(
     wallet.unblock(&w.bob_id()).await.unwrap();
     w.clock.advance_ms(11 * 60_000);
     w.bob.switch().fail_next(Fault::Unreachable {
-        path: "inbox".into(),
+        path: "/inbox".into(),
         after: 0,
     });
     wallet.receive(None).await.unwrap();

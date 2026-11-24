@@ -1208,7 +1208,7 @@ async fn test_blocked_return_queued_ask_not_flushed_by_a_receive_once_blocked_ag
     w.bob
         .switch()
         .fail_next(pubky_switch_client::testing::Fault::Error {
-            path: "inbox".into(),
+            path: "/inbox".into(),
             code: pubky_switch_core::http::ErrorCode::Unavailable,
             current: serde_json::Value::Null,
         });

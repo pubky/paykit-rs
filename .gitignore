@@ -2,3 +2,10 @@
 .idea/
 .DS_Store
 *.swp
+/paykit-ffi/dist/
+/paykit-ffi/bindings/android/.gradle/
+/paykit-ffi/bindings/android/.kotlin/
+/paykit-ffi/bindings/android/build/
+/paykit-ffi/bindings/android/lib/build/
+/paykit-ffi/bindings/android/lib/src/main/generated/
+/paykit-ffi/bindings/android/lib/src/main/jniLibs/
