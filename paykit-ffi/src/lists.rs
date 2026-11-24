@@ -307,7 +307,7 @@ pub(crate) async fn restored_list_seller(
                 reconciled = true;
                 break;
             }
-            Err(WalletError::NeedsUser { failure })
+            Err(WalletError::RetryLater { failure })
                 if failure
                     .refusal
                     .as_ref()
