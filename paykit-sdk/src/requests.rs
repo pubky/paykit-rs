@@ -1921,7 +1921,9 @@ impl Paykit {
                 // A placement that fails now is tried again at the next run; the kept stop
                 // stands meanwhile, so it can't let a payment through.
                 placed.insert((cancellation.sender(), request));
-                let _ = self.place_kept_cancellation(&target).await;
+                if let Err(error) = self.place_kept_cancellation(&target).await {
+                    crate::pay::unless_stop(error)?;
+                }
                 continue;
             }
             let held = self.app.shared_record(&self.activity_key(&target)?).await?;
@@ -2005,12 +2007,12 @@ impl Paykit {
                 out.push(view);
             }
         }
-        let shown: std::collections::HashSet<([u8; 32], [u8; 32])> = out
+        let mut shown: std::collections::HashSet<([u8; 32], [u8; 32])> = out
             .iter()
             .map(|view| (view.request.payee, view.request.request_hash))
             .collect();
         for view in self.unrecorded_requests().await? {
-            if !shown.contains(&(view.request.payee, view.request.request_hash)) {
+            if shown.insert((view.request.payee, view.request.request_hash)) {
                 out.push(view);
             }
         }
@@ -2577,7 +2579,7 @@ impl Paykit {
         // payee it goes only on the user's confirmation, below. It is never held.
         let (blocked, held) = if allowance.is_some() {
             self.refuse_while_payer_pass_owed().await?;
-            self.app.may_attempt(true).map_err(crate::pay::not_now)?;
+            self.app.may_attempt(true).map_err(crate::pay::held_back)?;
             (self.denied(&request.payee).await?, false)
         } else if answer == Answer::Accept {
             (self.denied_for_user(&request.payee).await?, false)

@@ -1127,7 +1127,7 @@ impl Paykit {
                     }) => {
                         // After a loss the client can sign the batch again under the same
                         // ID. A refusal of those bytes says nothing about the old service.
-                        self.own_identity_confirmed(false).await?;
+                        self.own_identity_confirmed(false).await??;
                         let own = self.app.own_identity();
                         own.generation() >= original.generation
                             && own
@@ -1226,7 +1226,7 @@ impl Paykit {
         if !endpoints.is_empty() {
             self.refuse_while_sends_held(&recipient).await?;
         }
-        self.own_identity_confirmed(false).await?;
+        self.own_identity_confirmed(false).await??;
         let generation = self.app.own_identity().generation();
         let publisher = self.app_id();
         let target = target(&publisher, &recipient, generation);
@@ -1293,7 +1293,7 @@ impl Paykit {
                 .collect(),
             expires_at: self.now().saturating_add(PRIVATE_LIST_MAX_AGE_MS),
         };
-        self.own_identity_confirmed(false).await?;
+        self.own_identity_confirmed(false).await??;
         if self.app.own_identity().generation() != generation || !self.holds(SCOPE) {
             return Err(counter_unavailable().into());
         }
@@ -1361,7 +1361,7 @@ impl Paykit {
             .queue(signed)
             .keep_id_at(marker.into_bytes())
             .locals(applied.into_writes());
-        self.own_identity_confirmed(false).await?;
+        self.own_identity_confirmed(false).await??;
         if self.app.own_identity().generation() != generation || !self.holds(SCOPE) {
             return Err(counter_unavailable().into());
         }

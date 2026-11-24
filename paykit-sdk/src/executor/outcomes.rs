@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use paykit_lib::allowances::{record_outcomes, AttemptEvidence, ClaimState, EntryOutcome, Ledger};
 use paykit_lib::records::{ActivityRecord, RecordBinding};
 use paykit_lib::{Asset, AttemptId, Body, Decimal};
-use pubky_switch_client::app::{AppError, OpBatch, RecordRead, UserConfirmed};
+use pubky_switch_client::app::{OpBatch, RecordRead, UserConfirmed};
 use pubky_switch_core::ops::Condition;
 
 use super::evidence::AppliedRecord;
@@ -28,6 +28,33 @@ pub(super) struct LedgerFacts {
     pub(super) signed: HashMap<AttemptId, AttemptEvidence>,
     release_records: HashMap<AttemptId, Condition>,
     other_failures: Vec<ReservedByOtherApp>,
+}
+
+impl LedgerFacts {
+    /// Whether an attempt another app reported failed still holds room the user can give
+    /// back ([`Paykit::release_allowance_attempt`]).
+    /// The amount, scaled, the user could give back by releasing every attempt another app
+    /// reported failed that is releasable by the evidence the release itself requires:
+    /// never paid, ended before dispatch on this installation, failed by another app, and
+    /// with the record write the release is conditioned on. `None` when there is none.
+    pub(super) fn releasable(&self) -> Option<u128> {
+        self.other_failures
+            .iter()
+            .filter(|failure| {
+                self.release_records.contains_key(&failure.attempt_id)
+                    && self.signed.get(&failure.attempt_id).is_some_and(|fact| {
+                        !fact.paid
+                            && fact.never_dispatched
+                            && fact.claim == Some(ClaimState::Failed { by_owner: false })
+                    })
+            })
+            .try_fold(None, |freed: Option<u128>, failure| {
+                Some(Some(
+                    freed.unwrap_or(0).checked_add(failure.value.scaled())?,
+                ))
+            })
+            .flatten()
+    }
 }
 
 impl Paykit {
@@ -206,9 +233,9 @@ impl Paykit {
                 Ok(())
             }
             .await;
-            if matches!(&result, Err(crate::PaykitError::Client(e)) if matches!(e.unkept(), AppError::Store(_) | AppError::Alarm(_)))
-            {
-                return result;
+            let result: Result<()> = result;
+            if let Err(error) = result {
+                crate::pay::unless_stop(error)?;
             }
         }
         Ok(())

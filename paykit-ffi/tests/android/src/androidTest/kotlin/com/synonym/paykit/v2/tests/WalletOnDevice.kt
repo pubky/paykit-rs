@@ -50,12 +50,10 @@ private val callbackThreads = java.util.Collections.synchronizedList(mutableList
 private fun recorded() { callbackThreads += Thread.currentThread() }
 
 private class DeviceMethod(ledger: File) : CheckoutMethod(ledger) {
-    override fun declaration(): MethodDeclaration = super.declaration().also { recorded() }
     override fun selectEndpoints(candidates: List<EndpointCandidate>, amount: Amount?): SelectedEndpoints =
         super.selectEndpoints(candidates, amount).also { recorded() }
     override fun transfer(endpoint: String, payload: String, amount: Amount): MethodTransfer =
         super.transfer(endpoint, payload, amount).also { recorded() }
-    override fun fractionDigits(endpoint: String): UInt? = super.fractionDigits(endpoint).also { recorded() }
     override fun settlementId(endpoint: String, proofJson: ByteArray): ByteArray? =
         super.settlementId(endpoint, proofJson).also { recorded() }
 }
@@ -75,7 +73,7 @@ private suspend fun checkoutFromMain(directory: File) {
     val method = DeviceMethod(File(directory, "settled"))
     method.release.complete(Unit)
     val store = DeviceStore(EnrollmentStore())
-    enrolledTestCheckout(store, method).use { fixture ->
+    enrolledTestCheckout(store, method, testDeclaration, testEndpoints).use { fixture ->
         method.clock = { fixture.nowMs() }
         val reference = ByteArray(16) { 23 }
         val secret = ByteArray(32) { 9 }

@@ -75,6 +75,7 @@ struct Inner {
     counter: u64,
     idempotent: bool,
     forgotten: Vec<AttemptId>,
+    lookups_failing: u64,
     calls: BTreeMap<AttemptId, u64>,
     call_amounts: BTreeMap<AttemptId, Vec<PaymentAmount>>,
     declaration: Option<RailDeclaration>,
@@ -305,6 +306,12 @@ impl FakeRail {
     /// history would. The payment itself stands.
     pub fn forget_history(&self, key: &AttemptId) {
         self.lock().forgotten.push(*key);
+    }
+
+    /// The next `n` lookups of a payment's outcome fail as the method's history being
+    /// unreachable for now ([`RailError::Unavailable`]).
+    pub fn fail_next_lookups(&self, n: u64) {
+        self.lock().lookups_failing = n;
     }
 
     /// Finish a payment left in flight: paid or failed.
@@ -556,7 +563,16 @@ impl Rail for FakeRail {
         &self,
         idempotency_key: AttemptId,
     ) -> BoxFuture<'_, Result<Option<RailOutcome>, RailError>> {
-        let inner = self.lock();
+        let mut inner = self.lock();
+        if inner.lookups_failing > 0 {
+            inner.lookups_failing -= 1;
+            drop(inner);
+            return Box::pin(async {
+                Err(RailError::Unavailable(
+                    "the method's history can't be read now".into(),
+                ))
+            });
+        }
         let keeps_history = inner.declaration.is_none_or(|d| d.history);
         let answer = if !keeps_history || inner.forgotten.contains(&idempotency_key) {
             None

@@ -1,4 +1,6 @@
-use crate::{HostRail, PaymentMethod, WalletError, WalletStore};
+use crate::{
+    EndpointSupport, HostRail, MethodDeclaration, PaymentMethod, WalletError, WalletStore,
+};
 use paykit_sdk::{PaymentEndpointIdentifier, Timer};
 use pubky_switch_client::app::{HomeserverReader, HomeserverWriter};
 use pubky_switch_client::clock::{Clock, SystemClock};
@@ -115,19 +117,18 @@ pub struct WalletHost {
 }
 #[uniffi::export]
 impl WalletHost {
-    /// Use this protected store, Pubky session and payment method for wallet operations.
+    /// Use this protected store, Pubky session and payment method for wallet operations. The
+    /// method's declaration and the endpoints it supports are given here, once: a method whose
+    /// guarantees change is given to a new `WalletHost`.
     #[uniffi::constructor]
     pub fn new(
         store: Arc<dyn WalletStore>,
         homeserver: Arc<dyn WalletHomeserver>,
         method: Arc<dyn PaymentMethod>,
-        endpoint_identifiers: Vec<String>,
+        declaration: MethodDeclaration,
+        endpoints: Vec<EndpointSupport>,
     ) -> Result<Arc<Self>, WalletError> {
-        let identifiers = endpoint_identifiers
-            .iter()
-            .map(|id| PaymentEndpointIdentifier::new(id))
-            .collect::<Result<_, _>>()
-            .map_err(|_| WalletError::invalid("payment endpoint identifier"))?;
+        let endpoints = supported_endpoints(endpoints)?;
         let home = Arc::new(Home(homeserver));
         let transport = HttpTransport::new(HttpConfig::default())
             .map_err(|_| WalletError::invalid("HTTPS transport configuration"))?;
@@ -137,7 +138,7 @@ impl WalletHost {
             home: home.clone(),
             writer: home,
             store,
-            rail: Arc::new(HostRail::new(method, identifiers)),
+            rail: Arc::new(HostRail::new(method, declaration, endpoints)),
             timer: Arc::new(RuntimeTimer),
         }))
     }
@@ -146,4 +147,26 @@ impl From<uniffi::UnexpectedUniFFICallbackError> for HomeserverError {
     fn from(_: uniffi::UnexpectedUniFFICallbackError) -> Self {
         Self::Unavailable
     }
+}
+
+/// Validate the endpoints a host says its method pays, with their fractional digits.
+pub(crate) fn supported_endpoints(
+    endpoints: Vec<EndpointSupport>,
+) -> Result<Vec<(PaymentEndpointIdentifier, Option<u32>)>, WalletError> {
+    let mut supported: Vec<(PaymentEndpointIdentifier, Option<u32>)> = Vec::new();
+    for e in endpoints {
+        let id = PaymentEndpointIdentifier::new(&e.identifier)
+            .map_err(|_| WalletError::invalid("payment endpoint identifier"))?;
+        if supported.iter().any(|(known, _)| *known == id) {
+            return Err(WalletError::invalid("payment endpoint identifier"));
+        }
+        // Amounts carry at most 18 fractional digits (Paykit wire 1.2).
+        if e.fraction_digits
+            .is_some_and(|d| d as usize > paykit_lib::amount::MAX_FRACTION_DIGITS)
+        {
+            return Err(WalletError::invalid("fraction digits"));
+        }
+        supported.push((id, e.fraction_digits));
+    }
+    Ok(supported)
 }

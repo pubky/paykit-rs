@@ -163,6 +163,24 @@ final class EnrollmentStore: WalletStore, @unchecked Sendable {
     }
 }
 
+/// What the test method declares to `WalletHost`, once.
+let testDeclaration = MethodDeclaration(idempotent: true, idempotencyRetentionMs: nil, history: true, historyRetentionMs: nil, historySurvivesRestore: true, longestCompletionMs: 3_600_000, paymentTimeToleranceMs: 0)
+let testEndpoints = [EndpointSupport(identifier: "btc-lightning-bolt11", fractionDigits: 8)]
+
+/// The failure behind a categorized wallet error; nil for the enrollment, restore and store
+/// answers, which keep their own cases.
+extension WalletError {
+    var categorized: WalletFailure? {
+        switch self {
+        case let .NeedsUser(failure), let .RetryLater(failure), let .OutcomeUnknown(failure),
+             let .NotSent(failure), let .Permanent(failure), let .Recovery(failure):
+            return failure
+        default:
+            return nil
+        }
+    }
+}
+
 class ReceiptReader: WalletHomeserver, PaymentMethod, @unchecked Sendable {
     private let lock = NSLock()
     private var transfers = 0
@@ -170,23 +188,19 @@ class ReceiptReader: WalletHomeserver, PaymentMethod, @unchecked Sendable {
     func get(identity: Data, path: String) async throws -> Data? { nil }
     func put(identity: Data, path: String, bytes: Data) async throws { preconditionFailure("unexpected public write") }
     func delete(identity: Data, path: String) async throws { preconditionFailure("unexpected public delete") }
-    func declaration() -> MethodDeclaration {
-        MethodDeclaration(idempotent: true, idempotencyRetentionMs: nil, history: true, historyRetentionMs: nil, historySurvivesRestore: true, longestCompletionMs: 3_600_000, paymentTimeToleranceMs: 0)
-    }
     func selectEndpoints(candidates: [EndpointCandidate], amount: Amount?) throws -> SelectedEndpoints {
         var payable: [UInt32] = []
         var failures: [EndpointFailure] = []
         for candidate in candidates.reversed() {
             if candidate.identifier == "btc-lightning-bolt12" {
-                failures.append(EndpointFailure(id: candidate.id, error: .Unavailable(reason: "route unavailable")))
+                failures.append(EndpointFailure(id: candidate.id, error: .Unknown(reason: "route unavailable")))
             } else { payable.append(candidate.id) }
         }
         return SelectedEndpoints(payable: payable, failures: failures)
     }
-    func transfer(endpoint: String, payload: String, amount: Amount) -> MethodTransfer {
+    func transfer(endpoint: String, payload: String, amount: Amount) throws -> MethodTransfer {
         try! MethodTransfer(amount: amount)
     }
-    func fractionDigits(endpoint: String) -> UInt32? { 8 }
     func pay(payment: MethodPayment) async throws -> MethodOutcome {
         lock.withLock { transfers += 1 }
         preconditionFailure("a receipted payment cannot be dispatched again")
@@ -194,7 +208,7 @@ class ReceiptReader: WalletHomeserver, PaymentMethod, @unchecked Sendable {
     func payment(attemptId: String) async throws -> MethodOutcome? { nil }
     func allowanceHistory(payer: Data) async throws -> [MethodDispatch]? { nil }
     func verify(proof: MethodProof) async throws -> UInt64? { nil }
-    func settlementId(endpoint: String, proofJson: Data) -> Data? { nil }
+    func settlementId(endpoint: String, proofJson: Data) throws -> Data? { nil }
 }
 
 // The issuer runs as a separate process, which a device test can't start.
@@ -218,25 +232,25 @@ private func resumeRefusal(_ issuer: String, left: Bool, request: RequestId) asy
     let store = EnrollmentStore()
     store.reopen(namespace: values[1], entries: values.dropFirst(2))
     let method = ReceiptReader()
-    let host = try WalletHost(store: store, homeserver: method, method: method, endpointIdentifiers: ["btc-lightning-bolt11"])
+    let host = try WalletHost(store: store, homeserver: method, method: method, declaration: testDeclaration, endpoints: testEndpoints)
     let wallet = try await host.load(appId: Data(base64Encoded: values[0])!)
     if !left {
         do {
             _ = try await wallet.requestReceipts(id: request)
             preconditionFailure("read receipts before the restored records were listed")
-        } catch let WalletError.Refused(refusal) {
-            guard case .notNow = refusal.kind() else { preconditionFailure("unexpected receipt refusal") }
+        } catch let WalletError.NeedsUser(failure) {
+            guard failure.code() == "not_now", case .notNow? = failure.refusal()?.kind() else { preconditionFailure("unexpected receipt refusal") }
         }
     }
     do {
         _ = try await wallet.resumePayments()
         preconditionFailure("resumed a held wallet")
-    } catch let WalletError.Refused(refusal) {
-        precondition(!left)
-        guard case .identityUnavailable = refusal.kind() else { preconditionFailure("unexpected resume refusal") }
+    } catch let WalletError.RetryLater(failure) {
+        precondition(!left && failure.code() == "identity_unavailable")
+        guard let refusal = failure.refusal(), case .identityUnavailable = refusal.kind() else { preconditionFailure("unexpected resume refusal") }
         precondition(refusal.attemptedFailure() == nil)
-    } catch let WalletError.Operation(kind, _, _, _, refusal) {
-        guard left, kind == .client, case .left? = refusal?.kind() else { preconditionFailure("unexpected Switch refusal") }
+    } catch let WalletError.Recovery(failure) {
+        guard left, failure.code() == "left", case .left? = failure.switchRefusal()?.kind() else { preconditionFailure("unexpected Switch refusal") }
     }
     precondition(method.transferCount == 0)
     try await wallet.shutdown()
@@ -251,7 +265,7 @@ private func recoverReceipt(_ issuer: String) async throws -> RequestId {
     let method = ReceiptReader()
     let original = EnrollmentStore()
     original.reopen(namespace: values[6], entries: values.dropFirst(7))
-    let sameDevice = try WalletHost(store: original, homeserver: method, method: method, endpointIdentifiers: ["btc-lightning-bolt11"])
+    let sameDevice = try WalletHost(store: original, homeserver: method, method: method, declaration: testDeclaration, endpoints: testEndpoints)
     let reopened = try await sameDevice.load(appId: app)
     let checkedId = try await reopened.appId()
     let checkedIdentity = try await reopened.identity()
@@ -269,7 +283,7 @@ private func recoverReceipt(_ issuer: String) async throws -> RequestId {
     ], amount: entry.amount)
     precondition(selection.payable == [9, 6] && selection.failures.count == 1)
     let failure = selection.failures[0]
-    guard case let .Unavailable(reason) = failure.error else { preconditionFailure("wrong endpoint failure") }
+    guard case let .Unknown(reason) = failure.error else { preconditionFailure("wrong endpoint failure") }
     precondition(failure.id == 2 && reason == "route unavailable")
     precondition(failure.error.localizedDescription == "MethodError(<redacted>)")
     let descriptions: [(Any, String)] = [
@@ -280,9 +294,8 @@ private func recoverReceipt(_ issuer: String) async throws -> RequestId {
         (periodUsage, "AllowancePeriodUsage"),
         (AllowanceUsage(lifetime: entry.amount.value, periods: [periodUsage], reserved: 0, spent: 1, released: 0), "AllowanceUsage"),
         (selection, "SelectedEndpoints"), (failure, "EndpointFailure"), (failure.error, "MethodError"),
-        (method.declaration(), "MethodDeclaration"),
-        (WalletError.Operation(kind: .client, detail: "operation failed", serviceCode: nil, keptBatch: Data([1]), switchRefusal: nil), "WalletError"),
-        (WalletError.UnknownMethod, "WalletError"),
+        (testDeclaration, "MethodDeclaration"), (testEndpoints[0], "EndpointSupport"),
+        (WalletError.InvalidInput(field: "amount"), "WalletError"),
     ]
     for (value, name) in descriptions {
         let expected = "\(name)(<redacted>)"
@@ -354,7 +367,7 @@ private func acknowledgeRecovery(_ issuer: String, cleared: Bool) async throws {
     let store = EnrollmentStore()
     store.reopen(namespace: values[5], entries: values.dropFirst(6))
     let method = ReceiptReader()
-    let host = try WalletHost(store: store, homeserver: method, method: method, endpointIdentifiers: ["btc-lightning-bolt11"])
+    let host = try WalletHost(store: store, homeserver: method, method: method, declaration: testDeclaration, endpoints: testEndpoints)
     let wallet = try await host.load(appId: app)
     let matching = try await wallet.unacknowledgedEvents().filter { $0.id == duty }
     precondition(matching.count == 1 && matching[0].owners == ["paykit"])

@@ -346,7 +346,11 @@ async fn kept_first_grant(world: &World) -> TestResult {
     let resumed = Box::pin(wallet.resume_allowance_executor(&offer.record)).await;
     assert!(resumed.is_err(), "{resumed:?}");
     assert!(!wallet.allowance(&offer.record).await?.consented);
-    Box::pin(wallet.confirm_allowance_executor(&offer.record, UserConfirmed::new())).await?;
+    Box::pin(wallet.confirm_allowance_executor(
+        &wallet.allowance(&offer.record).await.unwrap().hold,
+        UserConfirmed::new(),
+    ))
+    .await?;
     assert!(wallet.allowance(&offer.record).await?.consented);
     Ok(())
 }

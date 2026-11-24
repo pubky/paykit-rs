@@ -184,13 +184,11 @@ impl Paykit {
                 None => match self.app.begin_identity_lookup(payee, refresh).await {
                     Ok(lookup) => (lookup.identity, lookup.switch.map(PendingLookup::new)),
                     Err(error) => {
-                        return Ok((
-                            Err(Refusal::IdentityUnavailable(format!(
-                                "Switch spec 4.3: the payee's identity.json can't be read now: \
-                                 {error}"
-                            ))),
-                            read,
-                        ))
+                        let why = format!(
+                            "Switch spec 4.3: the payee's identity.json can't be read now: {error}"
+                        );
+                        crate::pay::unless_local_stop(error)?;
+                        return Ok((Err(Refusal::IdentityUnavailable(why)), read));
                     }
                 },
             };
@@ -220,7 +218,11 @@ impl Paykit {
                         Lookup::Answered(answer) => {
                             match self.app.finish_identity_lookup(answer).await {
                                 Ok(identity) => identity,
-                                Err(error) => return Ok((Err(not_taken(&error)), read)),
+                                Err(error) => {
+                                    let refusal = not_taken(&error);
+                                    crate::pay::unless_local_stop(error)?;
+                                    return Ok((Err(refusal), read));
+                                }
                             }
                         }
                         Lookup::Running(switch) => {
@@ -314,13 +316,19 @@ impl Paykit {
             Ok(identity) => identity,
             Err(refusal) => return Ok(Err(refusal)),
         };
-        match carrier {
-            Carrier::Record(record)
-                if !self
-                    .last_public_read
+        // A read is reused only while the payee app records kept still use the record it
+        // selected, judged now (Paykit spec 4).
+        let reused = match carrier {
+            Carrier::Record(record) => {
+                self.last_public_read
                     .as_ref()
-                    .is_some_and(|read| read.qualifies(record, &identity, self.now())) =>
-            {
+                    .is_some_and(|read| read.qualifies(record, &identity, self.now()))
+                    && self.seen_still_uses(payee, record).await?
+            }
+            _ => false,
+        };
+        match carrier {
+            Carrier::Record(_) if !reused => {
                 // A changed source or a recovered payment needs a fresh read of the selected app.
                 let mut failures = Vec::new();
                 let checked = Box::pin(self.public_records(
@@ -381,7 +389,11 @@ impl Paykit {
                 // An answer the client refuses to take is no answer to ignore: it may show
                 // the payee's identity.json equivocating, and then nothing is paid to it
                 // (Switch wire 3.3). It refuses as it does anywhere else.
-                Err(error) => Ok(Err(not_taken(&error))),
+                Err(error) => {
+                    let refusal = not_taken(&error);
+                    crate::pay::unless_local_stop(error)?;
+                    Ok(Err(refusal))
+                }
             },
             (Lookup::Running(switch), _) => {
                 self.lookups.insert(
