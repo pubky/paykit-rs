@@ -1343,6 +1343,9 @@ impl Paykit {
         Box::pin(self.confirm_consents_again()).await?;
         Box::pin(self.sweep_consents()).await?;
         Box::pin(self.sweep_notice_targets()).await?;
+        // The markers of batches of kept messages' writes the client no longer keeps
+        // (`stored.rs`).
+        Box::pin(self.sweep_held_writes()).await?;
         let applied = report
             .events
             .iter()

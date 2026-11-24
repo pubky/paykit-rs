@@ -283,6 +283,43 @@ impl Switches {
         app
     }
 
+    /// A batch `app`, one of alice's apps holding `paykit_manage_contacts`, makes and the
+    /// client keeps (its send rate-limited), named at the marker of `stored`'s later write as
+    /// the client names it: the write of `stored` is held. Returns the batch's ID.
+    pub(crate) async fn hold_write(
+        &self,
+        app: &mut crate::Paykit,
+        stored: &paykit_lib::records::StoredMessage,
+    ) -> [u8; 16] {
+        self.alice
+            .switch()
+            .fail_next(pubky_switch_client::testing::Fault::Error {
+                path: "/ops".into(),
+                code: pubky_switch_core::http::ErrorCode::RateLimited,
+                current: serde_json::Value::Null,
+            });
+        let kept = app
+            .app_mut()
+            .submit_batch(
+                pubky_switch_client::app::OpBatch::new()
+                    .op(pubky_switch_core::ops::OpKind::DenyPut { pubky: [9; 32] }),
+            )
+            .await
+            .unwrap_err();
+        let batch_id = kept.kept_batch().expect("kept");
+        app.app_mut()
+            .protocol_commit(
+                crate::protocol::BACKUP_NAME,
+                &[pubky_switch_client::app::LocalWrite::Put {
+                    key: crate::stored::held_write(stored).into_bytes(),
+                    value: batch_id.to_vec(),
+                }],
+            )
+            .await
+            .unwrap();
+        batch_id
+    }
+
     /// Bob's app `name`, holding only `paykit_request:<label>`.
     pub(crate) async fn labelled(&self, name: &str, label: &str) -> crate::Paykit {
         let label = paykit_lib::Label::parse(label).unwrap();

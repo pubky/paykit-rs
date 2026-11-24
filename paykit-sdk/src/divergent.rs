@@ -1877,9 +1877,21 @@ impl Paykit {
 
     /// Give up `stored`, kept over a divergent record at `kept_key`: the kept copy goes and
     /// the host is told, in one commit; the notice is raised once.
-    async fn give_up_divergent(&mut self, kept_key: &str, stored: &StoredMessage) -> Result<()> {
+    pub(crate) async fn give_up_divergent(
+        &mut self,
+        kept_key: &str,
+        stored: &StoredMessage,
+    ) -> Result<()> {
+        // Never given up while the client still keeps a batch of its write, which may still
+        // land (`Paykit::held_write_kept`); the marker of one it no longer keeps goes in the
+        // same commit. Every give-up of a kept message goes through one of three functions,
+        // this one, `Paykit::give_up_stored` and `Paykit::give_up`.
+        if self.held_write_kept(stored).await? {
+            return Ok(());
+        }
         let mut tx = Tx::default();
         tx.delete(kept_key);
+        tx.delete(&crate::stored::held_write(stored));
         let notice = key::message_notice(&stored.sender(), &stored.message().msg_id);
         if self.kept_notice(&notice).await?.is_none() {
             let at = self.service_time().unwrap_or(0);

@@ -252,6 +252,27 @@ impl Paykit {
         })
     }
 
+    /// Every marker of a batch the client keeps of a kept message's later write
+    /// ([`key::held_write`]), by its key, with the batch ID it names, `None` for one that
+    /// doesn't read as one (`stored.rs`, [`Paykit::sweep_held_writes`]).
+    ///
+    /// # Errors
+    ///
+    /// A store failure.
+    pub(crate) async fn held_write_markers(&self) -> Result<Vec<(String, Option<[u8; 16]>)>> {
+        let held = self
+            .app
+            .protocol_scan(crate::protocol::BACKUP_NAME, key::HELD_WRITES.as_bytes())
+            .await?;
+        Ok(held
+            .into_iter()
+            .filter_map(|(key, value)| {
+                let key = String::from_utf8(key).ok()?;
+                Some((key, <[u8; 16]>::try_from(value.as_slice()).ok()))
+            })
+            .collect())
+    }
+
     /// [`Paykit::local_scan`], leaving out a value that doesn't read or bind to its key: for
     /// a scan that gathers hints across counterparties, where one entry's damage must not
     /// stop the action for another.
@@ -2309,8 +2330,10 @@ pub(crate) mod key {
     /// The batch the client keeps of the later write of `sender`'s message `msg_id`, which
     /// may still land (`stored.rs`, [`crate::stored::held_write`]).
     pub(crate) fn held_write(sender: &[u8; 32], msg_id: &str) -> String {
-        format!("hw/{}/{msg_id}", b64(sender))
+        format!("{HELD_WRITES}{}/{msg_id}", b64(sender))
     }
+
+    pub(crate) const HELD_WRITES: &str = "hw/";
 
     /// The notice that `sender`'s message `msg_id` was given up.
     pub(crate) fn message_notice(sender: &[u8; 32], msg_id: &str) -> String {

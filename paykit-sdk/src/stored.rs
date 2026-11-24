@@ -25,12 +25,9 @@
 //!   its message staying processed. One not written within [`crate::KEPT_MESSAGE_MS`] of its
 //!   acceptance, such as a reply whose record never comes, is given up: its note goes, its
 //!   entry stays stored, and the host is told
-//!   ([`crate::NoticeKind::MessageGivenUp`]). Only a write refused for its content, with no
-//!   batch of it held by the client, counts toward that. One the switch answers, bare, with a
-//!   code a later try may pass is given up only at [`hard_bound`]. One whose batch the client
-//!   keeps to send again, whatever the answer, or that waits behind a kept batch, is never
-//!   written again nor given up while the client keeps that batch, which may still land
-//!   ([`submitted`], [`held_write`]).
+//!   ([`crate::NoticeKind::MessageGivenUp`]). One whose batch the client keeps to send again,
+//!   whatever the switch answered, is never written again nor given up while the client keeps
+//!   that batch, which may still land ([`submitted`], [`held_write`]).
 //! - **An effect of unknown fate** (`EffectUncertain`, or `Parked` as `Uncertain`): the same
 //!   write compensates for it, since placing a message a record already holds writes
 //!   nothing. A copy of the entry the host released after that is declined, its message
@@ -103,33 +100,33 @@ pub(crate) enum Placed {
     /// a batch that may still write it or that it waits behind ([`submitted`]): tried again at
     /// the next receive, and never given up meanwhile.
     Waits,
-    /// Not written now, with no batch of it held by the client, on an answer a later try may
-    /// pass by the Switch's own table ([`later_answer`]): tried again at the next receive,
-    /// uncounted, so past its window too, and given up only past [`hard_bound`] (Paykit spec
-    /// 8.1).
-    Retry,
 }
 
 /// What a later write's batch came to, judged first by whether the client still holds a batch
 /// of it (Paykit spec 8.1, Stored entries; Switch spec 12.5, "Kept batches"):
 ///
 /// - the client keeps the write's own batch to send again (`AppError::Kept`), whatever the
-///   switch answered, or the write waits behind a batch it keeps from an earlier call
-///   (`AppError::Ahead`), whose answer is that batch's: the write may still land, so it waits
-///   ([`Placed::Waits`]), never counted nor given up while the batch is held: given up
-///   meanwhile, the message would go while its write may still be applied, and a stop kept
-///   beside it, a payee's cancellation or an Allowance end, could go with it. The client
-///   saves the held batch's ID ([`held_write`]), and the message isn't written again while
-///   the client keeps that batch ([`Paykit::held_write_kept`]);
-/// - with no batch held: written; refused for its content ([`LaterAnswer::RefusesContent`]),
-///   counted toward the message's window ([`Placed::Not`]); answered with a code a later try
-///   may pass ([`LaterAnswer::TryAgain`]), tried again uncounted ([`Placed::Retry`]); or not
-///   sent now for want of a key, waiting.
+///   switch answered inside it: the write may still land, so it waits ([`Placed::Waits`]),
+///   never counted nor given up while the batch is held: given up meanwhile, the message
+///   would go while its write may still be applied, and a stop kept beside it, a payee's
+///   cancellation or an Allowance end, could go with it. The client saves the held batch's ID
+///   ([`held_write`]), and the message isn't written again nor given up while the client
+///   keeps that batch ([`Paykit::held_write_kept`]);
+/// - otherwise nothing of the write is held, and it was not written now ([`Placed::Not`]),
+///   counted toward the message's 30 days as any write not made: the switch answered it with
+///   its error code, or it waited behind a batch the client keeps from an earlier call
+///   (`AppError::Ahead`), which sent nothing of it and whose answer is that earlier batch's;
+/// - not sent now for want of a key (the client's bare `NotNow`): waiting.
 ///
 /// A wallet-wide stop ([`crate::pay::stops_resume`]) and an own switch that doesn't answer
-/// ([`crate::pay::switch_unavailable`]) are returned, held batch or not, and so is any other
-/// error, such as a store failure or an answer that doesn't verify: the write wasn't
-/// evaluated, and nothing is given up on it.
+/// ([`crate::pay::switch_unavailable`]) are returned, held batch or not. Any other error that
+/// isn't the switch's answer, such as a store failure or an answer that doesn't verify, is
+/// returned too: the write wasn't evaluated, and nothing is given up on it.
+///
+/// The receive goes on past a failed upkeep of the app record only on answers that end
+/// nothing here: a switch that doesn't answer, returned, or a refusal of the Switch client
+/// before anything is sent, which no later write meets
+/// ([`crate::own_record::own_record_left_owed`]).
 pub(crate) fn submitted<T>(result: std::result::Result<T, AppError>) -> Result<Placed> {
     let Err(error) = result else {
         return Ok(Placed::Done);
@@ -137,9 +134,10 @@ pub(crate) fn submitted<T>(result: std::result::Result<T, AppError>) -> Result<P
     if crate::pay::switch_unavailable(&error) {
         return Err(error.into());
     }
-    let held = matches!(error, AppError::Kept { .. } | AppError::Ahead { .. });
+    let held = matches!(error, AppError::Kept { .. });
+    let ahead = matches!(error, AppError::Ahead { .. });
     let bare_not_now = matches!(error, AppError::Refused(ClientRefusal::NotNow(_)));
-    let code = error.code();
+    let answered = error.code().is_some();
     let error = PaykitError::from(error);
     if crate::pay::stops_resume(&error) {
         return Err(error);
@@ -147,68 +145,16 @@ pub(crate) fn submitted<T>(result: std::result::Result<T, AppError>) -> Result<P
     if held || bare_not_now {
         return Ok(Placed::Waits);
     }
-    match code.map(later_answer) {
-        Some(LaterAnswer::RefusesContent) => Ok(Placed::Not),
-        Some(LaterAnswer::TryAgain) => Ok(Placed::Retry),
-        None => Err(error),
+    if ahead || answered {
+        return Ok(Placed::Not);
     }
+    Err(error)
 }
 
 /// Whether `error` is the switch's refusal of a read, an answer with its error code, rather
 /// than a switch that doesn't answer or a failure of the app's own.
 fn refused(error: &AppError) -> bool {
     !crate::pay::switch_unavailable(error) && error.unkept().code().is_some()
-}
-
-/// What an answer of the switch to a later write, with no batch of it held, says of the write
-/// ([`later_answer`]).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum LaterAnswer {
-    /// The write is refused for its content: counted toward the message's window.
-    RefusesContent,
-    /// A later try may pass: counts nothing toward the window.
-    TryAgain,
-}
-
-/// What the switch's answer `code` to a later write says of it, by the Retry column of Switch
-/// spec 6.4: refused for its content when the same write never passes unchanged, or passes
-/// only once the account's limit frees (`429 quota_exceeded`), the "room frees" case the
-/// message's window is for (Paykit spec 8.1, Stored entries). Every other code says a later
-/// try may pass: with a new timestamp, after a wait, or written again over a fresh read or new
-/// keys, which the next try does. A wallet-wide stop is returned before this decides
-/// ([`submitted`]).
-///
-/// The receive goes on past a failed upkeep of the app record only where the switch doesn't
-/// answer, or the Switch client refuses the update or the expiry policy is unknown
-/// ([`crate::own_record::own_record_left_owed`]), none of them a later write's answer this
-/// counts, so no step after the upkeep gives a stored message up on an answer the upkeep was
-/// allowed past.
-pub(crate) fn later_answer(code: pubky_switch_core::http::ErrorCode) -> LaterAnswer {
-    use pubky_switch_core::http::ErrorCode as E;
-    // No wildcard: a code the switch adds fails to build here until it is classified.
-    match code {
-        E::BadRequest
-        | E::BadSignature
-        | E::NotAdmitted
-        | E::PermissionMissing
-        | E::NotCurrent
-        | E::CertExpired
-        | E::NotFound
-        | E::StaleIdentity
-        | E::TooLarge
-        | E::QuotaExceeded => LaterAnswer::RefusesContent,
-        E::StaleTimestamp
-        | E::Conflict
-        | E::StaleEpoch
-        | E::StaleGeneration
-        | E::StaleKey
-        | E::IdentityNeeded
-        | E::Moved
-        | E::RateLimited
-        | E::Staged
-        | E::Unavailable
-        | E::RecoveryRequired => LaterAnswer::TryAgain,
-    }
 }
 
 /// The local key at which the client saves the ID of the batch it keeps of `stored`'s later
@@ -239,23 +185,22 @@ pub(crate) enum LaterWrite {
 
 /// The one rule of the later-write paths, a stored entry's note (`se/`), a reply kept before
 /// its record (`pr/`) and a message kept over a divergent record (`dw/`): a message written,
-/// or reflected already, is done; one not written now ([`Placed::Not`]: the switch refused
-/// the bare batch for its content, the record can't take it, its value doesn't open, or a
-/// scope key it waits for hasn't come) is kept within [`crate::KEPT_MESSAGE_MS`] of its
-/// acceptance, `accepted_at`, and given up from then on; one answered, bare, with a code a
-/// later try may pass ([`Placed::Retry`]) is kept within [`hard_bound`] and given up from
-/// then on; both judged on `service`, the highest service time verified (Paykit spec 8.1).
-/// One that waits ([`Placed::Waits`]), while its record's absence decides nothing or while
-/// the client holds a batch of it, is kept, past any bound. An error, such as a switch that
-/// doesn't answer or a store failure, never reaches this: it is returned, and the message
-/// stays kept.
+/// or reflected already, is done; one not written now ([`Placed::Not`]: the switch answered
+/// its write, the record can't take it, its value doesn't open, or a scope key it waits for
+/// hasn't come) is kept within [`crate::KEPT_MESSAGE_MS`] of its acceptance, `accepted_at`,
+/// and given up from then on, judged on `service`, the highest service time verified (Paykit
+/// spec 8.1: 30 days for a stored entry, a reply before its record, a message kept over a
+/// divergent record and an Allowance message alike). One that waits ([`Placed::Waits`]),
+/// while its record's absence decides nothing or while the client holds a batch of it, is
+/// kept. An error, such as a switch that doesn't answer or a store failure, never reaches
+/// this: it is returned, and the message stays kept. A give-up checks once more that the
+/// client holds no batch of the write ([`Paykit::give_up_stored`]).
 pub(crate) fn later_write(placed: Placed, accepted_at: u64, service: Option<u64>) -> LaterWrite {
     match placed {
         Placed::Done => LaterWrite::Done,
         Placed::Waits => LaterWrite::Keep,
         Placed::Not if past_window(accepted_at, service) => LaterWrite::GiveUp,
-        Placed::Retry if past_hard_bound(accepted_at, service) => LaterWrite::GiveUp,
-        Placed::Not | Placed::Retry => LaterWrite::Keep,
+        Placed::Not => LaterWrite::Keep,
     }
 }
 
@@ -263,20 +208,6 @@ pub(crate) fn later_write(placed: Placed, accepted_at: u64, service: Option<u64>
 /// kept at most, on `service`, the highest service time verified.
 pub(crate) fn past_window(accepted_at: u64, service: Option<u64>) -> bool {
     service.is_some_and(|t| accepted_at.saturating_add(crate::receive::KEPT_MESSAGE_MS) <= t)
-}
-
-/// How long after its acceptance a message whose write the switch keeps answering with a
-/// code that says nothing of its content ([`Placed::Retry`]) is still tried: one more window
-/// past its own. The app tries for the window and may then give the message up (Paykit spec
-/// 8.1); it doesn't on such an answer, which the switch may lift at the next try, but it
-/// keeps no message for ever.
-pub(crate) fn hard_bound() -> u64 {
-    crate::receive::KEPT_MESSAGE_MS.saturating_mul(2)
-}
-
-/// Whether a message accepted at `accepted_at` is past [`hard_bound`], on `service`.
-fn past_hard_bound(accepted_at: u64, service: Option<u64>) -> bool {
-    service.is_some_and(|t| accepted_at.saturating_add(hard_bound()) <= t)
 }
 
 /// The side of the shared records `target` is of.
@@ -1099,38 +1030,10 @@ impl Paykit {
                 let later = later_write(placed, accepted_at, self.service_time());
                 note.placed = later == LaterWrite::Done;
                 if !note.placed {
+                    // Never given up while the client still keeps a batch of its write
+                    // (`Paykit::held_write_kept`).
                     if later == LaterWrite::GiveUp {
-                        // Given up: the host is told, in the commit that drops the note.
-                        let mut tx = Tx::default();
-                        tx.delete(&note_key);
-                        let notice = key::message_notice(&note.sender, &note.msg_id);
-                        // The notice keeps the entry's handle, which its acknowledgement
-                        // forgets; one kept already, as after a restore onto another store,
-                        // takes the entry's handle here.
-                        let handle = StoredHandle {
-                            stored_id: note.stored_id,
-                            hash: note.hash,
-                        };
-                        match self.kept_notice(&notice).await? {
-                            None => {
-                                let at = self.service_time().unwrap_or(0);
-                                let given_up = KeptNotice::given_up(
-                                    note.sender,
-                                    &note.msg_id,
-                                    named_request(&stored),
-                                    at,
-                                    crate::notices::GivenUpFrom::Stored(handle),
-                                );
-                                tx.put(&notice, &given_up)?;
-                            }
-                            Some(mut kept) if kept.stored.as_ref() != Some(&handle) => {
-                                kept.stored = Some(handle);
-                                kept.origin = None;
-                                tx.put(&notice, &kept)?;
-                            }
-                            Some(_) => {}
-                        }
-                        self.local_commit(tx).await?;
+                        Box::pin(self.give_up_stored(&note_key, &note, &stored)).await?;
                     }
                     continue;
                 }
@@ -1188,12 +1091,73 @@ impl Paykit {
         Ok(())
     }
 
+    /// Give up `stored`, a stored entry's message noted at `note_key` (`se/`): the note goes,
+    /// and the host is told ([`NoticeKind::MessageGivenUp`], with the entry's handle), in one
+    /// commit with the marker of a batch of its write the client no longer keeps. Nothing is
+    /// given up while the client still keeps a batch of its write, which may still land
+    /// ([`Paykit::held_write_kept`]). Returns whether it was given up. Every give-up of a
+    /// kept message goes through one of three functions, this one, [`Paykit::give_up`] and
+    /// `Paykit::give_up_divergent`: a new way to give one up goes through one of them.
+    ///
+    /// # Errors
+    ///
+    /// A store failure, or a notice or marker that doesn't read.
+    pub(crate) async fn give_up_stored(
+        &mut self,
+        note_key: &str,
+        note: &StoredNote,
+        stored: &StoredMessage,
+    ) -> Result<bool> {
+        if self.held_write_kept(stored).await? {
+            return Ok(false);
+        }
+        let mut tx = Tx::default();
+        tx.delete(note_key);
+        tx.delete(&held_write(stored));
+        let notice = key::message_notice(&note.sender, &note.msg_id);
+        // The notice keeps the entry's handle, which its acknowledgement forgets; one kept
+        // already, as after a restore onto another store, takes the entry's handle here.
+        let handle = StoredHandle {
+            stored_id: note.stored_id,
+            hash: note.hash,
+        };
+        match self.kept_notice(&notice).await? {
+            None => {
+                let at = self.service_time().unwrap_or(0);
+                let given_up = KeptNotice::given_up(
+                    note.sender,
+                    &note.msg_id,
+                    named_request(stored),
+                    at,
+                    crate::notices::GivenUpFrom::Stored(handle),
+                );
+                tx.put(&notice, &given_up)?;
+            }
+            Some(mut kept) if kept.stored.as_ref() != Some(&handle) => {
+                kept.stored = Some(handle);
+                kept.origin = None;
+                tx.put(&notice, &kept)?;
+            }
+            Some(_) => {}
+        }
+        self.local_commit(tx).await?;
+        Ok(true)
+    }
+
     /// Give up `stored`, a payer's reply kept at `kept_key` (`pr/`): the kept copy goes and
     /// the host is told ([`NoticeKind::MessageGivenUp`], from a kept reply, with no entry's
-    /// handle), in one commit. The notice is raised once.
+    /// handle), in one commit with the marker of a batch of its write the client no longer
+    /// keeps. The notice is raised once. Nothing is given up while the client still keeps a
+    /// batch of its write, which may still land ([`Paykit::held_write_kept`]). Every give-up
+    /// of a kept message goes through one of three functions, this one,
+    /// [`Paykit::give_up_stored`] and `Paykit::give_up_divergent`.
     pub(crate) async fn give_up(&mut self, kept_key: &str, stored: &StoredMessage) -> Result<()> {
+        if self.held_write_kept(stored).await? {
+            return Ok(());
+        }
         let mut tx = Tx::default();
         tx.delete(kept_key);
+        tx.delete(&held_write(stored));
         let notice = key::message_notice(&stored.sender(), &stored.message().msg_id);
         if self.kept_notice(&notice).await?.is_none() {
             let at = self.service_time().unwrap_or(0);
@@ -1205,25 +1169,51 @@ impl Paykit {
         self.local_commit(tx).await
     }
 
-    /// Place `stored` in its `role` of the record at `target`, as a write of the app's own.
-    /// Whether it is in place: written now, or reflected already.
+    /// Forget every marker of a batch the client no longer keeps ([`held_write`]): applied,
+    /// dropped, or one it holds nothing of. A marker goes with its batch's apply, and with a
+    /// given-up message; this takes the rest, as of a message written another way, taken or
+    /// retired while its batch was dropped. It is safe: the client writes a marker in the
+    /// commit that keeps its batch, so a marker whose batch the client doesn't hold, read in
+    /// this same pass, is always stale. A marker that doesn't read goes too: it names no
+    /// batch. Run at the end of each receive, so the scan is bounded: no more markers than
+    /// the batches the client keeps plus the messages ended since the last receive.
     ///
-    /// A record that is absent or deleted is opened only by a message that may open it
-    /// (`creates`), and a receipt goes only beside the proof it names (Paykit wire 5.3). A
-    /// record held as a value that doesn't read, or that the app can't open, is never
-    /// written over (Switch spec 8.2: a reader doesn't act on a record it can't read, and a
-    /// write over one that is only unopenable for now could drop what its writer stored). A
-    /// value sealed at a key the app doesn't hold yet (`Unopened::KeyNotHeld`) and a record
-    /// whose scope's key at the current data epoch the app doesn't hold yet wait for the key:
-    /// tried again at each receive and placed once it comes, and given up as any other
-    /// message not written once [`crate::KEPT_MESSAGE_MS`] have passed since its acceptance
-    /// (Paykit spec 8.1). A record absent while the copy of its side may lack records
-    /// ([`Paykit::side_unlisted`]) waits, never given up meanwhile, and the message is placed
-    /// once the records are listed. A value that never opens stays as it is.
+    /// # Errors
+    ///
+    /// A store failure, or a kept batch that doesn't read.
+    pub(crate) async fn sweep_held_writes(&mut self) -> Result<()> {
+        let mut gone = Tx::default();
+        let mut any = false;
+        for (marker, batch_id) in self.held_write_markers().await? {
+            let kept = match batch_id {
+                Some(batch_id) => matches!(
+                    self.app.kept_batch(batch_id).await?,
+                    Some(pubky_switch_client::app::KeptBatchStatus::Kept { .. })
+                ),
+                None => false,
+            };
+            if !kept {
+                gone.delete(&marker);
+                any = true;
+            }
+        }
+        if any {
+            self.local_commit(gone).await?;
+        }
+        Ok(())
+    }
+
     /// Whether the client still keeps a batch of `stored`'s later write ([`held_write`]),
     /// which may still land: the message is then neither written again, which would keep
     /// another batch behind it, nor given up ([`submitted`]). A marker whose batch the client
     /// applied, dropped or holds nothing of any more goes, and the write is tried as any.
+    ///
+    /// The client keeps a batch it sent at most
+    /// [`pubky_switch_client::app::KEPT_BATCH_ANSWER_MS`] after its first send, the service's
+    /// 30 days for a batch's proofs less a one-hour margin, then applies or drops it; one never
+    /// sent goes at its first answered send, or is dropped at its first-handoff cutoff. So a
+    /// message waits on a held batch at most about 30 days after that batch's first send
+    /// (Paykit spec 8.1, Stored entries, Kept batch).
     ///
     /// # Errors
     ///
@@ -1243,6 +1233,21 @@ impl Paykit {
         Ok(false)
     }
 
+    /// Place `stored` in its `role` of the record at `target`, as a write of the app's own.
+    /// Whether it is in place: written now, or reflected already.
+    ///
+    /// A record that is absent or deleted is opened only by a message that may open it
+    /// (`creates`), and a receipt goes only beside the proof it names (Paykit wire 5.3). A
+    /// record held as a value that doesn't read, or that the app can't open, is never
+    /// written over (Switch spec 8.2: a reader doesn't act on a record it can't read, and a
+    /// write over one that is only unopenable for now could drop what its writer stored). A
+    /// value sealed at a key the app doesn't hold yet (`Unopened::KeyNotHeld`) and a record
+    /// whose scope's key at the current data epoch the app doesn't hold yet wait for the key:
+    /// tried again at each receive and placed once it comes, and given up as any other
+    /// message not written once [`crate::KEPT_MESSAGE_MS`] have passed since its acceptance
+    /// (Paykit spec 8.1). A record absent while the copy of its side may lack records
+    /// ([`Paykit::side_unlisted`]) waits, never given up meanwhile, and the message is placed
+    /// once the records are listed. A value that never opens stays as it is.
     pub(crate) async fn place_note(
         &mut self,
         target: &ActivityTarget,
@@ -1592,8 +1597,8 @@ mod tests {
     /// the client (Switch spec 6.4, 12.5; Paykit spec 8.1). A batch held is judged first:
     /// whatever the code inside it, the write waits, never counted nor given up, but for a
     /// wallet-wide stop or an own switch that doesn't answer, which are returned. A bare answer
-    /// counts toward the window only where it refuses the content. Every answer the receive
-    /// goes past at a failed upkeep of the app record is never counted. (A write waiting
+    /// counts toward the 30 days as any write not made. Every answer the receive goes past at
+    /// a failed upkeep of the app record is never counted. (A write waiting
     /// behind an earlier kept batch, `AppError::Ahead`, can't be built here, its `KeptAhead`
     /// being the client's own; the flows take it.)
     #[test]
@@ -1601,35 +1606,6 @@ mod tests {
         use pubky_switch_client::error::ClientError;
         use pubky_switch_core::http::ErrorCode;
         for code in ErrorCode::ALL {
-            // No wildcard: a code the switch adds fails to build here until it is classified.
-            let refuses_content = match code {
-                ErrorCode::BadRequest
-                | ErrorCode::BadSignature
-                | ErrorCode::NotAdmitted
-                | ErrorCode::PermissionMissing
-                | ErrorCode::NotCurrent
-                | ErrorCode::CertExpired
-                | ErrorCode::NotFound
-                | ErrorCode::StaleIdentity
-                | ErrorCode::TooLarge
-                | ErrorCode::QuotaExceeded => true,
-                ErrorCode::StaleTimestamp
-                | ErrorCode::Conflict
-                | ErrorCode::StaleEpoch
-                | ErrorCode::StaleGeneration
-                | ErrorCode::StaleKey
-                | ErrorCode::IdentityNeeded
-                | ErrorCode::Moved
-                | ErrorCode::RateLimited
-                | ErrorCode::Staged
-                | ErrorCode::Unavailable
-                | ErrorCode::RecoveryRequired => false,
-            };
-            assert_eq!(
-                later_answer(code) == LaterAnswer::RefusesContent,
-                refuses_content,
-                "{code:?}"
-            );
             let bare = AppError::Switch(ClientError::Switch {
                 status: code.status(),
                 code,
@@ -1642,8 +1618,16 @@ mod tests {
                 batch_id: [7; 16],
                 error: Box::new(bare.clone()),
             };
-            let returned = crate::pay::switch_unavailable(&bare)
-                || crate::pay::stops_resume(&PaykitError::Client(bare.clone()));
+            // Returned, held or bare: the own switch not answering, and the switch's
+            // wallet-wide stops, by name.
+            let returned = matches!(
+                code,
+                ErrorCode::Unavailable
+                    | ErrorCode::Staged
+                    | ErrorCode::NotCurrent
+                    | ErrorCode::CertExpired
+                    | ErrorCode::RecoveryRequired
+            );
             let bare_placed = submitted::<()>(Err(bare.clone()));
             let bare_counted = matches!(bare_placed, Ok(Placed::Not));
             let held_placed = submitted::<()>(Err(held));
@@ -1651,12 +1635,8 @@ mod tests {
                 assert!(bare_placed.is_err(), "{code:?} bare");
                 assert!(held_placed.is_err(), "{code:?} held");
             } else {
-                let expected = if refuses_content {
-                    Placed::Not
-                } else {
-                    Placed::Retry
-                };
-                assert_eq!(bare_placed.unwrap(), expected, "{code:?} bare");
+                // Bare, nothing of it held: a write not made, counted (Paykit spec 8.1).
+                assert_eq!(bare_placed.unwrap(), Placed::Not, "{code:?} bare");
                 // Never counted, never given up, while the client holds a batch of it.
                 assert_eq!(held_placed.unwrap(), Placed::Waits, "{code:?} held");
             }
@@ -1695,32 +1675,66 @@ mod tests {
         );
     }
 
+    /// A message whose later write's batch the client still keeps is never given up, by
+    /// any of the give-up paths, a stored entry's (`se/`), a reply's kept before its record
+    /// (`pr/`) and one's kept over a divergent record (`dw/`): nothing is told, and the
+    /// batch stays marked.
+    #[tokio::test]
+    async fn test_stored_give_ups_wait_while_the_batch_is_held() {
+        let w = crate::testkit::Switches::new();
+        let mut wallet = w
+            .join(
+                &w.alice,
+                "wallet",
+                crate::AppScopes::new()
+                    .pay()
+                    .manage_contacts()
+                    .build()
+                    .unwrap(),
+            )
+            .await;
+        let noted = note(false);
+        let alice = Party::new("alice", "wallet", &["paykit_pay", "paykit_contacts"]);
+        let bob = Party::new(
+            "bob",
+            "shop",
+            &["paykit_request", "paykit_settlements", "paykit_contacts"],
+        );
+        let stored = bob.message(
+            &alice,
+            "paykit.payment_request",
+            vec![],
+            object(serde_json::json!({
+                "amount": { "asset": "btc", "value": "1" },
+                "payment_reference": "order-1",
+                "proposal_expires_at": null
+            })),
+        );
+        w.hold_write(&mut wallet, &stored).await;
+        let note_key = key::stored_note(&noted.sender, &noted.msg_id);
+        assert!(!Box::pin(wallet.give_up_stored(&note_key, &noted, &stored))
+            .await
+            .unwrap());
+        Box::pin(wallet.give_up("pr/held", &stored)).await.unwrap();
+        Box::pin(wallet.give_up_divergent("dw/held", &stored))
+            .await
+            .unwrap();
+        assert!(wallet.notices().await.unwrap().is_empty());
+        assert!(wallet.held_write_kept(&stored).await.unwrap());
+    }
+
     #[test]
-    fn test_stored_later_write_keeps_a_retry_to_the_hard_bound() {
+    fn test_stored_later_write_gives_up_at_the_window_only_what_isnt_held() {
         let window = crate::receive::KEPT_MESSAGE_MS;
         let at = 1_000;
-        // Within its window, a refusal and a retry are kept alike.
         assert_eq!(later_write(Placed::Not, at, Some(at + 1)), LaterWrite::Keep);
-        assert_eq!(
-            later_write(Placed::Retry, at, Some(at + 1)),
-            LaterWrite::Keep
-        );
-        // Past it, a refusal is given up and a retry kept.
         assert_eq!(
             later_write(Placed::Not, at, Some(at + window)),
             LaterWrite::GiveUp
         );
+        // Waiting, as while the client holds a batch of the write: kept past any bound.
         assert_eq!(
-            later_write(Placed::Retry, at, Some(at + window)),
-            LaterWrite::Keep
-        );
-        // Past the hard bound, a retry is given up too.
-        assert_eq!(
-            later_write(Placed::Retry, at, Some(at + hard_bound())),
-            LaterWrite::GiveUp
-        );
-        assert_eq!(
-            later_write(Placed::Retry, at, Some(at + hard_bound() - 1)),
+            later_write(Placed::Waits, at, Some(at + 4 * window)),
             LaterWrite::Keep
         );
     }

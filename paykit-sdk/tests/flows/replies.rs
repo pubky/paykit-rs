@@ -1584,12 +1584,12 @@ async fn test_replies_kept_past_30_days_refused_by_the_switch_given_up_with_the_
 }
 
 #[tokio::test]
-async fn test_replies_kept_past_30_days_over_quota_wait_while_the_batch_is_held() {
+async fn test_replies_kept_past_30_days_over_quota_wait_only_while_held() {
     // As the write-fails test, but the write placing the first reply is refused for room
     // (`429 quota_exceeded`), 31 days after their acceptance. The client keeps that batch to
-    // send again, so the reply may still land, and the second reply's write waits behind it:
-    // neither is given up while the batch is held. Once room frees, both land, and nothing
-    // was told as given up.
+    // send again, so the first reply may still land and waits. The second reply's write waits
+    // behind that batch, nothing of it sent or kept, so it is given up at its 30 days (Paykit
+    // spec 8.1). Once room frees, the first lands.
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
@@ -1614,9 +1614,11 @@ async fn test_replies_kept_past_30_days_over_quota_wait_while_the_batch_is_held(
             .await
             .unwrap()
             .len(),
-        2
+        1
     );
-    assert!(shop.notices().await.unwrap().is_empty());
+    let notices = shop.notices().await.unwrap();
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert_eq!(notices[0].kind, paykit_sdk::NoticeKind::MessageGivenUp);
     w.clock.advance_ms(11 * 60_000);
     shop.receive(None).await.unwrap();
     shop.receive(None).await.unwrap();
@@ -1626,7 +1628,7 @@ async fn test_replies_kept_past_30_days_over_quota_wait_while_the_batch_is_held(
         .await
         .unwrap()
         .is_empty());
-    assert!(shop.notices().await.unwrap().is_empty());
+    assert_eq!(shop.notices().await.unwrap().len(), 1);
 }
 
 #[tokio::test]
