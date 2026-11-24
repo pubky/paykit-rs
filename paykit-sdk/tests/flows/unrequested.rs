@@ -3166,6 +3166,11 @@ async fn test_unrequested_loss_marker_of_a_recovery_upload_kept_through_an_in_pl
     let next = crate::provider_loss::declare_loss(&w);
     phone.app_mut().refresh_identity().await.unwrap();
     phone.app_mut().follow_provider().await.unwrap();
+    // The tablet follows the new service before the put-back is uploaded: its own proved
+    // list goes up first, and the put-back, a child of the delete that came after that list,
+    // last.
+    tablet.app_mut().refresh_identity().await.unwrap();
+    tablet.app_mut().follow_provider().await.unwrap();
     SwitchClient::new(
         SWITCH_ORIGIN,
         w.alice_id(),
@@ -3191,8 +3196,6 @@ async fn test_unrequested_loss_marker_of_a_recovery_upload_kept_through_an_in_pl
     .unwrap();
     // The tablet reads the put-back: its client holds it, unproved, and no receive or
     // backup follows before the tablet is dropped.
-    tablet.app_mut().refresh_identity().await.unwrap();
-    tablet.app_mut().follow_provider().await.unwrap();
     let held = tablet
         .app_mut()
         .read_record(&target)
@@ -3200,7 +3203,8 @@ async fn test_unrequested_loss_marker_of_a_recovery_upload_kept_through_an_in_pl
         .unwrap()
         .unwrap();
     assert!(!held.authenticated);
-    assert!(held.content.value().is_some());
+    let value: serde_json::Value = serde_json::from_slice(held.content.value().unwrap()).unwrap();
+    assert_eq!(value, put_back);
     drop(tablet);
     // A later write drops the marker and the mark.
     let mut dropped = put_back.clone();
