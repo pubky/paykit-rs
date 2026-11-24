@@ -456,16 +456,17 @@ Read `notices` and `payee_deletion_notices` by their stable identities. Acknowle
 each through its matching SDK API after recording or showing it.
 
 Notices through a restore. Identity notices (`BlockFloorHeld`, `FloorRaiseWaiting`,
-`AutomaticPaymentsHeld`) aren't restored: the restored wallet tells them again at its
-load. A restore onto a fresh store brings back the backup's notices. A restore in place,
-over the installation that kept running after the backup, keeps every notice of a
-payment, a message, a settlement and an outgoing delivery that either side holds, so a
-notice raised after the backup isn't lost. A notice the host acknowledged after the
-backup can be listed again: record notices by their identities, and show again only
-the ones not recorded. Two kinds don't follow this: a `BlockedMessagesLost` raised
-after the backup is lost at a restore in place, and a held answer the installation gave
-up after the backup is reported as `PossiblyDelivered` instead, since the backup's copy
-of the answer is marked restored. Handle Switch
+`AutomaticPaymentsHeld`) aren't restored: the restored wallet tells them again while
+they hold, at its load or a later receive. A restore onto a fresh store brings back the
+backup's notices. A restore in place, over the installation that kept running after the
+backup, keeps every notice of a payment (`PaidAfterFailed`, `HeldWithoutPay`), of a
+settlement and of an outgoing delivery that either side holds, so one raised after the
+backup isn't lost. A notice the host acknowledged after the backup can be listed again:
+record notices by their identities, and show again only the ones not recorded. A
+message's notice (`MessageGivenUp` and the Allowance notices) and a
+`BlockedMessagesLost` are the backup's, except that a held stop the installation told
+keeps the installation's notice: one raised after the backup is lost at a restore in
+place. Handle Switch
 duty events from `ReceiveSummary::report`. Call `receive` on startup and after a
 feed wake. It returns one bounded report. Use `more` to decide when to read another
 page. `ReceiveSummary::report.more` says the read stopped on one of its per-call

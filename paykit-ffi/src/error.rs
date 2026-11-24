@@ -670,7 +670,8 @@ pub enum SettlementWarningOutcome {
     /// whether one is saved already is unverified: the host shows the bucket's warning if it
     /// has yet to, either way.
     Failed,
-    /// The store can't tell whether this call's write of the warning applied: it may be saved.
+    /// The store can't tell the outcome of this call's lookup or write of the warning: it may
+    /// be saved.
     OutcomeUnknown,
 }
 

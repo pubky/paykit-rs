@@ -837,21 +837,19 @@ pub(crate) fn restore_paykit_layer(
         }
         stop_notices.insert(at.into_bytes(), held);
     }
-    // And its notices of payments and messages: a restore keeps each one either side holds,
-    // so a notice the installation raised after the backup isn't lost (Paykit spec 7.2,
-    // "What a restore loses"). One the host acknowledged after the backup can be listed
-    // again; none is lost. A fresh store has none.
+    // And its notices of payments, keyed by their attempt and kind: a restore keeps each one
+    // either side holds, so a notice the installation raised after the backup, which nothing
+    // raises again, isn't lost (Paykit spec 7.2, "What a restore loses"). One the host
+    // acknowledged after the backup can be listed again. A fresh store has none. A message's
+    // notice is the backup's: its kind, origin and kept entry can differ from the
+    // installation's at one key, and its own restore steps write it.
     let mut notices: std::collections::BTreeMap<Vec<u8>, crate::notices::KeptNotice> =
         std::collections::BTreeMap::new();
     for (k, value) in restoring
         .previous_local_scan(key::NOTICES.as_bytes())
         .map_err(|_| "the installation's notices cannot be read")?
     {
-        if matches!(
-            StateKey::parse(&k),
-            Some(StateKey::Notice { .. } | StateKey::MessageNotice { .. })
-        ) && !stop_notices.contains_key(&k)
-        {
+        if matches!(StateKey::parse(&k), Some(StateKey::Notice { .. })) {
             let notice = state::restored::<KeptNotice>(&k, &value, &binder)
                 .map_err(|_| "the installation holds an invalid notice")?;
             notices.insert(k, notice);
@@ -1466,7 +1464,7 @@ pub(crate) fn restore_paykit_layer(
                 if let (true, StateKey::Notice { attempt, .. }) = (notice.acknowledged, &family) {
                     acknowledged.push(*attempt);
                 }
-                if matches!(family, StateKey::BlockedLost { .. }) {
+                if !matches!(family, StateKey::Notice { .. }) {
                     writes.push(LocalWrite::Put { key, value });
                     continue;
                 }
