@@ -1768,7 +1768,7 @@ async fn test_restore_released_acceptance_never_delivered_is_withdrawn_not_repla
     let w = World::new();
     let (mut wallet, mut shop, _, original) =
         Box::pin(crate::restore_held::queued_acceptance(&w)).await;
-    w.bob.switch().fail_next(Fault::Error {
+    w.bob.dispatch().fail_next(Fault::Error {
         path: "/inbox".into(),
         code: ErrorCode::Unavailable,
         current: serde_json::Value::Null,

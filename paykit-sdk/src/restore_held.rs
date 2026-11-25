@@ -1098,7 +1098,7 @@ mod tests {
         wallet.local_put(&notice, &false).await.unwrap();
         let seq = w
             .alice
-            .switch()
+            .dispatch()
             .send_plaintext(bob, shop.app.cert(), signed.plaintext(), &[wallet.app_id()])
             .unwrap();
         Box::pin(wallet.app_mut().receive(None)).await.unwrap();
@@ -1205,7 +1205,7 @@ mod tests {
             )
             .unwrap();
         w.alice
-            .switch()
+            .dispatch()
             .send_plaintext(
                 bob,
                 shop.app.cert(),

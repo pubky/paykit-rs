@@ -290,7 +290,7 @@ async fn test_restore_held_stop_waits_while_the_service_lost_a_retained_record()
         RecordRead::Fresh(_)
     ));
     let absent = || {
-        w.bob.switch().fail_next(Fault::Error {
+        w.bob.dispatch().fail_next(Fault::Error {
             path: format!("records/{}", pubky_dispatch_core::enc::b64(&key)),
             code: pubky_dispatch_core::http::ErrorCode::NotFound,
             current: serde_json::Value::Null,
