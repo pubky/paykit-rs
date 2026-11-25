@@ -1758,16 +1758,53 @@ async fn restored_with_a_released_acceptance(
     (w, app, shop, request)
 }
 
+// pay.rs keeps reconciliation and later resumes from replacing a withdrawn acceptance.
 #[tokio::test]
-async fn test_restore_released_acceptance_never_delivered_is_sent_once() {
-    let (w, mut app, mut shop, request) = restored_with_a_released_acceptance(false).await;
-    // The restored client didn't know it, and the record holds none: a new one went.
-    assert_eq!(acceptances_taken(&mut shop).await, 1);
-    let record = value_of(&mut shop, &payee_record(&request)).await;
-    assert!(!record["response"].is_null(), "{record}");
-    // A second resume finds the new one known to the client and sends nothing.
-    app.resume_payments().await.unwrap();
+async fn test_restore_released_acceptance_never_delivered_is_withdrawn_not_replaced() {
+    use pubky_dispatch_client::app::{AppEvent, Delivery};
+    use pubky_dispatch_client::testing::Fault;
+    use pubky_dispatch_core::http::ErrorCode;
+
+    let w = World::new();
+    let (mut wallet, mut shop, _, original) =
+        Box::pin(crate::restore_held::queued_acceptance(&w)).await;
+    w.bob.switch().fail_next(Fault::Error {
+        path: "/inbox".into(),
+        code: ErrorCode::Unavailable,
+        current: serde_json::Value::Null,
+    });
+    assert!(matches!(
+        wallet.flush_message_in_delivery(&original).await.unwrap(),
+        Some(Delivery::Queued { tries, .. }) if tries > 0
+    ));
     assert_eq!(acceptances_taken(&mut shop).await, 0);
+    let backup = wallet.backup().await.unwrap();
+    drop(wallet);
+
+    let mut app = Box::pin(crate::restore_held::restore(&w, &w.alice, store(), &backup)).await;
+    assert!(app
+        .app()
+        .held_messages("paykit")
+        .await
+        .unwrap()
+        .contains(&original));
+    Box::pin(crate::common::finish_listing(&mut app)).await;
+    Box::pin(app.reconcile()).await.unwrap();
+    assert_eq!(acceptances_taken(&mut shop).await, 0);
+    let duties = app.app_mut().pending_duty_events().await.unwrap();
+    assert!(duties.iter().any(|d| {
+        matches!(&d.event, AppEvent::DeliveryUnknown { msg_id, .. } if msg_id == &original)
+    }));
+    Box::pin(app.resume_payments()).await.unwrap();
+    Box::pin(app.flush()).await.unwrap();
+    assert_eq!(acceptances_taken(&mut shop).await, 0);
+    assert!(!app
+        .app()
+        .queued_messages("paykit")
+        .await
+        .unwrap()
+        .iter()
+        .any(|m| m.kind == "paykit.payment_request_acceptance"));
     assert_eq!(w.rail.all_executions().len(), 1);
 }
 

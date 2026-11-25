@@ -288,7 +288,14 @@ impl crate::Paykit {
             &q.to,
             id,
         ))?;
-        if self.unplaced_for(&[key, pending], &q.to).await? {
+        if self
+            .unplaced_for(
+                &[key, pending],
+                &q.to,
+                crate::restore_held::Records::Allowance,
+            )
+            .await?
+        {
             return Ok(Unreadable);
         }
         // The one order of every held decision: paused waits; a confirmed view is decided

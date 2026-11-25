@@ -716,6 +716,8 @@ A restore holds the Paykit messages it can't tell are still wanted: those the ba
 
 A stop or a proof is released with its original bytes while the record, read afresh and not paused as divergent, still holds it: a stop with no stop of the counterparty's, a proof with no receipt for its attempt. It still passes the normal delivery checks, and it adds no reply grant. While the record can't be read, waits for a key, is paused until the user confirms it, or has a counterparty's stop or receipt kept and not placed in it yet, the message stays held. An original that can't be read, or whose body doesn't parse, is withdrawn and told.
 
+After a restore, Paykit decides every held message of its own kinds, a hold of one message included: a host holds a counterparty (`hold_queued`), not a message. The bindings offer no hold of one message.
+
 | Held message | What happens and what the host shows |
 | --- | --- |
 | Payee or payer cancellation, or request rejection | Released while the record holds it. When the record shows the counterparty's own stop, it is withdrawn and nothing more is needed. When the record no longer shows it and the request is still open, it is withdrawn with `StopNotRecorded`, and the user may stop the request again. |
@@ -724,7 +726,7 @@ A stop or a proof is released with its original bytes while the record, read afr
 | One-time or recurring Payment Request | Withdrawn. Show the original first. If the payer never answered, the user may authorize a new request. |
 | Period details | Withdrawn. The payee may issue new details for an open period, within its limit of eight. The payer may ask for the originals by re-send request. |
 | Receipt | Withdrawn. The payer may ask for the receipt retained in the payee record by re-send request. |
-| Acceptance reporting a payment | Withdrawn. While the payer record holds no response and the restored store doesn't know the original's delivery, resuming the payment signs the acceptance again from the journal and the claim. |
+| Acceptance reporting a payment | Withdrawn and told as unknown, and never signed again: the payee gets the payment's proof, which carries what it needs, and credits by it (Paykit spec 7.2). The payment finishes on its proof. |
 | Subscription acceptance | Withdrawn. The user may accept again if the payer record still has no response. |
 | Private Payment List request or re-send request | Withdrawn. The payer asks for a list at its next need. Restore and ordinary re-send rules handle further re-send requests. |
 | Allowance proposal | Withdrawn. Show the possibly delivered original before the user authorizes a new proposal. |

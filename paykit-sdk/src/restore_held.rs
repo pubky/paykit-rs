@@ -99,6 +99,16 @@ fn decidable(original: Option<&Message>, now: Option<u64>) -> Option<&Message> {
     original.filter(|original| within_window(original, now) && Body::parse(original).is_ok())
 }
 
+/// Which records a held decision reads: an activity record (a request's, a period's or a
+/// payment's), or an Allowance's and its proposal's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Records {
+    /// A request's, a period's or a payment's record.
+    Activity,
+    /// An Allowance's record and its proposal's.
+    Allowance,
+}
+
 /// What becomes of the owed mark (`hm`) at the end of a pass.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MarkAfter {
@@ -262,14 +272,24 @@ impl Paykit {
     /// past its own replay deadline at a flush. A non-stop error makes the step best
     /// effort, tried again at the next call; a stop of the wallet is returned, typed.
     pub(crate) async fn give_up_expired_held(&mut self) -> Result<()> {
-        let Some(queued) = Box::pin(self.carried_lists_owed()).await? else {
-            return Ok(());
+        let queued = match Box::pin(self.carried_lists_owed()).await {
+            Ok(Some(queued)) => queued,
+            Ok(None) => return Ok(()),
+            // Not listed now: nothing expires before the lists are recorded; tried again at
+            // the next call.
+            Err(error) => {
+                crate::pay::unless_stop(error)?;
+                return Ok(());
+            }
         };
         let held: Vec<String> = queued
             .iter()
             .filter(|q| q.held && paykit_kind(&q.kind))
             .map(|q| q.msg_id.clone())
             .collect();
+        // A stop's notice whose message is no longer held is shown, whether or not the
+        // decisions can run now: one a crash left pending after its withdrawal included.
+        Box::pin(self.show_pending_stops(&held)).await?;
         if held.is_empty() {
             return Ok(());
         }
@@ -281,6 +301,12 @@ impl Paykit {
             crate::pay::unless_stop(error)?;
         }
         for q in queued.iter().filter(|q| q.held && paykit_kind(&q.kind)) {
+            // A held acceptance only ever ends withdrawn or given up, never released: its
+            // payment is marked first, here, before every pass and flush that can end it,
+            // so it is never replaced (`Paykit::acceptance_withdrawn_at_restore`).
+            if q.kind == Kind::PaymentRequestAcceptance.as_str() {
+                Box::pin(self.acceptance_withdrawn_at_restore(&q.msg_id)).await?;
+            }
             let past = originals
                 .get(&q.msg_id)
                 .and_then(Option::as_ref)
@@ -288,9 +314,8 @@ impl Paykit {
             // A held message isn't tried: the flush only gives it up once it is too old. A
             // stopped client gives up nothing, and delivers nothing, until it can act.
             let given_up = if past {
-                // As the pass withdraws one past its window: no stop notice (`decide`).
-                self.local_delete(&key::unrecorded_stop(&q.to, &q.msg_id))
-                    .await?;
+                // Its window ended it, not evidence: a pending notice of an earlier pass
+                // stands, and is shown once the message is gone (`show_pending_stops`).
                 self.app
                     .withdraw_message(BACKUP_NAME, &q.msg_id)
                     .await
@@ -314,13 +339,9 @@ impl Paykit {
         let Some(pass) = self.local_get::<HeldPass>(key::HELD_MESSAGES_OWED).await? else {
             return Ok(None);
         };
-        let queued = match self.app.queued_messages(BACKUP_NAME).await {
-            Ok(queued) => queued,
-            Err(error) => {
-                crate::pay::unless_stop(error)?;
-                return Ok(None);
-            }
-        };
+        // A listing that fails is returned: no path expires or flushes a carried list
+        // before what it owes is recorded.
+        let queued = self.app.queued_messages(BACKUP_NAME).await?;
         for q in queued
             .iter()
             .filter(|q| q.kind == Kind::PrivatePaymentList.as_str())
@@ -379,9 +400,9 @@ impl Paykit {
                 return Ok((0, 0));
             }
         };
-        // A stop's notice is shown once its message is no longer held: withdrawn, or given
-        // up at its deadline (`note_unrecorded_stop`).
-        Box::pin(self.show_pending_stops(&ids)).await?;
+        // A stop's notice is shown once its message is no longer held: the expiry step,
+        // which runs before every pass, shows those of earlier passes, and the end of this
+        // pass those of its own withdrawals (`note_unrecorded_stop`).
         // A carried list the installation and backup both owed isn't held, and is
         // decided in the first pass only.
         let mut mark_stays = false;
@@ -471,12 +492,18 @@ impl Paykit {
             Err(_) => HeldRole::Unknown,
         };
         let mut decision = decide(role, StopEvidence::Unreadable);
+        // Whether evidence read now decided it; a pending notice of a stop an earlier pass
+        // found unrecorded stands unless it did.
+        let mut by_evidence = false;
         // Every wait ends: past its 30 days, with no original read, or with a body that
         // doesn't parse, a stop or proof is withdrawn and told (`within_window`).
         if decision == Decision::Wait {
             decision = match decidable(msg, self.service_time()) {
                 Some(original) => match self.stop_evidence(report, q, original).await {
-                    Ok(evidence) => decide(role, evidence),
+                    Ok(evidence) => {
+                        by_evidence = true;
+                        decide(role, evidence)
+                    }
                     Err(error) => {
                         crate::pay::unless_stop(error)?;
                         Decision::Wait
@@ -501,13 +528,15 @@ impl Paykit {
                         .filter(|_| role != HeldRole::Message(Kind::AllowanceEnd))
                         .and_then(|m| m.refs.first().copied());
                     self.note_unrecorded_stop(q, request).await?;
-                } else {
+                } else if by_evidence {
+                    // The counterparty's stop, or a record that holds neither: nothing to tell.
                     self.local_delete(&notice).await?;
                 }
                 if role == HeldRole::Message(Kind::PrivatePaymentList) {
                     self.keep_list_withdrawal(&q.to).await?;
                     self.note_carried_list(q).await?;
                 }
+
                 Ok(
                     if self.app.withdraw_message(BACKUP_NAME, &q.msg_id).await? {
                         Outcome::Withdrawn
@@ -593,17 +622,19 @@ impl Paykit {
             target = sale;
             read = self.fresh_held_activity(&target).await?;
         }
+        // A message of the counterparty's for this record kept and not placed yet, which may
+        // open it or stop it, decides first: it waits, a record not written yet included.
+        if self
+            .unplaced_for(&[self.activity_key(&target)?], &q.to, Records::Activity)
+            .await?
+        {
+            return Ok(Unreadable);
+        }
         let record = match read {
             Fresh::Held(record) => record,
             Fresh::Missing => return Ok(Absent),
             Fresh::Unreadable => return Ok(Unreadable),
         };
-        if self
-            .unplaced_for(&[self.activity_key(&target)?], &q.to)
-            .await?
-        {
-            return Ok(Unreadable);
-        }
         let stop = if cancellation {
             &record.cancellation
         } else {
@@ -664,17 +695,19 @@ impl Paykit {
             ([_, _], None) | ([_, _, _, ..], _) => return Ok(Absent),
         };
         let target = ActivityTarget::payer(key);
+        // A message of the counterparty's for this record kept and not placed yet, which may
+        // open it or stop it, decides first: it waits, a record not written yet included.
+        if self
+            .unplaced_for(&[self.activity_key(&target)?], &q.to, Records::Activity)
+            .await?
+        {
+            return Ok(Unreadable);
+        }
         let record = match self.fresh_held_activity(&target).await? {
             Fresh::Held(record) => record,
             Fresh::Missing => return Ok(Absent),
             Fresh::Unreadable => return Ok(Unreadable),
         };
-        if self
-            .unplaced_for(&[self.activity_key(&target)?], &q.to)
-            .await?
-        {
-            return Ok(Unreadable);
-        }
         let receipted = record.receipt.as_ref().is_some_and(|receipt| {
             matches!(receipt.body(), Body::PaymentReceipt(r) if r.attempt_id == proof.attempt_id)
         });
@@ -706,6 +739,7 @@ impl Paykit {
         &self,
         records: &[[u8; 32]],
         counterparty: &[u8; 32],
+        kind: Records,
     ) -> Result<bool> {
         for record in records {
             let replies = format!(
@@ -739,7 +773,7 @@ impl Paykit {
             .local_scan::<crate::stored::BoundNote>(&key::stored_notes_of(counterparty))
             .await?
         {
-            if self.unplaced_note_in(&note, records).await? {
+            if self.unplaced_note_in(&note, records, kind).await? {
                 return Ok(true);
             }
         }
@@ -812,6 +846,16 @@ impl Paykit {
         let read = self.fresh_request(target).await?;
         let key = self.activity_key(target)?;
         if self.held_record_paused(&key).await? {
+            return Ok(Fresh::Unreadable);
+        }
+        // Not found at the service while this store retains the record, not as a delete:
+        // the two disagree, so the decision waits, as an Allowance end's does
+        // (`Paykit::held_allowance_end`), bounded by its 30 days.
+        if matches!(read, Fresh::Missing)
+            && self.app.shared_record(&key).await?.is_some_and(|held| {
+                held.content != pubky_dispatch_client::app::RecordContent::Deleted
+            })
+        {
             return Ok(Fresh::Unreadable);
         }
         // A record that carries `lost_to_delete` is decided on what it holds. Paykit spec
@@ -977,7 +1021,12 @@ mod tests {
             }
 
             let unplaced = async |app: &Paykit, key, peer| {
-                app.unplaced_for(&[key], &peer)
+                let kind = if key == request_key {
+                    Records::Activity
+                } else {
+                    Records::Allowance
+                };
+                app.unplaced_for(&[key], &peer, kind)
                     .await
                     .unwrap_or_else(|e| panic!("{prefix} {e}"))
             };
@@ -1022,6 +1071,214 @@ mod tests {
                 "{prefix} after placement or removal"
             );
         }
+    }
+
+    /// Keep the payee's signed message as an unplaced stored entry at a pay-only wallet.
+    async fn unplaced_payee_note(
+        kind: Kind,
+        request: [u8; 32],
+        body: serde_json::Value,
+    ) -> (Paykit, [u8; 32]) {
+        use crate::stored::StoredNote;
+        use crate::testkit::{object, Dispatches};
+        use crate::AppScopes;
+
+        let w = Dispatches::new();
+        let mut wallet =
+            Box::pin(w.join(&w.alice, "wallet", AppScopes::new().pay().build().unwrap())).await;
+        let shop =
+            Box::pin(w.join(&w.bob, "shop", AppScopes::new().request().build().unwrap())).await;
+        let bob = shop.identity();
+        let signed = shop
+            .sign(wallet.identity(), kind, vec![request], object(body))
+            .unwrap();
+        wallet.app_mut().invite(&bob).await.unwrap();
+        // An unreadable notice parks this verified entry before it can write a reply or stop.
+        let notice = key::message_notice(&bob, signed.msg_id());
+        wallet.local_put(&notice, &false).await.unwrap();
+        let seq = w
+            .alice
+            .switch()
+            .send_plaintext(bob, shop.app.cert(), signed.plaintext(), &[wallet.app_id()])
+            .unwrap();
+        Box::pin(wallet.app_mut().receive(None)).await.unwrap();
+        wallet.local_delete(&notice).await.unwrap();
+        let parked = wallet.app_mut().parked_entries().await.unwrap();
+        let id = parked.iter().find(|p| p.seq == seq).unwrap().stored_id;
+        let entry = wallet.app_mut().parked_entry(id).await.unwrap().unwrap();
+        let stored = crate::stored::parked_message(&entry, &wallet.identity()).unwrap();
+        let note = StoredNote {
+            stored_id: id,
+            hash: stored.hash(),
+            sender: bob,
+            msg_id: signed.msg_id().to_owned(),
+            message: KeptMessage::taken(&stored, seq),
+            placed: false,
+        };
+        wallet
+            .local_put(&key::stored_note(&bob, signed.msg_id()), &note)
+            .await
+            .unwrap();
+        (wallet, bob)
+    }
+
+    #[tokio::test]
+    async fn test_restore_held_unplaced_undecided_place_only_for_activity() {
+        let (wallet, bob) = Box::pin(unplaced_payee_note(
+            Kind::PaymentPeriodDetails,
+            [1; 32],
+            serde_json::json!({
+                "billing_period": {
+                    "starts_at": "2026-02-28T00:00:00.000Z",
+                    "ends_at": "2026-03-31T00:00:00.000Z"
+                },
+                "expires_at": "2026-03-31T00:00:00.000Z",
+                "payment_endpoints": { "btc-lightning-bolt11": "lnbc1period" }
+            }),
+        ))
+        .await;
+        // The request is missing, so even a different activity record must wait.
+        let other = ActivityTarget::payer(natural_key::request_record(&bob, &[2; 32]));
+        let activity = wallet.activity_key(&other).unwrap();
+        let id = paykit_lib::AllowanceId::generate().unwrap();
+        let target = crate::allowances::allowance_target(&bob, &id);
+        let allowance = wallet.app.record_key(&target).unwrap();
+        assert!(wallet
+            .unplaced_for(&[activity], &bob, Records::Activity)
+            .await
+            .unwrap());
+        assert!(!wallet
+            .unplaced_for(&[allowance], &bob, Records::Allowance)
+            .await
+            .unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_restore_held_unplaced_payee_cancellation_at_a_pay_only_payer() {
+        let request = [1; 32];
+        let (wallet, bob) = Box::pin(unplaced_payee_note(
+            Kind::PaymentRequestCancellation,
+            request,
+            serde_json::json!({}),
+        ))
+        .await;
+        for (hash, matches) in [(request, true), ([2; 32], false)] {
+            let target = ActivityTarget::payer(natural_key::request_record(&bob, &hash));
+            let record = wallet.activity_key(&target).unwrap();
+            assert_eq!(
+                wallet
+                    .unplaced_for(&[record], &bob, Records::Activity)
+                    .await
+                    .unwrap(),
+                matches
+            );
+        }
+    }
+
+    // send_holds.rs leaves a restore-held stop to the restore's verified service clock.
+    #[tokio::test]
+    async fn test_restore_held_stop_expiry_leaves_a_held_stop_on_the_device_clock() {
+        use crate::testkit::{object, Dispatches};
+        use crate::{AppScopes, PaykitConfig, RequestRef};
+        use pubky_dispatch_client::app::SENT_RETENTION_MS;
+        use pubky_dispatch_client::clock::TestClock;
+        use pubky_dispatch_client::store::MemoryStore;
+        use std::sync::Arc;
+
+        let w = Dispatches::new();
+        let mut wallet =
+            Box::pin(w.join(&w.alice, "wallet", AppScopes::new().pay().build().unwrap())).await;
+        let shop =
+            Box::pin(w.join(&w.bob, "shop", AppScopes::new().request().build().unwrap())).await;
+        let bob = shop.identity();
+        wallet.app_mut().invite(&bob).await.unwrap();
+        let request = shop
+            .sign(
+                wallet.identity(),
+                Kind::PaymentRequest,
+                vec![],
+                object(serde_json::json!({
+                    "amount": { "asset": "btc", "value": "1" },
+                    "payment_reference": "order-1", "proposal_expires_at": null,
+                    "payment_endpoints": { "btc-lightning-bolt11": "lnbc1invoice" }
+                })),
+            )
+            .unwrap();
+        w.alice
+            .switch()
+            .send_plaintext(
+                bob,
+                shop.app.cert(),
+                request.plaintext(),
+                &[wallet.app_id()],
+            )
+            .unwrap();
+        Box::pin(wallet.receive(None)).await.unwrap();
+        let request = RequestRef {
+            payee: bob,
+            request_hash: request.hash(),
+        };
+        wallet.app_mut().hold_queued(&bob).await.unwrap();
+        let signed_at = wallet.now();
+        let stop = Box::pin(wallet.reject_request(&request, None))
+            .await
+            .unwrap();
+        wallet.app_mut().release_queued(&bob).await.unwrap();
+        // A later backup leaves the Dispatch replay deadline beyond the device time below.
+        w.clock.advance_ms(2 * 3_600_000);
+        let backup = wallet.backup().await.unwrap();
+        let rail = wallet.rail.clone();
+        let timer = wallet.timer.clone();
+        drop(wallet);
+
+        let past = signed_at + SENT_RETENTION_MS + 3_600_000;
+        let mut env = w.alice.env(Arc::new(MemoryStore::new()));
+        env.clock = Arc::new(TestClock::new(past));
+        let mut wallet = Box::pin(Paykit::restore(
+            env,
+            PaykitConfig::default(),
+            &backup,
+            rail,
+            timer,
+        ))
+        .await
+        .unwrap();
+        // Give the ordinary expiry a current deny-list copy, read now and denying no one,
+        // without a service read that would verify a time.
+        wallet.local_put(key::LISTS_READ, &past).await.unwrap();
+        wallet
+            .local_put(key::LISTS_READ_UNDER, &0u64)
+            .await
+            .unwrap();
+        wallet
+            .local_put(key::DENIED, &Vec::<[u8; 32]>::new())
+            .await
+            .unwrap();
+        assert!(!wallet.delivery_held(&bob).await.unwrap());
+        assert_eq!(wallet.service_time(), None);
+        assert!(wallet.local_holds(&key::queued_stop(&stop)).await.unwrap());
+        assert!(wallet
+            .app
+            .held_messages(BACKUP_NAME)
+            .await
+            .unwrap()
+            .contains(&stop));
+        Box::pin(wallet.give_up_expired_stops()).await.unwrap();
+        assert!(wallet
+            .app
+            .held_messages(BACKUP_NAME)
+            .await
+            .unwrap()
+            .contains(&stop));
+
+        // At the same clock reading the ordinary expiry does withdraw the released copy.
+        wallet
+            .app_mut()
+            .release_message(BACKUP_NAME, &stop, ReplyGrantOnRelease::Withheld)
+            .await
+            .unwrap();
+        Box::pin(wallet.give_up_expired_stops()).await.unwrap();
+        assert!(wallet.app.delivery(&stop).await.unwrap().is_none());
     }
 
     #[tokio::test]

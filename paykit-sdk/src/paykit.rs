@@ -937,7 +937,10 @@ impl Paykit {
     /// as a hold only once the next [`Paykit::receive`] or [`Paykit::backup`] has run
     /// (Paykit spec 6). After a
     /// restore, the host must run [`Paykit::receive`] before such calls; Paykit's outgoing
-    /// methods make that first read themselves (Dispatch spec 12.4).
+    /// methods make that first read themselves (Dispatch spec 12.4). After a restore, Paykit
+    /// decides every held message of its own kinds, a hold of one message included, which
+    /// it releases or withdraws by Paykit spec 7.2: a host holds a counterparty
+    /// (`hold_queued`), never one of Paykit's messages (`hold_message`).
     pub fn app_mut(&mut self) -> &mut App {
         &mut self.app
     }
@@ -1261,6 +1264,13 @@ impl Paykit {
         // is lost: only the SDK's own marks and notes are kept here, and nothing is written at
         // the Dispatch (`stored.rs`, `divergent.rs`).
         Box::pin(self.take_stored_events(&duties)).await?;
+        // Again after the read, at the service time it verified, before anything decides a
+        // held message and before any return below, so every receive that read gives up
+        // what is past its deadline (`Paykit::give_up_expired_held`). A stopped wallet gives
+        // up nothing: its stop is in the report.
+        if !report.stopped {
+            Box::pin(self.give_up_expired_held()).await?;
+        }
         if account_gone {
             // Nothing more is read or written there: the summary tells the host.
             let divergent = Box::pin(self.newly_paused(&paused_before)).await?;
@@ -1424,10 +1434,6 @@ impl Paykit {
         // Held messages are decided once Paykit's own first read is complete, after this
         // read's stops are placed, so a counterparty's stop it brought counts (Paykit spec
         // 7.2). The gate is the one predicate every decision goes through.
-        // Again after the read, at the service time it verified, before anything decides a
-        // held message (`Paykit::give_up_expired_held`). A stopped wallet returned above,
-        // its stop typed in the summary, before this step could meet it.
-        Box::pin(self.give_up_expired_held()).await?;
         let mut decided = (0, 0);
         if Box::pin(self.held_decisions_open(&report)).await? {
             decided = Box::pin(self.decide_held_messages(&report)).await?;

@@ -120,11 +120,19 @@ async fn cancellation(w: &World) -> (Paykit, RequestRef, String, Paykit) {
     (wallet, request, id, shop)
 }
 
+// restore_held.rs clears the owed mark after releasing the last held message.
 #[tokio::test]
 async fn test_restore_held_payee_cancellation_delivered_once() {
     let w = World::new();
     let (mut wallet, request, stop, mut shop) = Box::pin(cancellation(&w)).await;
     Box::pin(released(&mut shop, &stop)).await;
+    // The owed mark goes once nothing is held.
+    assert!(shop
+        .app()
+        .protocol_get("paykit", b"hm")
+        .await
+        .unwrap()
+        .is_none());
     receive_message(&mut wallet, &stop).await;
     assert_eq!(
         wallet.request(&request).await.unwrap().status,
@@ -263,6 +271,49 @@ async fn test_restore_held_unreadable_stop_waits_then_releases() {
         (0, 0, 1)
     );
     assert!(!wallet.receive(None).await.unwrap().applied.contains(&stop));
+    Box::pin(released(&mut shop, &stop)).await;
+    receive_message(&mut wallet, &stop).await;
+}
+
+// restore_held.rs waits when a fresh read reports absence for a locally retained record.
+#[tokio::test]
+async fn test_restore_held_stop_waits_while_the_service_lost_a_retained_record() {
+    use pubky_dispatch_client::app::{KeptReason, RecordRead};
+
+    let w = World::new();
+    let (mut wallet, request, stop, mut shop) = Box::pin(cancellation(&w)).await;
+    read_restored_client(&mut shop).await;
+    let target = crate::restore::payee_record(&request);
+    let key = shop.app().record_key(&target).unwrap();
+    assert!(matches!(
+        shop.app_mut().read_record_fresh(&target).await.unwrap(),
+        RecordRead::Fresh(_)
+    ));
+    let absent = || {
+        w.bob.switch().fail_next(Fault::Error {
+            path: format!("records/{}", pubky_dispatch_core::enc::b64(&key)),
+            code: pubky_dispatch_core::http::ErrorCode::NotFound,
+            current: serde_json::Value::Null,
+        });
+    };
+    absent();
+    assert!(matches!(
+        shop.app_mut().read_record_fresh(&target).await.unwrap(),
+        RecordRead::Kept {
+            reason: KeptReason::NotFound,
+            record: Some(record),
+        } if record.content.value().is_some()
+    ));
+    absent();
+    let counts = Box::pin(decisions_through_listing(&mut shop)).await;
+    assert_eq!(
+        counts,
+        HeldMessages {
+            still_held: Some(1),
+            ..HeldMessages::default()
+        }
+    );
+    assert!(held(&shop, &stop).await);
     Box::pin(released(&mut shop, &stop)).await;
     receive_message(&mut wallet, &stop).await;
 }
@@ -666,7 +717,7 @@ async fn test_restore_held_proof_withdrawn_once_its_receipt_is_recorded() {
     assert_eq!(w.rail.pay_calls(&attempt), 1);
 }
 
-async fn assert_receipt_unplaced(wallet: &Paykit, key: &str) {
+async fn assert_note_unplaced(wallet: &Paykit, key: &str) {
     let note = wallet
         .app()
         .protocol_get("paykit", key.as_bytes())
@@ -694,7 +745,7 @@ async fn test_restore_held_proof_waits_for_a_stored_receipt_not_placed() {
     w.alice.switch().keep_passed_entries();
     crate::common::refuse_writes(&w.alice, 2);
     wallet.receive(None).await.unwrap();
-    assert_receipt_unplaced(&wallet, &note).await;
+    assert_note_unplaced(&wallet, &note).await;
     drop(wallet);
 
     let (mut wallet, placement) =
@@ -704,7 +755,7 @@ async fn test_restore_held_proof_waits_for_a_stored_receipt_not_placed() {
         (counts.released, counts.withdrawn, counts.still_held),
         (0, 1, Some(1))
     );
-    assert_receipt_unplaced(&wallet, &note).await;
+    assert_note_unplaced(&wallet, &note).await;
     assert!(held(&wallet, &proof).await);
     placement.refusing.store(false, Ordering::Relaxed);
     withdrawn(&mut wallet).await;
@@ -790,57 +841,73 @@ async fn test_restore_held_paid_proof_withdrawn_then_credited_once() {
     assert_eq!(w.rail.pay_calls(&attempt_id), 1);
 }
 
-// pay.rs:3835 leaves the payment owed until the restored acceptance has been decided.
-#[tokio::test]
-async fn test_restore_held_acceptance_keeps_its_payment_owed_until_decided() {
-    use paykit_sdk::{Resolution, Stage};
-    use pubky_dispatch_client::app::UserConfirmed;
-
-    let w = World::new();
+/// A pending payment whose original acceptance is still queued for Bob.
+pub(super) async fn queued_acceptance(w: &World) -> (Paykit, Paykit, AttemptId, String) {
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
     let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
     let bob = w.bob_id();
     let kind = "paykit.payment_request_acceptance";
     wallet.app_mut().hold_queued(&bob).await.unwrap();
-    let attempt_id = Box::pin(crate::stored::pending(&w, &mut wallet, &request)).await;
+    let attempt_id = Box::pin(crate::stored::pending(w, &mut wallet, &request)).await;
     let queued = wallet.app().queued_messages("paykit").await.unwrap();
     let original = queued.into_iter().find(|q| q.kind == kind).unwrap().msg_id;
-    w.rail.settle(&attempt_id, true);
-    let obligation = wallet.payments().await.unwrap()[0].obligation;
     wallet.app_mut().release_queued(&bob).await.unwrap();
-    let backup = wallet.backup().await.unwrap();
-    drop(wallet);
+    (wallet, shop, attempt_id, original)
+}
 
-    // Once the attempt can be resolved by another app, the phone records it as paid.
-    w.clock.advance_ms(2 * crate::common::HOUR_MS);
-    let mut phone = w.wallet("phone").await;
-    phone
-        .resolve_attempt(
+// pay.rs finishes the payment without replacing an acceptance withdrawn at restore.
+#[tokio::test]
+async fn test_restore_held_withdrawn_acceptance_is_never_replaced() {
+    use paykit_sdk::{Resolution, Stage};
+    use pubky_dispatch_client::app::UserConfirmed;
+
+    for resume_first in [true, false] {
+        let w = World::new();
+        let (mut wallet, _shop, attempt_id, original) = Box::pin(queued_acceptance(&w)).await;
+        w.rail.settle(&attempt_id, true);
+        let obligation = wallet.payments().await.unwrap()[0].obligation;
+        let backup = wallet.backup().await.unwrap();
+        drop(wallet);
+
+        // The phone resolves the claim as paid. Resuming that resolved claim sends no proof.
+        w.clock.advance_ms(2 * crate::common::HOUR_MS);
+        let mut phone = w.wallet("phone").await;
+        Box::pin(phone.resolve_attempt(
             &obligation,
             attempt_id,
             Resolution::Done,
             UserConfirmed::new(),
-        )
+        ))
         .await
         .unwrap();
-    let mut wallet = Box::pin(restore(&w, &w.alice, store(), &backup)).await;
-    read_restored_client(&mut wallet).await;
-    wallet.resume_payments().await.unwrap();
-    assert!(held(&wallet, &original).await);
-    assert_eq!(wallet.payments().await.unwrap()[0].stage, Stage::Paying);
-    withdrawn(&mut wallet).await;
-    assert!(!held(&wallet, &original).await);
-    unknown(&mut wallet, &original).await;
-
-    wallet.resume_payments().await.unwrap();
-    assert_eq!(wallet.payments().await.unwrap()[0].stage, Stage::Finished);
-    wallet.flush().await.unwrap();
-    let sent = wallet.app().sent_to(&bob, 0, u64::MAX).await.unwrap();
-    let replacement = sent.iter().find(|m| m.kind == kind).unwrap();
-    assert_ne!(replacement.msg_id, original);
-    receive_message(&mut shop, &replacement.msg_id).await;
-    assert_eq!(w.rail.pay_calls(&attempt_id), 1);
+        let mut wallet = Box::pin(restore(&w, &w.alice, store(), &backup)).await;
+        read_restored_client(&mut wallet).await;
+        assert!(held(&wallet, &original).await);
+        if resume_first {
+            Box::pin(wallet.resume_payments()).await.unwrap();
+            assert!(held(&wallet, &original).await);
+        }
+        let counts = Box::pin(decisions_through_listing(&mut wallet)).await;
+        assert_eq!(counts.withdrawn, 1);
+        assert!(!held(&wallet, &original).await);
+        if !resume_first {
+            Box::pin(wallet.resume_payments()).await.unwrap();
+        }
+        Box::pin(wallet.flush()).await.unwrap();
+        assert_eq!(wallet.payments().await.unwrap()[0].stage, Stage::Finished);
+        let sent = wallet
+            .app()
+            .sent_to(&w.bob_id(), 0, u64::MAX)
+            .await
+            .unwrap();
+        assert!(sent
+            .iter()
+            .filter(|m| m.kind == "paykit.payment_request_acceptance")
+            .all(|m| m.msg_id == original));
+        unknown(&mut wallet, &original).await;
+        assert_eq!(w.rail.pay_calls(&attempt_id), 1);
+    }
 }
 
 #[tokio::test]
@@ -931,6 +998,87 @@ async fn unrecorded_rejection(w: &World) -> (Paykit, RequestRef, String, PaykitB
     let stop = queue_unrecorded_rejection(&mut wallet, &request).await;
     let backup = wallet.backup().await.unwrap();
     (wallet, request, stop, backup)
+}
+
+/// A queued rejection whose signed window ends before its restored Dispatch deadline.
+async fn rejection_before_dispatch_deadline(w: &World) -> (Paykit, Arc<FaultStore>, String, u64) {
+    use crate::common::HOUR_MS;
+
+    let (mut wallet, request, stop, _) = Box::pin(unrecorded_rejection(w)).await;
+    let past = w.clock.now_ms() + SENT_RETENTION_MS + HOUR_MS;
+    w.clock.advance_ms(2 * HOUR_MS);
+    wallet
+        .app_mut()
+        .read_record_fresh(&outcome_record::payer_record(&request))
+        .await
+        .unwrap();
+    assert_eq!(wallet.app().highest_service_time(), Some(w.clock.now_ms()));
+    let backup = wallet.backup().await.unwrap();
+    drop(wallet);
+    let storage = Arc::new(FaultStore::new(store(), StoreFault::None));
+    let mut wallet = Box::pin(restore(w, &w.alice, storage.clone(), &backup)).await;
+    read_restored_client(&mut wallet).await;
+    assert!(held(&wallet, &stop).await);
+    (wallet, storage, stop, past)
+}
+
+async fn withhold_pay_key(w: &World, wallet: &mut Paykit) {
+    let epoch = w
+        .alice
+        .next_doc(|body| body.data_epoch += 1)
+        .unwrap()
+        .data_epoch();
+    wallet.app_mut().refresh_identity().await.unwrap();
+    assert_eq!(wallet.app().data_epoch(), epoch);
+    assert!(wallet.app().scope_key(epoch, "paykit_pay").is_none());
+}
+
+// paykit.rs gives up expired messages after a read under a refused certificate.
+#[tokio::test]
+async fn test_restore_held_expiry_runs_when_the_receive_returns_early() {
+    let w = World::new();
+    let (mut wallet, _, stop, past) = Box::pin(rejection_before_dispatch_deadline(&w)).await;
+    let me = wallet.app_id();
+    let old = wallet.app().cert().clone();
+    let scopes = crate::certificate::refused(AppScopes::new().pay().build().unwrap());
+    let refused = crate::certificate::renew(&w, me, &scopes, 1_000);
+    Box::pin(wallet.app_mut().receive(None)).await.unwrap();
+    crate::certificate::list(&w, me, &old, &refused);
+    wallet.app_mut().refresh_identity().await.unwrap();
+    assert_eq!(wallet.app().cert().hash(), refused.hash());
+    w.clock.set_ms(past);
+    // The client deadline still allows the copy and the last verified time is before expiry.
+    wallet.app_mut().flush_message(&stop).await.unwrap();
+    assert!(held(&wallet, &stop).await);
+    assert!(wallet.app().highest_service_time().unwrap() < past - crate::common::HOUR_MS);
+    let read = Box::pin(wallet.receive(None)).await.unwrap();
+    assert!(matches!(
+        read.certificate_refused,
+        Some(Refusal::CertificateRefused(_))
+    ));
+    assert!(!read.report.stopped);
+    assert_eq!(wallet.app().highest_service_time(), Some(past));
+    assert!(!held(&wallet, &stop).await);
+    unknown(&mut wallet, &stop).await;
+}
+
+// outbound.rs gives up an expired held copy when flush reads the lists at the new service time.
+#[tokio::test]
+async fn test_restore_held_flush_gives_up_past_thirty_days() {
+    let w = World::new();
+    let (mut wallet, _, stop, past) = Box::pin(rejection_before_dispatch_deadline(&w)).await;
+    withhold_pay_key(&w, &mut wallet).await;
+    let read = Box::pin(wallet.receive(None)).await.unwrap();
+    assert_eq!(read.held_messages.still_held, Some(1));
+    w.clock.set_ms(past);
+    Box::pin(wallet.flush()).await.unwrap();
+    assert!(wallet
+        .app()
+        .scope_key(wallet.app().data_epoch(), "paykit_pay")
+        .is_none());
+    assert_eq!(wallet.app().highest_service_time(), Some(past));
+    assert!(!held(&wallet, &stop).await);
+    unknown(&mut wallet, &stop).await;
 }
 
 // restore_held.rs:480 withdraws silently for the counterparty's stop.
@@ -1667,6 +1815,10 @@ async fn queue_list_request(wallet: &mut Paykit, to: [u8; 32]) -> String {
 /// Fail the Dispatch commit that records this specific delivery as given up.
 async fn fail_withdrawal(app: &mut Paykit, storage: &FaultStore, id: &str) {
     storage.fail_put_once(format!("outgone/{id}").as_bytes());
+    Box::pin(await_failed_stop_write(app, id)).await;
+}
+
+async fn await_failed_stop_write(app: &mut Paykit, id: &str) {
     for _ in 0..8 {
         match app.receive(None).await {
             Err(paykit_sdk::PaykitError::Client(error))
@@ -1969,6 +2121,86 @@ async fn test_restore_held_stop_notice_shown_once_after_withdrawal_is_told() {
     assert!(stop_notice_ids(&wallet, &stop).await.is_empty());
 }
 
+async fn acknowledge_one_stop_notice(wallet: &mut Paykit, stop: &str) {
+    let ids = stop_notice_ids(wallet, stop).await;
+    let [id] = ids.as_slice() else {
+        panic!("expected one stop notice: {ids:?}")
+    };
+    wallet.acknowledge_notice(id).await.unwrap();
+    Box::pin(wallet.receive(None)).await.unwrap();
+    assert!(stop_notice_ids(wallet, stop).await.is_empty());
+}
+
+// restore_held.rs shows pending notices for withdrawn stops while scope keys are missing.
+#[tokio::test]
+async fn test_restore_held_pending_notice_shown_while_the_gate_is_closed() {
+    let w = World::new();
+    let (wallet, _, stop, backup) = Box::pin(unrecorded_rejection(&w)).await;
+    drop(wallet);
+    let storage = Arc::new(FaultStore::new(store(), StoreFault::None));
+    let mut wallet = Box::pin(restore(&w, &w.alice, storage.clone(), &backup)).await;
+    Box::pin(fail_withdrawal(&mut wallet, &storage, &stop)).await;
+    withhold_pay_key(&w, &mut wallet).await;
+    let read = Box::pin(wallet.receive(None)).await.unwrap();
+    assert_eq!(read.held_messages.still_held, Some(1));
+    assert!(stop_notice_ids(&wallet, &stop).await.is_empty());
+    assert!(wallet
+        .app_mut()
+        .withdraw_message("paykit", &stop)
+        .await
+        .unwrap());
+    unknown(&mut wallet, &stop).await;
+
+    let read = Box::pin(wallet.receive(None)).await.unwrap();
+    assert_eq!(read.held_messages, nothing_held());
+    assert!(wallet
+        .app()
+        .scope_key(wallet.app().data_epoch(), "paykit_pay")
+        .is_none());
+    Box::pin(acknowledge_one_stop_notice(&mut wallet, &stop)).await;
+}
+
+// restore_held.rs preserves a pending StopNotRecorded notice when the signed window expires.
+#[tokio::test]
+async fn test_restore_held_window_keeps_a_pending_stop_notice() {
+    let w = World::new();
+    let (mut wallet, storage, stop, past) = Box::pin(rejection_before_dispatch_deadline(&w)).await;
+    Box::pin(fail_withdrawal(&mut wallet, &storage, &stop)).await;
+    withhold_pay_key(&w, &mut wallet).await;
+    assert!(stop_notice_ids(&wallet, &stop).await.is_empty());
+    w.clock.set_ms(past);
+    wallet.app_mut().flush_message(&stop).await.unwrap();
+    assert!(held(&wallet, &stop).await);
+    let read = Box::pin(wallet.receive(None)).await.unwrap();
+    assert_eq!(read.held_messages, nothing_held());
+    assert!(!held(&wallet, &stop).await);
+    unknown(&mut wallet, &stop).await;
+    Box::pin(wallet.receive(None)).await.unwrap();
+    assert!(wallet
+        .app()
+        .scope_key(wallet.app().data_epoch(), "paykit_pay")
+        .is_none());
+    Box::pin(acknowledge_one_stop_notice(&mut wallet, &stop)).await;
+}
+
+// restore_held.rs writes the pending stop notice before it withdraws the delivery.
+#[tokio::test]
+async fn test_restore_held_stop_notice_written_before_its_withdrawal() {
+    let w = World::new();
+    let (wallet, _, stop, backup) = Box::pin(unrecorded_rejection(&w)).await;
+    drop(wallet);
+    let storage = Arc::new(FaultStore::new(store(), StoreFault::None));
+    let mut wallet = Box::pin(restore(&w, &w.alice, storage.clone(), &backup)).await;
+    read_restored_client(&mut wallet).await;
+    storage.fail_put_once(b"p/paykit/nt/stop/");
+    Box::pin(await_failed_stop_write(&mut wallet, &stop)).await;
+    assert!(stop_notice_ids(&wallet, &stop).await.is_empty());
+    Box::pin(withdrawn(&mut wallet)).await;
+    assert!(!held(&wallet, &stop).await);
+    unknown(&mut wallet, &stop).await;
+    Box::pin(acknowledge_one_stop_notice(&mut wallet, &stop)).await;
+}
+
 // restore_held.rs `mark_after`: whichever listing of the client's held messages fails,
 // the owed mark goes only after a sweep, so the stop's notice is still shown, once.
 #[tokio::test]
@@ -2233,6 +2465,68 @@ async fn assert_stop_withdrawn(app: &mut Paykit, stop: &str) {
     assert!(app.message_delivery(stop).await.unwrap().is_none());
     unknown(app, stop).await;
     assert!(stop_notice_ids(app, stop).await.is_empty());
+}
+
+// restore_held.rs checks unplaced requests before treating an absent payer record as decisive.
+#[tokio::test]
+async fn test_restore_held_rejection_waits_for_its_request_not_yet_written() {
+    use pubky_dispatch_client::app::{KeptReason, RecordRead};
+
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let sent = Box::pin(shop.send_request(w.alice_id(), draft("1", w.clock.now_ms())))
+        .await
+        .unwrap();
+    let request = sent.request.unwrap();
+    let target = outcome_record::payer_record(&request);
+    let key = wallet.app().record_key(&target).unwrap();
+    let note = format!(
+        "se/{}/{}",
+        pubky_dispatch_core::enc::b64(&w.bob_id()),
+        sent.msg_id
+    );
+    crate::common::refuse_writes(&w.alice, 2);
+    Box::pin(wallet.receive(None)).await.unwrap();
+    assert_note_unplaced(&wallet, &note).await;
+    // Queue the signed rejection through the client while Paykit still owes the request write.
+    let stop = queue_unrecorded_rejection(&mut wallet, &request).await;
+    let backup = wallet.backup().await.unwrap();
+    drop(wallet);
+
+    let (mut wallet, placement) =
+        Box::pin(restore_before_placement(&w, &w.alice, &backup, key)).await;
+    Box::pin(assert_held_for_placement(
+        &mut wallet,
+        &stop,
+        note.as_bytes(),
+    ))
+    .await;
+    assert_note_unplaced(&wallet, &note).await;
+    assert!(matches!(
+        wallet.app_mut().read_record_fresh(&target).await.unwrap(),
+        RecordRead::Kept {
+            reason: KeptReason::NotFound,
+            record: None,
+        }
+    ));
+    assert!(stop_notice_ids(&wallet, &stop).await.is_empty());
+
+    placement.refusing.store(false, Ordering::Relaxed);
+    Box::pin(withdrawn(&mut wallet)).await;
+    assert!(!held(&wallet, &stop).await);
+    unknown(&mut wallet, &stop).await;
+    assert!(wallet
+        .app()
+        .protocol_get("paykit", note.as_bytes())
+        .await
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        wallet.request(&request).await.unwrap().status,
+        RequestStatus::Open
+    );
+    assert_eq!(stop_notice_ids(&wallet, &stop).await.len(), 1);
 }
 
 // restore_held.rs:530 waits for kept_unplaced before releasing the recorded rejection.

@@ -1502,6 +1502,7 @@ impl Paykit {
             acceptance_plaintext: None,
             acceptance_cert: None,
             acceptance_released: false,
+            acceptance_withdrawn: false,
             rail_proof: None,
             paid_at_ms: None,
             offline: None,

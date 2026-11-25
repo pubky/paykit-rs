@@ -557,3 +557,35 @@ fn test_delivery_and_transport_codes_name_each_known_answer() {
         );
     }
 }
+
+/// After a restore, Paykit decides every held message of its own kinds, a hold of one message
+/// included (Paykit spec 7.2; the host guide, "Messages held at restore"). The bindings offer a
+/// host no hold of one message: a binding that adds one needs that rule settled first.
+#[test]
+fn test_bindings_expose_no_hold_of_one_message() {
+    fn sources(dir: &std::path::Path, out: &mut Vec<(String, String)>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                // This test's own module names what it looks for.
+                if !path.ends_with("tests") {
+                    sources(&path, out);
+                }
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                let text = std::fs::read_to_string(&path).unwrap();
+                out.push((path.display().to_string(), text));
+            }
+        }
+    }
+    let mut files = Vec::new();
+    sources(
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+        &mut files,
+    );
+    assert!(!files.is_empty());
+    for (path, text) in files {
+        for call in ["hold_message(", "release_message("] {
+            assert!(!text.contains(call), "{path}: the bindings call `{call}`");
+        }
+    }
+}
