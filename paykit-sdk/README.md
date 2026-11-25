@@ -221,12 +221,24 @@ advancing its cursor; draining durable work releases capacity and lets it
 resume.
 
 Inspect `PrivateIntakeSupervisor::health` and each buffered result's `freshness`.
+A buffered result's `freshness` is the state when that drain started; `health`
+shows the current state. After a live event buffers a packet, the Linked Peer
+is `Replaying` while intake checks its next expected slot, and stays
+`Replaying` until the next event or audit if that check fails. No further
+wakeup follows when the check settles the peer. The exception is a packet that
+fills the peer's capacity: the Linked Peer is then `Backpressured`, and no
+check runs.
 `Connecting`, `Replaying`, `Stale`, `Backpressured`, `Unsupported`, and `Stopped`
 must not be interpreted as remote queue emptiness. `Stale` also covers a peer
 whose Pubky homeserver could not be resolved. A homeserver that rejects or
 does not implement SSE is `Unsupported`; SSE mode does not fall back to
 continuous slot polling. Already buffered packets remain drainable during an
 outage. Reconnects reuse durable per-user cursors and reconcile expected slots.
+A supervised peer (a Linked Peer or a peer with a pending Encrypted Link
+Handshake) without a stored cursor starts from the newest event found by a
+recent request (reused across reconnects within one topology epoch) instead of
+replaying its history, when such a request succeeds; otherwise it replays from
+the beginning as before. The startup audit reconciles its earlier slots.
 Use synchronous `PrivateIntakeSupervisor::is_finished` to detect authoritative
 supervisor task termination, including autonomous lease or topology failure.
 It remains false while any owned task is live and is true after `stop`; do not
