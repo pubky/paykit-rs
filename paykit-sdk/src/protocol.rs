@@ -957,6 +957,9 @@ pub(crate) fn restore_paykit_layer(
             | StateKey::Flagged
             | StateKey::StoredNote { .. }
             | StateKey::Taken(_) => continue,
+            // The client omits its kept batches on restore: no batch of the later write is
+            // kept by the restored app.
+            StateKey::HeldWrite { .. } => continue,
             // Only the original installation holds this duty. A restore reconciles its
             // shared end through the outgoing delivery notices.
             StateKey::OwedEnd(_) => continue,
