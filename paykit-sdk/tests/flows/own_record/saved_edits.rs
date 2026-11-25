@@ -1431,3 +1431,96 @@ async fn test_own_record_restore_in_place_over_an_unreadable_ask_completes() {
     .await;
     assert!(restored.is_ok(), "{:?}", restored.err());
 }
+
+/// `backup` with its Paykit layer's rows rewritten by `change`.
+fn rewrite_layer(
+    backup: &paykit_sdk::PaykitBackup,
+    change: impl FnOnce(&mut Vec<(Vec<u8>, Vec<u8>)>),
+) -> paykit_sdk::PaykitBackup {
+    let mut value: Value = serde_json::from_slice(&backup.to_bytes().unwrap()).unwrap();
+    let data =
+        pubky_dispatch_core::enc::unb64(value["layers"][0]["data"].as_str().unwrap()).unwrap();
+    let mut layer = pubky_dispatch_client::app::decode_local_state(&data).unwrap();
+    change(&mut layer);
+    value["layers"][0]["data"] = Value::String(pubky_dispatch_core::enc::b64(
+        &pubky_dispatch_client::app::encode_local_state(&layer),
+    ));
+    paykit_sdk::PaykitBackup::from_bytes(&serde_json::to_vec(&value).unwrap()).unwrap()
+}
+
+#[tokio::test]
+async fn test_own_record_restore_refuses_an_endpoint_notice_under_another_tellings_key() {
+    // Two endpoint change notices in a backup: restored as they are, both are kept. Swapped,
+    // or one moved under another telling's key, the backup is refused: each notice is bound
+    // to the telling its key names.
+    let w = World::new();
+    let kept = store();
+    let mut shop = shop_on(&w, false, Arc::clone(&kept)).await;
+    save_withdrawal_unsigned(&w, &mut shop).await;
+    let app_id = shop.app_id();
+    drop(shop);
+    let recorded = Recorded::over(Arc::clone(&w.router) as Arc<dyn Transport>);
+    let mut shop = load_recorded(&w, Arc::clone(&kept), app_id, publishing(), &recorded).await;
+    shop.receive(None).await.unwrap();
+    shop.set_public_endpoints(
+        std::collections::BTreeMap::from([(b(), payload("bc1q"))]),
+        None,
+    )
+    .await
+    .unwrap();
+    time_read_fails(&w, &w.bob);
+    assert!(shop.remove_public_endpoint(&b()).await.is_err());
+    drop(shop);
+    let mut shop = load_recorded(&w, kept, app_id, publishing(), &recorded).await;
+    shop.receive(None).await.unwrap();
+    let backup = shop.backup().await.unwrap();
+    drop(shop);
+    let prefix = b"nt/endpoint_change_not_published/";
+    let restore = |backup: paykit_sdk::PaykitBackup| {
+        let w = &w;
+        async move {
+            Paykit::restore(
+                w.env(&w.bob, store()),
+                publishing(),
+                &backup,
+                w.rail.clone(),
+                w.timer(),
+            )
+            .await
+        }
+    };
+    let restored = restore(backup.clone()).await.unwrap();
+    let notices = restored.notices().await.unwrap();
+    assert_eq!(
+        notices
+            .iter()
+            .filter(|notice| notice.kind == NoticeKind::PublicEndpointChangeNotPublished)
+            .count(),
+        2
+    );
+    drop(restored);
+    let swapped = rewrite_layer(&backup, |layer| {
+        let at: Vec<usize> = layer
+            .iter()
+            .enumerate()
+            .filter(|(_, (key, _))| key.starts_with(prefix))
+            .map(|(at, _)| at)
+            .collect();
+        assert_eq!(at.len(), 2);
+        let first = layer[at[0]].1.clone();
+        layer[at[0]].1 = layer[at[1]].1.clone();
+        layer[at[1]].1 = first;
+    });
+    assert!(restore(swapped).await.is_err());
+    let moved = rewrite_layer(&backup, |layer| {
+        let row = layer
+            .iter_mut()
+            .find(|(key, _)| key.starts_with(prefix))
+            .unwrap();
+        let mut key = prefix.to_vec();
+        key.extend_from_slice(pubky_dispatch_core::enc::b64(&[7; 32]).as_bytes());
+        row.0 = key;
+        layer.sort();
+    });
+    assert!(restore(moved).await.is_err());
+}
