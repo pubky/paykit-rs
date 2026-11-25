@@ -1476,7 +1476,10 @@ homeserver without SSE costs one failing request per retry. Seeding deliberately
 covers only peers without a stored cursor for the current homeserver; a peer
 with a stored cursor resumes from it as before.
 Stopping the supervisor or restarting the subscription topology abandons a
-pending request. Audits, not events, guarantee delivery: a packet whose event
+pending request. While the request is pending, the group keeps running
+expected-slot audits, the first one second after it starts and then at the
+healthy audit cadence; they start before the request finishes, so they never
+store a cursor. Audits, not events, guarantee delivery: a packet whose event
 the stream skips is fetched by the next audit.
 
 `PrivateIntakeSupervisor::health` reports per-peer transport state and last

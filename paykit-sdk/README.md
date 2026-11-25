@@ -231,6 +231,9 @@ Handshake) without a stored cursor starts from the newest event found by a
 recent request (reused across reconnects within one topology epoch) instead of
 replaying its history, when such a request succeeds; otherwise it replays from
 the beginning as before. The startup audit reconciles its earlier slots.
+While that request is pending, the group keeps running expected-slot audits
+(first after one second, then at the healthy audit cadence), which never store
+a cursor.
 Use synchronous `PrivateIntakeSupervisor::is_finished` to detect authoritative
 supervisor task termination, including autonomous lease or topology failure.
 It remains false while any owned task is live and is true after `stop`; do not
