@@ -1168,6 +1168,12 @@ impl Paykit {
                 PendingReply::Undecided
             }
         };
+        // While the client keeps a batch of this answer's write, which may still land, it is
+        // neither written again, which would keep another batch behind it, nor given up
+        // (Paykit spec 8.1, Stored entries, Kept batch).
+        if self.held_write_kept(reply).await? {
+            return Ok(waiting());
+        }
         if accepting
             && (Box::pin(
                 self.pending_acceptance_stopped(
@@ -1360,6 +1366,9 @@ impl Paykit {
         for write in writes {
             batch = batch.entry(write);
         }
+        // The client names the batch it keeps of this write at the answer's marker
+        // (`crate::stored::holding`), so its give-up waits on it.
+        let batch = crate::stored::holding(batch, reply);
         match crate::stored::submitted(self.submit(batch).await) {
             Ok(crate::stored::Placed::Done) => {
                 if track_application {
