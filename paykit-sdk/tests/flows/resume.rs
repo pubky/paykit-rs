@@ -1018,8 +1018,9 @@ async fn resumed_under(
     let settled = wallet.resume_payments().await;
     assert!(settled.is_ok(), "{case}: {settled:?}");
     told.extend(settled.unwrap_or_default());
-    // The user's `failed`, applied by its kept batch, is reported as the user's, once, where
-    // the method neither paid nor failed it.
+    // The user's `failed`, applied by its kept batch, is reported as the user's, at most
+    // once, where the method neither paid nor failed it: by the call that ended it, unless
+    // that call returned an error.
     if user_failed_kept && shows[target] == Shows::Pending {
         let over: Vec<_> = told
             .iter()
@@ -1034,10 +1035,11 @@ async fn resumed_under(
             })
             .collect();
         assert!(
-            matches!(
-                over.as_slice(),
-                [PayOutcome::Failed { reason, .. }] if reason == "the user resolved it as failed"
-            ),
+            over.len() <= 1
+                && over.iter().all(|outcome| matches!(
+                    outcome,
+                    PayOutcome::Failed { reason, .. } if reason == "the user resolved it as failed"
+                )),
             "{case}: {told:?}"
         );
     }
@@ -1083,4 +1085,187 @@ async fn test_resume_result_agrees_with_the_journal_whatever_happens_to_the_firs
 #[tokio::test]
 async fn test_resume_result_agrees_with_the_journal_whatever_happens_to_the_second_payment() {
     every_combination(1).await;
+}
+
+/// Alice's wallet on `storage`, with a request of bob's it paid twice: the first attempt the
+/// method reported failed, then a retry left in flight. Returns the wallet, the request, the
+/// first attempt and the retry.
+async fn failed_then_retried(
+    w: &World,
+    storage: Arc<dyn pubky_dispatch_client::store::StateStore>,
+) -> (Paykit, paykit_sdk::RequestRef, AttemptId, AttemptId) {
+    let mut wallet = w.wallet_on("wallet", storage).await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    w.rail.next(Behaviour::Fail);
+    let PayOutcome::Failed {
+        attempt_id: first, ..
+    } = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .outcome
+        .unwrap()
+    else {
+        panic!("the method reports the first attempt failed");
+    };
+    w.rail.next(Behaviour::Hang);
+    let PayOutcome::Pending {
+        attempt_id: retry, ..
+    } = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .outcome
+        .unwrap()
+    else {
+        panic!("the retry is in flight");
+    };
+    (wallet, request, first, retry)
+}
+
+#[tokio::test]
+async fn test_resume_restore_admits_a_failed_attempt_found_paid_beside_its_retry() {
+    // The backup holds the first attempt failed by the method and its retry in flight. The
+    // installation then finds the first made after all. Restored in place, the first stands
+    // paid, no second payment in progress, so the restore is admitted; and the retry, which
+    // an idempotent method would repeat, is never handed off again: the obligation is paid
+    // (Paykit spec 7.2, 8.3).
+    let w = World::new();
+    let storage = store();
+    let (mut wallet, _, first, retry) = failed_then_retried(&w, Arc::clone(&storage)).await;
+    let backup = wallet.backup().await.unwrap();
+    w.rail.complete_after_failure(&first);
+    let outcomes = wallet.resume_payments().await.unwrap();
+    assert!(
+        outcomes
+            .iter()
+            .any(|o| matches!(o, PayOutcome::Paid { attempt_id, .. } if *attempt_id == first)),
+        "{outcomes:?}"
+    );
+    drop(wallet);
+    w.rail.forget_history(&retry);
+    w.rail.set_idempotent(true);
+    let mut restored = Paykit::restore(
+        w.env(&w.alice, storage),
+        PaykitConfig::default(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+    )
+    .await
+    .expect("a paid attempt beside its retry is no second payment in progress");
+    crate::common::finish_listing(&mut restored).await;
+    let payments = restored.payments().await.unwrap();
+    let paid = payments.iter().find(|p| p.attempt_id == first).unwrap();
+    assert!(paid.paid_by_method, "{payments:?}");
+    restored.resume_payments().await.unwrap();
+    assert_eq!(w.rail.pay_calls(&retry), 1);
+    assert_eq!(w.rail.executions(&first), 1);
+}
+
+#[tokio::test]
+async fn test_resume_no_payment_of_an_obligation_found_paid_goes_again() {
+    // Once an attempt of an obligation holds a proof, no other attempt of that obligation is
+    // handed to the method (Paykit spec 7.2, "no second execution"; 8.3). Here the first
+    // attempt was reported failed and then found made after all: paying the same request
+    // again hands nothing off, and the method executes nothing more for it.
+    let w = World::new();
+    let (mut wallet, request, first, retry) = failed_then_retried(&w, store()).await;
+    w.rail.settle(&retry, false);
+    w.rail.complete_after_failure(&first);
+    wallet.resume_payments().await.unwrap();
+    let again = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .outcome;
+    assert!(
+        !matches!(
+            again,
+            Ok(PayOutcome::Paid { .. } | PayOutcome::Pending { .. })
+        ),
+        "{again:?}"
+    );
+    // The first and the failed retry executed once each, and nothing else ever.
+    let executions = w.rail.all_executions();
+    assert!(
+        executions
+            .iter()
+            .all(|(attempt, n)| (*attempt == first || *attempt == retry) && *n == 1),
+        "{executions:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_resume_late_success_after_the_users_done_finds_no_failed_claim() {
+    // The user's `done`, kept and applied after the method's failure, resolved the claim
+    // done. The method's history then shows the payment made: the entry is found paid, but
+    // nothing marks its claim failed, so no receipt later tells of a payment after a failure
+    // that never was.
+    let w = World::new();
+    let (mut wallet, [first, second], transport) =
+        second_resolved_and_kept(&w, paykit_sdk::Resolution::Done).await;
+    w.rail.settle(&first, true);
+    w.rail.settle(&second, false);
+    *transport.next.lock().unwrap() = Some(TransportError::Timeout);
+    wallet.resume_payments().await.unwrap();
+    w.rail.complete_after_failure(&second);
+    wallet.resume_payments().await.unwrap();
+    let key = format!("j/{}", second.to_text());
+    let entry: serde_json::Value = serde_json::from_slice(
+        &wallet
+            .app()
+            .protocol_get("paykit", key.as_bytes())
+            .await
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(!entry["d"]["rail_proof"].is_null(), "{entry}");
+    assert_eq!(
+        entry["d"]["failed_on_claim"],
+        serde_json::json!(false),
+        "{entry}"
+    );
+}
+
+#[tokio::test]
+async fn test_resume_keeps_the_message_a_proof_was_sent_under() {
+    // Once the outcome sends the proof, the record keeps its message: an older copy of the
+    // entry is then read finished, and its proof is never signed again.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    let PayOutcome::Paid {
+        attempt_id,
+        proof_msg_id: Some(sent),
+        ..
+    } = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .outcome
+        .unwrap()
+    else {
+        panic!("paid, its proof sent");
+    };
+    let key = format!("jf/{}", attempt_id.to_text());
+    let facts: serde_json::Value = serde_json::from_slice(
+        &wallet
+            .app()
+            .protocol_get("paykit", key.as_bytes())
+            .await
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        facts["d"]["proof_msg_id"],
+        serde_json::json!(sent),
+        "{facts}"
+    );
+    assert_eq!(
+        facts["d"]["attempt_id"],
+        serde_json::json!(attempt_id.to_text())
+    );
 }

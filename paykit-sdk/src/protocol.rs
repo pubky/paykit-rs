@@ -57,7 +57,6 @@ use serde_json::{Map, Value};
 use crate::activity::{self, KeptSide, SideTag};
 use crate::allowances::ConsentEntry;
 use crate::hold::RestoreHold;
-use crate::journal::JournalEntry;
 use crate::marks::{DropMark, KeyWaitMark, QueuedRequest};
 use crate::notices::KeptNotice;
 use crate::pay::ListAsk;
@@ -571,6 +570,12 @@ fn previous_floor_kept(
 /// backup carries the app's signing keys, so whoever can write one can sign anything the
 /// app can, and a check of what the app signed guards against corruption only.
 ///
+/// Each journal entry is checked again with what the method said of its attempt laid over
+/// it, before anything is written: an entry and a record that don't hold together, which only
+/// a damaged backup or installation can give, refuse the whole restore, writing nothing, so
+/// the installation is left as it was and can be restored from another backup. The error
+/// names the attempt and the rule, never the entry's content.
+///
 /// The families whose size the runtime bounds at every write are counted, and a layer
 /// past a bound is refused: the notices of lost messages owed (`bl/`, at most
 /// [`crate::marks::MAX_LOST_OWED`]) and each family of marks (`pd/`, `ud/`, `kw/`, `bd/`, at
@@ -884,7 +889,9 @@ pub(crate) fn restore_paykit_layer(
         let kept = state::restored::<crate::journal::AttemptFacts>(&key, &value, &binder)
             .map_err(|_| "the installation holds an invalid payment method fact")?;
         let merged = match facts.remove(&attempt) {
-            Some(backup) => backup.merged(kept),
+            Some(backup) => backup.merged(kept).map_err(|_| {
+                "Paykit spec 7.2: a payment's facts in the backup and the installation disagree"
+            })?,
             None => kept,
         };
         facts.insert(attempt, merged);
@@ -1522,15 +1529,18 @@ pub(crate) fn restore_paykit_layer(
         // restore context gives (Paykit spec 7.1, Paykit wire 1.5), its record the one its
         // request or attempt names, and every message it keeps verified for this app
         // ([`JournalEntry::check_restored`]): checked here, before anything is written.
-        let mut entry = state::restored::<JournalEntry>(&key, &value, &binder)
-            .map_err(|_| bad())?
-            .with_facts(facts.get(&attempt));
+        let stored = state::restored::<crate::journal::StoredEntry>(&key, &value, &binder)
+            .map_err(|_| bad())?;
+        let written = stored.as_written();
         // An app has one payment of an obligation in progress at a time; an entry an earlier
         // restore left open beside it is that payment's doubt, which the user paid over, and
-        // is never handed off again (Paykit spec 7.2, 12.4).
-        if entry.open() && !entry.restored && !open.insert(entry.obligation) {
+        // is never handed off again (Paykit spec 7.2, 12.4). Judged on the backup's entries as
+        // written: an attempt the installation since learned paid is read with its proof
+        // below, and a paid attempt is no second payment in progress.
+        if written.open() && !written.restored && !open.insert(written.obligation) {
             return Err("Paykit spec 7.2: two open journal entries for one obligation".into());
         }
+        let mut entry = stored.with_facts(facts.get(&attempt));
         if entry.offline == Some(crate::journal::OfflineRecording::AwaitingRecording)
             && entry.rail_proof.is_some()
         {
@@ -1539,6 +1549,18 @@ pub(crate) fn restore_paykit_layer(
         journaled.insert(attempt);
         entry.restored = true;
         entry.never_dispatched = false;
+        // What the restore writes holds as the journal's writers leave an entry, the
+        // method's word laid over it included: a state the journal refuses is never written.
+        // The overlay keeps the journal's rules by construction, so only a damaged backup or
+        // installation meets this; the restore then writes nothing, and the installation is
+        // left as it was.
+        entry.check().map_err(|_| {
+            format!(
+                "Paykit spec 7.2: the journal entry of attempt {} and what the method said of \
+                 it don't hold together as the journal's rules require",
+                attempt.to_text()
+            )
+        })?;
         let value = state::encode(&entry).map_err(|_| bad())?;
         writes.push(LocalWrite::Put { key, value });
     }

@@ -62,9 +62,19 @@ impl Paykit {
         };
         match self.rail.pay(payment).await {
             Ok(outcome) => self.take_outcome(&mut entry, outcome, None).await,
-            Err(RailError::Refused(_)) => {
-                self.take_outcome(&mut entry, RailOutcome::Failed, None)
-                    .await
+            // As a first online call refused: nothing was and nothing will be submitted, so
+            // no payment started, never the method's failure, whose history the recheck
+            // would ask again for nothing (Paykit spec 7.2).
+            Err(RailError::Refused(why)) => {
+                entry.failed_before_call = true;
+                self.set_stage(&mut entry, Stage::RailFailed).await?;
+                self.report(&mut entry).await.map(|outcome| match outcome {
+                    PayOutcome::Failed { attempt_id, .. } => PayOutcome::Failed {
+                        attempt_id,
+                        reason: format!("the payment method refused the call: {why}"),
+                    },
+                    other => other,
+                })
             }
             Err(_) => Ok(PayOutcome::Uncertain { attempt_id }),
         }

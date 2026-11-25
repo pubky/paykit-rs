@@ -253,17 +253,12 @@ pending. Use `resume_payments` to progress outstanding work, then read
 `payments()` again to refresh the journal view.
 
 `resume_payments` returns one outcome for each payment that is still open
-and one for each payment that ended and whose outcome no call has returned
-yet, as the journal holds it when the call returns. A payment that ended
-without this wallet's own outcome, because the user or another app resolved
-it, comes as `PayOutcome::Resolved`: show nothing new to pay and read its
-state from `payments()`. An outcome a call returned, a pay call's, a
-resume's or the user's own `resolve_attempt`, is not listed again, unless a
-later resume finds the payment made after all. One that ended in a call that
-returned an error, or never returned, is listed by the next resume. The one
-gap is a crash in the instant after a call recorded that it returned an
-outcome and before the host received it: `payments()` still shows that
-payment's state.
+and one for each payment the call ended, as the journal holds it when the
+call returns. A payment that ended without this wallet's own outcome, because
+the user or another app resolved it, comes as `PayOutcome::Resolved`: show
+nothing new to pay and read its state from `payments()`. A payment that was
+already over before the call is not listed again, unless the call found it
+made after all.
 
 When another wallet marks a subscription manual-only, the wallet that started
 a payment by hand can still resume that attempt after a restart. The SDK

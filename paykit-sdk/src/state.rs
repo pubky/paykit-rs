@@ -125,7 +125,6 @@ use crate::hold::HeldAnswer;
 use crate::hold::MissedHold;
 use crate::hold::OwnResendOwed;
 use crate::hold::RestoreHold;
-use crate::journal::JournalEntry;
 use crate::loss::LossBoundary;
 use crate::marks::{DropMark, KeyWaitMark};
 use crate::notices::KeptNotice;
@@ -1365,10 +1364,10 @@ impl BoundRead for BoundNote {
     }
 }
 
-impl sealed::Sealed for JournalEntry {}
+impl sealed::Sealed for crate::journal::StoredEntry {}
 
 /// A journal entry (Paykit spec 7.2), checked as a restore checks it
-/// ([`JournalEntry::check_restored`]): of the attempt its key names; its claim key the one
+/// ([`crate::journal::JournalEntry::check_restored`]): of the attempt its key names; its claim key the one
 /// its payee, request and Billing Period blind to, or, for a payment without a request, its
 /// attempt ID; the request it keeps that payee's request of that hash, amount, reference
 /// and label; its carrier verified for the payee; its acceptance this
@@ -1376,24 +1375,25 @@ impl sealed::Sealed for JournalEntry {}
 /// that request, or, for a payment without a request, of this app's attempt the key names.
 /// An entry naming another attempt, claim, record or message would read and write one
 /// payment while its key names another.
-impl Stored for JournalEntry {
+impl Stored for crate::journal::StoredEntry {
     fn bind(&self, _: &str, family: &StateKey, binder: &Binder<'_>) -> Result<()> {
+        let entry = self.as_written();
         let StateKey::Journal(attempt) = family else {
             return corrupt();
         };
-        if let Some(under) = &self.allowance {
-            if self.user_started || self.request_hash()?.is_none() || !under.valid() {
+        if let Some(under) = &entry.allowance {
+            if entry.user_started || entry.request_hash()?.is_none() || !under.valid() {
                 return corrupt();
             }
         }
-        if self.attempt()? != *attempt {
+        if entry.attempt()? != *attempt {
             return corrupt();
         }
         let blind = binder.blind()?;
         let cert = binder.cert.ok_or_else(PaykitError::corrupt)?;
-        self.check_restored(&binder.own, cert, |input| blind(input))?;
-        if self.request_hash()?.is_none()
-            && self.natural_key != natural_key::payer_payment_record(&binder.own, attempt)
+        entry.check_restored(&binder.own, cert, |input| blind(input))?;
+        if entry.request_hash()?.is_none()
+            && entry.natural_key != natural_key::payer_payment_record(&binder.own, attempt)
         {
             return corrupt();
         }
@@ -1403,14 +1403,15 @@ impl Stored for JournalEntry {
 
 impl sealed::Sealed for crate::journal::AttemptFacts {}
 
-/// What the payment method said of an attempt, and whether a resume reported it over
-/// ([`crate::journal::AttemptFacts`]): at its attempt's key, holding only what can be held.
+/// What the payment method said of an attempt ([`crate::journal::AttemptFacts`]): of the
+/// attempt its key names (`jf/<attempt_id>`), so a value moved to another attempt's key never
+/// becomes that attempt's word, holding only what can be held.
 impl Stored for crate::journal::AttemptFacts {
     fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
-        if !matches!(family, StateKey::AttemptFacts(_)) {
-            return corrupt();
+        match family {
+            StateKey::AttemptFacts(attempt) if self.attempt_id == attempt.to_text() => self.check(),
+            _ => corrupt(),
         }
-        self.check()
     }
 }
 

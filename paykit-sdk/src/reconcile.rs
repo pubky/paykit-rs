@@ -684,10 +684,7 @@ impl Paykit {
         // A delivery operation for the whole call (Paykit spec 8.1).
         let _delivery = self.delivery_operation();
         // The call's future goes on the heap, as `receive`'s does: it nests deep.
-        Box::pin(self.resolve_attempt_inner(obligation, attempt, resolution, _confirmed)).await?;
-        // The user ended it, and the call tells them so: a resume reports it again only
-        // where its payment is found made after all.
-        self.mark_told_if_over(&attempt).await
+        Box::pin(self.resolve_attempt_inner(obligation, attempt, resolution, _confirmed)).await
     }
 
     async fn resolve_attempt_inner(

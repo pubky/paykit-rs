@@ -1952,7 +1952,7 @@ fn receipt_effect(
     let facts =
         state::cx_get::<crate::journal::AttemptFacts>(cx, &key::attempt_facts(&attempt_id))?;
     let journaled = JournalEntry::on_claim(
-        state::cx_get::<JournalEntry>(cx, &key::journal(&attempt_id))?
+        state::cx_get::<crate::journal::StoredEntry>(cx, &key::journal(&attempt_id))?
             .map(|entry| entry.with_facts(facts.as_ref())),
         &claim,
     )
