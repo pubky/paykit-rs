@@ -851,6 +851,19 @@ pub(crate) fn bind_notice(key: &str, notice: &KeptNotice) -> Result<()> {
     if !peer_allowed {
         return Err(PaykitError::corrupt());
     }
+    // Only the notice of an endpoint change not published names endpoints, and it is kept
+    // with no lists rather than with empty ones.
+    if let Some(change) = &notice.endpoints {
+        let at_its_key = matches!(
+            family,
+            Some(StateKey::IdentityNotice(
+                NoticeKind::PublicEndpointChangeNotPublished
+            ))
+        );
+        if !at_its_key || change.is_empty() {
+            return Err(PaykitError::corrupt());
+        }
+    }
     match family {
         Some(StateKey::SettlementNotice(subject)) => {
             if notice.kind == subject.kind()
@@ -1208,6 +1221,7 @@ impl Paykit {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::own_record::EndpointChange;
 
     fn kept(attempt: &AttemptId) -> KeptNotice {
         KeptNotice {
@@ -1253,6 +1267,76 @@ mod tests {
             assert!(
                 bind_notice(&key::notice(&attempt, NoticeKind::HeldWithoutPay), &notice).is_err()
             );
+        }
+    }
+
+    fn endpoint_change(withdrawn: &[&str], offered: &[&str], changed: &[&str]) -> EndpointChange {
+        let set = |ids: &[&str]| ids.iter().map(|id| id.to_string()).collect();
+        EndpointChange {
+            withdrawn: set(withdrawn),
+            offered: set(offered),
+            changed: set(changed),
+        }
+    }
+
+    #[test]
+    fn test_endpoint_change_notice_names_each_class_in_its_own_list() {
+        let kind = NoticeKind::PublicEndpointChangeNotPublished;
+        let key = key::identity_notice(kind);
+        let mut notice = KeptNotice::identity(kind, 5);
+        notice.endpoints = Some(endpoint_change(&["old"], &["new-a", "new-b"], &["moved"]));
+        assert!(bind_notice(&key, &notice).is_ok());
+        let view = notice.view("id".into()).unwrap();
+        let names = |ids: &[paykit_lib::PaymentEndpointIdentifier]| {
+            ids.iter()
+                .map(|id| id.as_str().to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names(&view.endpoints_withdrawn), ["old"]);
+        assert_eq!(names(&view.endpoints_offered), ["new-a", "new-b"]);
+        assert_eq!(names(&view.endpoints_changed), ["moved"]);
+        // With no lists, the host is told only that a change wasn't published.
+        let plain = KeptNotice::identity(kind, 5).view("id".into()).unwrap();
+        assert!(plain.endpoints_withdrawn.is_empty());
+        assert!(plain.endpoints_offered.is_empty());
+        assert!(plain.endpoints_changed.is_empty());
+    }
+
+    #[test]
+    fn test_endpoint_change_notice_refuses_lists_elsewhere_empty_or_unreadable() {
+        let kind = NoticeKind::PublicEndpointChangeNotPublished;
+        let key = key::identity_notice(kind);
+        let mut empty = KeptNotice::identity(kind, 5);
+        empty.endpoints = Some(EndpointChange::default());
+        assert!(bind_notice(&key, &empty).is_err());
+        let change = endpoint_change(&["old"], &[], &[]);
+        // No other notice names endpoints.
+        let mut other = KeptNotice::identity(NoticeKind::BlockFloorHeld, 5);
+        other.endpoints = Some(change.clone());
+        assert!(bind_notice(&key::identity_notice(NoticeKind::BlockFloorHeld), &other).is_err());
+        let attempt = AttemptId::from_bytes([5; 16]);
+        let mut paid = kept(&attempt);
+        assert!(bind_notice(&key::notice(&attempt, paid.kind), &paid).is_ok());
+        paid.endpoints = Some(change.clone());
+        assert!(bind_notice(&key::notice(&attempt, paid.kind), &paid).is_err());
+        let to = [2; 32];
+        let hash = [3; 32];
+        let id = "123e4567-e89b-42d3-a456-426614174000";
+        let mut delivery = KeptNotice::list_delivery_unknown(&to, id, &hash, 3);
+        let delivery_key = key::restored_delivery(&to, id, &hash);
+        assert!(bind_notice(&delivery_key, &delivery).is_ok());
+        delivery.endpoints = Some(change);
+        assert!(bind_notice(&delivery_key, &delivery).is_err());
+        // An identifier the wire refuses reads as a corrupt store, in every list.
+        for bad in ["..", "private", "a/b", ""] {
+            for class in 0..3 {
+                let mut ids = [&[][..], &[][..], &[][..]];
+                ids[class] = std::slice::from_ref(&bad);
+                let mut notice = KeptNotice::identity(kind, 5);
+                notice.endpoints = Some(endpoint_change(ids[0], ids[1], ids[2]));
+                assert!(bind_notice(&key, &notice).is_ok());
+                assert!(notice.view("id".into()).is_err(), "{bad:?} in list {class}");
+            }
         }
     }
 
