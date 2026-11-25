@@ -1737,10 +1737,10 @@ dependencies = [
  "base64 0.22.1",
  "paykit-lib",
  "paykit-sdk",
- "pubky-switch-client",
- "pubky-switch-core",
- "pubky-switch-harness",
- "pubky-switch-signer",
+ "pubky-dispatch-client",
+ "pubky-dispatch-core",
+ "pubky-dispatch-harness",
+ "pubky-dispatch-signer",
  "rusqlite",
  "serde",
  "serde_json",
@@ -1755,8 +1755,8 @@ name = "paykit-lib"
 version = "0.2.0-alpha.0"
 dependencies = [
  "paykit-lib",
- "pubky-switch-core",
- "pubky-switch-signer",
+ "pubky-dispatch-core",
+ "pubky-dispatch-signer",
  "serde",
  "serde_json",
  "thiserror",
@@ -1768,10 +1768,10 @@ version = "0.2.0-alpha.0"
 dependencies = [
  "paykit-lib",
  "paykit-sdk",
- "pubky-switch-client",
- "pubky-switch-core",
- "pubky-switch-harness",
- "pubky-switch-signer",
+ "pubky-dispatch-client",
+ "pubky-dispatch-core",
+ "pubky-dispatch-harness",
+ "pubky-dispatch-signer",
  "serde",
  "serde_json",
  "syn 2.0.119",
@@ -1888,9 +1888,9 @@ dependencies = [
 ]
 
 [[package]]
-name = "pubky-switch"
+name = "pubky-dispatch"
 version = "0.1.0"
-source = "git+https://github.com/pubky/pubky-dispatch?rev=b3b6270e3c8ac0fd4b6a6117c175458d878df3d3#b3b6270e3c8ac0fd4b6a6117c175458d878df3d3"
+source = "git+https://github.com/pubky/pubky-dispatch?rev=c2b19c95f5f60937df3995efda13e477e9b1ff47#c2b19c95f5f60937df3995efda13e477e9b1ff47"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -1904,7 +1904,7 @@ dependencies = [
  "metrics",
  "metrics-exporter-prometheus",
  "parking_lot",
- "pubky-switch-core",
+ "pubky-dispatch-core",
  "reqwest",
  "roughenough-protocol",
  "serde",
@@ -1920,9 +1920,9 @@ dependencies = [
 ]
 
 [[package]]
-name = "pubky-switch-client"
+name = "pubky-dispatch-client"
 version = "0.1.0"
-source = "git+https://github.com/pubky/pubky-dispatch?rev=b3b6270e3c8ac0fd4b6a6117c175458d878df3d3#b3b6270e3c8ac0fd4b6a6117c175458d878df3d3"
+source = "git+https://github.com/pubky/pubky-dispatch?rev=c2b19c95f5f60937df3995efda13e477e9b1ff47#c2b19c95f5f60937df3995efda13e477e9b1ff47"
 dependencies = [
  "blake3",
  "bytes",
@@ -1931,7 +1931,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
- "pubky-switch-core",
+ "pubky-dispatch-core",
  "reqwest",
  "serde",
  "serde_json",
@@ -1943,9 +1943,9 @@ dependencies = [
 ]
 
 [[package]]
-name = "pubky-switch-core"
+name = "pubky-dispatch-core"
 version = "0.1.0"
-source = "git+https://github.com/pubky/pubky-dispatch?rev=b3b6270e3c8ac0fd4b6a6117c175458d878df3d3#b3b6270e3c8ac0fd4b6a6117c175458d878df3d3"
+source = "git+https://github.com/pubky/pubky-dispatch?rev=c2b19c95f5f60937df3995efda13e477e9b1ff47#c2b19c95f5f60937df3995efda13e477e9b1ff47"
 dependencies = [
  "base64 0.22.1",
  "blake3",
@@ -1962,16 +1962,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "pubky-switch-harness"
+name = "pubky-dispatch-harness"
 version = "0.1.0"
-source = "git+https://github.com/pubky/pubky-dispatch?rev=b3b6270e3c8ac0fd4b6a6117c175458d878df3d3#b3b6270e3c8ac0fd4b6a6117c175458d878df3d3"
+source = "git+https://github.com/pubky/pubky-dispatch?rev=c2b19c95f5f60937df3995efda13e477e9b1ff47#c2b19c95f5f60937df3995efda13e477e9b1ff47"
 dependencies = [
  "axum",
  "futures-util",
- "pubky-switch",
- "pubky-switch-client",
- "pubky-switch-core",
- "pubky-switch-signer",
+ "pubky-dispatch",
+ "pubky-dispatch-client",
+ "pubky-dispatch-core",
+ "pubky-dispatch-signer",
  "serde_json",
  "tempfile",
  "thiserror",
@@ -1981,12 +1981,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "pubky-switch-signer"
+name = "pubky-dispatch-signer"
 version = "0.1.0"
-source = "git+https://github.com/pubky/pubky-dispatch?rev=b3b6270e3c8ac0fd4b6a6117c175458d878df3d3#b3b6270e3c8ac0fd4b6a6117c175458d878df3d3"
+source = "git+https://github.com/pubky/pubky-dispatch?rev=c2b19c95f5f60937df3995efda13e477e9b1ff47#c2b19c95f5f60937df3995efda13e477e9b1ff47"
 dependencies = [
- "pubky-switch-client",
- "pubky-switch-core",
+ "pubky-dispatch-client",
+ "pubky-dispatch-core",
  "serde",
  "serde_json",
  "thiserror",
