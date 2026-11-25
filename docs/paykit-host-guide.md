@@ -7,6 +7,10 @@ for store guarantees, approval and client outcomes. Keep app keys and backups in
 host-protected storage and serialize operations on the handle. A memory store
 cannot preserve unanswered writes or payments across a restart.
 
+Stored state and backups written by a build before the first release of v0.2 are
+not carried across builds: a later build may refuse them, and nothing is upgraded.
+From the first release on, every change to a stored format comes with a migration.
+
 The integrator chooses whether to enroll an App ID per installation or share one
 App ID and its keys. A separate App ID has its own signer approval and can be
 revoked independently. Installations sharing an App ID have the same grants.
@@ -374,8 +378,11 @@ Allowance and creates a new one with the counterparty. It also asks with
 `AllowanceConfirmationNeeded`: confirming is recorded and writes its grant again,
 but in this version automatic payments under it don't resume, since its usage needs
 a repair this version doesn't make. They answer `HeldForUser` with
-`AllowanceNotResumed`; don't
+`AllowanceNotResumed` (code `allowance_not_resumed`); don't
 offer confirming as the way to resume, and don't ask the user to confirm again.
+When the regrant's reply is lost, calling `confirm_allowance_executor` again lands
+the kept regrant, and `resume_allowance_executor` then answers `AllowanceNotResumed`
+too: stop retrying, since no wait clears it.
 One-time requests stay held after a provider loss in any case (Paykit spec 8.1,
 8.3).
 
@@ -515,7 +522,7 @@ Which payment-method output a proof names is the integrator's to check: Paykit n
 
 ### Sharing a Private Payment List from several selling apps
 
-A selling app that publishes a Private Payment List keeps a counter for each recipient and generation of its own identity. Another app holding the unlabelled selling scope (`paykit_request`) can write that counter. When `publish_list_to` or `withdraw_list_from` has to reserve a new list version and the current counter was written by another app, the call is refused as not now, a withdrawal included. In Rust, the refusal's text names the app that wrote the counter. A binding host sees only `not_now`. With another app's write on that counter, retries to reserve a version keep returning `not_now` throughout the same generation. To stop that recipient paying this app's list now, revoke this selling app in the signer and enroll it again; that ends its lists for every recipient once they read the payee's current identity document, at most 10 minutes later. Otherwise the list lapses at its signed expiry or 30 days after the recipient accepted it. Revoke the app that made the foreign write too. Other recipients are not affected.
+A selling app that publishes a Private Payment List keeps a counter for each recipient and generation of its own identity. Another app holding the unlabelled selling scope (`paykit_request`) can write that counter. When `publish_list_to` or `withdraw_list_from` has to reserve a new list version and the counter holds another app's write, the call is refused with `HeldForUser`, a withdrawal included: with `PublicationConflict` (code `publication_conflict`) when that write verifies, and with `Unresolved` (code `held_unresolved`) while the counter can't be verified, as when the Switch client flagged a write to it. In Rust the conflict's text names the app that wrote the counter; a binding host gets the code only. A flagged write is reported first as `AppEvent::WriteFlagged` (`WalletEventData::WriteFlagged` in the bindings), which names the app that wrote it: look at that event before revoking anything. With another app's verified write on the counter, retries give the same refusal throughout the same generation; an unverified counter may clear on a later read. The refusal holds publication to that one recipient; other recipients are not affected. To stop that recipient paying this app's list now, revoke this selling app in the signer and enroll it again. That ends this app's lists for every recipient, not only this one, once they read the payee's current identity document, at most 10 minutes later. Otherwise the list lapses at its signed expiry or 30 days after the recipient accepted it. Revoke the app that made the foreign write too.
 
 ### Receive events the host acts on
 
@@ -692,7 +699,7 @@ The method declares `payment_time_tolerance_ms` with its declaration. The payee 
 | `Refusal::Cancelled` | Show that the request has already been cancelled. |
 | `Refusal::AllowanceEnded` | Show the stop and close actions on this Allowance. It is final: a scheduler stops paying under it and does not retry. |
 | `Refusal::AllowanceConflicted` | Show the conflict and close actions on this Allowance. It is final: a scheduler stops paying under it and does not retry. |
-| `Refusal::AllowanceConfirmationNeeded` | Automatic payment under the named Allowance waits for the user, after a missed item, or a restore until it is judged clean or the user confirms. The Allowance's `confirmation_needed` shows the same. Show the counterparty, terms and executor. In Rust, confirm with the refusal's `hold` or the displayed view's `hold`. A binding host gets only the `record` in the refusal. Read `allowance(record)` for the view to show, then pass that view's `hold` to `confirm_allowance_executor(hold, true)` once the user confirms. If that call answers `NotNow`, keep the confirmation with that `hold` and call it again later, unless the reason is the repair after a provider loss: the confirmation has landed, and calling again changes nothing. If it answers `AllowanceConfirmationNeeded` again, a newer restore, missed item or provider loss has set another hold: show the Allowance again and ask the user again. After a provider loss it also names an Allowance the user confirmed before the loss: confirming writes its grant again, but automatic payments under it don't resume in this version; the user who wants them ends the Allowance and creates a new one. |
+| `Refusal::AllowanceConfirmationNeeded` | Automatic payment under the named Allowance waits for the user, after a missed item, or a restore until it is judged clean or the user confirms. The Allowance's `confirmation_needed` shows the same. Show the counterparty, terms and executor. In Rust, confirm with the refusal's `hold` or the displayed view's `hold`. A binding host gets only the `record` in the refusal. Read `allowance(record)` for the view to show, then pass that view's `hold` to `confirm_allowance_executor(hold, true)` once the user confirms. If that call answers `NotNow`, keep the confirmation with that `hold` and call it again later. If it answers `AllowanceConfirmationNeeded` again, a newer restore, missed item or provider loss has set another hold: show the Allowance again and ask the user again. After a provider loss it also names an Allowance the user confirmed before the loss: confirming writes its grant again, but automatic payments under it don't resume in this version. A Billing Period paid under it and `resume_allowance_executor` then answer `HeldForUser` with `AllowanceNotResumed` (code `allowance_not_resumed`), as confirming again can, and no retry clears it: offer the user to end the Allowance and set up a new one; it can still be paid by hand. |
 | `Refusal::CreditHistoryLost` | Show that credit is held because the prior credit history is unavailable. |
 | `Refusal::AlreadyPaid` | Show the existing paid state. |
 | `Refusal::BeingHandledByOtherWallet` | Show that another own wallet holds the attempt. |
@@ -752,6 +759,8 @@ Three codes are provisional: `usage`, `not_automatic` and `client_not_now`. The 
 Every reason of `NotNow` is `RetryLater`, of `HeldForUser` `NeedsUser`, and of `RecoveryNeeded` `Recovery`. `attempt_failed` takes its cause's case, whatever it is: read `attemptedFailure()` for the cause. `waiting_for_list` is `NeedsUser` when the device clock is behind.
 
 Two rules override a code's case. A failure with a `keptBatch` comes as `OutcomeUnknown`, unless its case is `Recovery`: the wallet sends that batch again by itself, and the outcome shows once it is answered. The one exception is `settlement_warning_unsaved`, which comes as `NeedsUser` with its `keptBatch`: the user is shown the bucket's warning while the kept batch may still apply. A pay that may have been sent never comes as an error: it comes as a pending or uncertain outcome. The one exception is a wallet-wide stop met after the call, such as the store failing or an alarm. It comes as that stop, and the journal keeps the payment, which the resume after the recovery settles from the method's history.
+
+A failure that comes once the request may have left the device comes as `OutcomeUnknown`, also without a `keptBatch`: a timeout, an answer whose signature doesn't verify, an answer too large to take, one the service gave before reading the request, and one that doesn't read or verify. The failure doesn't say which request it was, and some requests the Switch client sends outside a kept batch are safe to repeat only while the first is outstanding: a message the service no longer holds is appended again, and a late connect request can reopen one that was declined. Only a failure that sent nothing comes as a case that calls again.
 
 | Code | From | Case | What the host does |
 |---|---|---|---|
@@ -828,6 +837,7 @@ Two rules override a code's case. A failure with a `keptBatch` comes as `Outcome
 | `publication_conflict` | `HeldForUserReason::PublicationConflict` | `NeedsUser` | Writes conflict at one publication counter for this recipient: publication to it is held while the other app's write stands, until a write of the bound publisher replaces it. Show it for that recipient. |
 | `record_unreadable` | `HeldForUserReason::RecordUnreadable` | `NeedsUser` | One held record doesn't read: show it for that request; it goes on once the record is rewritten or recovered. |
 | `allowance_not_resumed` | `HeldForUserReason::AllowanceNotResumed` | `NeedsUser` | After a provider loss this version doesn't resume automatic payments under the Allowance: offer the user to end it and set up a new one; it can still be paid by hand. |
+| `allowance_not_resumed_after_restore` | `HeldForUserReason::AllowanceNotResumedAfterRestore` | `NeedsUser` | After a restore this installation can't establish the Allowance's ledger history, which moved on since the backup: no later read or confirmation resumes it. Offer the user to end it and set up a new one, or to pay by hand; a newer backup of this app also resumes it. Don't ask the user to confirm the Allowance. |
 | `allowance_execution_held` | `HeldForUserReason::AllowanceExecutionHeld` | `NeedsUser` | This app's execution of the Allowance is held, as the message names: take it up with `resumeAllowanceExecutor` where this app should execute it, show the Allowance record for the user to confirm, or offer payment by hand. |
 | `recovery_needed` | a `RecoveryReason` the bindings don't know | `Recovery` | Show `reason()` and follow the recovery steps. |
 | `usage` | `Refusal::Usage` | `NotSent` | Provisional. A value given breaks a Paykit rule: fix the call. |
@@ -850,14 +860,20 @@ Two rules override a code's case. A failure with a `keptBatch` comes as `Outcome
 | `expired_unsent` | `AppError::ExpiredUnsent` | `NotSent` | The batch was retired before it was sent: make the call again. |
 | `store_after_kept` | `AppError::Store` behind a kept batch | `OutcomeUnknown` | The commit failed after the call's batch was kept: it may have applied. Reconcile before trying again. |
 | `protocol_store` | `AppError::Protocol` behind a kept batch | `OutcomeUnknown` | Paykit's store failed after the call's batch was kept: it may have applied. Reconcile before trying again. |
-| `transport` | `AppError::Transport`, `ClientError::Transport` | `RetryLater` | The Switch couldn't be reached: call again later. |
+| `transport` | `TransportError::Connect` | `RetryLater` | No connection could be made, so nothing was sent: call again later. |
+| `transport_no_answer` | `TransportError::Timeout` or another transport failure | `OutcomeUnknown` | The request may have reached the service and taken effect, and no answer came: reconcile before trying again. |
+| `transport_first_send_unavailable` | `TransportError::FirstSendUnavailable` | `NotSent` | A guarded first send couldn't be timed: the device clock is too far from the service's, or went back. Nothing was sent: correct the device clock, then call again. |
+| `transport_first_send_expired` | `TransportError::FirstSendExpired` | `NotSent` | A guarded first send passed its deadline and was never released: make the call again. |
+| `transport_refused` | `TransportError::Refused` | `NotSent` | The host's transport may not connect to the service's origin: allow it, then call again. |
+| `transport_answer_too_large` | `TransportError::TooLarge` | `OutcomeUnknown` | The answer is larger than the endpoint's cap or the wallet's transport takes, neither of which the host sets. The request went out, so it may have taken effect: reconcile before trying again. The same call gets the same answer; report it. |
+| `transport_invalid_request` | `TransportError::InvalidRequest` | `NotSent` | The host's transport couldn't build the request: fix the transport. |
 | `account_not_answering` | `AppError::NotAnsweringAsAccount` | `RetryLater` | The service doesn't answer for the account yet: call again later. |
-| `invalid_data` | `AppError::InvalidData`, `ClientError::Core` | `Permanent` | Data from the network or the store doesn't verify: trying again gives the same answer until what serves it changes. Show it and report it; other calls are not affected. |
+| `invalid_data` | `AppError::InvalidData`, `ClientError::Core` | `OutcomeUnknown` | Data from the store or from the call's answer doesn't verify or doesn't read. The request may have gone out and taken effect: reconcile before trying again. The same data gives the same answer until what serves it changes; show it and report it. |
 | `display_read_pending` | `ClientError::DisplayReadPending` | `RetryLater` | Wait for the signed display read in progress. |
-| `bad_service_signature` | `ClientError::BadServiceSignature` | `RetryLater` | An answer the pinned service key doesn't verify, from an intermediary or after the service changed its key: call again after `receive`, which follows the newest `identity.json` and its key. |
+| `bad_service_signature` | `ClientError::BadServiceSignature` or an unreadable signed header, at any status | `OutcomeUnknown` | An answer the pinned service key doesn't verify, from an intermediary such as a proxy, or after the service changed its key: nothing of it was used, its status included. The request went out, so it may have taken effect: reconcile before trying again. `receive` follows the newest `identity.json` and its key; if the answer stays, report it. |
 | `stale_answer` | `ClientError::StaleAnswer` | `RetryLater` | A public read outside its window: call again. |
-| `body_unread` | `ClientError::BodyUnread` | `RetryLater` | The service answered before reading the request: call again later. |
-| `invalid_response` | `ClientError::InvalidResponse` | `RetryLater` | The answer doesn't read: call again later. |
+| `body_unread` | `ClientError::BodyUnread`: `too_large`, `rate_limited` or `not_found` before the service read the request | `OutcomeUnknown` | Such an answer binds the request without its body, so it counts as no answer (Switch wire 7.1): reconcile before trying again, after `retryAfterMs` when it is set. |
+| `invalid_response` | `ClientError::InvalidResponse` | `OutcomeUnknown` | The call's answer doesn't read. The request went out, so it may have taken effect: reconcile before trying again. |
 | `body_over_cap` | `ClientError::BodyOverCap` | `NotSent` | The request is over its cap: make a smaller one. |
 | `unpinned` | `ClientError::Unpinned` | `NotSent` | No pinned service key: enroll first. |
 | `switch_bad_request` | Switch answer `bad_request` | `Permanent` | The service refused the request as malformed. |
