@@ -150,6 +150,17 @@ pub enum HeldForUserReason {
          new one"
     )]
     AllowanceNotResumed,
+    /// After a restore this installation can't establish the Allowance's ledger history: the
+    /// ledger moved on by more than one write since the backup, and the write between is no
+    /// longer readable, so no later read brings it back, and this version makes no repair.
+    /// The user ends the Allowance and sets up a new one, or pays by hand; a newer backup of
+    /// this app that holds the ledger as it is now also resumes it (Paykit spec 8.3,
+    /// "Resuming the same executor").
+    #[error(
+        "after a restore this installation can't establish the Allowance's ledger history: \
+         the user ends it and sets up a new one, or pays by hand"
+    )]
+    AllowanceNotResumedAfterRestore,
     /// This app's execution of the Allowance is held until the user or the host acts, as the
     /// text names: this app takes the execution up ([`crate::Paykit::resume_allowance_executor`]),
     /// the user confirms the Allowance record as shown, or pays by hand (Paykit spec 8.3,
