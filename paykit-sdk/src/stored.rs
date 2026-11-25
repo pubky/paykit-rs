@@ -152,12 +152,6 @@ pub(crate) fn submitted<T>(result: std::result::Result<T, AppError>) -> Result<P
     Err(error)
 }
 
-/// Whether `error` is the Dispatch's refusal of a read, an answer with its error code, rather
-/// than a Dispatch that doesn't answer or a failure of the app's own.
-fn refused(error: &AppError) -> bool {
-    !crate::pay::dispatch_unavailable(error) && error.unkept().code().is_some()
-}
-
 /// What a stored receipt's later read of its claim gives its write: the claim to decide on,
 /// as the Dispatch answered it, or the outcome the write ends in now. A refusal for good
 /// settles nothing ([`DispatchClaim::Refused`]). An answer a later read may pass says nothing
