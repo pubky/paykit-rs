@@ -840,8 +840,8 @@ adapter, the SDK marks the reservation as cancellation-started in storage before
 calling the adapter. Reservation IDs with cancellation-started records must not be
 reused for new Private Payment Lists until cleanup removes the record.
 App-removal cleanup checks its App lease when claiming cancellation, before
-adapter dispatch, and before deleting the reservation. If ownership changes
-after dispatch, cancellation may already have happened externally; the record
+adapter handoff, and before deleting the reservation. If ownership changes
+after handoff, cancellation may already have happened externally; the record
 remains for the current worker to reconcile through idempotent cancellation.
 
 Single-use Payment Request reservations are outside the SDK shape until the
