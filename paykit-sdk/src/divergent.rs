@@ -1710,7 +1710,8 @@ impl Paykit {
                     .await?
                     .is_some_and(|read| read.counterparty != stored.sender())
                 {
-                    self.local_delete(&kept_key).await?;
+                    self.end_kept_copy(&kept_key, &stored, crate::stored::KeptEnd::Retired)
+                        .await?;
                     continue;
                 }
             }
@@ -1876,41 +1877,19 @@ impl Paykit {
     }
 
     /// Give up `stored`, kept over a divergent record at `kept_key`: the kept copy goes and
-    /// the host is told, in one commit; the notice is raised once.
+    /// the host is told once (`Paykit::end_kept_copy`).
     pub(crate) async fn give_up_divergent(
         &mut self,
         kept_key: &str,
         stored: &StoredMessage,
     ) -> Result<()> {
-        // Never given up while the client still keeps a batch of its write, which may still
-        // land (`Paykit::held_write_kept`); the marker of one it no longer keeps goes in the
-        // same commit. Every give-up of a kept message goes through one of three functions,
-        // this one, `Paykit::give_up_stored` and `Paykit::give_up`.
-        let mut tx = Tx::default();
-        match self.held_give_up(stored, &mut tx).await? {
-            Some(crate::stored::Ended::Waits) => return Ok(()),
-            // Its write is in its record: placed, the kept copy gone, nothing told.
-            Some(_) => {
-                tx.delete(kept_key);
-                return self.local_commit(tx).await;
-            }
-            None => {}
-        }
-        tx.delete(kept_key);
-        tx.delete(&crate::stored::held_write(stored));
-        let notice = key::message_notice(&stored.sender(), &stored.message().msg_id);
-        if self.kept_notice(&notice).await?.is_none() {
-            let at = self.service_time().unwrap_or(0);
-            tx.put(
-                &notice,
-                &crate::stored::given_up_notice(
-                    stored,
-                    at,
-                    crate::notices::GivenUpOrigin::Divergent,
-                ),
-            )?;
-        }
-        self.local_commit(tx).await
+        self.end_kept_copy(
+            kept_key,
+            stored,
+            crate::stored::KeptEnd::GivenUp(crate::notices::GivenUpOrigin::Divergent),
+        )
+        .await
+        .map(|_| ())
     }
 
     /// The records the app has seen divergent and its user hasn't confirmed, those whose

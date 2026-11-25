@@ -3475,7 +3475,12 @@ impl Paykit {
             .map(|held| held.content);
         if !receive::holds_record(content.as_ref()) {
             match Box::pin(self.pending_reply_later(&record, &reply, evidence)).await? {
-                replies::PendingReply::Stopped => return self.local_delete(kept_key).await,
+                replies::PendingReply::Stopped => {
+                    return self
+                        .end_kept_copy(kept_key, &reply, crate::stored::KeptEnd::Retired)
+                        .await
+                        .map(|_| ());
+                }
                 replies::PendingReply::Undecided => return Ok(()),
                 replies::PendingReply::Waits(version) => {
                     if crate::stored::past_window(accepted_at, self.service_time()) {
@@ -3493,7 +3498,9 @@ impl Paykit {
                 replies::PendingReply::Unrelated => {}
             }
             if crate::stored::past_window(accepted_at, self.service_time()) {
-                Box::pin(self.local_delete(kept_key)).await?;
+                // Never while a batch of its write may still land (`end_kept_copy`).
+                Box::pin(self.end_kept_copy(kept_key, &reply, crate::stored::KeptEnd::Retired))
+                    .await?;
             }
             return Ok(());
         }

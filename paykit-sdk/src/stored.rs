@@ -185,11 +185,27 @@ pub(crate) enum HeldWrite {
     Applied,
 }
 
-/// What a give-up of a kept message came to ([`Paykit::give_up_stored`]).
+/// How a kept copy of a message goes other than with its own write
+/// ([`Paykit::end_kept_copy`]).
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum KeptEnd<'a> {
+    /// Given up at its 30 days, the host told ([`NoticeKind::MessageGivenUp`]) from `origin`.
+    GivenUp(crate::notices::GivenUpOrigin),
+    /// A stored entry's message, noted by `note`, given up at its 30 days, the host told
+    /// with the entry's handle.
+    GivenUpStored(&'a StoredNote),
+    /// Retired with nothing told: what its write would go into is gone past its window, or
+    /// can't take it.
+    Retired,
+}
+
+/// What came of ending a kept copy ([`Paykit::end_kept_copy`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Ended {
     /// Given up, the host told.
     GivenUp,
+    /// Retired, nothing told.
+    Retired,
     /// Not given up: the client still keeps a batch of its write.
     Waits,
     /// Placed: the client applied a batch of its write; nothing is told.
@@ -1119,13 +1135,9 @@ impl Paykit {
     }
 
     /// Give up `stored`, a stored entry's message noted at `note_key` (`se/`): the note goes,
-    /// and the host is told ([`NoticeKind::MessageGivenUp`], with the entry's handle), in one
-    /// commit with the marker of a batch of its write the client no longer keeps. Nothing is
-    /// given up while the client still keeps a batch of its write, which may still land
-    /// ([`Paykit::held_write_kept`]), and one whose batch the client applied is placed, the
-    /// caller noting it placed, with nothing told. Returns what came of it. Every give-up of a
-    /// kept message goes through one of three functions, this one, [`Paykit::give_up`] and
-    /// `Paykit::give_up_divergent`: a new way to give one up goes through one of them.
+    /// and the host is told ([`NoticeKind::MessageGivenUp`], with the entry's handle)
+    /// ([`Paykit::end_kept_copy`]). Returns what came of it: one whose batch the client
+    /// applied is placed, the caller noting it placed, with nothing told.
     ///
     /// # Errors
     ///
@@ -1136,74 +1148,107 @@ impl Paykit {
         note: &StoredNote,
         stored: &StoredMessage,
     ) -> Result<Ended> {
-        let mut tx = Tx::default();
-        if let Some(ended) = self.held_give_up(stored, &mut tx).await? {
-            if ended == Ended::Placed {
-                self.local_commit(tx).await?;
-            }
-            return Ok(ended);
-        }
-        tx.delete(note_key);
-        tx.delete(&held_write(stored));
-        let notice = key::message_notice(&note.sender, &note.msg_id);
-        // The notice keeps the entry's handle, which its acknowledgement forgets; one kept
-        // already, as after a restore onto another store, takes the entry's handle here.
-        let handle = StoredHandle {
-            stored_id: note.stored_id,
-            hash: note.hash,
-        };
-        match self.kept_notice(&notice).await? {
-            None => {
-                let at = self.service_time().unwrap_or(0);
-                let given_up = KeptNotice::given_up(
-                    note.sender,
-                    &note.msg_id,
-                    named_request(stored),
-                    at,
-                    crate::notices::GivenUpFrom::Stored(handle),
-                );
-                tx.put(&notice, &given_up)?;
-            }
-            Some(mut kept) if kept.stored.as_ref() != Some(&handle) => {
-                kept.stored = Some(handle);
-                kept.origin = None;
-                tx.put(&notice, &kept)?;
-            }
-            Some(_) => {}
-        }
-        self.local_commit(tx).await?;
-        Ok(Ended::GivenUp)
+        self.end_kept_copy(note_key, stored, KeptEnd::GivenUpStored(note))
+            .await
     }
 
     /// Give up `stored`, a payer's reply kept at `kept_key` (`pr/`): the kept copy goes and
-    /// the host is told ([`NoticeKind::MessageGivenUp`], from a kept reply, with no entry's
-    /// handle), in one commit with the marker of a batch of its write the client no longer
-    /// keeps. The notice is raised once. Nothing is given up while the client still keeps a
-    /// batch of its write, which may still land ([`Paykit::held_write_kept`]). Every give-up
-    /// of a kept message goes through one of three functions, this one,
-    /// [`Paykit::give_up_stored`] and `Paykit::give_up_divergent`.
+    /// the host is told once ([`NoticeKind::MessageGivenUp`], from a kept reply, with no
+    /// entry's handle) ([`Paykit::end_kept_copy`]).
     pub(crate) async fn give_up(&mut self, kept_key: &str, stored: &StoredMessage) -> Result<()> {
+        self.end_kept_copy(
+            kept_key,
+            stored,
+            KeptEnd::GivenUp(crate::notices::GivenUpOrigin::KeptReply),
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// The one way a kept copy of a message, a stored entry's note (`se/`), a reply kept
+    /// before its record (`pr/`) or a message kept over a divergent record (`dw/`), goes
+    /// other than in the commit of its own write: given up at its 30 days, or retired, as
+    /// `end` says. Nothing goes while the client still keeps a batch of its write, which may
+    /// still land ([`Paykit::held_write_kept`]; Paykit spec 8.1, Stored entries, Kept
+    /// batch): the copy stays, to be decided again at the next receive ([`Ended::Waits`]).
+    /// One whose batch the client applied is placed, its write in its record: the copy and
+    /// the marker go, nothing told ([`Ended::Placed`]); a stored entry's note stays, for its
+    /// caller to note it placed. Otherwise the copy goes in one commit with the marker of a
+    /// batch the client no longer keeps, and, when given up, with the host's notice, raised
+    /// once.
+    ///
+    /// The raw delete of a kept copy's key is written here and in the commit of the copy's
+    /// own write only: a guard test (`test_stored_kept_copies_removed_only_through_the_gate`)
+    /// counts every delete of one, so a new way to remove one goes through this function.
+    ///
+    /// # Errors
+    ///
+    /// A store failure, or a notice or marker that doesn't read.
+    pub(crate) async fn end_kept_copy(
+        &mut self,
+        kept_key: &str,
+        stored: &StoredMessage,
+        end: KeptEnd<'_>,
+    ) -> Result<Ended> {
         let mut tx = Tx::default();
         match self.held_give_up(stored, &mut tx).await? {
-            Some(Ended::Waits) => return Ok(()),
-            // Its write is in its record: placed, the kept copy gone, nothing told.
-            Some(_) => {
-                tx.delete(kept_key);
-                return self.local_commit(tx).await;
+            Some(Ended::Waits) => return Ok(Ended::Waits),
+            Some(Ended::Placed) => {
+                if !matches!(end, KeptEnd::GivenUpStored(_)) {
+                    tx.delete(kept_key);
+                }
+                self.local_commit(tx).await?;
+                return Ok(Ended::Placed);
             }
-            None => {}
+            // `held_give_up` answers only `Waits` or `Placed` when a batch is held.
+            Some(Ended::GivenUp | Ended::Retired) | None => {}
         }
         tx.delete(kept_key);
         tx.delete(&held_write(stored));
         let notice = key::message_notice(&stored.sender(), &stored.message().msg_id);
-        if self.kept_notice(&notice).await?.is_none() {
-            let at = self.service_time().unwrap_or(0);
-            tx.put(
-                &notice,
-                &given_up_notice(stored, at, crate::notices::GivenUpOrigin::KeptReply),
-            )?;
+        match end {
+            KeptEnd::Retired => {
+                self.local_commit(tx).await?;
+                return Ok(Ended::Retired);
+            }
+            KeptEnd::GivenUp(origin) => {
+                if self.kept_notice(&notice).await?.is_none() {
+                    let at = self.service_time().unwrap_or(0);
+                    tx.put(&notice, &given_up_notice(stored, at, origin))?;
+                }
+            }
+            KeptEnd::GivenUpStored(note) => {
+                let notice = key::message_notice(&note.sender, &note.msg_id);
+                // The notice keeps the entry's handle, which its acknowledgement forgets; one
+                // kept already, as after a restore onto another store, takes the entry's
+                // handle here.
+                let handle = StoredHandle {
+                    stored_id: note.stored_id,
+                    hash: note.hash,
+                };
+                match self.kept_notice(&notice).await? {
+                    None => {
+                        let at = self.service_time().unwrap_or(0);
+                        let given_up = KeptNotice::given_up(
+                            note.sender,
+                            &note.msg_id,
+                            named_request(stored),
+                            at,
+                            crate::notices::GivenUpFrom::Stored(handle),
+                        );
+                        tx.put(&notice, &given_up)?;
+                    }
+                    Some(mut kept) if kept.stored.as_ref() != Some(&handle) => {
+                        kept.stored = Some(handle);
+                        kept.origin = None;
+                        tx.put(&notice, &kept)?;
+                    }
+                    Some(_) => {}
+                }
+            }
         }
-        self.local_commit(tx).await
+        self.local_commit(tx).await?;
+        Ok(Ended::GivenUp)
     }
 
     /// Forget every marker of a batch the client no longer keeps ([`held_write`]): applied,
@@ -1677,6 +1722,134 @@ impl Paykit {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every removal of a kept copy's key (`se/`, `pr/`, `dw/`) in the SDK's sources, by
+    /// the function it is written in: other than in the commit of the copy's own write, a
+    /// kept copy goes only through [`Paykit::end_kept_copy`], which asks first whether the
+    /// client still keeps a batch of its write (Paykit spec 8.1, Stored entries, Kept
+    /// batch). A new delete of one, anywhere, fails this test until it is routed through
+    /// that function or listed here with what it is. A kept copy's key is held in a binding
+    /// named `kept_key` or `note_key`, or built in place, so the scan sees it: a binding of
+    /// one under another name fails too.
+    #[test]
+    fn test_stored_kept_copies_removed_only_through_the_gate() {
+        use std::collections::BTreeMap;
+        const KEPT: [&str; 9] = [
+            "kept_key",
+            "note_key",
+            "key::stored_note(",
+            "key::kept_reply(",
+            "key::divergent_write(",
+            "KEPT_REPLIES",
+            "STORED_NOTES",
+            "DIVERGENT_WRITES",
+            "drop_kept",
+        ];
+        const BUILDERS: [&str; 3] = [
+            "key::stored_note(",
+            "key::kept_reply(",
+            "key::divergent_write(",
+        ];
+        // (file, function, deletes): what each is.
+        let allowed: BTreeMap<(&str, &str), usize> = [
+            // The gate.
+            (("stored.rs", "end_kept_copy"), 2),
+            // Placed: staged with the copy's own write, committed only with it.
+            (("receive.rs", "place_kept_replies"), 3),
+            (("allowances.rs", "place_kept_allowance_response"), 2),
+            (("divergent.rs", "place_divergent_writes"), 1),
+            (("allowances/pending.rs", "place_incoming_proposal"), 1),
+            (("allowances/pending.rs", "remove_withdrawn_proposal"), 1),
+            // Settled: the exact discard of the proposal it answers, committed with the
+            // record view that retires the proposal (Paykit spec 8.3.1).
+            (("allowances/replies.rs", "retire"), 1),
+            // Moved: a kept receipt goes to `dw/` in the commit that keeps it there, its
+            // marker kept; and a bound's drop there.
+            (("divergent.rs", "keep_over_paused"), 2),
+            // Dropped for a bound, as never processed: its pair forgotten in the same
+            // commit, so its sender is asked again (Paykit spec 9, Messages dropped for a
+            // bound); not a give-up.
+            (("receive.rs", "make_room_for_reply"), 1),
+            (("divergent.rs", "step_keep"), 1),
+            // Cleanup of a note whose entry is done: placed, or released by the client as a
+            // duplicate of one it processed.
+            (("stored.rs", "place_stored"), 1),
+            (("stored.rs", "take_stored_event"), 1),
+        ]
+        .into_iter()
+        .collect();
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        let mut dirs = vec![root.clone()];
+        while let Some(dir) = dirs.pop() {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    dirs.push(path);
+                } else if path.extension().is_some_and(|ext| ext == "rs") {
+                    files.push(path);
+                }
+            }
+        }
+        let mut found: BTreeMap<(String, String), usize> = BTreeMap::new();
+        for path in files {
+            let name = path
+                .strip_prefix(&root)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
+            let source = std::fs::read_to_string(&path).unwrap();
+            let lines: Vec<&str> = source
+                .lines()
+                .take_while(|line| !line.starts_with("#[cfg(test)]"))
+                .collect();
+            let mut function = String::new();
+            for (at, line) in lines.iter().enumerate() {
+                let code = line.trim_start();
+                if code.starts_with("//") {
+                    continue;
+                }
+                if let Some(rest) = code.split("fn ").nth(1).filter(|_| code.contains("fn ")) {
+                    if let Some(end) = rest.find(|c: char| !(c.is_alphanumeric() || c == '_')) {
+                        if end > 0 && (code.starts_with("fn ") || code.contains(" fn ")) {
+                            function = rest[..end].to_string();
+                        }
+                    }
+                }
+                // A kept copy's key bound under a name the scan doesn't see.
+                if let Some(binding) = code.strip_prefix("let ") {
+                    let builds = BUILDERS.iter().any(|b| binding.contains(b));
+                    if builds && !binding.contains(", \"\")") {
+                        let bound = binding.split([' ', ':']).next().unwrap_or_default();
+                        assert!(
+                            ["kept_key", "note_key", "kept"].contains(&bound),
+                            "{name}:{}: a kept copy's key bound as `{bound}`",
+                            at + 1
+                        );
+                    }
+                }
+                let deletes = code.contains(".delete(")
+                    || code.contains("local_delete(")
+                    || code.contains("Delete {");
+                if !deletes {
+                    continue;
+                }
+                let window = if code.contains("Delete {") {
+                    lines[at..lines.len().min(at + 3)].join(" ")
+                } else {
+                    code.to_string()
+                };
+                if KEPT.iter().any(|k| window.contains(k)) || window.contains("(&kept)") {
+                    *found.entry((name.clone(), function.clone())).or_default() += 1;
+                }
+            }
+        }
+        let found: BTreeMap<(&str, &str), usize> = found
+            .iter()
+            .map(|((file, function), n)| ((file.as_str(), function.as_str()), *n))
+            .collect();
+        assert_eq!(found, allowed);
+    }
     use crate::testkit::{object, Party};
 
     /// The later write's rule over every answer of the switch, bare and with the batch held by

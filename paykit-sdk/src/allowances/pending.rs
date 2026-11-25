@@ -1064,22 +1064,22 @@ impl Paykit {
         let original = message.message().msg_id.as_str();
         let mut effects = state::Tx::default();
         let held = if let Some(stored_id) = stored_id {
-            let key = key::stored_note(&peer, original);
-            let Some(mut note) = self.local_get::<StoredNote>(&key).await? else {
+            let note_key = key::stored_note(&peer, original);
+            let Some(mut note) = self.local_get::<StoredNote>(&note_key).await? else {
                 return Ok(Some(Placed::Done));
             };
             if note.placed || note.stored_id != stored_id {
                 return Ok(Some(Placed::Done));
             }
             note.placed = true;
-            effects.put(&key, &note)?;
+            effects.put(&note_key, &note)?;
             note.message
         } else {
-            let key = key::kept_reply(&peer, &a_key, original);
-            let Some(held) = self.local_get::<KeptMessage>(&key).await? else {
+            let kept_key = key::kept_reply(&peer, &a_key, original);
+            let Some(held) = self.local_get::<KeptMessage>(&kept_key).await? else {
                 return Ok(Some(Placed::Done));
             };
-            effects.delete(&key);
+            effects.delete(&kept_key);
             held
         };
         let position = evidence.position().ok_or_else(PaykitError::corrupt)?;

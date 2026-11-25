@@ -1522,3 +1522,77 @@ impl FailNextKeep {
         Ok(outcome)
     }
 }
+
+/// A batch `app` makes that the client keeps, its send rate-limited at `signer`'s switch,
+/// named at the marker of the later write of the message kept at `kept`, a `pr/` or `dw/`
+/// key, as the client names it: that write is held, as a later write kept on a full account
+/// is (Paykit spec 8.1, Stored entries, Kept batch).
+pub async fn hold_kept_write(signer: &TestSigner, app: &mut Paykit, kept: &[u8]) -> [u8; 16] {
+    let key = std::str::from_utf8(kept).unwrap();
+    let parts: Vec<&str> = key.split('/').collect();
+    let (sender, msg_id) = match parts[0] {
+        "pr" => (parts[1], parts[3]),
+        "dw" => (parts[3], parts[4]),
+        _ => panic!("not a kept copy: {key}"),
+    };
+    signer
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Error {
+            path: "/ops".into(),
+            code: pubky_switch_core::http::ErrorCode::RateLimited,
+            current: Value::Null,
+        });
+    let error = app
+        .app_mut()
+        .submit_batch(
+            pubky_switch_client::app::OpBatch::new().op(OpKind::DenyPut { pubky: [9; 32] }),
+        )
+        .await
+        .unwrap_err();
+    let batch_id = error.kept_batch().expect("kept");
+    app.app_mut()
+        .protocol_commit(
+            "paykit",
+            &[pubky_switch_client::app::LocalWrite::Put {
+                key: format!("hw/{sender}/{msg_id}").into_bytes(),
+                value: batch_id.to_vec(),
+            }],
+        )
+        .await
+        .unwrap();
+    batch_id
+}
+
+/// Past its paced resend, the batch the client keeps at `signer`'s switch is sent again and
+/// answered `code`: `permission_missing` drops it. Until then, the client keeps it.
+pub fn resend_kept_batch(w: &World, signer: &TestSigner, code: pubky_switch_core::http::ErrorCode) {
+    w.clock.advance_ms(11 * 60_000);
+    signer
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Error {
+            path: "/ops".into(),
+            code,
+            current: Value::Null,
+        });
+}
+
+/// The keys `app` keeps under `prefix`.
+pub async fn kept_keys(app: &Paykit, prefix: &str) -> Vec<Vec<u8>> {
+    app.app()
+        .protocol_scan("paykit", prefix.as_bytes())
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|(key, _)| key)
+        .collect()
+}
+
+/// The key `app` keeps under `prefix` of the message `msg_id`.
+pub async fn kept_key_of(app: &Paykit, prefix: &str, msg_id: &str) -> Vec<u8> {
+    let tail = format!("/{msg_id}");
+    kept_keys(app, prefix)
+        .await
+        .into_iter()
+        .find(|key| key.ends_with(tail.as_bytes()))
+        .expect("kept")
+}

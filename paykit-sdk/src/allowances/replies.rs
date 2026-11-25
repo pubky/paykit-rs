@@ -770,10 +770,10 @@ fn retire(
     let mut writes = vec![LocalWrite::Delete {
         key: key::pending_conflict(key).into_bytes(),
     }];
-    for (at, message) in kept {
+    for (kept_key, message) in kept {
         if answers(p, &message.stored(own)?) {
             writes.push(LocalWrite::Delete {
-                key: at.into_bytes(),
+                key: kept_key.into_bytes(),
             });
         }
     }
@@ -1194,7 +1194,7 @@ impl Paykit {
             let record = self.app.record_key(&permanent)?;
             let original = &reply.message().msg_id;
             let kept_key = key::kept_reply(&peer, &record, original);
-            let stored_key = key::stored_note(&peer, original);
+            let note_key = key::stored_note(&peer, original);
             let mut writes = Vec::new();
             let bind = |held: &mut KeptMessage| -> Result<bool> {
                 if held.position() != Some(position) || held.stored(&own)?.hash() != reply.hash() {
@@ -1213,14 +1213,14 @@ impl Paykit {
                 writes.push(state::local_put(&kept_key, &held)?);
             }
             if let Some(mut note) = self
-                .local_get::<StoredNote>(&stored_key)
+                .local_get::<StoredNote>(&note_key)
                 .await?
                 .filter(|n| !n.placed)
             {
                 if !bind(&mut note.message)? {
                     return Ok(waiting());
                 }
-                writes.push(state::local_put(&stored_key, &note)?);
+                writes.push(state::local_put(&note_key, &note)?);
             }
             if writes.is_empty() {
                 return Ok(waiting());
