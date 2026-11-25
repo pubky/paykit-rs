@@ -790,7 +790,8 @@ async fn test_own_record_restore_tells_a_held_change_at_the_open() {
 #[tokio::test]
 async fn test_own_record_open_whose_telling_fails_shuts_every_signing_until_it_is_told() {
     // The notice can't be written at the load: the app opens all the same, the change stays
-    // held, and every call that would sign is refused until a later try tells it.
+    // held, and every call that would sign is refused, with the store's failure itself,
+    // until a later try tells it. A receive whose try fails so ends on that failure.
     use pubky_dispatch_client::store::{Fault, FaultStore};
     let w = World::new();
     let kept = store();
@@ -820,8 +821,8 @@ async fn test_own_record_open_whose_telling_fails_shuts_every_signing_until_it_i
     let untold = |error: paykit_sdk::PaykitError| {
         matches!(
             error,
-            paykit_sdk::PaykitError::Refused(paykit_sdk::Refusal::NotNow(
-                paykit_sdk::NotNowReason::EndpointChangeUntold
+            paykit_sdk::PaykitError::Client(pubky_dispatch_client::app::AppError::Store(
+                pubky_dispatch_client::StoreError::Unavailable
             ))
         )
     };
@@ -837,6 +838,8 @@ async fn test_own_record_open_whose_telling_fails_shuts_every_signing_until_it_i
         signed_endpoints(&shop),
         vec![(a().as_str().to_owned(), "lno1tips".to_owned())]
     );
+    faulty.fail_put_once(notices);
+    assert!(untold(shop.receive(None).await.unwrap_err()));
     // The next receive tells it, and signing goes on.
     shop.receive(None).await.unwrap();
     let notice = told(&shop).await.unwrap();
@@ -973,10 +976,20 @@ async fn load_untold(
     faulty: &Arc<pubky_dispatch_client::store::FaultStore>,
     app_id: [u8; 16],
 ) -> Paykit {
+    load_untold_with(w, faulty, app_id, publishing()).await
+}
+
+/// [`load_untold`] with `config`.
+async fn load_untold_with(
+    w: &World,
+    faulty: &Arc<pubky_dispatch_client::store::FaultStore>,
+    app_id: [u8; 16],
+    config: PaykitConfig,
+) -> Paykit {
     faulty.refuse_puts_as_too_large(Some(b"p/paykit/nt/endpoint_change_not_published/"));
     let mut shop = Paykit::load(
         w.env(&w.bob, Arc::clone(faulty) as Arc<dyn StateStore>),
-        publishing(),
+        config,
         app_id,
         w.rail.clone(),
         w.timer(),
@@ -999,9 +1012,11 @@ async fn renew_and_adopt(w: &World, shop: &mut Paykit) -> pubky_dispatch_core::r
     let old = shop.app().cert().clone();
     let scopes = AppScopes::new().request().build().unwrap();
     let renewed = crate::certificate::renew_for(w, &w.bob, "shop", shop.app_id(), &scopes, 1_000);
-    shop.receive(None).await.unwrap();
+    // A receive takes the renewal at its read; while the held change can't be told, its
+    // upkeep then ends on the store's failure.
+    let _ = shop.receive(None).await;
     crate::certificate::list_for(&w.bob, shop.app_id(), &old, &renewed);
-    shop.receive(None).await.unwrap();
+    let _ = shop.receive(None).await;
     assert_eq!(shop.app().cert().hash(), renewed.hash());
     renewed
 }
@@ -1089,4 +1104,330 @@ async fn test_own_record_renewal_while_an_offer_is_untold_signs_the_signed_membe
         ids(&notice.endpoints_offered),
         vec![b().as_str().to_owned()]
     );
+}
+
+#[tokio::test]
+async fn test_own_record_renewal_after_publishing_stops_signs_no_endpoint() {
+    // The renewal callback builds the member for what the app does now: loaded without
+    // publishing its record, a renewal taken while a held change is untold signs no public
+    // endpoint, as every other signing would.
+    use pubky_dispatch_client::store::{Fault, FaultStore};
+    let w = World::new();
+    let kept = store();
+    let mut shop = shop_on(&w, false, Arc::clone(&kept)).await;
+    shop.set_public_endpoint(a(), payload("lno1tips"))
+        .await
+        .unwrap();
+    time_read_fails(&w, &w.bob);
+    assert!(shop
+        .set_public_endpoint(b(), payload("bc1qnew"))
+        .await
+        .is_err());
+    let app_id = shop.app_id();
+    drop(shop);
+    let faulty = Arc::new(FaultStore::new(kept, Fault::None));
+    let mut shop = load_untold_with(&w, &faulty, app_id, PaykitConfig::default()).await;
+    assert!(!signed_endpoints(&shop).is_empty());
+    renew_and_adopt(&w, &mut shop).await;
+    assert!(signed_endpoints(&shop).is_empty());
+    assert!(still_held(&mut shop).await);
+}
+
+#[tokio::test]
+async fn test_own_record_two_withdrawals_to_the_same_endpoints_are_two_notices() {
+    // Withdrawing A to no endpoint is told and left unacknowledged. B is offered alone, and
+    // withdrawing it to no endpoint is saved and held in turn: a second notice, naming B,
+    // not lost under the first because both leave the same endpoints.
+    let w = World::new();
+    let kept = store();
+    let mut shop = shop_on(&w, false, Arc::clone(&kept)).await;
+    save_withdrawal_unsigned(&w, &mut shop).await;
+    let app_id = shop.app_id();
+    drop(shop);
+    let recorded = Recorded::over(Arc::clone(&w.router) as Arc<dyn Transport>);
+    let mut shop = load_recorded(&w, Arc::clone(&kept), app_id, publishing(), &recorded).await;
+    let first = told(&shop).await.unwrap();
+    assert_eq!(
+        ids(&first.endpoints_withdrawn),
+        vec![a().as_str().to_owned()]
+    );
+    shop.receive(None).await.unwrap();
+    shop.set_public_endpoints(
+        std::collections::BTreeMap::from([(b(), payload("bc1q"))]),
+        None,
+    )
+    .await
+    .unwrap();
+    time_read_fails(&w, &w.bob);
+    assert!(shop.remove_public_endpoint(&b()).await.is_err());
+    drop(shop);
+    let shop = load_recorded(&w, kept, app_id, publishing(), &recorded).await;
+    let mut withdrawn: Vec<Vec<String>> = shop
+        .notices()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|notice| notice.kind == NoticeKind::PublicEndpointChangeNotPublished)
+        .map(|notice| ids(&notice.endpoints_withdrawn))
+        .collect();
+    withdrawn.sort();
+    assert_eq!(
+        withdrawn,
+        vec![vec![a().as_str().to_owned()], vec![b().as_str().to_owned()]]
+    );
+}
+
+/// A store whose next commit deleting a key that starts with `prefix` fails, applying
+/// nothing.
+struct FailingDelete {
+    inner: Arc<dyn StateStore>,
+    prefix: Mutex<Option<Vec<u8>>>,
+}
+
+impl FailingDelete {
+    fn failing(&self, batch: &pubky_dispatch_client::store::WriteBatch) -> bool {
+        let mut prefix = self.prefix.lock().unwrap();
+        let hit = prefix.as_ref().is_some_and(|prefix| {
+            batch.writes().iter().any(|write| {
+                matches!(write, pubky_dispatch_client::store::Write::Delete { key, .. }
+                    if key.starts_with(prefix))
+            })
+        });
+        if hit {
+            *prefix = None;
+        }
+        hit
+    }
+}
+
+impl StateStore for FailingDelete {
+    fn get(
+        &self,
+        ns: &str,
+        key: &[u8],
+    ) -> Result<Option<Vec<u8>>, pubky_dispatch_client::error::StoreError> {
+        self.inner.get(ns, key)
+    }
+
+    fn scan(
+        &self,
+        ns: &str,
+        prefix: &[u8],
+        after: Option<&[u8]>,
+        limit: u32,
+    ) -> Result<Vec<pubky_dispatch_client::store::KeyValue>, pubky_dispatch_client::error::StoreError>
+    {
+        self.inner.scan(ns, prefix, after, limit)
+    }
+
+    fn commit(
+        &self,
+        batch: pubky_dispatch_client::store::WriteBatch,
+    ) -> Result<(), pubky_dispatch_client::error::StoreError> {
+        if self.failing(&batch) {
+            return Err(pubky_dispatch_client::error::StoreError::Unavailable);
+        }
+        self.inner.commit(batch)
+    }
+
+    fn acquire(
+        &self,
+        ns: &str,
+        owner: pubky_dispatch_client::store::StoreOwner,
+    ) -> Result<
+        pubky_dispatch_client::store::AcquireOutcome,
+        pubky_dispatch_client::error::StoreError,
+    > {
+        self.inner.acquire(ns, owner)
+    }
+
+    fn commit_if(
+        &self,
+        ns: &str,
+        owner: pubky_dispatch_client::store::StoreOwner,
+        batch: pubky_dispatch_client::store::WriteBatch,
+    ) -> Result<pubky_dispatch_client::store::CommitOutcome, pubky_dispatch_client::error::StoreError>
+    {
+        if self.failing(&batch) {
+            return Err(pubky_dispatch_client::error::StoreError::Unavailable);
+        }
+        self.inner.commit_if(ns, owner, batch)
+    }
+}
+
+#[tokio::test]
+async fn test_own_record_notice_acknowledged_before_its_clear_is_shown_once() {
+    // The notice is written at the load and the clear after it fails. The host acknowledges
+    // it while the change is still held; the next receive clears the change, and the notice
+    // isn't shown again.
+    let w = World::new();
+    let kept = store();
+    let mut shop = shop_on(&w, false, Arc::clone(&kept)).await;
+    save_withdrawal_unsigned(&w, &mut shop).await;
+    let app_id = shop.app_id();
+    drop(shop);
+    let failing = Arc::new(FailingDelete {
+        inner: kept,
+        prefix: Mutex::new(Some(b"rheld/".to_vec())),
+    });
+    let mut shop = Paykit::load(
+        w.env(&w.bob, Arc::clone(&failing) as Arc<dyn StateStore>),
+        publishing(),
+        app_id,
+        w.rail.clone(),
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    assert!(failing.prefix.lock().unwrap().is_none());
+    assert!(shop
+        .app_mut()
+        .held_record_edit("paykit")
+        .await
+        .unwrap()
+        .is_some());
+    let notice = told(&shop).await.unwrap();
+    assert_eq!(
+        ids(&notice.endpoints_withdrawn),
+        vec![a().as_str().to_owned()]
+    );
+    shop.acknowledge_notice(&notice.id).await.unwrap();
+    assert!(told(&shop).await.is_none());
+    shop.receive(None).await.unwrap();
+    assert!(!still_held(&mut shop).await);
+    assert!(told(&shop).await.is_none());
+}
+
+/// Sign `member` as Paykit's, as another writer of the record could, not through Paykit.
+async fn sign_paykit_member(shop: &mut Paykit, member: serde_json::Map<String, Value>) {
+    shop.app_mut()
+        .set_protocol_member("paykit", Some(member), None)
+        .await
+        .unwrap();
+}
+
+fn unreadable_member() -> serde_json::Map<String, Value> {
+    serde_json::json!({ "public_endpoints": "not an object" })
+        .as_object()
+        .cloned()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn test_own_record_unreadable_signed_member_with_nothing_held_opens_the_gate() {
+    // The record signed holds a Paykit member that doesn't read, and nothing is held or
+    // asked: there is nothing to tell, so nothing waits for a telling.
+    let w = World::new();
+    let kept = store();
+    let mut shop = shop_on(&w, false, Arc::clone(&kept)).await;
+    sign_paykit_member(&mut shop, unreadable_member()).await;
+    let app_id = shop.app_id();
+    drop(shop);
+    let recorded = Recorded::over(Arc::clone(&w.router) as Arc<dyn Transport>);
+    let mut shop = load_recorded(&w, kept, app_id, publishing(), &recorded).await;
+    assert!(told(&shop).await.is_none());
+    let error = shop.update_own_record().await.unwrap_err();
+    assert!(
+        !matches!(
+            error,
+            paykit_sdk::PaykitError::Refused(paykit_sdk::Refusal::NotNow(
+                paykit_sdk::NotNowReason::EndpointChangeUntold
+            ))
+        ),
+        "{error:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_own_record_held_change_over_an_unreadable_signed_member_is_told_and_cleared() {
+    // The record signed holds a Paykit member that doesn't read, and a change saved after it
+    // is held at the load: it is told naming no endpoint, and cleared.
+    let w = World::new();
+    let kept = store();
+    let mut shop = shop_on(&w, false, Arc::clone(&kept)).await;
+    sign_paykit_member(&mut shop, unreadable_member()).await;
+    let offer = PaykitMember {
+        endpoint_identifiers: Vec::new(),
+        public_endpoints: std::collections::BTreeMap::from([(a(), payload("lno1tips"))]),
+    };
+    time_read_fails(&w, &w.bob);
+    assert!(shop
+        .app_mut()
+        .set_protocol_member("paykit", Some(offer.to_member()), None)
+        .await
+        .is_err());
+    let app_id = shop.app_id();
+    drop(shop);
+    let recorded = Recorded::over(Arc::clone(&w.router) as Arc<dyn Transport>);
+    let mut shop = load_recorded(&w, kept, app_id, publishing(), &recorded).await;
+    let notice = told(&shop).await.unwrap();
+    assert!(
+        notice.endpoints_withdrawn.is_empty()
+            && notice.endpoints_offered.is_empty()
+            && notice.endpoints_changed.is_empty()
+    );
+    assert!(shop
+        .app_mut()
+        .held_record_edit("paykit")
+        .await
+        .unwrap()
+        .is_none());
+    assert!(!recorded.sent("lno1tips"));
+}
+
+#[tokio::test]
+async fn test_own_record_unreadable_held_change_is_told_by_an_ask_only_on_the_record_signed() {
+    // A held change that doesn't read, beside an ask made on another record than the one
+    // signed now: that ask may name an endpoint offered since, so the change is told naming no
+    // endpoint. An ask made on the record signed now is told as asked.
+    for (base_is_signed, named) in [(false, Vec::new()), (true, vec![a().as_str().to_owned()])] {
+        let w = World::new();
+        let kept = store();
+        let mut shop = shop_on(&w, false, Arc::clone(&kept)).await;
+        time_read_fails(&w, &w.bob);
+        assert!(shop
+            .app_mut()
+            .set_protocol_member("paykit", Some(unreadable_member()), None)
+            .await
+            .is_err());
+        let base = if base_is_signed { digest(&[]) } else { [8; 32] };
+        keep_ask(&mut shop, [9; 32], base, &[a().as_str()]).await;
+        let app_id = shop.app_id();
+        drop(shop);
+        let recorded = Recorded::over(Arc::clone(&w.router) as Arc<dyn Transport>);
+        let shop = load_recorded(&w, kept, app_id, publishing(), &recorded).await;
+        let notice = told(&shop).await.unwrap();
+        assert_eq!(ids(&notice.endpoints_withdrawn), named, "{base_is_signed}");
+        assert!(notice.endpoints_offered.is_empty() && notice.endpoints_changed.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn test_own_record_restore_in_place_over_an_unreadable_ask_completes() {
+    // The installation's ask doesn't read: a restore in place leaves it out, as the settling
+    // reads it, and completes.
+    let w = World::new();
+    let kept = store();
+    let mut shop = shop_on(&w, false, Arc::clone(&kept)).await;
+    let backup = shop.backup().await.unwrap();
+    shop.app_mut()
+        .protocol_commit(
+            "paykit",
+            &[pubky_dispatch_client::app::LocalWrite::Put {
+                key: b"ec".to_vec(),
+                value: b"not an ask".to_vec(),
+            }],
+        )
+        .await
+        .unwrap();
+    drop(shop);
+    let restored = Paykit::restore(
+        w.env(&w.bob, kept),
+        publishing(),
+        &backup,
+        w.rail.clone(),
+        w.timer(),
+    )
+    .await;
+    assert!(restored.is_ok(), "{:?}", restored.err());
 }

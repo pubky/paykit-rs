@@ -654,13 +654,18 @@ pub(crate) fn restore_paykit_layer(
             .previous_local_scan(prefix.as_bytes())
             .map_err(|_| "the endpoint change cannot be read")?
         {
-            let read = if prefix == key::ENDPOINT_CHANGE {
-                state::restored::<crate::own_record::EndpointChange>(&key, &value, &binder)
-                    .map(drop)
+            if prefix == key::ENDPOINT_CHANGE {
+                // An ask that doesn't read names nothing, as the settling reads it: left out,
+                // so the backup's goes in its place, if any.
+                if state::restored::<crate::own_record::EndpointChange>(&key, &value, &binder)
+                    .is_err()
+                {
+                    continue;
+                }
             } else {
-                state::restored::<KeptNotice>(&key, &value, &binder).map(drop)
-            };
-            read.map_err(|_| "invalid retained endpoint change")?;
+                state::restored::<KeptNotice>(&key, &value, &binder)
+                    .map_err(|_| "invalid retained endpoint change notice")?;
+            }
             endpoint_rows.insert(key, value);
         }
     }
