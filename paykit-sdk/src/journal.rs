@@ -451,14 +451,51 @@ pub(crate) enum UserResolution {
     Failed,
 }
 
+/// Where this installation first saw an attempt's payment made, of its own journal or not:
+/// read first wherever whether the attempt was paid is decided, and never taken back by a
+/// later read that no longer shows it (Paykit spec 7.2, 8.3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
+pub(crate) enum PaidSource {
+    /// The payment method's proof, journaled with the entry.
+    MethodProof,
+    /// The method's account history lists it paid.
+    PaidHistory,
+    /// A payer proof: on a dated write of the current payer record, or a copy held without
+    /// one.
+    PayerProof {
+        /// The proof was on a dated write of the current record.
+        dated: bool,
+    },
+    /// A signed `done` on the claim, verified.
+    SignedDone,
+    /// A claim read showing `done`, unsigned.
+    ClaimShowsDone,
+}
+
+/// The first sighting of an attempt's payment made ([`AttemptFacts::paid_seen`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PaidSeen {
+    /// Where it was seen.
+    pub(crate) source: PaidSource,
+    /// The obligation the sighting was for.
+    #[serde(with = "serde_b64")]
+    pub(crate) obligation: [u8; 32],
+    /// When, on the device clock.
+    pub(crate) first_seen_ms: u64,
+}
+
 /// What this app knows of one attempt beside its journal entry (`jf/<attempt_id>`): what the
 /// payment method said of it. No batch carries it. A batch kept from before carries the
 /// entry's journal copy as it was when the batch was built, and applying it replaces the
 /// entry, so the method's word could not survive in the entry alone; here nothing but the
 /// writers of [`Paykit::learn`] touches it, and it only grows ([`AttemptFacts::grows_to`]).
 /// Every read of an entry lays it over the entry ([`JournalEntry::with_facts`]). It names its
-/// attempt, as the entry does, and is read only at that attempt's key. Deleted only with its
-/// entry (Paykit spec 7.2).
+/// attempt, as the entry does, and is read only at that attempt's key. It also keeps where
+/// the payment was first seen made, which an attempt this installation didn't journal can
+/// hold too. Deleted only with its entry, or, holding a sighting, once the Allowance ledger
+/// no longer lists the attempt too (Paykit spec 7.2, 8.3).
 ///
 /// [`Paykit::learn`]: crate::Paykit
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -479,6 +516,11 @@ pub(crate) struct AttemptFacts {
     /// The recheck asks the method's history about that failure again, while the history
     /// keeps it. Only the recheck clears it.
     pub(crate) ask_again: bool,
+    /// Where the payment was first seen made. Never changed once set.
+    pub(crate) paid_seen: Option<PaidSeen>,
+    /// The Allowance ledger no longer lists the attempt: the sighting is needed no more once
+    /// the entry goes. Never cleared.
+    pub(crate) ledger_dropped: bool,
 }
 
 impl AttemptFacts {
@@ -500,16 +542,31 @@ impl AttemptFacts {
                 || (next.proof == self.proof && next.paid_at_ms == self.paid_at_ms))
             && (self.proof_msg_id.is_none() || next.proof_msg_id == self.proof_msg_id)
             && (!self.method_failed || next.method_failed)
+            && (self.paid_seen.is_none() || next.paid_seen == self.paid_seen)
+            && (!self.ledger_dropped || next.ledger_dropped)
     }
 
     /// The facts both copies of one attempt hold, for an in-place restore: a proof either
     /// holds, the first one where both do (Paykit spec 7.2), with the `msg_id` it was sent
     /// under, and the method's failure where either says it. The recheck asks again where
-    /// either still asks and no proof answers it. Copies of two attempts are a corrupt store.
+    /// either still asks and no proof answers it. The earlier sighting of the payment where
+    /// both hold one, which must be of the same obligation. Copies of two attempts, or two
+    /// sightings of different obligations, are a corrupt store.
     pub(crate) fn merged(self, other: Self) -> Result<Self> {
         if self.attempt_id != other.attempt_id {
             return Err(PaykitError::corrupt());
         }
+        let paid_seen = match (self.paid_seen, other.paid_seen) {
+            (Some(a), Some(b)) if a.obligation != b.obligation => {
+                return Err(PaykitError::corrupt())
+            }
+            (Some(a), Some(b)) => Some(if b.first_seen_ms < a.first_seen_ms {
+                b
+            } else {
+                a
+            }),
+            (a, b) => a.or(b),
+        };
         let (proof, paid_at_ms, proof_msg_id) = match (self.proof, other.proof) {
             (Some(proof), _) => (Some(proof), self.paid_at_ms, self.proof_msg_id),
             (None, Some(proof)) => (Some(proof), other.paid_at_ms, other.proof_msg_id),
@@ -522,6 +579,8 @@ impl AttemptFacts {
             paid_at_ms,
             proof_msg_id,
             method_failed: self.method_failed || other.method_failed,
+            paid_seen,
+            ledger_dropped: self.ledger_dropped || other.ledger_dropped,
         })
     }
 
