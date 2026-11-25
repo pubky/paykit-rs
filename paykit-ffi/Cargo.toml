@@ -14,7 +14,7 @@ crate-type = ["lib", "cdylib", "staticlib"]
 
 [features]
 bindgen = ["uniffi/cli"]
-test-wallet = ["dep:pubky-switch-harness", "dep:pubky-switch-signer", "paykit-lib/signer"]
+test-wallet = ["dep:pubky-dispatch-harness", "dep:pubky-dispatch-signer", "paykit-lib/signer"]
 
 [[bin]]
 name = "paykit-bindgen"
@@ -29,10 +29,10 @@ path = "tests/hosts/issuer.rs"
 async-trait = "0.1"
 paykit-sdk = { path = "../paykit-sdk" }
 paykit-lib.workspace = true
-pubky-switch-client = { workspace = true, features = ["tokio"] }
-pubky-switch-core.workspace = true
-pubky-switch-harness = { workspace = true, optional = true }
-pubky-switch-signer = { workspace = true, optional = true }
+pubky-dispatch-client = { workspace = true, features = ["tokio"] }
+pubky-dispatch-core.workspace = true
+pubky-dispatch-harness = { workspace = true, optional = true }
+pubky-dispatch-signer = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -43,8 +43,8 @@ uniffi = { version = "=0.29.5", features = ["tokio"] }
 paykit-sdk = { path = "../paykit-sdk", features = ["test-support"] }
 base64 = "0.22"
 paykit-lib = { workspace = true, features = ["signer"] }
-pubky-switch-harness.workspace = true
-pubky-switch-signer.workspace = true
+pubky-dispatch-harness.workspace = true
+pubky-dispatch-signer.workspace = true
 rusqlite = "0.32"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt", "test-util", "time"] }

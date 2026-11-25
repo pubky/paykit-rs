@@ -123,7 +123,7 @@ async fn check_subscription_periods(
 ) -> TestResult {
     use paykit_lib::bodies::PeriodDetails;
     use paykit_sdk::{Refusal, RequestStatus};
-    use pubky_switch_client::app::{AppEvent, UserConfirmed};
+    use pubky_dispatch_client::app::{AppEvent, UserConfirmed};
 
     let Subscription {
         mut buyer,
@@ -172,11 +172,11 @@ async fn check_subscription_periods(
             );
             rail.next(paykit_sdk::rail::Behaviour::Hang);
         }
-        let (returned, result) = dispatch_period(buyer, request, period).await?;
+        let (returned, result) = handoff_period(buyer, request, period).await?;
         buyer = returned;
         let attempt_id = if paid.is_empty() {
             let PayOutcome::Pending { attempt_id, .. } = result.outcome? else {
-                return Err("first dispatch did not stay in flight".into());
+                return Err("first handoff did not stay in flight".into());
             };
             let app_id = buyer.app_id();
             drop(buyer);
@@ -276,7 +276,7 @@ async fn check_subscription_periods(
         "{:?}",
         report.report.events
     );
-    let (returned, withheld) = dispatch_period(buyer, request, third).await?;
+    let (returned, withheld) = handoff_period(buyer, request, third).await?;
     buyer = returned;
     let withheld = withheld.outcome.unwrap_err();
     assert!(
@@ -290,7 +290,7 @@ async fn check_subscription_periods(
         buyer.request(&request).await?.status,
         RequestStatus::Cancelled
     );
-    let (returned, stopped) = dispatch_period(buyer, request, third).await?;
+    let (returned, stopped) = handoff_period(buyer, request, third).await?;
     buyer = returned;
     let stopped = stopped.outcome.unwrap_err();
     assert!(
@@ -333,7 +333,7 @@ async fn check_subscription_periods(
     Ok(())
 }
 
-async fn dispatch_period(
+async fn handoff_period(
     mut buyer: Paykit,
     request: RequestRef,
     period: PeriodRef,

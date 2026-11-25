@@ -36,11 +36,11 @@ use paykit_sdk::{
     AppScopes, PayOptions, PayOutcome, Paykit, PeriodPrice, ReceiptsOf, RequestDraft, RequestRef,
     RequestedScopes, Timer,
 };
-use pubky_switch_client::app::{Delivery, SharedRecord};
-use pubky_switch_client::store::MemoryStore;
-use pubky_switch_client::transport::BoxFuture;
-use pubky_switch_harness::{parties::Asking, Backend, World};
-use pubky_switch_signer::{Protocols, Signer};
+use pubky_dispatch_client::app::{Delivery, SharedRecord};
+use pubky_dispatch_client::store::MemoryStore;
+use pubky_dispatch_client::transport::BoxFuture;
+use pubky_dispatch_harness::{parties::Asking, Backend, World};
+use pubky_dispatch_signer::{Protocols, Signer};
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
@@ -77,7 +77,7 @@ async fn join(
 ) -> TestResult<Paykit> {
     let owner = world.identity(identity)?;
     let keys = world.app_keys(&owner, name)?;
-    let auth = pubky_switch_core::enc::hash(name.as_bytes());
+    let auth = pubky_dispatch_core::enc::hash(name.as_bytes());
     let names: Vec<_> = scopes.scopes.iter().map(String::as_str).collect();
     let request = Asking::for_scopes_with_paths(keys, &names, &[], auth)?;
     let approved = signer
@@ -636,7 +636,7 @@ async fn test_period_rate_from_a_second_payee_app_requires_its_current_authority
 async fn second_app_rate(world: &World, issuer: QuoteIssuer) -> TestResult {
     use paykit_lib::periods::{AnchoredRule, Recurrence, Unit};
     use paykit_sdk::rail::Behaviour;
-    use pubky_switch_signer::UserConfirmed;
+    use pubky_dispatch_signer::UserConfirmed;
 
     let rail = Arc::new(FakeRail::with_clock(world.clock().clone()));
     rail.set_declaration(
@@ -894,7 +894,7 @@ async fn follow_subscriber(wallet: &mut Paykit) -> TestResult<paykit_sdk::Reconc
         }
         let report = wallet.reconcile().await?;
         wallet
-            .end_reconcile(pubky_switch_client::app::UserConfirmed::new())
+            .end_reconcile(pubky_dispatch_client::app::UserConfirmed::new())
             .await?;
         return Ok(report);
     }
@@ -918,8 +918,8 @@ async fn reconcile_fractional_periods(world: &World) -> TestResult {
     use paykit_lib::collections::Collection;
     use paykit_lib::derive::request_obligation;
     use paykit_lib::periods::{AnchoredRule, Recurrence, Unit};
-    use pubky_switch_client::app::{
-        ClaimOp, Collection as SwitchCollection, ObligationDeadline, OpBatch, RecordTarget,
+    use pubky_dispatch_client::app::{
+        ClaimOp, Collection as DispatchCollection, ObligationDeadline, OpBatch, RecordTarget,
     };
 
     let origin = "https://subscriber.payment.test";
@@ -969,7 +969,7 @@ async fn reconcile_fractional_periods(world: &World) -> TestResult {
         .await?;
         let target = |natural: Vec<u8>| {
             RecordTarget::new(
-                SwitchCollection::new(
+                DispatchCollection::new(
                     Collection::PayerActivity.name(),
                     Collection::PayerActivity.policy(None),
                 ),
@@ -1068,7 +1068,7 @@ async fn reconcile_fractional_periods(world: &World) -> TestResult {
     world.add_switch(recovered, &[&subscriber]).await?;
     Box::pin(signer.declare_provider_loss(
         recovered,
-        pubky_switch_signer::UserConfirmed::shown_and_confirmed(),
+        pubky_dispatch_signer::UserConfirmed::shown_and_confirmed(),
     ))
     .await?;
     world.advance_ms(1000);
@@ -1096,7 +1096,7 @@ async fn reconcile_fractional_periods(world: &World) -> TestResult {
 
 async fn early_paid_period_after_loss(world: &World) -> TestResult {
     use paykit_lib::periods::{AnchoredRule, Recurrence, Unit};
-    use pubky_switch_client::app::UserConfirmed;
+    use pubky_dispatch_client::app::UserConfirmed;
 
     let mut signer = Box::pin(setup_identity(
         world,
@@ -1217,7 +1217,7 @@ async fn early_paid_period_after_loss(world: &World) -> TestResult {
     world.add_switch(recovered_origin, &[&subscriber]).await?;
     Box::pin(signer.declare_provider_loss(
         recovered_origin,
-        pubky_switch_signer::UserConfirmed::shown_and_confirmed(),
+        pubky_dispatch_signer::UserConfirmed::shown_and_confirmed(),
     ))
     .await
     .map_err(|e| format!("declare payer provider loss: {e}"))?;
@@ -1297,7 +1297,7 @@ async fn early_paid_period_after_loss(world: &World) -> TestResult {
     );
     assert_eq!(rail.all_executions().values().sum::<u64>(), 1);
 
-    let later = loss.uncertain_until_ms + pubky_switch_core::records::CLOCK_TOLERANCE_MS + 1;
+    let later = loss.uncertain_until_ms + pubky_dispatch_core::records::CLOCK_TOLERANCE_MS + 1;
     world.advance_ms(later.saturating_sub(world.now_ms()));
     shop.receive(None).await?;
     let fresh = Box::pin(subscribe(

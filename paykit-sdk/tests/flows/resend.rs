@@ -2,7 +2,7 @@
 //! which re-sends what the request selects, at most once an hour per message.
 
 use paykit_sdk::ResendSelection;
-use pubky_switch_client::clock::Clock;
+use pubky_dispatch_client::clock::Clock;
 
 use crate::common::{draft, World, HOUR_MS};
 
@@ -21,7 +21,7 @@ async fn test_resend_request_answered_once_an_hour() {
     // The phone joins after the request went out: it was never sealed to it.
     let mut phone = w.wallet("phone").await;
     // Bob's apps read alice's identity.json again once their copy is older than 10 minutes,
-    // and then take the phone's messages (Switch spec 4.3).
+    // and then take the phone's messages (Dispatch spec 4.3).
     w.clock.advance_ms(11 * 60_000);
     let ask = ResendSelection::default().with_request_hashes(vec![request.request_hash]);
     phone.request_resend(w.bob_id(), ask.clone()).await.unwrap();
@@ -41,7 +41,7 @@ async fn test_resend_request_answered_once_an_hour() {
         report
             .events
             .iter()
-            .any(|e| matches!(e, pubky_switch_client::app::AppEvent::Duplicate { .. })),
+            .any(|e| matches!(e, pubky_dispatch_client::app::AppEvent::Duplicate { .. })),
         "{:?}",
         report.events
     );
@@ -52,7 +52,7 @@ async fn test_resend_selecting_nothing_refused() {
     let w = World::new();
     let mut phone = w.wallet("phone").await;
     // Bob's apps read alice's identity.json again once their copy is older than 10 minutes,
-    // and then take the phone's messages (Switch spec 4.3).
+    // and then take the phone's messages (Dispatch spec 4.3).
     w.clock.advance_ms(11 * 60_000);
     let refused = phone
         .request_resend(w.bob_id(), ResendSelection::default())

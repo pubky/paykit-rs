@@ -8,12 +8,12 @@ use paykit_sdk::app_records::{
     PublicAppFailureReason, PublicPaymentList, MAX_PUBLIC_ENDPOINTS, MAX_PUBLIC_PAYLOAD_BYTES,
 };
 use paykit_sdk::{PayOptions, PayOutcome, Paykit, PaymentMode, Refusal};
-use pubky_switch_client::app::{HomeserverReader, UserConfirmed};
-use pubky_switch_client::clock::{Clock, TestClock};
-use pubky_switch_client::error::{StoreError, TransportError};
-use pubky_switch_client::testing::TestHomeserver;
-use pubky_switch_client::transport::BoxFuture;
-use pubky_switch_core::records::{app_record_path, IDENTITY_PATH};
+use pubky_dispatch_client::app::{HomeserverReader, UserConfirmed};
+use pubky_dispatch_client::clock::{Clock, TestClock};
+use pubky_dispatch_client::error::{StoreError, TransportError};
+use pubky_dispatch_client::testing::TestHomeserver;
+use pubky_dispatch_client::transport::BoxFuture;
+use pubky_dispatch_core::records::{app_record_path, IDENTITY_PATH};
 use serde_json::{json, Map, Value};
 
 use crate::common::{btc, request_from, store, World, HOUR_MS};
@@ -106,8 +106,8 @@ async fn wallet_reading_through(w: &World) -> (Paykit, Arc<FailingRecords>) {
 async fn wallet_reading_through_on(
     w: &World,
     wrap: impl FnOnce(
-        Arc<dyn pubky_switch_client::store::StateStore>,
-    ) -> Arc<dyn pubky_switch_client::store::StateStore>,
+        Arc<dyn pubky_dispatch_client::store::StateStore>,
+    ) -> Arc<dyn pubky_dispatch_client::store::StateStore>,
 ) -> (Paykit, Arc<FailingRecords>) {
     let base = store();
     let app_id = w.wallet_on("wallet", Arc::clone(&base)).await.app_id();
@@ -308,7 +308,7 @@ async fn test_public_read_one_time_judges_every_app() {
         now,
         Some(now + HOUR_MS),
     );
-    // The Homeserver keeps serving the identity.json before the seller wallet joined, and bob's switch
+    // The Homeserver keeps serving the identity.json before the seller wallet joined, and bob's Dispatch
     // the newer one listing it after the shop: the seller wallet's record is read after the shop's,
     // and that read takes the hour.
     let older = w.homeserver.file(w.bob_id(), IDENTITY_PATH).unwrap();
@@ -428,8 +428,8 @@ async fn test_public_read_identity_source_rereads_a_directory_only_pass() {
         .unwrap();
     assert_eq!(started.identity.doc.hash(), higher.hash());
     assert_eq!(started.identity.read_at_ms, None);
-    // Records and the switch read run together. The second app's read happens after the
-    // first app's old bytes have returned. The switch then qualifies the very same hash.
+    // Records and the Dispatch read run together. The second app's read happens after the
+    // first app's old bytes have returned. The Dispatch then qualifies the very same hash.
     let changed = Arc::clone(&w);
     reads.on_read(&apps[1].1, move || {
         changed.clock.advance_ms(1);
@@ -451,7 +451,7 @@ async fn test_public_read_identity_source_rereads_a_directory_only_pass() {
 
 #[tokio::test]
 async fn test_public_read_failed_lookup_time_does_not_shorten_the_homeserver_observation() {
-    use pubky_switch_client::app::SwitchCopy;
+    use pubky_dispatch_client::app::SwitchCopy;
     let w = Arc::new(World::new());
     let (mut wallet, reads) = wallet_reading_through(&w).await;
     let apps = bob_apps(&w, &["shop", "seller-wallet"]).await;
@@ -497,8 +497,8 @@ async fn test_public_read_failed_lookup_time_does_not_shorten_the_homeserver_obs
 
 #[tokio::test]
 async fn test_public_read_identity_source_rereads_after_rollback_past_either_observation() {
-    use pubky_switch_client::testing::START_MS;
-    use pubky_switch_core::records::IdentityDoc;
+    use pubky_dispatch_client::testing::START_MS;
+    use pubky_dispatch_core::records::IdentityDoc;
 
     for later_homeserver in [true, false] {
         let base = START_MS;
@@ -518,7 +518,7 @@ async fn test_public_read_identity_source_rereads_after_rollback_past_either_obs
             base,
             expiry,
         );
-        // A higher version known only from the Homeserver. A later switch lookup
+        // A higher version known only from the Homeserver. A later Dispatch lookup
         // can complete without supplying that version again.
         let mut body = w.bob.body();
         body.version += 1;
@@ -577,7 +577,7 @@ async fn test_public_read_identity_source_rereads_after_rollback_past_either_obs
 
 #[tokio::test]
 async fn test_public_read_identity_source_rechecks_after_a_newly_listed_apps_read() {
-    use pubky_switch_core::records::RemovedApp;
+    use pubky_dispatch_core::records::RemovedApp;
     let w = Arc::new(World::new());
     let (mut wallet, reads) = wallet_reading_through(&w).await;
     bob_apps(&w, &["shop"]).await;
@@ -591,7 +591,7 @@ async fn test_public_read_identity_source_rechecks_after_a_newly_listed_apps_rea
     w.homeserver.put(w.bob_id(), IDENTITY_PATH, first_doc);
     let before = w.clock.now_ms();
     w.clock.advance_ms(4 * 60_000);
-    // The switch adds the seller wallet to the second pass. Its record returns after the
+    // The Dispatch adds the seller wallet to the second pass. Its record returns after the
     // clock moves behind that lookup. A new lookup now shows the seller wallet's removal.
     let changed = Arc::clone(&w);
     reads.on_read(&seller_wallet.1, move || {
@@ -623,9 +623,9 @@ async fn test_public_read_fetches_the_replacement_after_an_open_renewal_closes()
 }
 
 async fn read_during_renewal(already_listed: bool) {
-    use pubky_switch_client::testing::{issue_cert, AppSpec};
-    use pubky_switch_core::ops::OpKind;
-    use pubky_switch_core::records::{AppRecord, RenewedCert};
+    use pubky_dispatch_client::testing::{issue_cert, AppSpec};
+    use pubky_dispatch_core::ops::OpKind;
+    use pubky_dispatch_core::records::{AppRecord, RenewedCert};
 
     let w = Arc::new(World::new());
     let (mut wallet, reads) = wallet_reading_through(&w).await;
@@ -701,7 +701,7 @@ async fn read_during_renewal(already_listed: bool) {
 
 #[tokio::test]
 async fn test_public_read_refreshes_after_a_newly_listed_apps_slow_read() {
-    use pubky_switch_core::records::RemovedApp;
+    use pubky_dispatch_core::records::RemovedApp;
 
     let w = Arc::new(World::new());
     let (mut wallet, reads) = wallet_reading_through(&w).await;
@@ -715,7 +715,7 @@ async fn test_public_read_refreshes_after_a_newly_listed_apps_slow_read() {
     );
     w.homeserver.put(w.bob_id(), IDENTITY_PATH, first_doc);
 
-    // The switch lists the seller wallet. While its record is read a kiosk joins, so the next
+    // The Dispatch lists the seller wallet. While its record is read a kiosk joins, so the next
     // identity lookup must also collect the kiosk's record.
     let kiosk = w.bob.identity().app_keys("kiosk").app_id_bytes();
     let world = Arc::clone(&w);
@@ -952,7 +952,7 @@ async fn test_public_read_required_app_in_conflict_pays_the_earlier_record() {
         expiry,
     );
     wallet.public_endpoints(&w.bob_id(), None).await.unwrap();
-    // Two bodies at one updated_at: the shop keeps the earlier record it holds (Switch spec
+    // Two bodies at one updated_at: the shop keeps the earlier record it holds (Dispatch spec
     // 4.2), so a request requiring it pays that record's endpoint and tells the conflict.
     publish_app_at(
         &w,
@@ -981,7 +981,7 @@ async fn test_public_read_required_app_in_conflict_pays_the_earlier_record() {
     assert_eq!(failures.len(), 1, "{failures:?}");
     assert!(
         matches!(&failures[0].reason, PublicAppFailureReason::Refused(rule)
-            if rule.contains("Switch spec 4.2")),
+            if rule.contains("Dispatch spec 4.2")),
         "{failures:?}"
     );
 }
@@ -1020,11 +1020,11 @@ async fn test_public_read_failures_told_with_every_payment_result() {
         "{failed:?}"
     );
     assert!(shop_failed(&failed.public_failures));
-    // The payer's switch can't be reached for the attempt: an error, and the shop's
+    // The payer's Dispatch can't be reached for the attempt: an error, and the shop's
     // failure is still told.
     w.alice
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+        .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
             path: "/ops".into(),
             after: 0,
         });
@@ -1132,7 +1132,7 @@ async fn test_public_read_payment_tells_a_conflict_it_first_finds() {
     assert_eq!(public_failures[0].app_id, apps[0].1);
     assert!(
         matches!(&public_failures[0].reason, PublicAppFailureReason::Refused(rule)
-            if rule.contains("Switch spec 4.2")),
+            if rule.contains("Dispatch spec 4.2")),
         "{public_failures:?}"
     );
     let payments = wallet.payments().await.unwrap();
@@ -1518,13 +1518,13 @@ async fn test_public_read_earlier_unkept_group_keeps_the_later_hold() {
 /// A store that moves the world's clock on at the first read, once armed, of the records a
 /// reader keeps of a payee app (`ar/`).
 struct ClockOnSeenRead {
-    inner: Arc<dyn pubky_switch_client::store::StateStore>,
+    inner: Arc<dyn pubky_dispatch_client::store::StateStore>,
     clock: Arc<TestClock>,
     advance_ms: u64,
     armed: std::sync::atomic::AtomicBool,
 }
 
-impl pubky_switch_client::store::StateStore for ClockOnSeenRead {
+impl pubky_dispatch_client::store::StateStore for ClockOnSeenRead {
     fn get(&self, ns: &str, key: &[u8]) -> Result<Option<Vec<u8>>, StoreError> {
         if key.windows(4).any(|w| w == b"/ar/")
             && self.armed.swap(false, std::sync::atomic::Ordering::SeqCst)
@@ -1540,28 +1540,28 @@ impl pubky_switch_client::store::StateStore for ClockOnSeenRead {
         prefix: &[u8],
         after: Option<&[u8]>,
         limit: u32,
-    ) -> Result<Vec<pubky_switch_client::store::KeyValue>, StoreError> {
+    ) -> Result<Vec<pubky_dispatch_client::store::KeyValue>, StoreError> {
         self.inner.scan(ns, prefix, after, limit)
     }
 
-    fn commit(&self, batch: pubky_switch_client::store::WriteBatch) -> Result<(), StoreError> {
+    fn commit(&self, batch: pubky_dispatch_client::store::WriteBatch) -> Result<(), StoreError> {
         self.inner.commit(batch)
     }
 
     fn acquire(
         &self,
         ns: &str,
-        owner: pubky_switch_client::store::StoreOwner,
-    ) -> Result<pubky_switch_client::store::AcquireOutcome, StoreError> {
+        owner: pubky_dispatch_client::store::StoreOwner,
+    ) -> Result<pubky_dispatch_client::store::AcquireOutcome, StoreError> {
         self.inner.acquire(ns, owner)
     }
 
     fn commit_if(
         &self,
         ns: &str,
-        owner: pubky_switch_client::store::StoreOwner,
-        batch: pubky_switch_client::store::WriteBatch,
-    ) -> Result<pubky_switch_client::store::CommitOutcome, StoreError> {
+        owner: pubky_dispatch_client::store::StoreOwner,
+        batch: pubky_dispatch_client::store::WriteBatch,
+    ) -> Result<pubky_dispatch_client::store::CommitOutcome, StoreError> {
         self.inner.commit_if(ns, owner, batch)
     }
 }
@@ -1624,13 +1624,13 @@ async fn test_public_read_time_taken_once_before_any_app_is_judged() {
 async fn test_public_read_failures_found_before_an_error_come_with_it() {
     let w = World::new();
     let fault = Arc::new(std::sync::OnceLock::<
-        Arc<pubky_switch_client::store::FaultStore>,
+        Arc<pubky_dispatch_client::store::FaultStore>,
     >::new());
     let kept = Arc::clone(&fault);
     let (mut wallet, reads) = wallet_reading_through_on(&w, move |base| {
-        let store = Arc::new(pubky_switch_client::store::FaultStore::new(
+        let store = Arc::new(pubky_dispatch_client::store::FaultStore::new(
             base,
-            pubky_switch_client::store::Fault::None,
+            pubky_dispatch_client::store::Fault::None,
         ));
         let _ = kept.set(Arc::clone(&store));
         store
@@ -1755,7 +1755,7 @@ async fn test_public_read_unretained_conflict_member_never_the_fallback_of_a_lat
     // The shop's record has a second body at its time too large to keep, so that time's
     // group is unknown. A later record replaces it, and then conflicts with a body at its
     // own time: the earlier record, which may itself be in conflict, is never the record
-    // used meanwhile (Switch spec 4.2).
+    // used meanwhile (Dispatch spec 4.2).
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let apps = bob_apps(&w, &["shop", "seller-wallet"]).await;

@@ -1,7 +1,7 @@
 import Foundation
 import Paykit
 
-/// The payer's public Payment Endpoints and outbox (Paykit spec 4, Switch spec 11).
+/// The payer's public Payment Endpoints and outbox (Paykit spec 4, Dispatch spec 11).
 func checkPublic(fixture: CheckoutFixture, wallet: NativeWallet) async throws {
     let endpoints = try await wallet.ownPublicEndpoints()
     precondition(endpoints.isEmpty)

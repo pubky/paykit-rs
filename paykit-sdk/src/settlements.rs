@@ -6,13 +6,13 @@ use paykit_lib::derive::{occurrence_tag, settlement_bucket, settlement_tag};
 use paykit_lib::records::{
     CreditDecision, CurrentBucket, OccurrenceKind, RecordBinding, SettlementBucket,
 };
-use pubky_switch_client::app::{
+use pubky_dispatch_client::app::{
     AppError, KeptReason, OpBatch, RecordRead, RecordTarget, SharedRecord,
 };
-use pubky_switch_client::client::Submitted;
-use pubky_switch_client::ClientError;
-use pubky_switch_core::http::ErrorCode;
-use pubky_switch_core::ops::{Condition, RecordVersion};
+use pubky_dispatch_client::client::Submitted;
+use pubky_dispatch_client::ClientError;
+use pubky_dispatch_core::http::ErrorCode;
+use pubky_dispatch_core::ops::{Condition, RecordVersion};
 
 use crate::activity::ActivityTarget;
 use crate::error::{Refusal, Result};
@@ -213,11 +213,11 @@ impl Paykit {
             }]
         );
         if creates_bucket {
-            if let pubky_switch_core::ops::OpKind::RecordPut(put) = &mut operation {
+            if let pubky_dispatch_core::ops::OpKind::RecordPut(put) = &mut operation {
                 // A covering hosted absence can coexist with a retained pre-loss
                 // value. Create at strict zero with its actual blinded name inputs.
                 put.expected_version = RecordVersion::NONE;
-                put.id_inputs = Some(pubky_switch_core::ops::IdInputs {
+                put.id_inputs = Some(pubky_dispatch_core::ops::IdInputs {
                     collection: write.target.collection.name.clone(),
                     blinded_key: self.app.naming_key().blind(&write.target.natural_key),
                 });
@@ -233,7 +233,7 @@ impl Paykit {
         };
         if let AppError::Kept { error: cause, .. } = &error {
             // The receipt updates its checked live occurrence. Only the new bucket
-            // needs another record slot (Paykit wire 5.7, Switch wire 6.4 and 9.3).
+            // needs another record slot (Paykit wire 5.7, Dispatch wire 6.4 and 9.3).
             if creates_bucket && refused_record_key(cause) {
                 if let Err(storage) = self
                     .raise_settlement_notice(SettlementSubject::Bucket(write.number), write.payer)
@@ -269,7 +269,7 @@ impl Paykit {
         &mut self,
         marker: Option<&str>,
     ) -> Result<()> {
-        use pubky_switch_client::app::{KeptBatchDrop, KeptBatchStatus};
+        use pubky_dispatch_client::app::{KeptBatchDrop, KeptBatchStatus};
         let Some(key) = marker else { return Ok(()) };
         let Some(state) = self
             .local_get::<crate::receipt_delivery::ReceiptBatch>(key)
@@ -290,7 +290,7 @@ impl Paykit {
     }
 }
 
-/// The verified service answer for this submission (Switch wire 7.6 and 9.3).
+/// The verified service answer for this submission (Dispatch wire 7.6 and 9.3).
 fn refused_record_key(cause: &AppError) -> bool {
     matches!(cause, AppError::Switch(ClientError::Switch {
         status: 429, code: ErrorCode::QuotaExceeded, current, ..
@@ -319,8 +319,8 @@ mod tests {
     use super::*;
     use paykit_lib::derive::natural_key;
     use paykit_lib::records::{SeenMarks, SettlementMark};
-    use pubky_switch_core::ident::NamingKey;
-    use pubky_switch_core::shared::ApplicationRef;
+    use pubky_dispatch_core::ident::NamingKey;
+    use pubky_dispatch_core::shared::ApplicationRef;
 
     #[test]
     fn test_only_the_signed_record_key_limit_identifies_a_new_bucket_refusal() {
@@ -438,7 +438,7 @@ mod tests {
                 item_hash: [4; 32],
             };
             let before = (!version.is_none()).then(|| (version, application(version)));
-            assert!(pubky_switch_core::shared::version_holds(
+            assert!(pubky_dispatch_core::shared::version_holds(
                 &key,
                 version,
                 before,
@@ -446,7 +446,7 @@ mod tests {
             ));
             let next = RecordVersion::new(1, 49);
             // The same receipt-only comparison no longer holds after the first request wins.
-            assert!(!pubky_switch_core::shared::version_holds(
+            assert!(!pubky_dispatch_core::shared::version_holds(
                 &key,
                 version,
                 Some((next, application(next))),

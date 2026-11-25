@@ -1,4 +1,4 @@
-//! After a provider loss (Paykit spec 7.3; Switch spec 12.6): which obligations stay in
+//! After a provider loss (Paykit spec 7.3; Dispatch spec 12.6): which obligations stay in
 //! doubt at the new service.
 //!
 //! An obligation is uncertain when its request or Billing Period was payable before the
@@ -22,7 +22,7 @@
 //!   confirmed it ([`crate::PayOptions::with_may_be_paid_confirmed`]); a confirmed payment
 //!   that fails leaves the doubt as it was;
 //! - no automatic payment is made on it, with no confirmation passing it, and a resume never
-//!   repeats a dispatch made before the loss;
+//!   repeats a handoff made before the loss;
 //! - the request's status reads [`crate::RequestStatus::MayBePaid`].
 //!
 //! A period of an earlier subscription stays held while its payment history is incomplete,
@@ -38,7 +38,7 @@
 //! repeats a one-time payment on a resume, the repeat of an attempt its user started included
 //! ([`Paykit::shared_loss_hold`]). A higher block floor may have existed only at the lost
 //! provider, and nothing at the replacement bounds it. `recovery_from` stays in every later
-//! `identity.json` until a later loss replaces it (Switch spec 4.3), so the hold holds through
+//! `identity.json` until a later loss replaces it (Dispatch spec 4.3), so the hold holds through
 //! moves and key changes, at every own app, one that joins or is restored later included.
 //! Nothing in v0.2 lifts it: a user's statement that an obligation wasn't paid before the loss
 //! ends only that obligation's doubt for a payment by hand. A payment the user starts by hand
@@ -48,9 +48,11 @@
 
 use paykit_lib::periods::PeriodRef;
 use paykit_lib::records::StoredMessage;
-use pubky_switch_client::app::{LocalView, LocalWrite, ProviderLoss, StoreFailure, UserConfirmed};
-use pubky_switch_core::chain::TransitionProof;
-use pubky_switch_core::records::CLOCK_TOLERANCE_MS;
+use pubky_dispatch_client::app::{
+    LocalView, LocalWrite, ProviderLoss, StoreFailure, UserConfirmed,
+};
+use pubky_dispatch_core::chain::TransitionProof;
+use pubky_dispatch_core::records::CLOCK_TOLERANCE_MS;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{PaykitError, Refusal, Result};
@@ -147,7 +149,7 @@ impl LossBoundary {
     }
 }
 
-/// The protocol's writes for `loss` (Switch spec 12.6 step 4), with its re-sends in one
+/// The protocol's writes for `loss` (Dispatch spec 12.6 step 4), with its re-sends in one
 /// commit: the boundary kept, `view` holding the one kept before. A newer loss replaces it
 /// and drops every statement of the user's about the older one; the same loss again
 /// replaces it and keeps them; an older loss writes nothing.
@@ -307,7 +309,7 @@ impl Paykit {
     }
 
     /// Recheck the signed subscription of a journaled payment before reserving or
-    /// dispatching its exact Billing Period (Paykit spec 7.3, 8.2).
+    /// handing off its exact Billing Period (Paykit spec 7.3, 8.2).
     pub(crate) async fn period_recovery_held(&self, entry: &JournalEntry) -> Result<bool> {
         let Some(period) = entry.period()? else {
             return Ok(false);
@@ -331,11 +333,11 @@ impl Paykit {
         Ok(loss.boundary.uncertain(Some(&stored)))
     }
 
-    /// Whether `entry`'s dispatch was made before a provider loss the app follows or followed:
+    /// Whether `entry`'s handoff was made before a provider loss the app follows or followed:
     /// its attempt written at a generation before the one the loss recovered at, or one whose
     /// proof the entry doesn't hold or that doesn't read. A resume never repeats it
     /// (Paykit spec 7.3).
-    pub(crate) async fn dispatched_before_loss(&self, entry: &JournalEntry) -> Result<bool> {
+    pub(crate) async fn handed_off_before_loss(&self, entry: &JournalEntry) -> Result<bool> {
         let Some(loss) = self.decisive_loss().await? else {
             return Ok(false);
         };

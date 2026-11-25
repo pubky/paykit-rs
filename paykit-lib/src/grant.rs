@@ -2,7 +2,7 @@
 //!
 //! An executor app's signed grant, stored in the Allowance record, names the app that pays
 //! automatically under the Allowance. It is signed under Paykit's own label
-//! `paykit/v1/executor-grant` with the Switch's algorithm (Switch wire 2.1), over the
+//! `paykit/v1/executor-grant` with the Dispatch's algorithm (Dispatch wire 2.1), over the
 //! identity, the counterparty, the Allowance, the terms hash, `confirmed_generation`, and the
 //! Allowance record version the grant's write builds on.
 //!
@@ -17,11 +17,11 @@
 //! answers with the version that grant's write built on, and the ledger version and item
 //! hash it names, so no other app can name a ledger write for a new executor to build on.
 
-use pubky_switch_core::enc::{b64, u64be, zbase32_encode};
-use pubky_switch_core::keys::AppKeys;
-use pubky_switch_core::ops::RecordVersion;
-use pubky_switch_core::records::AppCert;
-use pubky_switch_core::sig::{self, SignedDoc};
+use pubky_dispatch_core::enc::{b64, u64be, zbase32_encode};
+use pubky_dispatch_core::keys::AppKeys;
+use pubky_dispatch_core::ops::RecordVersion;
+use pubky_dispatch_core::records::AppCert;
+use pubky_dispatch_core::sig::{self, SignedDoc};
 use serde_json::{Map, Value};
 
 use crate::error::{invalid, Result};
@@ -79,7 +79,7 @@ impl ExecutorGrant {
     /// `built_on` is the version of the Allowance record the write adding the grant reads: a
     /// grant goes into an Allowance record that holds its proposal already (Paykit wire 5.4).
     ///
-    /// The caller keeps its signing key; storing it is the Switch's rule (Switch spec 3.1).
+    /// The caller keeps its signing key; storing it is the Dispatch's rule (Dispatch spec 3.1).
     #[allow(clippy::too_many_arguments)]
     pub fn sign(
         app: &AppKeys,
@@ -156,7 +156,7 @@ impl ExecutorGrant {
     ///
     /// # Errors
     ///
-    /// [`crate::Error::Switch`] for a certificate or signature the Switch's checks refuse,
+    /// [`crate::Error::Dispatch`] for a certificate or signature the Dispatch's checks refuse,
     /// [`crate::Error::Invalid`] for Paykit's rules.
     pub fn verify(
         &self,
@@ -233,7 +233,7 @@ pub struct LedgerHandoff {
     pub grant: RecordVersion,
     /// The version of the previous executor's last ledger version.
     pub ledger: RecordVersion,
-    /// That ledger write's item hash (Switch wire 6.6).
+    /// That ledger write's item hash (Dispatch wire 6.6).
     pub item_hash: [u8; 32],
     /// The previous executor's certificate, holding `paykit_allowance_execute`.
     pub cert: SignedDoc,
@@ -249,7 +249,7 @@ impl LedgerHandoff {
     /// the grant history entry at version `grant`, naming the ledger write at `ledger` with
     /// item hash `item_hash`.
     ///
-    /// The caller keeps its signing key; storing it is the Switch's rule (Switch spec 3.1).
+    /// The caller keeps its signing key; storing it is the Dispatch's rule (Dispatch spec 3.1).
     #[allow(clippy::too_many_arguments)]
     pub fn sign(
         app: &AppKeys,
@@ -356,7 +356,7 @@ impl LedgerHandoff {
     ///
     /// # Errors
     ///
-    /// [`crate::Error::Switch`] for a certificate or signature the Switch's checks refuse,
+    /// [`crate::Error::Dispatch`] for a certificate or signature the Dispatch's checks refuse,
     /// [`crate::Error::Invalid`] for Paykit's rules.
     pub fn verify(
         &self,

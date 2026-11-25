@@ -15,10 +15,10 @@ use paykit_sdk::{
     AppScopes, PayeeStatus, Paykit, PaykitConfig, PaykitError, Refusal, RequestDraft, RequestRef,
     RequestStatus,
 };
-use pubky_switch_client::app::{
-    AppEvent, Collection as SwitchCollection, OpBatch, RecordContent, RecordTarget, Unopened,
+use pubky_dispatch_client::app::{
+    AppEvent, Collection as DispatchCollection, OpBatch, RecordContent, RecordTarget, Unopened,
 };
-use pubky_switch_client::clock::Clock;
+use pubky_dispatch_client::clock::Clock;
 use serde_json::json;
 
 use crate::common::{btc, draft, endpoint, store, World, HOUR_MS};
@@ -45,7 +45,7 @@ pub(crate) fn monthly(now: u64, ends_at: Option<u64>) -> RequestDraft {
 
 /// The request's first Billing Period: January 2026.
 pub(crate) fn january() -> PeriodRef {
-    let start = pubky_switch_client::testing::START_MS;
+    let start = pubky_dispatch_client::testing::START_MS;
     PeriodRef {
         starts_at: start,
         ends_at: start + 31 * DAY_MS,
@@ -312,7 +312,7 @@ async fn test_periods_accept_refused_once_answered_and_for_a_one_time_request() 
 
 #[tokio::test]
 async fn test_periods_accept_past_the_expiry_refused_by_the_service() {
-    // The wallet hasn't heard from its switch since the proposal expired: its batch goes,
+    // The wallet hasn't heard from its Dispatch since the proposal expired: its batch goes,
     // and the service refuses it, the acceptance's time condition past. Nothing is sent.
     let w = World::new();
     let mut shop = w.shop().await;
@@ -431,7 +431,7 @@ async fn test_periods_draft_with_both_deadlines_refused_period_deadline_sent() {
 /// Bob's signed monthly request to alice's apps, not delivered yet, and its hash.
 pub(crate) fn signed_request(
     w: &World,
-) -> (pubky_switch_core::message::MessagePlaintext, [u8; 32]) {
+) -> (pubky_dispatch_core::message::MessagePlaintext, [u8; 32]) {
     let now = w.clock.now_ms();
     let body = paykit_lib::bodies::PaymentRequest {
         amount: btc("1"),
@@ -460,7 +460,7 @@ pub(crate) fn signed_request(
     (plaintext, hash)
 }
 
-/// Bob's shop's details for `period` of the request `hash`, entered at alice's switch for
+/// Bob's shop's details for `period` of the request `hash`, entered at alice's Dispatch for
 /// `targets`.
 pub(crate) fn inject_details(w: &World, targets: &[[u8; 16]], hash: [u8; 32], period: PeriodRef) {
     let body = details(period, "lnbc1p", w.clock.now_ms() + DAY_MS)
@@ -482,7 +482,7 @@ pub(crate) fn inject_details(w: &World, targets: &[[u8; 16]], hash: [u8; 32], pe
 async fn accepted_by(
     w: &World,
     phone: &mut Paykit,
-    plaintext: &pubky_switch_core::message::MessagePlaintext,
+    plaintext: &pubky_dispatch_core::message::MessagePlaintext,
     hash: [u8; 32],
 ) -> RequestRef {
     w.deliver(&w.bob, "shop", &w.alice, &[phone.app_id()], plaintext);
@@ -607,7 +607,7 @@ async fn test_periods_details_for_a_record_not_listed_yet_held_until_listed() {
 fn payer_period(request: &RequestRef) -> RecordTarget {
     let collection = Collection::PayerActivity;
     RecordTarget::new(
-        SwitchCollection::new(collection.name(), collection.policy(None)),
+        DispatchCollection::new(collection.name(), collection.policy(None)),
         &natural_key::period_record(
             &request.payee,
             &request.request_hash,
@@ -680,7 +680,7 @@ async fn test_periods_details_over_a_period_record_awaiting_its_key_held_until_i
 
 #[tokio::test]
 async fn test_periods_details_refused_for_good_written_at_a_later_receive() {
-    // The switch refuses the details' record write for good: the message is kept, and
+    // The Dispatch refuses the details' record write for good: the message is kept, and
     // written into the period record by a later write of the wallet's own, in the same
     // receive.
     let w = World::new();
@@ -695,9 +695,9 @@ async fn test_periods_details_refused_for_good_written_at_a_later_receive() {
     .unwrap();
     w.alice
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::Error {
+        .fail_next(pubky_dispatch_client::testing::Fault::Error {
             path: "/ops".into(),
-            code: pubky_switch_core::http::ErrorCode::PermissionMissing,
+            code: pubky_dispatch_core::http::ErrorCode::PermissionMissing,
             current: serde_json::Value::Null,
         });
     let summary = wallet.receive(None).await.unwrap();
@@ -975,7 +975,7 @@ async fn test_periods_acceptance_keeps_members_a_later_version_wrote() {
 /// The request's Billing Period `k`: January 2026 for 0, to April for 3.
 fn month(k: usize) -> PeriodRef {
     const STARTS: [u64; 5] = [0, 31, 59, 90, 120];
-    let start = pubky_switch_client::testing::START_MS;
+    let start = pubky_dispatch_client::testing::START_MS;
     PeriodRef {
         starts_at: start + STARTS[k] * DAY_MS,
         ends_at: start + STARTS[k + 1] * DAY_MS,
@@ -1154,7 +1154,7 @@ fn daily(now: u64) -> RequestDraft {
 
 /// The daily request's Billing Period `k`, from January 1st 2026 (0).
 fn day(k: u64) -> PeriodRef {
-    let start = pubky_switch_client::testing::START_MS;
+    let start = pubky_dispatch_client::testing::START_MS;
     PeriodRef {
         starts_at: start + k * DAY_MS,
         ends_at: start + (k + 1) * DAY_MS,
@@ -1273,7 +1273,7 @@ async fn contacts_wallet(w: &World, lists: &Arc<crate::common::ListsStore>) -> P
             "wallet",
             AppScopes::new().pay().manage_contacts().build().unwrap(),
             PaykitConfig::default(),
-            Arc::clone(lists) as Arc<dyn pubky_switch_client::store::StateStore>,
+            Arc::clone(lists) as Arc<dyn pubky_dispatch_client::store::StateStore>,
         )
         .await;
     wallet.app_mut().invite(&w.bob_id()).await.unwrap();
@@ -1558,7 +1558,7 @@ async fn test_periods_proof_naming_earlier_details_credited_at_the_payee() {
 
 /// The signer stores bob's app `app`'s key bundle for `cert`, every data epoch up to the
 /// current.
-fn store_bob_bundle(w: &World, app: [u8; 16], cert: &pubky_switch_core::records::AppCert) {
+fn store_bob_bundle(w: &World, app: [u8; 16], cert: &pubky_dispatch_core::records::AppCert) {
     store_bob_bundle_from(w, app, cert, 1);
 }
 
@@ -1567,13 +1567,13 @@ fn store_bob_bundle(w: &World, app: [u8; 16], cert: &pubky_switch_core::records:
 fn store_bob_bundle_from(
     w: &World,
     app: [u8; 16],
-    cert: &pubky_switch_core::records::AppCert,
+    cert: &pubky_dispatch_core::records::AppCert,
     first: u64,
 ) {
-    use pubky_switch_client::app::Protocol as _;
+    use pubky_dispatch_client::app::Protocol as _;
     let epoch = w.bob.switch().identity_doc().unwrap().data_epoch();
     let protocol = paykit_sdk::PaykitProtocol::new();
-    let parts = pubky_switch_core::records::seal_bundle_parts(
+    let parts = pubky_dispatch_core::records::seal_bundle_parts(
         w.bob.identity().key(),
         cert,
         first,
@@ -1584,8 +1584,8 @@ fn store_bob_bundle_from(
     for part in parts {
         w.bob
             .switch()
-            .signer_op(pubky_switch_core::ops::OpKind::KeyBundlePut(
-                pubky_switch_core::ops::KeyBundlePut {
+            .signer_op(pubky_dispatch_core::ops::OpKind::KeyBundlePut(
+                pubky_dispatch_core::ops::KeyBundlePut {
                     target_app_id: app,
                     bundle: part.bundle,
                     first_epoch: part.first_epoch,
@@ -1605,7 +1605,7 @@ fn payee_period(request: &RequestRef) -> RecordTarget {
 fn payee_period_at(request: &RequestRef, period: PeriodRef) -> RecordTarget {
     let collection = Collection::PayeeActivity;
     RecordTarget::new(
-        SwitchCollection::new(collection.name(), collection.policy(None)),
+        DispatchCollection::new(collection.name(), collection.policy(None)),
         &natural_key::period_record(&request.payee, &request.request_hash, period.start_secs()),
     )
 }
@@ -2022,9 +2022,9 @@ async fn test_periods_accept_and_details_kept_reported_sent() {
     let mut shop = w.shop().await;
     let mut wallet = w.wallet("wallet").await;
     let request = requested(&w, &mut shop, &mut wallet).await;
-    let unavailable = || pubky_switch_client::testing::Fault::Error {
+    let unavailable = || pubky_dispatch_client::testing::Fault::Error {
         path: "/ops".into(),
-        code: pubky_switch_core::http::ErrorCode::Unavailable,
+        code: pubky_dispatch_core::http::ErrorCode::Unavailable,
         current: serde_json::Value::Null,
     };
     w.alice.switch().fail_next(unavailable());
@@ -2105,9 +2105,9 @@ async fn test_periods_details_refused_for_good_dropped_once_the_payee_cancelled(
     shop.cancel_sent_request(&sale, None).await.unwrap();
     w.alice
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::Error {
+        .fail_next(pubky_dispatch_client::testing::Fault::Error {
             path: "/ops".into(),
-            code: pubky_switch_core::http::ErrorCode::PermissionMissing,
+            code: pubky_dispatch_core::http::ErrorCode::PermissionMissing,
             current: serde_json::Value::Null,
         });
     let summary = wallet.receive(None).await.unwrap();
@@ -2232,7 +2232,7 @@ async fn test_periods_credit_given_on_the_users_confirmation_while_a_record_is_s
     let w = World::new();
     let (mut shop, february) = with_a_sealed_record(&w).await;
     let confirmed = paykit_sdk::ReceiptDetails::new()
-        .with_maybe_credited_confirmed(pubky_switch_client::app::UserConfirmed::new());
+        .with_maybe_credited_confirmed(pubky_dispatch_client::app::UserConfirmed::new());
     assert!(shop
         .confirm_payment_with(&february, confirmed)
         .await
@@ -2274,9 +2274,9 @@ async fn test_periods_credit_not_given_while_the_records_cant_be_listed_then_giv
     .unwrap();
     w.bob
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::Error {
+        .fail_next(pubky_dispatch_client::testing::Fault::Error {
             path: "/records".into(),
-            code: pubky_switch_core::http::ErrorCode::Unavailable,
+            code: pubky_dispatch_core::http::ErrorCode::Unavailable,
             current: serde_json::Value::Null,
         });
     assert!(shop.confirm_payment(&record).await.is_err());
@@ -2326,9 +2326,9 @@ async fn test_periods_details_after_a_kept_payee_cancellation_never_stored() {
     shop.cancel_sent_request(&sale, None).await.unwrap();
     w.alice
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::Error {
+        .fail_next(pubky_dispatch_client::testing::Fault::Error {
             path: "/ops".into(),
-            code: pubky_switch_core::http::ErrorCode::PermissionMissing,
+            code: pubky_dispatch_core::http::ErrorCode::PermissionMissing,
             current: serde_json::Value::Null,
         });
     wallet.receive(None).await.unwrap();
@@ -2364,9 +2364,9 @@ async fn test_periods_kept_details_after_a_kept_payee_cancellation_never_placed(
     );
     w.alice
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::Error {
+        .fail_next(pubky_dispatch_client::testing::Fault::Error {
             path: "/ops".into(),
-            code: pubky_switch_core::http::ErrorCode::PermissionMissing,
+            code: pubky_dispatch_core::http::ErrorCode::PermissionMissing,
             current: serde_json::Value::Null,
         });
     wallet.receive(None).await.unwrap();
@@ -2386,9 +2386,9 @@ async fn test_periods_accept_whose_delivery_fails_now_reported_queued() {
     let request = requested(&w, &mut shop, &mut wallet).await;
     w.bob
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::Error {
+        .fail_next(pubky_dispatch_client::testing::Fault::Error {
             path: "/inbox".into(),
-            code: pubky_switch_core::http::ErrorCode::Unavailable,
+            code: pubky_dispatch_core::http::ErrorCode::Unavailable,
             current: serde_json::Value::Null,
         });
     let accepted = wallet.accept_subscription(&request).await.unwrap();
@@ -2426,11 +2426,11 @@ async fn test_periods_kept_details_not_bound_to_their_key_refused_as_corrupt() {
         .protocol_commit(
             "paykit",
             &[
-                pubky_switch_client::app::LocalWrite::Put {
+                pubky_dispatch_client::app::LocalWrite::Put {
                     key: kept[0].0.clone(),
                     value: kept[1].1.clone(),
                 },
-                pubky_switch_client::app::LocalWrite::Put {
+                pubky_dispatch_client::app::LocalWrite::Put {
                     key: kept[1].0.clone(),
                     value: kept[0].1.clone(),
                 },
@@ -2460,15 +2460,15 @@ async fn test_periods_details_over_a_corrupt_kept_stop_not_dropped() {
         .unwrap();
     let key = format!(
         "kc/{}/{}/{:020}",
-        pubky_switch_core::enc::b64(&record_key),
-        pubky_switch_core::enc::b64(&shop.app().cert().hash()),
+        pubky_dispatch_core::enc::b64(&record_key),
+        pubky_dispatch_core::enc::b64(&shop.app().cert().hash()),
         wallet.app().own_identity().generation(),
     );
     wallet
         .app_mut()
         .protocol_commit(
             "paykit",
-            &[pubky_switch_client::app::LocalWrite::Put {
+            &[pubky_dispatch_client::app::LocalWrite::Put {
                 key: key.into_bytes(),
                 value: b"not a kept cancellation".to_vec(),
             }],
@@ -2505,7 +2505,7 @@ async fn test_periods_credit_never_given_when_a_record_read_fails() {
             "shop",
             AppScopes::new().request().build().unwrap(),
             PaykitConfig::default(),
-            Arc::clone(&failing) as Arc<dyn pubky_switch_client::store::StateStore>,
+            Arc::clone(&failing) as Arc<dyn pubky_dispatch_client::store::StateStore>,
         )
         .await;
     let mut wallet = w.wallet("wallet").await;
@@ -2534,7 +2534,7 @@ async fn test_periods_credit_never_given_when_a_record_read_fails() {
     for n in 1..=12 {
         failing.fail_nth(n);
         let confirmed = paykit_sdk::ReceiptDetails::new()
-            .with_maybe_credited_confirmed(pubky_switch_client::app::UserConfirmed::new());
+            .with_maybe_credited_confirmed(pubky_dispatch_client::app::UserConfirmed::new());
         let credited = shop
             .confirm_payment_with(&periods[1].record, confirmed)
             .await;
@@ -2738,7 +2738,7 @@ async fn test_periods_send_details_never_writes_over_a_period_record_that_doesnt
         ),
         "{refused:?}"
     );
-    // What the switch holds, as the seller wallet reads it: its own write, not written over.
+    // What the Dispatch holds, as the seller wallet reads it: its own write, not written over.
     let after = seller_wallet
         .app_mut()
         .read_record(&target)
@@ -2867,7 +2867,7 @@ async fn test_periods_credit_given_beside_a_record_under_another_policy() {
     let mut policy = Collection::PayeeActivity.fixed_policy();
     policy.write_scopes = vec!["paykit_pay".into(), "paykit_request".into()];
     let foreign = RecordTarget::new(
-        SwitchCollection::new(Collection::PayeeActivity.name(), policy),
+        DispatchCollection::new(Collection::PayeeActivity.name(), policy),
         b"another protocol's record",
     );
     let bytes = serde_json::to_vec(&json!({ "v": 1 })).unwrap();
@@ -2934,7 +2934,7 @@ async fn test_periods_details_expiry_judged_on_the_verified_service_time() {
     let (request, sale) = subscribed(&w, &mut shop, &mut wallet).await;
     let app_id = shop.app_id();
     drop(shop);
-    let ahead = Arc::new(pubky_switch_client::clock::TestClock::new(
+    let ahead = Arc::new(pubky_dispatch_client::clock::TestClock::new(
         w.clock.now_ms() + 2 * HOUR_MS,
     ));
     let mut shop = w.load_on_clock(&w.bob, shop_store, app_id, ahead).await;
@@ -3216,7 +3216,7 @@ async fn test_periods_restore_reports_earlier_details_without_a_replay() {
 pub(crate) fn payee_request_at(request: &RequestRef) -> RecordTarget {
     let collection = Collection::PayeeActivity;
     RecordTarget::new(
-        SwitchCollection::new(collection.name(), collection.policy(None)),
+        DispatchCollection::new(collection.name(), collection.policy(None)),
         &natural_key::request_record(&request.payee, &request.request_hash),
     )
 }
@@ -3421,8 +3421,8 @@ async fn test_periods_restore_own_details_waiting_on_their_request_record_end_pa
 /// wallet as a message of `kind` with an empty body, naming the same `refs`, under a new
 /// `msg_id`: a genuine message of that app, as another own app might have recorded it.
 fn alice_signs_again(w: &World, stored: &serde_json::Value, kind: &str) -> serde_json::Value {
-    use pubky_switch_core::enc::{b64, unb64};
-    use pubky_switch_core::message::{Message, Sender};
+    use pubky_dispatch_core::enc::{b64, unb64};
+    use pubky_dispatch_core::message::{Message, Sender};
     let json = unb64(stored["plaintext"]["json"].as_str().unwrap()).unwrap();
     let json: serde_json::Value = serde_json::from_slice(&json).unwrap();
     let refs = json["refs"]
@@ -3498,7 +3498,7 @@ async fn restored_over_an_answer(
 #[tokio::test]
 async fn test_periods_restore_after_the_payer_rejected_queues_no_details() {
     // Another own app writes alice's rejection in place of the acceptance the backup saw. A
-    // mark now survives a restore (Switch spec 12.4 "Seen marks"), so the restored shop
+    // mark now survives a restore (Dispatch spec 12.4 "Seen marks"), so the restored shop
     // checks that write as the backed-up installation would: it replaces a message in a role
     // seen, and is flagged, not taken (Paykit wire 5.3 "Seen roles"). The shop queues neither
     // details, and the re-send scan, which can't read a stop in the record, stays owed until
@@ -3520,7 +3520,7 @@ async fn test_periods_restore_after_the_payer_rejected_queues_no_details() {
         assert!(!queued(&shop, msg_id).await, "{msg_id}");
     }
     w.clock
-        .advance_ms(pubky_switch_client::app::SENT_RETENTION_MS + 1);
+        .advance_ms(pubky_dispatch_client::app::SENT_RETENTION_MS + 1);
     shop.receive(None).await.unwrap();
     assert!(shop
         .app()
@@ -3655,7 +3655,7 @@ async fn test_periods_credit_stays_given_after_a_restore() {
 pub(super) fn payer_period_at(request: &RequestRef, period: PeriodRef) -> RecordTarget {
     let collection = Collection::PayerActivity;
     RecordTarget::new(
-        SwitchCollection::new(collection.name(), collection.policy(None)),
+        DispatchCollection::new(collection.name(), collection.policy(None)),
         &natural_key::period_record(&request.payee, &request.request_hash, period.start_secs()),
     )
 }
@@ -3715,7 +3715,7 @@ async fn payer_period_paid(
         .unwrap();
 }
 
-/// Bob's shop's later details for January of the request `hash`, entered at alice's switch
+/// Bob's shop's later details for January of the request `hash`, entered at alice's Dispatch
 /// for `targets`. Returns their `msg_id`.
 fn inject_later_details(w: &World, targets: &[[u8; 16]], hash: [u8; 32]) -> String {
     w.clock.advance_ms(1_000);
@@ -3789,9 +3789,9 @@ async fn test_periods_details_for_a_period_the_payer_shows_paid_taken_at_the_lat
     for _ in 0..2 {
         w.alice
             .switch()
-            .fail_next(pubky_switch_client::testing::Fault::Error {
+            .fail_next(pubky_dispatch_client::testing::Fault::Error {
                 path: "/ops".into(),
-                code: pubky_switch_core::http::ErrorCode::PermissionMissing,
+                code: pubky_dispatch_core::http::ErrorCode::PermissionMissing,
                 current: serde_json::Value::Null,
             });
     }
@@ -3979,9 +3979,9 @@ async fn test_periods_stored_proof_waits_for_its_details_after_the_record_is_del
     for _ in 0..2 {
         w.bob
             .switch()
-            .fail_next(pubky_switch_client::testing::Fault::Error {
+            .fail_next(pubky_dispatch_client::testing::Fault::Error {
                 path: "/ops".into(),
-                code: pubky_switch_core::http::ErrorCode::PermissionMissing,
+                code: pubky_dispatch_core::http::ErrorCode::PermissionMissing,
                 current: serde_json::Value::Null,
             });
     }
@@ -4138,7 +4138,7 @@ async fn test_periods_credit_not_now_while_the_request_record_is_sealed_then_giv
     seller_wallet.receive(None).await.unwrap();
     let collection = Collection::PayeeActivity;
     let request_record = RecordTarget::new(
-        SwitchCollection::new(collection.name(), collection.policy(None)),
+        DispatchCollection::new(collection.name(), collection.policy(None)),
         &natural_key::request_record(&request.payee, &request.request_hash),
     );
     rewrites(&mut seller_wallet, &request_record).await;
@@ -4236,7 +4236,7 @@ async fn test_periods_proof_from_a_flagged_payer_over_a_payee_period_record_that
                 .build()
                 .unwrap(),
             PaykitConfig::default(),
-            Arc::clone(&lists) as Arc<dyn pubky_switch_client::store::StateStore>,
+            Arc::clone(&lists) as Arc<dyn pubky_dispatch_client::store::StateStore>,
         )
         .await;
     let mut shop = w.shop().await;
@@ -4328,7 +4328,7 @@ fn missed_with_paykits_listing_failing(w: &World) {
     w.alice.switch().push_missed(1, now - 1_000, now);
     w.alice
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+        .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
             path: "records?collection".into(),
             after: 3,
         });
@@ -4418,7 +4418,7 @@ async fn test_periods_proof_from_a_flagged_third_party_naming_a_held_request_onl
                 .build()
                 .unwrap(),
             PaykitConfig::default(),
-            Arc::clone(&lists) as Arc<dyn pubky_switch_client::store::StateStore>,
+            Arc::clone(&lists) as Arc<dyn pubky_dispatch_client::store::StateStore>,
         )
         .await;
     let mut wallet = w.wallet("wallet").await;
@@ -4528,7 +4528,7 @@ async fn test_periods_proof_over_a_payee_request_record_that_never_opens_kept_th
     seller_wallet.receive(None).await.unwrap();
     let collection = Collection::PayeeActivity;
     let target = RecordTarget::new(
-        SwitchCollection::new(collection.name(), collection.policy(None)),
+        DispatchCollection::new(collection.name(), collection.policy(None)),
         &natural_key::request_record(&request.payee, &request.request_hash),
     );
     let value = seller_wallet
@@ -4546,11 +4546,11 @@ async fn test_periods_proof_over_a_payee_request_record_that_never_opens_kept_th
         .record_op(&target, Some(&value), Vec::new())
         .await
         .unwrap();
-    let pubky_switch_core::ops::OpKind::RecordPut(mut put) = kind else {
+    let pubky_dispatch_core::ops::OpKind::RecordPut(mut put) = kind else {
         panic!("a record op");
     };
     let epoch = w.bob.switch().identity_doc().unwrap().data_epoch();
-    put.value_sealed = pubky_switch_core::sealed::SealedValue::seal(
+    put.value_sealed = pubky_dispatch_core::sealed::SealedValue::seal(
         &[3; 32],
         &w.bob_id(),
         epoch,
@@ -4563,7 +4563,7 @@ async fn test_periods_proof_over_a_payee_request_record_that_never_opens_kept_th
         .app_mut()
         .submit_batch(
             OpBatch::for_protocol("paykit")
-                .entry((conditions, pubky_switch_core::ops::OpKind::RecordPut(put))),
+                .entry((conditions, pubky_dispatch_core::ops::OpKind::RecordPut(put))),
         )
         .await
         .unwrap();
@@ -4627,7 +4627,7 @@ async fn test_periods_proof_over_a_payee_request_record_that_never_opens_kept_th
 fn payer_request_at(request: &RequestRef) -> RecordTarget {
     let collection = Collection::PayerActivity;
     RecordTarget::new(
-        SwitchCollection::new(collection.name(), collection.policy(None)),
+        DispatchCollection::new(collection.name(), collection.policy(None)),
         &natural_key::request_record(&request.payee, &request.request_hash),
     )
 }
@@ -4638,7 +4638,7 @@ enum RecordWhile {
     /// Deleted by her phone: the wallet holds no record of the request.
     Gone,
     /// Written by her phone as a value that doesn't read, which her wallet, restored from
-    /// a backup, holds as the switch does.
+    /// a backup, holds as the Dispatch does.
     Unreadable,
 }
 
@@ -4698,7 +4698,7 @@ async fn details_dropped_for_the_bounds(
         RecordWhile::Unreadable => {
             // A value that doesn't read, which the wallet's copy, holding the record's
             // value, refuses as a write over it: the wallet is restored from a backup
-            // onto a new store, whose copy holds the record as the switch does.
+            // onto a new store, whose copy holds the record as the Dispatch does.
             let backup = wallet.backup().await.unwrap();
             let mut value: serde_json::Value = serde_json::from_slice(&good).unwrap();
             value["v"] = json!(99);
@@ -4877,7 +4877,7 @@ async fn test_periods_details_dropped_for_the_bounds_asked_with_only_a_period_re
 // 6): nothing is accepted, sent, written or lost past the pause.
 
 /// Bob's shop on `base`.
-async fn shop_on(w: &World, base: Arc<dyn pubky_switch_client::store::StateStore>) -> Paykit {
+async fn shop_on(w: &World, base: Arc<dyn pubky_dispatch_client::store::StateStore>) -> Paykit {
     w.join_with(
         &w.bob,
         "shop",
@@ -4932,7 +4932,7 @@ async fn test_periods_details_sent_only_once_a_paused_record_is_confirmed() {
     let mut shop = shop_on(&w, Arc::clone(&base)).await;
     let mut wallet = w.wallet("wallet").await;
     let (_, sale) = subscribed(&w, &mut shop, &mut wallet).await;
-    // Divergent at the switch, as a conflicting upload leaves it: a fresh read shows it so.
+    // Divergent at the Dispatch, as a conflicting upload leaves it: a fresh read shows it so.
     w.bob
         .switch()
         .make_divergent([0x5a; 16], sale, [1; 32])
@@ -5668,7 +5668,7 @@ async fn credit_after_wrong_period(period: PeriodRef, missing_request: bool) {
         shop.confirm_payment_with(
             &key,
             paykit_sdk::ReceiptDetails::new()
-                .with_maybe_credited_confirmed(pubky_switch_client::app::UserConfirmed::new())
+                .with_maybe_credited_confirmed(pubky_dispatch_client::app::UserConfirmed::new())
         )
         .await
         .unwrap_err()
@@ -5725,7 +5725,7 @@ async fn credit_after_wrong_period(period: PeriodRef, missing_request: bool) {
     let other = shop.app().record_key(&payee_request_at(&req)).unwrap();
     let confirmed = || {
         paykit_sdk::ReceiptDetails::new()
-            .with_maybe_credited_confirmed(pubky_switch_client::app::UserConfirmed::new())
+            .with_maybe_credited_confirmed(pubky_dispatch_client::app::UserConfirmed::new())
     };
     if missing_request {
         let count = w.record_writes(&w.bob, &other);
@@ -5839,14 +5839,14 @@ async fn test_payee_deletion_a_retained_receipt_blocks_the_same_settlement_for_a
         .record;
     let before = w.record_writes(&w.bob, &alice);
     let confirmed = paykit_sdk::ReceiptDetails::new()
-        .with_maybe_credited_confirmed(pubky_switch_client::app::UserConfirmed::new());
+        .with_maybe_credited_confirmed(pubky_dispatch_client::app::UserConfirmed::new());
     assert_eq!(
         shop.confirm_payment_with(&alice, confirmed).await.unwrap(),
         None
     );
     assert_eq!(w.record_writes(&w.bob, &alice), before);
     let confirmed = paykit_sdk::ReceiptDetails::new()
-        .with_maybe_credited_confirmed(pubky_switch_client::app::UserConfirmed::new());
+        .with_maybe_credited_confirmed(pubky_dispatch_client::app::UserConfirmed::new());
     let before = w.record_writes(&w.bob, &carol);
     assert_eq!(
         shop.confirm_payment_with(&carol, confirmed).await.unwrap(),

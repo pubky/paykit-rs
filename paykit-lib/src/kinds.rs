@@ -1,7 +1,7 @@
 //! Paykit's message kinds and the scopes that send and receive them (Paykit spec 3.3, 3.4,
 //! 5; Paykit wire 4.1, 4.3).
 //!
-//! The Switch runs the common recipient checks of a message (Switch wire 5.1); Paykit gives
+//! The Dispatch runs the common recipient checks of a message (Dispatch wire 5.1); Paykit gives
 //! it the rules of its kinds through [`PaykitKindRules`]: the opaque members of its bodies
 //! (Paykit wire 1.1), the one kind sent between own apps (check 6) and the scopes of each
 //! kind, narrowed by label (check 8). The body, check 10, is [`crate::bodies`].
@@ -14,11 +14,11 @@
 //! sees no request, so the payer applies it where it reads the request
 //! ([`check_sender_for_request`]).
 
-use pubky_switch_core::json::OpaqueMember;
-use pubky_switch_core::message::Message;
-use pubky_switch_core::receive::KindRules;
-use pubky_switch_core::records::AppCert;
-use pubky_switch_core::scopes as switch_scopes;
+use pubky_dispatch_core::json::OpaqueMember;
+use pubky_dispatch_core::message::Message;
+use pubky_dispatch_core::receive::KindRules;
+use pubky_dispatch_core::records::AppCert;
+use pubky_dispatch_core::scopes as dispatch_scopes;
 
 use crate::error::{invalid, Error, Result};
 use crate::scopes::{self, ExtensionPrefix, Label, PAYKIT_PREFIX};
@@ -29,7 +29,7 @@ pub const MAX_RECORDED_KIND_LEN: usize = 16_384;
 
 /// The opaque members of Paykit's message bodies (Paykit wire 1.1): a body's `metadata`, of
 /// every kind, extension kinds included, and the `proof` of a `paykit.payment_proof`. Every
-/// other member is checked by the Switch's integer rule.
+/// other member is checked by the Dispatch's integer rule.
 pub const OPAQUE_MEMBERS: &[OpaqueMember<'static>] = &[
     OpaqueMember {
         kind: None,
@@ -345,7 +345,7 @@ impl MessageKind {
 
 /// Whether `scopes` hold one of `roles` (Paykit wire 4.1 check 8). Labelled selling
 /// scopes authorize request-related kinds. A list publisher needs plain `paykit_request`.
-/// [`Role::Any`] requires at least one Paykit scope (Switch wire 3.1 "Several protocols").
+/// [`Role::Any`] requires at least one Paykit scope (Dispatch wire 3.1 "Several protocols").
 pub fn holds_role(scopes: &[String], roles: &[Role]) -> bool {
     let has = |s: &str| scopes.iter().any(|x| x == s);
     roles.iter().any(|role| match role {
@@ -505,7 +505,7 @@ pub fn check_sender_for_request(
     }
 }
 
-/// Check 8 for a Paykit message (Paykit spec 3.3, 3.4; Paykit wire 4.1, Switch wire 5.1):
+/// Check 8 for a Paykit message (Paykit spec 3.3, 3.4; Paykit wire 4.1, Dispatch wire 5.1):
 /// the sender's side ([`check_sender_scopes`]), then the own scopes hold one that receives
 /// the kind, and the labels and roles:
 ///
@@ -573,7 +573,7 @@ fn check_cancellation_roles(label: Option<&str>, sender: &[String], own: &[Strin
 /// Whether the certificate covers sales with this label (Paykit spec 3.4).
 fn selling_scope_for(scopes: &[String], label: Option<&str>) -> bool {
     match label {
-        Some(label) => switch_scopes::holds(scopes, &format!("{}:{label}", scopes::REQUEST)),
+        Some(label) => dispatch_scopes::holds(scopes, &format!("{}:{label}", scopes::REQUEST)),
         None => scopes.iter().any(|scope| scope == scopes::REQUEST),
     }
 }
@@ -613,7 +613,7 @@ pub fn targets_app(kind: Kind, side: Side, label: Option<&Label>, scopes: &[Stri
     }
 }
 
-/// The rules Paykit gives the Switch's recipient checks (Switch wire 5.1, Paykit wire 4.1):
+/// The rules Paykit gives the Dispatch's recipient checks (Dispatch wire 5.1, Paykit wire 4.1):
 /// the opaque members, the one kind sent between own apps (check 6) and the scopes of each
 /// kind (check 8), for the receiving app whose certificate holds `own_scopes`.
 #[derive(Clone, Debug)]
@@ -650,7 +650,7 @@ impl KindRules for PaykitKindRules {
     /// Check 8, after Paykit's verifiers' checks of the sender's certificate (Paykit wire
     /// 3.1): its scope rules and permissions; then [`check_kind_scopes`]. An
     /// `executor_notice` from another identity is refused: it goes only between own apps.
-    fn check_scopes(&self, message: &Message, sender: &AppCert) -> pubky_switch_core::Result<()> {
+    fn check_scopes(&self, message: &Message, sender: &AppCert) -> pubky_dispatch_core::Result<()> {
         let result = scopes::check_certificate(sender)
             .and_then(|()| {
                 if message.kind == Kind::ExecutorNotice.as_str() && !message.is_from_own_app() {
@@ -661,25 +661,25 @@ impl KindRules for PaykitKindRules {
                 Ok(())
             })
             .and_then(|()| check_kind_scopes(message, sender.scopes(), &self.own_scopes));
-        result.map_err(to_switch)
+        result.map_err(to_dispatch)
     }
 }
 
-/// A Paykit refusal handed back through the Switch's [`KindRules`] interface.
-fn to_switch(error: Error) -> pubky_switch_core::Error {
+/// A Paykit refusal handed back through the Dispatch's [`KindRules`] interface.
+fn to_dispatch(error: Error) -> pubky_dispatch_core::Error {
     match error {
-        Error::Switch(inner) => inner,
-        Error::Invalid(why) | Error::Validation(why) => pubky_switch_core::Error::Invalid(why),
+        Error::Dispatch(inner) => inner,
+        Error::Invalid(why) | Error::Validation(why) => pubky_dispatch_core::Error::Invalid(why),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pubky_switch_core::keys::{AppKeys, IdentityKey};
-    use pubky_switch_core::message::Sender;
-    use pubky_switch_core::records::AppCertBody;
-    use pubky_switch_core::scopes::Permission;
+    use pubky_dispatch_core::keys::{AppKeys, IdentityKey};
+    use pubky_dispatch_core::message::Sender;
+    use pubky_dispatch_core::records::AppCertBody;
+    use pubky_dispatch_core::scopes::Permission;
     use serde_json::{json, Value};
 
     fn owned(scopes: &[&str]) -> Vec<String> {

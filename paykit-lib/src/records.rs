@@ -3,11 +3,11 @@
 //! buckets, with their binding rules. The ledger of `allowance_ledgers` is
 //! [`crate::allowances::Ledger`]; its binding is [`bind_ledger`].
 //!
-//! A value is JSON (Switch wire 1.1), sealed by the Switch under the collection's read scope
-//! (Switch wire 6.2). Readers verify every stored message on use and work out status from
+//! A value is JSON (Dispatch wire 1.1), sealed by the Dispatch under the collection's read scope
+//! (Dispatch wire 6.2). Readers verify every stored message on use and work out status from
 //! the verified messages and the claim, never from an unsigned member alone.
 //!
-//! Security: a record binds its key by its messages' own signed fields (Switch spec 8.2).
+//! Security: a record binds its key by its messages' own signed fields (Dispatch spec 8.2).
 //! The reader recomputes the key with its own naming key and acts on a record only if the
 //! messages it stores name that key's request, period, payee, app or Allowance, so no own
 //! app can file a counterparty's message under another obligation, label or Allowance.
@@ -18,13 +18,13 @@ pub use pending::PendingAllowanceRecord;
 
 use std::collections::HashSet;
 
-use pubky_switch_core::enc::{b64, pubky_id, unb64, zbase32_encode};
-use pubky_switch_core::ident::NamingKey;
-use pubky_switch_core::message::{Message, MessagePlaintext, VerifiedSender};
-use pubky_switch_core::ops::{Condition, RecordVersion};
-use pubky_switch_core::records::AppCert;
-use pubky_switch_core::sig::SignedDoc;
-use pubky_switch_core::time::rfc3339;
+use pubky_dispatch_core::enc::{b64, pubky_id, unb64, zbase32_encode};
+use pubky_dispatch_core::ident::NamingKey;
+use pubky_dispatch_core::message::{Message, MessagePlaintext, VerifiedSender};
+use pubky_dispatch_core::ops::{Condition, RecordVersion};
+use pubky_dispatch_core::records::AppCert;
+use pubky_dispatch_core::sig::SignedDoc;
+use pubky_dispatch_core::time::rfc3339;
 use serde::Serialize;
 use serde_json::{Map, Value};
 
@@ -250,7 +250,7 @@ impl UnknownMembers {
     /// elements, which the reader gives the elements it builds.
     pub(crate) fn read(value: &Map<String, Value>, shape: &'static Shape) -> (Self, Origins) {
         let read = serde_json::to_vec(value)
-            .map(|bytes| pubky_switch_core::enc::hash(&bytes))
+            .map(|bytes| pubky_dispatch_core::enc::hash(&bytes))
             .unwrap_or_default();
         let mut held = Vec::new();
         let mut origins = Origins::default();
@@ -677,7 +677,7 @@ static LEDGER_HANDOFF: Shape = Shape {
     ],
 };
 
-/// A verified copy of one message (Paykit wire 5.2, Switch spec 8.2).
+/// A verified copy of one message (Paykit wire 5.2, Dispatch spec 8.2).
 #[derive(Clone, Debug)]
 pub struct StoredMessage {
     sender: [u8; 32],
@@ -742,12 +742,12 @@ impl StoredMessage {
         if let Some(at) = accepted_at {
             ensure(
                 !cert.expired_at(at),
-                "Paykit wire 5.2: the certificate had expired at accepted_at (Switch wire 5.1 check 3)",
+                "Paykit wire 5.2: the certificate had expired at accepted_at (Dispatch wire 5.1 check 3)",
             )?;
         }
         ensure(
             cert.app_id() == plaintext.sender_app_id(),
-            "Paykit wire 5.2: the plaintext's App ID isn't the certificate's (Switch wire 5.1 check 6)",
+            "Paykit wire 5.2: the plaintext's App ID isn't the certificate's (Dispatch wire 5.1 check 6)",
         )?;
         let message = plaintext.check(
             recipient,
@@ -775,7 +775,7 @@ impl StoredMessage {
         })
     }
 
-    /// A stored message from one the Switch client received and checked: the sender, its
+    /// A stored message from one the Dispatch client received and checked: the sender, its
     /// certificate, the signed plaintext and the parsed message the client gives. The stored
     /// copy is rebuilt from the sender, the certificate and the plaintext alone, through
     /// [`StoredMessage::new`], as a reader rebuilds it from the record (Paykit wire 5.2), and
@@ -802,14 +802,14 @@ impl StoredMessage {
     }
 
     /// Read a stored message addressed to `recipient` (Paykit wire 5.2), with the recipient
-    /// checks that need no `identity.json` (Switch wire 5.1 checks 2 to 6), Paykit's
+    /// checks that need no `identity.json` (Dispatch wire 5.1 checks 2 to 6), Paykit's
     /// certificate checks (Paykit wire 3.1), the sender's side of check 8
     /// ([`check_sender_scopes`]) and the body (check 10). The sender's standing,
-    /// check 7, was checked once when the message was recorded (Switch spec 8.2).
+    /// check 7, was checked once when the message was recorded (Dispatch spec 8.2).
     ///
     /// # Errors
     ///
-    /// [`Error::Switch`] for the Switch's checks, [`Error::Invalid`] for Paykit's.
+    /// [`Error::Dispatch`] for the Dispatch's checks, [`Error::Invalid`] for Paykit's.
     pub fn read(value: &Value, recipient: &[u8; 32]) -> Result<Self> {
         Self::read_checked(value, recipient, None)
     }
@@ -1151,7 +1151,7 @@ fn read_msg_ids(obj: &Obj<'_>, stored: &[String]) -> Result<Vec<String>> {
         let id = id
             .as_str()
             .ok_or_else(|| bad(obj.ctx(), "msg_ids", "not a string"))?;
-        pubky_switch_core::json::check_uuid_v4(id)
+        pubky_dispatch_core::json::check_uuid_v4(id)
             .map_err(|_| bad(obj.ctx(), "msg_ids", "not a lower-case UUID v4"))?;
         named.push(id.to_owned());
     }
@@ -1160,7 +1160,7 @@ fn read_msg_ids(obj: &Obj<'_>, stored: &[String]) -> Result<Vec<String>> {
 
 /// The `msg_ids` a writer writes (Paykit wire 5.3, 5.4): the canonical list,
 /// [`bounded_msg_ids`] of the stored messages' IDs and `others`, each a lower-case UUID v4,
-/// as readers read them (Switch wire 1.1).
+/// as readers read them (Dispatch wire 1.1).
 ///
 /// # Errors
 ///
@@ -1168,7 +1168,7 @@ fn read_msg_ids(obj: &Obj<'_>, stored: &[String]) -> Result<Vec<String>> {
 fn written_msg_ids(stored: &[String], others: &[String]) -> Result<Vec<String>> {
     let ids = bounded_msg_ids(stored, others);
     for id in &ids {
-        pubky_switch_core::json::check_uuid_v4(id).map_err(|_| {
+        pubky_dispatch_core::json::check_uuid_v4(id).map_err(|_| {
             Error::Validation(
                 "Paykit wire 5.3: msg_ids: an ID that isn't a lower-case UUID v4".into(),
             )
@@ -1410,7 +1410,7 @@ impl ActivityRecord {
     ///
     /// # Errors
     ///
-    /// [`Error::Invalid`] or [`Error::Switch`] naming the rule: the record is invalid.
+    /// [`Error::Invalid`] or [`Error::Dispatch`] naming the rule: the record is invalid.
     pub fn read(json: &[u8], own: &[u8; 32], side: ActivitySide) -> Result<Self> {
         Self::read_checked(json, own, side, None)
     }
@@ -2042,7 +2042,7 @@ impl ActivityRecord {
     ///
     /// # Errors
     ///
-    /// [`Error::Invalid`] or [`Error::Switch`]: the reader doesn't act on it.
+    /// [`Error::Invalid`] or [`Error::Dispatch`]: the reader doesn't act on it.
     pub fn bind(
         json: &[u8],
         own: &[u8; 32],
@@ -2089,7 +2089,7 @@ impl ActivityRecord {
             .or(self.allowance_id.as_ref())
     }
 
-    /// "Seen roles", "Seen Allowance" and "Seen marks" (Paykit wire 5.3, Switch spec 8.2): a
+    /// "Seen roles", "Seen Allowance" and "Seen marks" (Paykit wire 5.3, Dispatch spec 8.2): a
     /// reader that holds `self` ignores, and shows with its writer, a later write of the same
     /// record that drops or replaces a message in a role it saw; that drops period details it
     /// saw, in `period_details` or `earlier_details`; that changes or drops the
@@ -2419,14 +2419,14 @@ impl ActivityRecord {
 ///
 /// # Errors
 ///
-/// [`Error::Validation`] for a start past the last time Switch wire 1.6 writes.
+/// [`Error::Validation`] for a start past the last time Dispatch wire 1.6 writes.
 pub fn reassociation_condition(from_period: u64) -> Result<Condition> {
     let end = from_period
         .checked_mul(1000)
-        .filter(|ms| *ms <= pubky_switch_core::time::MAX_TIME_MS)
+        .filter(|ms| *ms <= pubky_dispatch_core::time::MAX_TIME_MS)
         .ok_or_else(|| {
             Error::Validation(
-                "Paykit wire 5.3: from_period past the last time Switch wire 1.6 writes".into(),
+                "Paykit wire 5.3: from_period past the last time Dispatch wire 1.6 writes".into(),
             )
         })?;
     Ok(Condition::ServerTimeIn {
@@ -2462,7 +2462,7 @@ pub struct PaymentListRecord {
     pub used: Vec<UsedEndpoint>,
     /// The `msg_id`s the record reflects.
     pub msg_ids: Vec<String>,
-    /// The item hash (Switch wire 6.6) of the delete a write-back from an older copy
+    /// The item hash (Dispatch wire 6.6) of the delete a write-back from an older copy
     /// answered, if any (Paykit wire 5, `lost_to_delete`). A record carrying it is at its
     /// least permissive state: its list is never paid automatically, and every single-use
     /// endpoint of a list version at or below its list's counts as used (Paykit spec 6).
@@ -2498,7 +2498,7 @@ impl PaymentListRecord {
     ///
     /// # Errors
     ///
-    /// [`Error::Invalid`] or [`Error::Switch`] naming the rule.
+    /// [`Error::Invalid`] or [`Error::Dispatch`] naming the rule.
     pub fn read(json: &[u8], own: &[u8; 32]) -> Result<Self> {
         let map = parse_object(json, LISTS)?;
         let obj = Obj::new(&map, LISTS);
@@ -2560,7 +2560,7 @@ impl PaymentListRecord {
         )
     }
 
-    /// The held-to-later rule of a `payment_lists` record (Paykit wire 4.13, 5.4, Switch spec
+    /// The held-to-later rule of a `payment_lists` record (Paykit wire 4.13, 5.4, Dispatch spec
     /// 8.2): a reader that holds `self` ignores, and shows with its writer, a later write of
     /// the record whose list is older than the one it holds, or of the same `version` but
     /// another message, by hash; and one that drops a single-use endpoint it saw used, at any
@@ -2608,7 +2608,7 @@ impl PaymentListRecord {
     ///
     /// # Errors
     ///
-    /// [`Error::Switch`] if the policy hash can't be computed.
+    /// [`Error::Dispatch`] if the policy hash can't be computed.
     pub fn record_key(&self, naming_key: &NamingKey) -> Result<[u8; 32]> {
         Collection::PaymentLists.record_key(
             naming_key,
@@ -2617,12 +2617,12 @@ impl PaymentListRecord {
         )
     }
 
-    /// The binding rule (Paykit wire 5.4, Switch spec 8.2): read the record at `key` and act
+    /// The binding rule (Paykit wire 5.4, Dispatch spec 8.2): read the record at `key` and act
     /// on it only if it is the key derived from `payee` and `app_id`.
     ///
     /// # Errors
     ///
-    /// [`Error::Invalid`] or [`Error::Switch`]: the reader doesn't act on it and flags it.
+    /// [`Error::Invalid`] or [`Error::Dispatch`]: the reader doesn't act on it and flags it.
     pub fn bind(
         json: &[u8],
         own: &[u8; 32],
@@ -2735,7 +2735,7 @@ impl BlockFloorRecord {
         Ok(Self { floor_ms, unknown })
     }
 
-    /// The held-to-later rule of the `block_floor` record (Paykit wire 5.6, Switch spec 8.2):
+    /// The held-to-later rule of the `block_floor` record (Paykit wire 5.6, Dispatch spec 8.2):
     /// a reader that holds `self` ignores, and shows with its writer, a later write of a lower
     /// floor. A later write of the same floor or a higher one is taken.
     ///
@@ -2764,17 +2764,17 @@ impl BlockFloorRecord {
     ///
     /// # Errors
     ///
-    /// [`Error::Switch`] if the policy hash can't be computed.
+    /// [`Error::Dispatch`] if the policy hash can't be computed.
     pub fn record_key(own: &[u8; 32], naming_key: &NamingKey) -> Result<[u8; 32]> {
         Collection::BlockFloor.record_key(naming_key, &natural_key::block_floor(own), None)
     }
 
-    /// The binding rule (Paykit wire 5.6, Switch spec 8.2): read the record at `key` and act
+    /// The binding rule (Paykit wire 5.6, Dispatch spec 8.2): read the record at `key` and act
     /// on it only if it is the key derived from the reader's own identity.
     ///
     /// # Errors
     ///
-    /// [`Error::Invalid`] or [`Error::Switch`]: the reader doesn't act on it and flags it.
+    /// [`Error::Invalid`] or [`Error::Dispatch`]: the reader doesn't act on it and flags it.
     pub fn bind(
         json: &[u8],
         own: &[u8; 32],
@@ -2895,12 +2895,12 @@ impl ListPublicationRecord {
             "Paykit wire 5.8: generation and counter start at 1",
         )?;
         ensure(
-            pubky_switch_core::json::check_uuid_v4(&self.msg_id).is_ok(),
+            pubky_dispatch_core::json::check_uuid_v4(&self.msg_id).is_ok(),
             "Paykit wire 5.8: msg_id isn't a lower-case UUID v4",
         )
     }
 
-    /// The seen-counters rule (Paykit wire 5.8, Switch spec 8.2): a reader that holds `self`
+    /// The seen-counters rule (Paykit wire 5.8, Dispatch spec 8.2): a reader that holds `self`
     /// ignores, and shows with its writer, a later write of a lower counter, or of the same
     /// counter naming another message. A later write of a higher counter, or the very write
     /// held, is taken.
@@ -2927,7 +2927,7 @@ impl ListPublicationRecord {
     /// # Errors
     ///
     /// [`Error::Validation`] for a record that breaks a rule of Paykit wire 5.8, or whose
-    /// counter or generation is past the largest Switch integer; [`Error::Invalid`] if the
+    /// counter or generation is past the largest Dispatch integer; [`Error::Invalid`] if the
     /// value can't be written.
     pub fn to_json(&self) -> Result<Vec<u8>> {
         self.check().map_err(Error::into_validation)?;
@@ -3069,7 +3069,7 @@ enum MarkAdded {
 /// (Paykit wire 5.7, Seen marks). Marks enter only from buckets bound at that bucket's key
 /// ([`SeenMarks::add`]), which keeps another bucket's marks out. Binding checks a value
 /// against its key; it can't tell a value the app read from the service from one it made
-/// up. So the caller adds only values it read at the switch, never a
+/// up. So the caller adds only values it read at the Dispatch, never a
 /// [`CreditDecision::Credit`] bucket before its write has applied. The app keeps the values
 /// it read durably and adds them again after a restart.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -3189,7 +3189,7 @@ struct MarkMerge {
 }
 
 /// The current write of a settlement's bucket, as the read before a credit found it at the
-/// switch (Paykit wire 5.7, Reading).
+/// Dispatch (Paykit wire 5.7, Reading).
 #[derive(Clone, Copy, Debug)]
 pub enum CurrentBucket<'a> {
     /// No current value at the bucket's key.
@@ -3256,7 +3256,7 @@ pub enum CreditDecision {
 /// ([`SettlementBucket::bind`]), from a merge of such buckets, or from
 /// [`SettlementBucket::decide_credit`], the one call that adds a mark no bound value held.
 /// Binding checks a value against its key; it can't tell a value the caller read from the
-/// service from one it made up. So the caller binds only values it read at the switch, and
+/// service from one it made up. So the caller binds only values it read at the Dispatch, and
 /// treats a [`CreditDecision::Credit`] bucket as unwritten until its batch applies. No writer
 /// removes or changes a mark, so a reader that has seen a mark shows a later write that drops
 /// it or raises it, and writes the bucket back with every mark it has seen
@@ -3336,7 +3336,7 @@ impl SettlementBucket {
     /// Read a `settlements` bucket value as bucket `bucket` (Paykit wire 5.7). Refuses every
     /// value no writer produces: malformed or unordered marks, none, more than 9,000,
     /// repeated settlements or unknown occurrence kinds. Members it doesn't know are kept as
-    /// read (Switch wire 1.1).
+    /// read (Dispatch wire 1.1).
     fn read(json: &[u8], bucket: u16) -> Result<Self> {
         let map = parse_object(json, SETTLEMENTS)?;
         let obj = Obj::new(&map, SETTLEMENTS);
@@ -3401,7 +3401,7 @@ impl SettlementBucket {
     /// every seen mark is merged is [`CreditDecision::Full`]. Otherwise the credit writes the
     /// current write (empty when absent) with every seen mark and the mark.
     ///
-    /// The caller reads the bucket at the switch, never from its copy or a backup alone, and
+    /// The caller reads the bucket at the Dispatch, never from its copy or a backup alone, and
     /// keeps the checks of Paykit wire 5.7, Reading, that this library can't make: the
     /// rollback alarm and the provider-loss rule of Paykit spec 8.1 step 4. The library holds
     /// no record version: the caller writes a [`CreditDecision::Credit`] bucket at the
@@ -3592,7 +3592,7 @@ impl SettlementBucket {
     ///
     /// # Errors
     ///
-    /// [`Error::Validation`] for a bucket past 1023; [`Error::Switch`] if the policy hash can't
+    /// [`Error::Validation`] for a bucket past 1023; [`Error::Dispatch`] if the policy hash can't
     /// be computed.
     pub fn record_key(bucket: u16, naming_key: &NamingKey) -> Result<[u8; 32]> {
         if bucket >= SETTLEMENT_BUCKETS {
@@ -3607,12 +3607,12 @@ impl SettlementBucket {
         )
     }
 
-    /// The binding rule (Paykit wire 5.7, Switch spec 8.2): read the record at `key` as bucket
+    /// The binding rule (Paykit wire 5.7, Dispatch spec 8.2): read the record at `key` as bucket
     /// `bucket` only if it is that bucket's key, under the collection's one policy.
     ///
     /// # Errors
     ///
-    /// [`Error::Invalid`], [`Error::Validation`] or [`Error::Switch`]: the reader doesn't act
+    /// [`Error::Invalid`], [`Error::Validation`] or [`Error::Dispatch`]: the reader doesn't act
     /// on it and flags it.
     pub fn bind(json: &[u8], bucket: u16, naming_key: &NamingKey, key: &[u8; 32]) -> Result<Self> {
         Self::bind_with_blinding(json, bucket, key, |input| naming_key.blind(input))
@@ -3634,7 +3634,7 @@ impl SettlementBucket {
             "Paykit wire 5.7: invalid settlement bucket number",
         )?;
         let collection = Collection::Settlements;
-        let expected = pubky_switch_core::ident::record_key_from_blinded(
+        let expected = pubky_dispatch_core::ident::record_key_from_blinded(
             collection.name(),
             &blind(&natural_key::settlement_bucket(bucket)),
             &collection.fixed_policy().hash()?,
@@ -3811,7 +3811,7 @@ impl AllowanceRecord {
     ///
     /// # Errors
     ///
-    /// [`Error::Invalid`] or [`Error::Switch`] naming the rule.
+    /// [`Error::Invalid`] or [`Error::Dispatch`] naming the rule.
     pub fn read(json: &[u8], own: &[u8; 32]) -> Result<Self> {
         let map = parse_object(json, ALLOWANCES)?;
         let obj = Obj::new(&map, ALLOWANCES);
@@ -4052,7 +4052,7 @@ impl AllowanceRecord {
     ///
     /// # Errors
     ///
-    /// [`Error::Switch`] if the policy hash can't be computed.
+    /// [`Error::Dispatch`] if the policy hash can't be computed.
     pub fn record_key(&self, naming_key: &NamingKey) -> Result<[u8; 32]> {
         Collection::Allowances.record_key(
             naming_key,
@@ -4065,7 +4065,7 @@ impl AllowanceRecord {
     ///
     /// # Errors
     ///
-    /// [`Error::Switch`] if the policy hash can't be computed.
+    /// [`Error::Dispatch`] if the policy hash can't be computed.
     pub fn ledger_key(&self, naming_key: &NamingKey) -> Result<[u8; 32]> {
         Collection::AllowanceLedgers.record_key(
             naming_key,
@@ -4074,12 +4074,12 @@ impl AllowanceRecord {
         )
     }
 
-    /// The binding rule (Paykit wire 5.4, Switch spec 8.2): read the record at `key`, and act
+    /// The binding rule (Paykit wire 5.4, Dispatch spec 8.2): read the record at `key`, and act
     /// on it only if the key is the one derived from `counterparty` and `allowance_id`.
     ///
     /// # Errors
     ///
-    /// [`Error::Invalid`] or [`Error::Switch`]: the reader doesn't act on it and flags it.
+    /// [`Error::Invalid`] or [`Error::Dispatch`]: the reader doesn't act on it and flags it.
     pub fn bind(
         json: &[u8],
         own: &[u8; 32],
@@ -4174,11 +4174,11 @@ impl AllowanceRecord {
     /// after the one it answers names the same app as that entry, so the handoff is the one to
     /// the current executor. `Ok(None)` for none, and for one of an earlier handoff, which
     /// counts for nothing. Whether its app has since been removed is the caller's check
-    /// (Switch spec 12.2).
+    /// (Dispatch spec 12.2).
     ///
     /// # Errors
     ///
-    /// [`Error::Invalid`] or [`Error::Switch`] for one that doesn't verify: the reader
+    /// [`Error::Invalid`] or [`Error::Dispatch`] for one that doesn't verify: the reader
     /// ignores it and flags it.
     pub fn ledger_handoff_counts(&self, own: &[u8; 32]) -> Result<Option<&LedgerHandoff>> {
         if self.ledger_handoff_unread.is_some() {
@@ -4208,7 +4208,7 @@ impl AllowanceRecord {
     ///
     /// # Errors
     ///
-    /// [`Error::Invalid`] or [`Error::Switch`] naming the rule: the reader ignores it and
+    /// [`Error::Invalid`] or [`Error::Dispatch`] naming the rule: the reader ignores it and
     /// flags it.
     pub fn check_ledger_handoff(&self, own: &[u8; 32], handoff: &LedgerHandoff) -> Result<usize> {
         handoff.verify(own, &self.counterparty, &self.allowance_id)?;
@@ -4246,7 +4246,7 @@ impl AllowanceRecord {
         Ok(at)
     }
 
-    /// "Ledger handoff" (Paykit wire 5.4, Switch spec 8.2): a later write of the Allowance
+    /// "Ledger handoff" (Paykit wire 5.4, Dispatch spec 8.2): a later write of the Allowance
     /// record keeps a `ledger_handoff` a reader has seen, or replaces it by one that verifies
     /// where it sits ([`AllowanceRecord::check_ledger_handoff`]) and is for a later grant of
     /// the later write's grant history; one that drops it, or replaces it by one for the same
@@ -4259,7 +4259,7 @@ impl AllowanceRecord {
     ///
     /// # Errors
     ///
-    /// [`Error::Invalid`] or [`Error::Switch`] naming the rule `later` breaks.
+    /// [`Error::Invalid`] or [`Error::Dispatch`] naming the rule `later` breaks.
     pub fn check_later_handoff(&self, later: &AllowanceRecord, own: &[u8; 32]) -> Result<()> {
         if later.ledger_handoff == self.ledger_handoff
             && later.ledger_handoff_unread == self.ledger_handoff_unread
@@ -4293,7 +4293,7 @@ impl AllowanceRecord {
         )
     }
 
-    /// "Seen roles" of an Allowance record (Paykit spec 6, Paykit wire 5.4, Switch spec 8.2):
+    /// "Seen roles" of an Allowance record (Paykit spec 6, Paykit wire 5.4, Dispatch spec 8.2):
     /// a reader that holds `self` ignores, and shows with its writer, a later write of the
     /// record that drops or replaces the proposal, the response, the end or the conflicting
     /// proposal it saw, by hash, so a conflict is never cleared, whose current grant isn't the
@@ -4418,7 +4418,7 @@ impl AllowanceRecord {
     }
 }
 
-/// The binding rule of an `allowance_ledgers` record (Paykit wire 5.5, Switch spec 8.2):
+/// The binding rule of an `allowance_ledgers` record (Paykit wire 5.5, Dispatch spec 8.2):
 /// read the ledger at `key`, and act on it only if the key is the one derived from its
 /// `counterparty` and `allowance_id` with the reader's naming key, and both equal those of
 /// the Allower's accepted Allowance record. Its signed proposal names the Allowee,
@@ -5220,7 +5220,7 @@ mod tests {
         let json = BlockFloorRecord::new(9).to_json().unwrap();
         assert!(Collection::BlockFloor.fixed_policy().permanent.is_some());
         // The key the ordinary `paykit_pay` policy derives isn't the record's.
-        let ordinary = pubky_switch_core::ident::Policy::new("paykit_pay", &["paykit_pay"]);
+        let ordinary = pubky_dispatch_core::ident::Policy::new("paykit_pay", &["paykit_pay"]);
         let at_ordinary = nk.record_key(
             Collection::BlockFloor.name(),
             &natural_key::block_floor(&own),
@@ -5482,7 +5482,7 @@ mod tests {
     #[test]
     fn test_list_publication_refuses_a_value_that_breaks_its_rules() {
         let good: Value = serde_json::from_slice(&publication(7, 1).to_json().unwrap()).unwrap();
-        let max = pubky_switch_core::json::MAX_INT;
+        let max = pubky_dispatch_core::json::MAX_INT;
         for (member, bad) in [
             ("v", serde_json::json!(2)),
             ("generation", serde_json::json!(0)),

@@ -5,10 +5,10 @@
 use std::sync::Arc;
 
 use paykit_sdk::{AppScopes, NoticeKind, PayOptions, PayOutcome, Paykit, PaykitConfig, Refusal};
-use pubky_switch_client::app::UserConfirmed;
-use pubky_switch_client::store::MemoryStore;
-use pubky_switch_core::records::CLOCK_TOLERANCE_MS;
-use pubky_switch_harness::World;
+use pubky_dispatch_client::app::UserConfirmed;
+use pubky_dispatch_client::store::MemoryStore;
+use pubky_dispatch_core::records::CLOCK_TOLERANCE_MS;
+use pubky_dispatch_harness::World;
 
 use super::{checkout, finish_listing, invoice, on_both_backends, Checkout, TestResult};
 
@@ -78,7 +78,7 @@ async fn held_after_loss(world: &World) -> TestResult {
     Box::pin(world.add_switch(RECOVERY_ORIGIN, &[&identity])).await?;
     let doc = Box::pin(payer.signer.declare_provider_loss(
         RECOVERY_ORIGIN,
-        pubky_switch_signer::UserConfirmed::shown_and_confirmed(),
+        pubky_dispatch_signer::UserConfirmed::shown_and_confirmed(),
     ))
     .await?;
     assert!(doc.body().recovery_from.is_some());

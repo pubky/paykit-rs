@@ -4,12 +4,12 @@ use crate::runtime::{in_callback, HOST_CALL_LIMIT};
 use paykit_lib::{
     Asset, AttemptId, Decimal, PaymentAmount, PaymentEndpointIdentifier, PaymentEndpointPayload,
 };
-use paykit_sdk::rail::{AllowanceDispatch, CandidateId, ProofCheck};
+use paykit_sdk::rail::{AllowanceHandoff, CandidateId, ProofCheck};
 use paykit_sdk::{
     EndpointSelection, PaymentEndpointCandidate, Rail, RailDeclaration, RailError, RailOutcome,
     RailPaid, RailPayment, Transfer,
 };
-use pubky_switch_client::transport::BoxFuture;
+use pubky_dispatch_client::transport::BoxFuture;
 use serde_json::{Map, Value};
 use std::sync::Arc;
 
@@ -50,15 +50,15 @@ pub struct MethodDeclaration {
     pub idempotent: bool,
     /// How long the method remembers an idempotency key; `None` for good.
     pub idempotency_retention_ms: Option<u64>,
-    /// The method's history can show the outcome of a dispatch.
+    /// The method's history can show the outcome of a handoff.
     pub history: bool,
-    /// How long the history keeps a dispatch; `None` for good.
+    /// How long the history keeps a handoff; `None` for good.
     pub history_retention_ms: Option<u64>,
     /// The history lives with the account, not only on the paying device, so a restored device
-    /// sees every dispatch made after its backup.
+    /// sees every handoff made after its backup.
     pub history_survives_restore: bool,
-    /// The longest a dispatch takes to complete or fail, in milliseconds: a day for an ordinary
-    /// Lightning payment (Switch spec 10.2).
+    /// The longest a handoff takes to complete or fail, in milliseconds: a day for an ordinary
+    /// Lightning payment (Dispatch spec 10.2).
     pub longest_completion_ms: u64,
     /// How far, in milliseconds, the method's verified payment time may lie before the
     /// request's signed `created_at` for a payment made after it (Paykit spec 7.1, "Not
@@ -98,7 +98,7 @@ pub struct EndpointCandidate {
 /// A failure of the payment method's call (Paykit spec 7.2). `Unknown` is ambiguous: a payment
 /// may have been submitted, so it means nothing yet and the attempt stays open; a thrown host
 /// error is read as `Unknown`. `NotSubmitted` is authoritative: nothing was and nothing will be
-/// submitted, so a first dispatch it answers is written `failed`, its journal entry is
+/// submitted, so a first handoff it answers is written `failed`, its journal entry is
 /// finished, and a replacement payment may follow.
 #[derive(Debug, Clone, uniffi::Error, thiserror::Error)]
 pub enum MethodError {
@@ -192,7 +192,7 @@ pub struct MethodPayment {
     /// The request's payment reference, copied into the payment where the method allows it.
     pub payment_reference: Option<String>,
 }
-/// The outcome of a dispatch, as the method reports it.
+/// The outcome of a handoff, as the method reports it.
 #[derive(Clone, uniffi::Enum)]
 pub enum MethodOutcome {
     /// Verified success.
@@ -231,10 +231,10 @@ impl MethodOutcome {
 
 /// A payment submitted or possibly submitted through the payer's wallet.
 #[derive(uniffi::Record)]
-pub struct MethodDispatch {
+pub struct MethodHandoff {
     /// The original idempotency key used to pay.
     pub attempt_id: String,
-    /// The amount transferred, or durably bound to the dispatch, excluding fees.
+    /// The amount transferred, or durably bound to the handoff, excluding fees.
     pub amount: Amount,
     /// The method's outcome, including a payment whose result is still unknown.
     pub outcome: MethodOutcome,
@@ -290,12 +290,12 @@ pub trait PaymentMethod: Send + Sync {
     /// is still submitting, once Paykit asks again after four times the pay limit, lets the
     /// payment be made twice.
     async fn payment(&self, attempt_id: String) -> Result<Option<MethodOutcome>, MethodError>;
-    /// Complete account-wide dispatch inventory, including manual, failed and pending attempts.
+    /// Complete account-wide handoff inventory, including manual, failed and pending attempts.
     /// Return null for incomplete coverage and an empty list only for proven empty history.
     async fn allowance_history(
         &self,
         payer: Vec<u8>,
-    ) -> Result<Option<Vec<MethodDispatch>>, MethodError>;
+    ) -> Result<Option<Vec<MethodHandoff>>, MethodError>;
     /// Verify the proof against the original payment and return its verified payment time,
     /// in Unix milliseconds, or null when it can't be verified. That time decides credit:
     /// the payee credits the request only when it lies within the request's times, so
@@ -377,7 +377,7 @@ impl HostRail {
         &self.flights
     }
 
-    /// Whether the method can find a dispatch again by its attempt ID. Without that a payment
+    /// Whether the method can find a handoff again by its attempt ID. Without that a payment
     /// the wallet stopped waiting for could never be settled, so paying is refused; every
     /// other wallet call works with any declaration (Paykit spec 7.2).
     pub(crate) fn has_lookup(&self) -> bool {
@@ -484,7 +484,7 @@ impl Rail for HostRail {
             let app = crate::wallet::current_app();
             match self
                 .flights
-                .dispatch(attempt, app, pay, self.pay_limit)
+                .handoff(attempt, app, pay, self.pay_limit)
                 .await
             {
                 Waited::Answered(answer) => answer?.into_rail(),
@@ -519,7 +519,7 @@ impl Rail for HostRail {
     fn allowance_history(
         &self,
         payer: [u8; 32],
-    ) -> BoxFuture<'_, Result<Option<Vec<AllowanceDispatch>>, RailError>> {
+    ) -> BoxFuture<'_, Result<Option<Vec<AllowanceHandoff>>, RailError>> {
         Box::pin(async move {
             let Some(history) = bounded(
                 self.lookup_limit,
@@ -532,7 +532,7 @@ impl Rail for HostRail {
             let all = history
                 .into_iter()
                 .map(|entry| {
-                    Ok(AllowanceDispatch {
+                    Ok(AllowanceHandoff {
                         attempt_id: AttemptId::parse(&entry.attempt_id).map_err(invalid_answer)?,
                         amount: PaymentAmount::try_from(entry.amount).map_err(invalid_answer)?,
                         outcome: entry.outcome.into_rail()?,

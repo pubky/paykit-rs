@@ -1,10 +1,10 @@
 use crate::{
-    fixed, CursorStatus, NativeWallet, ProviderLossBoundary, SwitchAlarm, WalletError, WalletHost,
+    fixed, CursorStatus, DispatchAlarm, NativeWallet, ProviderLossBoundary, WalletError, WalletHost,
 };
 use paykit_sdk::{Paykit, PaykitBackup, UserConfirmed};
 use std::sync::Arc;
 
-/// Whether the user can still account for the source device (Switch spec 12.4).
+/// Whether the user can still account for the source device (Dispatch spec 12.4).
 #[derive(uniffi::Enum)]
 pub enum BackupDevice {
     /// The device is still in the user's possession.
@@ -15,7 +15,7 @@ pub enum BackupDevice {
     UnaccountedFor,
 }
 
-/// The installed client's current restore evidence (Switch spec 12.4).
+/// The installed client's current restore evidence (Dispatch spec 12.4).
 #[derive(uniffi::Record)]
 pub struct WalletRestoreState {
     /// The app remains in reconciliation, including while another registered protocol is reconciling.
@@ -25,7 +25,7 @@ pub struct WalletRestoreState {
     /// Registrations since the backup whose use the user must account for.
     pub registrations: Vec<u64>,
     /// An alarm that stopped the installation, including a refused registration.
-    pub alarm: Option<SwitchAlarm>,
+    pub alarm: Option<DispatchAlarm>,
 }
 
 /// Original apps, verified reports and explicit removals for one provider loss (Paykit spec 7.3).
@@ -62,7 +62,7 @@ pub struct RecoveryReport {
     pub original: Vec<u8>,
     /// The authorized publisher's 16-byte App ID (Paykit wire 5.10).
     pub publisher: Vec<u8>,
-    /// The exact write accepted by the service (Switch wire 6.3).
+    /// The exact write accepted by the service (Dispatch wire 6.3).
     pub application: ApplicationRef,
     /// The 32-byte commitment to the original app's inventory cutoff (Paykit wire 5.10).
     pub cutoff: Vec<u8>,
@@ -89,20 +89,20 @@ impl From<paykit_sdk::RecoveryReport> for RecoveryReport {
     }
 }
 
-/// The service's reference to an applied record write (Switch wire 6.3).
+/// The service's reference to an applied record write (Dispatch wire 6.3).
 #[derive(uniffi::Record)]
 pub struct ApplicationRef {
-    /// The generation in which the write was applied (Switch wire 6.3).
+    /// The generation in which the write was applied (Dispatch wire 6.3).
     pub generation: u64,
-    /// The sequence of the write within that generation (Switch wire 6.3).
+    /// The sequence of the write within that generation (Dispatch wire 6.3).
     pub seq: u64,
-    /// The 32-byte hash of the full applied item (Switch wire 6.3).
+    /// The 32-byte hash of the full applied item (Dispatch wire 6.3).
     pub item_hash: Vec<u8>,
 }
 
 #[uniffi::export]
 impl WalletHost {
-    /// Ask the user about the source device first (Switch spec 12.4). A lost or stolen
+    /// Ask the user about the source device first (Dispatch spec 12.4). A lost or stolen
     /// device requires revoking the old app and enrolling new keys.
     /// Supply the App ID saved alongside the protected backup. The exclusive store
     /// rejects reads and writes to any other app before an installation can change.
@@ -184,7 +184,7 @@ impl NativeWallet {
         .await
     }
 
-    /// The user cannot account for the displayed registrations. Switch stops this app and
+    /// The user cannot account for the displayed registrations. Dispatch stops this app and
     /// requests revocation. The resulting alarm remains available in the restore state.
     pub async fn refuse_restored_registrations(
         &self,

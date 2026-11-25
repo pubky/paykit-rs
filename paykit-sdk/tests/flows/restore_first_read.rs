@@ -1,11 +1,11 @@
-//! A restore's first read precedes outgoing requests (Switch spec 12.4).
+//! A restore's first read precedes outgoing requests (Dispatch spec 12.4).
 
 use std::sync::Arc;
 
 use paykit_sdk::{MessageDelivery, Paykit, PaykitConfig, Rail, Refusal};
-use pubky_switch_client::clock::Clock;
-use pubky_switch_client::testing::Fault;
-use pubky_switch_core::http::ErrorCode;
+use pubky_dispatch_client::clock::Clock;
+use pubky_dispatch_client::testing::Fault;
+use pubky_dispatch_core::http::ErrorCode;
 
 use crate::common::{draft, request_from, store, ScriptedIdentityReads, World};
 
@@ -26,7 +26,7 @@ async fn queued_request(w: &World, shop: &mut Paykit) -> String {
 async fn restore_shop(w: &World, shop: &mut Paykit, reads: &Arc<ScriptedIdentityReads>) -> Paykit {
     let backup = shop.backup().await.unwrap();
     let mut env = w.env(&w.bob, store());
-    env.homeserver = Arc::clone(reads) as Arc<dyn pubky_switch_client::app::HomeserverReader>;
+    env.homeserver = Arc::clone(reads) as Arc<dyn pubky_dispatch_client::app::HomeserverReader>;
     let restored = Paykit::restore(
         env,
         PaykitConfig::default(),
@@ -161,7 +161,7 @@ async fn test_restore_first_read_retries_a_queued_reply_after_reload() {
         Arc::clone(&w.clock),
     ));
     let mut env = w.env(&w.alice, Arc::clone(&storage));
-    env.homeserver = Arc::clone(&reads) as Arc<dyn pubky_switch_client::app::HomeserverReader>;
+    env.homeserver = Arc::clone(&reads) as Arc<dyn pubky_dispatch_client::app::HomeserverReader>;
     let mut restored = Paykit::restore(
         env,
         PaykitConfig::default(),
@@ -180,7 +180,7 @@ async fn test_restore_first_read_retries_a_queued_reply_after_reload() {
                     &w.alice,
                     Arc::clone(&storage),
                     app_id,
-                    Arc::clone(&reads) as Arc<dyn pubky_switch_client::app::HomeserverReader>,
+                    Arc::clone(&reads) as Arc<dyn pubky_dispatch_client::app::HomeserverReader>,
                 )
                 .await;
         }
@@ -274,7 +274,7 @@ async fn test_restore_first_read_preserves_the_implicit_report_through_an_error(
     restored.flush().await.unwrap();
     assert!(matches!(
         restored.app().restore_held_cursor(),
-        Some(pubky_switch_client::app::HeldCursor::Ahead { .. })
+        Some(pubky_dispatch_client::app::HeldCursor::Ahead { .. })
     ));
     assert!(restored
         .app()
@@ -314,7 +314,7 @@ async fn test_restore_first_read_preserves_the_implicit_report_through_an_error(
             .events
             .iter()
             .filter(|event| matches!(event,
-        pubky_switch_client::app::AppEvent::MessageReceived { msg_id, .. }
+        pubky_dispatch_client::app::AppEvent::MessageReceived { msg_id, .. }
         if msg_id == &sent.msg_id))
             .count(),
         1
@@ -346,7 +346,7 @@ async fn test_restore_first_read_does_not_confirm_a_held_request() {
     restored.flush().await.unwrap();
     assert!(matches!(
         restored.app().restore_held_cursor(),
-        Some(pubky_switch_client::app::HeldCursor::Ahead { .. })
+        Some(pubky_dispatch_client::app::HeldCursor::Ahead { .. })
     ));
     assert!(restored.request(&request).await.unwrap().held.is_some());
     assert!(restored
@@ -387,12 +387,12 @@ async fn test_restore_first_read_block_refusal_keeps_other_current_blocks() {
     assert!(
         matches!(
             error,
-            paykit_sdk::PaykitError::Client(pubky_switch_client::app::AppError::Refused(_))
+            paykit_sdk::PaykitError::Client(pubky_dispatch_client::app::AppError::Refused(_))
         ),
         "{error:?}"
     );
     assert!(restored.app().restore_held_cursor().is_some());
-    let mark = format!("bk/{}", pubky_switch_core::enc::b64(&w.bob_id()));
+    let mark = format!("bk/{}", pubky_dispatch_core::enc::b64(&w.bob_id()));
     assert!(restored
         .app()
         .protocol_get("paykit", mark.as_bytes())
@@ -435,7 +435,7 @@ async fn test_restore_first_read_block_refusal_preserves_the_page_report() {
     let error = restored.block(&w.carol_id()).await.unwrap_err();
     assert!(matches!(
         error,
-        paykit_sdk::PaykitError::Client(pubky_switch_client::app::AppError::Refused(_))
+        paykit_sdk::PaykitError::Client(pubky_dispatch_client::app::AppError::Refused(_))
     ));
     assert!(restored.app().restore_held_cursor().is_some());
     let summary = restored.receive(None).await.unwrap();
@@ -453,7 +453,7 @@ async fn test_restore_first_read_block_refusal_preserves_the_page_report() {
             .events
             .iter()
             .filter(|event| matches!(event,
-        pubky_switch_client::app::AppEvent::MessageReceived { msg_id, .. }
+        pubky_dispatch_client::app::AppEvent::MessageReceived { msg_id, .. }
         if msg_id == &sent.msg_id))
             .count(),
         1
@@ -461,7 +461,7 @@ async fn test_restore_first_read_block_refusal_preserves_the_page_report() {
     let later = restored.receive(None).await.unwrap();
     assert!(!later.applied.contains(&sent.msg_id));
     assert!(!later.report.events.iter().any(|event| matches!(event,
-        pubky_switch_client::app::AppEvent::MessageReceived { msg_id, .. }
+        pubky_dispatch_client::app::AppEvent::MessageReceived { msg_id, .. }
         if msg_id == &sent.msg_id)));
     assert!(w.rail.all_executions().is_empty());
 }
@@ -487,7 +487,7 @@ async fn test_restore_first_read_keeps_block_intent_when_identity_is_unavailable
         Arc::clone(&w.clock),
     ));
     let mut env = w.env(&w.alice, Arc::clone(&storage));
-    env.homeserver = Arc::clone(&reads) as Arc<dyn pubky_switch_client::app::HomeserverReader>;
+    env.homeserver = Arc::clone(&reads) as Arc<dyn pubky_dispatch_client::app::HomeserverReader>;
     let mut restored = Paykit::restore(
         env,
         PaykitConfig::default(),
@@ -503,7 +503,7 @@ async fn test_restore_first_read_keeps_block_intent_when_identity_is_unavailable
         error.refusal(),
         Some(Refusal::IdentityUnavailable(_))
     ));
-    let mark = format!("bk/{}", pubky_switch_core::enc::b64(&w.bob_id()));
+    let mark = format!("bk/{}", pubky_dispatch_core::enc::b64(&w.bob_id()));
     let before = restored
         .app()
         .protocol_get("paykit", mark.as_bytes())
@@ -520,7 +520,7 @@ async fn test_restore_first_read_keeps_block_intent_when_identity_is_unavailable
             &w.alice,
             storage,
             app_id,
-            Arc::clone(&reads) as Arc<dyn pubky_switch_client::app::HomeserverReader>,
+            Arc::clone(&reads) as Arc<dyn pubky_dispatch_client::app::HomeserverReader>,
         )
         .await;
     assert_eq!(
@@ -559,7 +559,7 @@ async fn test_restore_first_read_missing_identity_holds_the_queued_request() {
     ));
     let mut restored = restore_shop(&w, &mut shop, &reads).await;
     w.homeserver
-        .remove(w.bob_id(), pubky_switch_core::records::IDENTITY_PATH);
+        .remove(w.bob_id(), pubky_dispatch_core::records::IDENTITY_PATH);
     assert_eq!(restored.app().identity_confirmed_at(), None);
     let result = restored.flush().await;
     assert_eq!(restored.app().identity_confirmed_at(), None);
@@ -579,13 +579,16 @@ async fn test_restore_first_read_missing_identity_holds_the_queued_request() {
 
 #[tokio::test]
 async fn test_restore_first_read_older_identity_holds_the_queued_request() {
-    use pubky_switch_client::app::HomeserverReader;
+    use pubky_dispatch_client::app::HomeserverReader;
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
     let old = w
         .homeserver
-        .get(w.bob_id(), pubky_switch_core::records::IDENTITY_PATH.into())
+        .get(
+            w.bob_id(),
+            pubky_dispatch_core::records::IDENTITY_PATH.into(),
+        )
         .await
         .unwrap()
         .unwrap();
@@ -604,11 +607,11 @@ async fn test_restore_first_read_older_identity_holds_the_queued_request() {
     ));
     let mut restored = restore_shop(&w, &mut shop, &reads).await;
     w.homeserver
-        .put(w.bob_id(), pubky_switch_core::records::IDENTITY_PATH, old);
+        .put(w.bob_id(), pubky_dispatch_core::records::IDENTITY_PATH, old);
     assert_eq!(restored.app().identity_confirmed_at(), None);
     assert!(matches!(
         restored.app_mut().refresh_identity().await.unwrap(),
-        pubky_switch_client::app::IdentityRefresh::Older { .. }
+        pubky_dispatch_client::app::IdentityRefresh::Older { .. }
     ));
     let result = restored.flush().await;
     assert_eq!(restored.app().identity_confirmed_at(), None);
@@ -628,13 +631,16 @@ async fn test_restore_first_read_older_identity_holds_the_queued_request() {
 
 #[tokio::test]
 async fn test_restore_first_read_newer_directory_identity_requires_confirmation() {
-    use pubky_switch_client::app::HomeserverReader;
+    use pubky_dispatch_client::app::HomeserverReader;
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
     let old = w
         .homeserver
-        .get(w.bob_id(), pubky_switch_core::records::IDENTITY_PATH.into())
+        .get(
+            w.bob_id(),
+            pubky_dispatch_core::records::IDENTITY_PATH.into(),
+        )
         .await
         .unwrap()
         .unwrap();
@@ -648,7 +654,7 @@ async fn test_restore_first_read_newer_directory_identity_requires_confirmation(
         )
         .await;
     w.homeserver
-        .put(w.bob_id(), pubky_switch_core::records::IDENTITY_PATH, old);
+        .put(w.bob_id(), pubky_dispatch_core::records::IDENTITY_PATH, old);
     let mut restored = Paykit::restore(
         w.env(&w.bob, store()),
         PaykitConfig::default(),
@@ -721,7 +727,7 @@ enum BlockFailure {
 }
 
 struct BlockFailureStore {
-    inner: pubky_switch_client::store::MemoryStore,
+    inner: pubky_dispatch_client::store::MemoryStore,
     target: Vec<u8>,
     failure: BlockFailure,
     finalization_fails: bool,
@@ -729,12 +735,12 @@ struct BlockFailureStore {
     failures: std::sync::atomic::AtomicUsize,
 }
 
-impl pubky_switch_client::store::StateStore for BlockFailureStore {
+impl pubky_dispatch_client::store::StateStore for BlockFailureStore {
     fn get(
         &self,
         ns: &str,
         key: &[u8],
-    ) -> Result<Option<Vec<u8>>, pubky_switch_client::error::StoreError> {
+    ) -> Result<Option<Vec<u8>>, pubky_dispatch_client::error::StoreError> {
         self.inner.get(ns, key)
     }
 
@@ -744,7 +750,7 @@ impl pubky_switch_client::store::StateStore for BlockFailureStore {
         prefix: &[u8],
         after: Option<&[u8]>,
         limit: u32,
-    ) -> Result<Vec<pubky_switch_client::store::KeyValue>, pubky_switch_client::error::StoreError>
+    ) -> Result<Vec<pubky_dispatch_client::store::KeyValue>, pubky_dispatch_client::error::StoreError>
     {
         use std::sync::atomic::Ordering;
         if self.finalization_fails
@@ -754,19 +760,19 @@ impl pubky_switch_client::store::StateStore for BlockFailureStore {
                 .compare_exchange(1, 2, Ordering::SeqCst, Ordering::SeqCst)
                 .is_ok()
         {
-            return Err(pubky_switch_client::error::StoreError::Corrupt);
+            return Err(pubky_dispatch_client::error::StoreError::Corrupt);
         }
         self.inner.scan(ns, prefix, after, limit)
     }
 
     fn commit(
         &self,
-        batch: pubky_switch_client::store::WriteBatch,
-    ) -> Result<(), pubky_switch_client::error::StoreError> {
+        batch: pubky_dispatch_client::store::WriteBatch,
+    ) -> Result<(), pubky_dispatch_client::error::StoreError> {
         self.commit_with(batch, |batch| {
             self.inner
                 .commit(batch)
-                .map(|()| pubky_switch_client::store::CommitOutcome::Applied)
+                .map(|()| pubky_dispatch_client::store::CommitOutcome::Applied)
         })
         .map(|_| ())
     }
@@ -774,18 +780,20 @@ impl pubky_switch_client::store::StateStore for BlockFailureStore {
     fn acquire(
         &self,
         ns: &str,
-        owner: pubky_switch_client::store::StoreOwner,
-    ) -> Result<pubky_switch_client::store::AcquireOutcome, pubky_switch_client::error::StoreError>
-    {
+        owner: pubky_dispatch_client::store::StoreOwner,
+    ) -> Result<
+        pubky_dispatch_client::store::AcquireOutcome,
+        pubky_dispatch_client::error::StoreError,
+    > {
         self.inner.acquire(ns, owner)
     }
 
     fn commit_if(
         &self,
         ns: &str,
-        owner: pubky_switch_client::store::StoreOwner,
-        batch: pubky_switch_client::store::WriteBatch,
-    ) -> Result<pubky_switch_client::store::CommitOutcome, pubky_switch_client::error::StoreError>
+        owner: pubky_dispatch_client::store::StoreOwner,
+        batch: pubky_dispatch_client::store::WriteBatch,
+    ) -> Result<pubky_dispatch_client::store::CommitOutcome, pubky_dispatch_client::error::StoreError>
     {
         self.commit_with(batch, |batch| self.inner.commit_if(ns, owner, batch))
     }
@@ -793,16 +801,16 @@ impl pubky_switch_client::store::StateStore for BlockFailureStore {
 impl BlockFailureStore {
     fn commit_with(
         &self,
-        batch: pubky_switch_client::store::WriteBatch,
+        batch: pubky_dispatch_client::store::WriteBatch,
         apply: impl FnOnce(
-            pubky_switch_client::store::WriteBatch,
+            pubky_dispatch_client::store::WriteBatch,
         ) -> Result<
-            pubky_switch_client::store::CommitOutcome,
-            pubky_switch_client::error::StoreError,
+            pubky_dispatch_client::store::CommitOutcome,
+            pubky_dispatch_client::error::StoreError,
         >,
-    ) -> Result<pubky_switch_client::store::CommitOutcome, pubky_switch_client::error::StoreError>
+    ) -> Result<pubky_dispatch_client::store::CommitOutcome, pubky_dispatch_client::error::StoreError>
     {
-        use pubky_switch_client::store::Write;
+        use pubky_dispatch_client::store::Write;
         use std::sync::atomic::Ordering;
         let matches = batch
             .writes()
@@ -811,16 +819,17 @@ impl BlockFailureStore {
                 (BlockFailure::Commit, Write::Delete { key, .. }) => key == &self.target,
                 (BlockFailure::Keep, Write::Put { key, value, .. }) if key.starts_with(b"opq/") => {
                     let value: serde_json::Value = serde_json::from_slice(value).unwrap();
-                    let bytes = pubky_switch_core::enc::unb64(value["d"]["body"].as_str().unwrap())
-                        .unwrap();
-                    pubky_switch_client::client::Batch::from_body(bytes)
+                    let bytes =
+                        pubky_dispatch_core::enc::unb64(value["d"]["body"].as_str().unwrap())
+                            .unwrap();
+                    pubky_dispatch_client::client::Batch::from_body(bytes)
                         .unwrap()
                         .ops()
                         .iter()
                         .any(|op| {
                             matches!(
                                 op.body().kind,
-                                pubky_switch_core::ops::OpKind::DenyPut { .. }
+                                pubky_dispatch_core::ops::OpKind::DenyPut { .. }
                             )
                         })
                 }
@@ -828,15 +837,15 @@ impl BlockFailureStore {
             });
         if matches && self.armed.swap(false, Ordering::SeqCst) {
             self.failures.fetch_add(1, Ordering::SeqCst);
-            return Err(pubky_switch_client::error::StoreError::Unavailable);
+            return Err(pubky_dispatch_client::error::StoreError::Unavailable);
         }
         apply(batch)
     }
 }
 
 async fn block_after_first_page(failure: BlockFailure, manages: bool, finalization_fails: bool) {
-    use pubky_switch_client::error::StoreError;
-    use pubky_switch_client::store::StateStore;
+    use pubky_dispatch_client::error::StoreError;
+    use pubky_dispatch_client::store::StateStore;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     let w = World::new();
     let mut wallet = if manages {
@@ -863,7 +872,11 @@ async fn block_after_first_page(failure: BlockFailure, manages: bool, finalizati
         .await
         .unwrap();
     assert!(matches!(sent.delivery, MessageDelivery::Accepted { .. }));
-    let target = format!("p/paykit/bk/{}", pubky_switch_core::enc::b64(&w.carol_id())).into_bytes();
+    let target = format!(
+        "p/paykit/bk/{}",
+        pubky_dispatch_core::enc::b64(&w.carol_id())
+    )
+    .into_bytes();
     let faults = Arc::new(BlockFailureStore {
         inner: Default::default(),
         target,
@@ -889,7 +902,7 @@ async fn block_after_first_page(failure: BlockFailure, manages: bool, finalizati
             matches!(
                 result,
                 Err(paykit_sdk::PaykitError::Client(
-                    pubky_switch_client::app::AppError::Store(StoreError::Corrupt)
+                    pubky_dispatch_client::app::AppError::Store(StoreError::Corrupt)
                 ))
             ),
             "{result:?}"
@@ -898,7 +911,7 @@ async fn block_after_first_page(failure: BlockFailure, manages: bool, finalizati
             matches!(
                 result,
                 Err(paykit_sdk::PaykitError::Client(
-                    pubky_switch_client::app::AppError::Store(StoreError::Unavailable)
+                    pubky_dispatch_client::app::AppError::Store(StoreError::Unavailable)
                 ))
             ),
             "{result:?}"
@@ -922,11 +935,11 @@ async fn block_after_first_page(failure: BlockFailure, manages: bool, finalizati
             1
         );
         assert_eq!(summary.report.events.iter().filter(|event| matches!(event,
-            pubky_switch_client::app::AppEvent::MessageReceived { msg_id, .. } if msg_id == &sent.msg_id)).count(), 1);
+            pubky_dispatch_client::app::AppEvent::MessageReceived { msg_id, .. } if msg_id == &sent.msg_id)).count(), 1);
         let later = restored.receive(None).await.unwrap();
         assert!(!later.applied.contains(&sent.msg_id));
         assert!(!later.report.events.iter().any(|event| matches!(event,
-            pubky_switch_client::app::AppEvent::MessageReceived { msg_id, .. } if msg_id == &sent.msg_id)));
+            pubky_dispatch_client::app::AppEvent::MessageReceived { msg_id, .. } if msg_id == &sent.msg_id)));
     }
     assert!(w.rail.all_executions().is_empty());
 }

@@ -1,6 +1,6 @@
 //! [`Paykit`]: one Paykit App of an identity, on the client's [`App`], with Paykit's API.
 //!
-//! It is async only at the edges and returns plain owned types. The Switch's mechanics
+//! It is async only at the edges and returns plain owned types. The Dispatch's mechanics
 //! (sending, receiving checks, records, claims, batches, cursors, moves) are the client's;
 //! [`Paykit::app`] and [`Paykit::app_mut`] give the client's API for what Paykit doesn't wrap,
 //! such as contacts and invite codes.
@@ -17,13 +17,13 @@ use std::sync::Arc;
 use paykit_lib::derive::request_obligation_blinded;
 use paykit_lib::scopes::{acts_as_payee, check_certificate};
 use paykit_lib::Label;
-use pubky_switch_client::app::{
+use pubky_dispatch_client::app::{
     App, AppBackup, AppConfig, AppEnv, AppError, AppEvent, HeldCursor, HomeserverReader,
     IdentityRefresh, JoinRequest, ProtocolSet, ReceiveReport,
 };
-use pubky_switch_client::clock::Clock;
-use pubky_switch_core::records::{AppCert, AppRecordBody, Approval};
-use pubky_switch_core::scopes::owns_root;
+use pubky_dispatch_client::clock::Clock;
+use pubky_dispatch_core::records::{AppCert, AppRecordBody, Approval};
+use pubky_dispatch_core::scopes::owns_root;
 
 use crate::destination::KeptLookup;
 use crate::error::{Refusal, Result};
@@ -34,25 +34,25 @@ use crate::rail::{Rail, RailDeclaration};
 use crate::state::{key, Tx};
 use crate::timer::Timer;
 
-/// The longest a first dispatch may take from its attempt's answer to the payment method's
+/// The longest a first handoff may take from its attempt's answer to the payment method's
 /// call: 10 minutes. Between them come the destination and identity checks, the
 /// acceptance's journaling, the final payment check and the journal write of `Paying`: a few
 /// requests in sequence, each bounded by the client's request timeout (40 s, with 10 s to
 /// connect), so a few minutes at worst. The fence judges the attempt's age with the clock
-/// tolerance (5 minutes) added, so a dispatch goes only within 5 minutes of its answer,
+/// tolerance (5 minutes) added, so a handoff goes only within 5 minutes of its answer,
 /// and the budget, added to the rail's longest time in the floor of `orphan_after`, keeps
-/// the attempt from being orphaned while its payment may still run (Switch spec 10.2).
-pub const PRE_DISPATCH_BUDGET_MS: u64 = 10 * 60_000;
+/// the attempt from being orphaned while its payment may still run (Dispatch spec 10.2).
+pub const PRE_HANDOFF_BUDGET_MS: u64 = 10 * 60_000;
 
 /// The least `orphan_after`, in seconds, for an app paying through a rail that declares
 /// `declaration`: the rail's longest time to complete or fail, plus
-/// [`PRE_DISPATCH_BUDGET_MS`], rounded up (Switch spec 10.2: the attempting app sets
+/// [`PRE_HANDOFF_BUDGET_MS`], rounded up (Dispatch spec 10.2: the attempting app sets
 /// `orphan_after` to the longest its method can take). Below it, another own app could
-/// resolve an attempt as orphaned while its dispatch was still to come or still running.
+/// resolve an attempt as orphaned while its handoff was still to come or still running.
 pub fn orphan_floor_s(declaration: &RailDeclaration) -> u64 {
     declaration
         .longest_completion_ms
-        .saturating_add(PRE_DISPATCH_BUDGET_MS)
+        .saturating_add(PRE_HANDOFF_BUDGET_MS)
         .div_ceil(1000)
 }
 
@@ -61,8 +61,8 @@ pub(crate) fn check_orphan_window(config: &PaykitConfig, rail: &dyn Rail) -> Res
     let floor = orphan_floor_s(&rail.declaration());
     match config.orphan_after_s {
         Some(set) if set < floor => Err(paykit_lib::Error::Validation(format!(
-            "Switch spec 10.2: orphan_after_s {set} is below the rail's floor of {floor} s, its \
-             longest completion plus the pre-dispatch budget"
+            "Dispatch spec 10.2: orphan_after_s {set} is below the rail's floor of {floor} s, its \
+             longest completion plus the pre-handoff budget"
         ))
         .into()),
         _ => Ok(()),
@@ -78,13 +78,13 @@ pub const DEFAULT_RESEND_BUDGET: u64 = 500;
 pub struct PaykitConfig {
     /// The client's choices when Paykit opens the app. An attached app has its own choices.
     pub app: AppConfig,
-    /// Seconds after which an open attempt of this app is orphaned (Switch spec 10.2).
+    /// Seconds after which an open attempt of this app is orphaned (Dispatch spec 10.2).
     /// `None`, the default, is [`orphan_floor_s`] for the app's rail: its declared longest
-    /// time to complete or fail plus [`PRE_DISPATCH_BUDGET_MS`], so a default config suits
+    /// time to complete or fail plus [`PRE_HANDOFF_BUDGET_MS`], so a default config suits
     /// any rail. A value set below that floor is refused when opening the app and on
-    /// every attempt. An idempotent dispatch is repeated after a crash only while the rail's
-    /// longest time still fits before the orphan age (Paykit spec 7.2, "Dispatch window"):
-    /// at the floor that leaves only the pre-dispatch budget, less the clock tolerance, so
+    /// every attempt. An idempotent handoff is repeated after a crash only while the rail's
+    /// longest time still fits before the orphan age (Paykit spec 7.2, "Handoff window"):
+    /// at the floor that leaves only the pre-handoff budget, less the clock tolerance, so
     /// an app that wants later repeats sets a larger value.
     pub orphan_after_s: Option<u64>,
     /// The label a payee app sends its requests under (Paykit spec 3.1, 8.1). An app holding
@@ -106,13 +106,13 @@ impl PaykitConfig {
         self
     }
 
-    /// Seconds after which an open attempt of this app is orphaned (Switch spec 10.2). When
+    /// Seconds after which an open attempt of this app is orphaned (Dispatch spec 10.2). When
     /// not set it is [`orphan_floor_s`] for the app's rail: its declared longest time to
-    /// complete or fail plus [`PRE_DISPATCH_BUDGET_MS`], so a default config suits any rail.
+    /// complete or fail plus [`PRE_HANDOFF_BUDGET_MS`], so a default config suits any rail.
     /// A value set below that floor is refused by `join`, `load`, `restore` and every
-    /// attempt. An idempotent dispatch is repeated after a crash only while the rail's
-    /// longest time still fits before the orphan age (Paykit spec 7.2, "Dispatch window"):
-    /// at the floor that leaves only the pre-dispatch budget, less the clock tolerance, so
+    /// attempt. An idempotent handoff is repeated after a crash only while the rail's
+    /// longest time still fits before the orphan age (Paykit spec 7.2, "Handoff window"):
+    /// at the floor that leaves only the pre-handoff budget, less the clock tolerance, so
     /// an app that wants later repeats sets a larger value.
     #[must_use]
     pub fn with_orphan_after_s(mut self, orphan_after_s: u64) -> Self {
@@ -144,7 +144,7 @@ impl PaykitConfig {
         self
     }
 
-    /// Build the Paykit protocol to register when the host opens its own Switch app
+    /// Build the Paykit protocol to register when the host opens its own Dispatch app
     /// for [`Paykit::attach`]. It handles this wallet's registered extension kinds.
     pub fn protocol(&self, rail: Arc<dyn Rail>) -> Arc<PaykitProtocol> {
         Arc::new(PaykitProtocol::with_rail(rail).with_extension_kinds(self.extension_kinds.clone()))
@@ -172,7 +172,7 @@ impl Default for PaykitConfig {
 
 /// A Paykit App's backup: the client's [`AppBackup`] with Paykit's layer, its local state
 /// and in it the payment journal, which a restore installs with the client's state in one
-/// commit (Paykit spec 2, 7.2; Switch spec 12.4). It holds the app's signing key: keep it as
+/// commit (Paykit spec 2, 7.2; Dispatch spec 12.4). It holds the app's signing key: keep it as
 /// [`AppBackup`] says. Its `Debug` shows no key.
 #[derive(Clone)]
 pub struct PaykitBackup {
@@ -235,7 +235,7 @@ pub struct ReceiveSummary {
     /// instead: reading again does nothing until that is dealt with.
     pub report: ReceiveReport,
     /// The `msg_id`s of the messages received, each with its effect committed with the
-    /// cursor move (Switch spec 8.2).
+    /// cursor move (Dispatch spec 8.2).
     pub applied: Vec<String>,
     /// The `resend_request`s answered and asked.
     pub resends: u64,
@@ -252,7 +252,7 @@ pub struct ReceiveSummary {
     pub records_unlisted: Option<String>,
     /// A certificate taken is another than the one the records were last listed under, and
     /// the app waits for its scope keys, which the signer stores when it is next
-    /// online (Switch spec 3.5). The client asks the signer for a full bundle once, and asks
+    /// online (Dispatch spec 3.5). The client asks the signer for a full bundle once, and asks
     /// again only after a later bundle part leaves a key still missing, or after a restore;
     /// it doesn't ask at every read. Until the keys come the records the certificate adds
     /// aren't listed, and the calls that act on them are refused as not now; the host tells
@@ -263,16 +263,16 @@ pub struct ReceiveSummary {
     /// the read's `AppEvent::AwaitingKeys` names them: such an entry's record holds a value
     /// sealed at that epoch, which the app can't open yet, or its write needs the current
     /// epoch's key. The client stores each such entry and passes it at once, and runs its
-    /// step again once the key comes (Switch spec 8.2). One it drops past its bounds first,
+    /// step again once the key comes (Dispatch spec 8.2). One it drops past its bounds first,
     /// 21 days from its acceptance on the service time verified, was never processed: the
     /// host is told once ([`crate::NoticeKind::MessageGivenUp`]), and its sender is asked to
     /// send it again once the app holds every key such messages waited for (Paykit spec 8.1).
     pub key_epochs_awaited: Vec<u64>,
-    /// The account is gone at this switch: the client took it as erased (Switch spec 12.7),
-    /// a provider loss (Switch spec 12.6). The host tells the user. The app reads nothing
+    /// The account is gone at this dispatch: the client took it as erased (Dispatch spec 12.7),
+    /// a provider loss (Dispatch spec 12.6). The host tells the user. The app reads nothing
     /// more there, and the SDK acts on nothing by itself: lookups of the identity there fail
-    /// closed (Switch spec 4.3), and the payment journal stays, for the recovery at a new
-    /// switch to resume from. Set from the read that takes the account as gone until the
+    /// closed (Dispatch spec 4.3), and the payment journal stays, for the recovery at a new
+    /// Dispatch to resume from. Set from the read that takes the account as gone until the
     /// host acknowledges its `AppEvent::AccountGone`, or until the account shows again.
     pub account_gone: bool,
     /// The records this receive paused: a view showed them divergent after a provider loss
@@ -363,7 +363,7 @@ fn key_epochs_awaited(events: &[AppEvent]) -> Vec<u64> {
     epochs
 }
 
-/// Whether `events` hold the client's `AccountGone` (Switch spec 12.7).
+/// Whether `events` hold the client's `AccountGone` (Dispatch spec 12.7).
 fn account_gone(events: &[AppEvent]) -> bool {
     events
         .iter()
@@ -374,7 +374,7 @@ fn account_gone(events: &[AppEvent]) -> bool {
 ///
 /// The convenience constructors register Paykit alone; the `*_with_protocols` constructors
 /// let the host register its other protocols under the same App ID (Paykit spec 3.2).
-/// Each own scope root needs its registered owner (Switch wire 3.1). Other protocols'
+/// Each own scope root needs its registered owner (Dispatch wire 3.1). Other protocols'
 /// scopes grant no Paykit rights, whether in the own or a counterparty's certificate.
 pub struct Paykit {
     pub(crate) app: App,
@@ -383,9 +383,9 @@ pub struct Paykit {
     pub(crate) clock: Arc<dyn Clock>,
     /// The Homeserver reader, for the payees' app records (Paykit spec 4).
     pub(crate) homeserver: Arc<dyn HomeserverReader>,
-    /// The host's timer, which bounds the wait for a payee's switch (Switch spec 4.3).
+    /// The host's timer, which bounds the wait for a payee's Dispatch (Dispatch spec 4.3).
     pub(crate) timer: Arc<dyn Timer>,
-    /// The payees' switch lookups still running after their grace: an answer that arrives
+    /// The payees' Dispatch lookups still running after their grace: an answer that arrives
     /// before money moves is still used (Paykit spec 4).
     pub(crate) lookups: HashMap<[u8; 32], KeptLookup>,
     /// The last payable public records and the source observations covering their reads.
@@ -460,15 +460,17 @@ impl Paykit {
     }
 
     fn check_protocol(protocol: &Arc<PaykitProtocol>, protocols: &ProtocolSet) -> Result<()> {
-        let expected = Arc::clone(protocol) as Arc<dyn pubky_switch_client::app::Protocol>;
+        let expected = Arc::clone(protocol) as Arc<dyn pubky_dispatch_client::app::Protocol>;
         if !protocols
             .get("paykit")
             .is_some_and(|p| Arc::ptr_eq(p, &expected))
         {
-            return Err(AppError::Refused(pubky_switch_client::app::Refusal::Usage(
-                "the protocol set must retain the supplied Paykit protocol".into(),
-            ))
-            .into());
+            return Err(
+                AppError::Refused(pubky_dispatch_client::app::Refusal::Usage(
+                    "the protocol set must retain the supplied Paykit protocol".into(),
+                ))
+                .into(),
+            );
         }
         Ok(())
     }
@@ -525,7 +527,7 @@ impl Paykit {
         }
     }
 
-    /// Join from an approval (Switch spec 12.1), as a Paykit App: the client's join, with
+    /// Join from an approval (Dispatch spec 12.1), as a Paykit App: the client's join, with
     /// Paykit as its protocol. The approval's certificate must pass Paykit's checks (Paykit
     /// wire 3.1). Session creation, key storage and the approval's channel stay the host's.
     /// This convenience constructor registers only Paykit. Use [`Paykit::join_with_protocols`]
@@ -540,7 +542,7 @@ impl Paykit {
     /// refuses; `Validation` for an `orphan_after_s` below the rail's floor
     /// ([`orphan_floor_s`]); the client's `Usage` refusal for a capabilities list
     /// ([`crate::Rail::endpoint_identifiers`]) the app's record can't carry. Otherwise the
-    /// client's join errors, as [`pubky_switch_client::app::App::join`] gives them. The
+    /// client's join errors, as [`pubky_dispatch_client::app::App::join`] gives them. The
     /// client may have committed state before an error finishing its join; when state was
     /// kept, [`Paykit::load`] followed by a receive resumes the pending work.
     ///
@@ -562,7 +564,7 @@ impl Paykit {
         Self::join_with_protocols(env, config, request, rail, timer, |p| Ok(p.into())).await
     }
 
-    /// Join with the host's complete protocol set (Paykit spec 3.2; Switch spec 3.3).
+    /// Join with the host's complete protocol set (Paykit spec 3.2; Dispatch spec 3.3).
     /// `register` receives the Paykit implementation configured for this rail and must
     /// include that same instance in its returned set, alongside the host's protocols.
     /// The set routes approval keys and callbacks to their owners. Registration, the own
@@ -612,7 +614,7 @@ impl Paykit {
                 // adds: a list it can't carry refuses the join here, before anything is
                 // written. Its `accepts` is the client's: each registered protocol's kinds for
                 // the certificate, in registration order, each kept only when that protocol
-                // owns the kind's root, its prefix before the first `.` (Switch wire 3.1,
+                // owns the kind's root, its prefix before the first `.` (Dispatch wire 3.1,
                 // 5.1), once. The client's set computes it privately, so its rule is applied
                 // here with the same public ownership check.
                 let mut accepts: Vec<String> = Vec::new();
@@ -663,7 +665,7 @@ impl Paykit {
 
     /// Load a Paykit App from the store alone: nothing is sent. Payments a crash left in the
     /// journal resume at [`Paykit::resume_payments`]. A stored certificate Paykit refuses,
-    /// a renewal the Switch took, still loads: the app reads its feed, to take a renewal
+    /// a renewal the Dispatch took, still loads: the app reads its feed, to take a renewal
     /// that passes, and takes no Paykit action meanwhile ([`Paykit::certificate_refused`]).
     ///
     /// This convenience constructor registers only Paykit. Use [`Paykit::load_with_protocols`]
@@ -683,7 +685,7 @@ impl Paykit {
         Self::load_with_protocols(env, config, app_id, rail, timer, |p| Ok(p.into())).await
     }
 
-    /// Load with every protocol the app joined with (Paykit spec 3.2; Switch spec 3.3).
+    /// Load with every protocol the app joined with (Paykit spec 3.2; Dispatch spec 3.3).
     /// As at [`Paykit::join_with_protocols`], `register` must retain the supplied Paykit
     /// instance. Missing or extra registered owners are refused before state is written.
     ///
@@ -715,7 +717,7 @@ impl Paykit {
         .await
     }
 
-    /// Take ownership of a host-built Switch app immediately after [`App::join`] or
+    /// Take ownership of a host-built Dispatch app immediately after [`App::join`] or
     /// [`App::load`]. Register a fresh [`PaykitConfig::protocol`] for that app and pass
     /// the same instance here. The app supplies its clock, Homeserver reader and record
     /// publishing setting. The host supplies Paykit's other settings and its timer.
@@ -739,14 +741,14 @@ impl Paykit {
         Box::pin(async move {
             Self::check_protocol(&protocol, app.protocols())?;
             if !protocol.has_extension_kinds(&config.extension_kinds) {
-                return Err(AppError::Refused(pubky_switch_client::app::Refusal::Usage(
+                return Err(AppError::Refused(pubky_dispatch_client::app::Refusal::Usage(
                     "the registered Paykit protocol and wallet must handle the same extension kinds"
                         .into(),
                 ))
                 .into());
             }
             let rail = Arc::clone(protocol.rail().ok_or_else(|| {
-                AppError::Refused(pubky_switch_client::app::Refusal::Usage(
+                AppError::Refused(pubky_dispatch_client::app::Refusal::Usage(
                     "the registered Paykit protocol must have a rail".into(),
                 ))
             })?);
@@ -758,19 +760,23 @@ impl Paykit {
                     .await?
                     .is_some_and(|owed| owed.restored_at_ms.is_none())
             {
-                return Err(AppError::Refused(pubky_switch_client::app::Refusal::Usage(
-                    "use Paykit's restore and load constructors for backup recovery".into(),
-                ))
-                .into());
+                return Err(
+                    AppError::Refused(pubky_dispatch_client::app::Refusal::Usage(
+                        "use Paykit's restore and load constructors for backup recovery".into(),
+                    ))
+                    .into(),
+                );
             }
             if !wallet
                 .protocol
                 .bind_for_attachment(wallet.app.identity(), wallet.app.cert().clone())
             {
-                return Err(AppError::Refused(pubky_switch_client::app::Refusal::Usage(
-                    "the registered Paykit protocol already has an owner".into(),
-                ))
-                .into());
+                return Err(
+                    AppError::Refused(pubky_dispatch_client::app::Refusal::Usage(
+                        "the registered Paykit protocol already has an owner".into(),
+                    ))
+                    .into(),
+                );
             }
             wallet
                 .protocol
@@ -797,7 +803,7 @@ impl Paykit {
         Ok(self)
     }
 
-    /// Restore from a backup (Switch spec 12.4): the client's restore, which installs
+    /// Restore from a backup (Dispatch spec 12.4): the client's restore, which installs
     /// Paykit's layer, its local state with the journal, in the commit of its own state.
     /// The journal is checked whole before anything is written, and its entries are marked
     /// restored, so their open attempts are resolved as a restore requires (Paykit spec
@@ -829,7 +835,7 @@ impl Paykit {
     }
 
     /// Restore the client's state and every registered protocol layer together (Paykit
-    /// spec 3.2, 7.2; Switch spec 12.4). As at [`Paykit::join_with_protocols`], `register`
+    /// spec 3.2, 7.2; Dispatch spec 12.4). As at [`Paykit::join_with_protocols`], `register`
     /// must retain the supplied Paykit instance. The client validates the named layers
     /// and each protocol validates its own state before the atomic restore commit.
     ///
@@ -869,7 +875,7 @@ impl Paykit {
     }
 
     /// The app's backup: the client's state and Paykit's, the payment journal in it, read in
-    /// one call (Paykit spec 7.2; Switch spec 12.4). A backup that couldn't be restored is
+    /// one call (Paykit spec 7.2; Dispatch spec 12.4). A backup that couldn't be restored is
     /// refused now, as the client checks it.
     ///
     /// # Errors
@@ -905,7 +911,7 @@ impl Paykit {
     /// as a hold only once the next [`Paykit::receive`] or [`Paykit::backup`] has run
     /// (Paykit spec 6). After a
     /// restore, the host must run [`Paykit::receive`] before such calls; Paykit's outgoing
-    /// methods make that first read themselves (Switch spec 12.4).
+    /// methods make that first read themselves (Dispatch spec 12.4).
     pub fn app_mut(&mut self) -> &mut App {
         &mut self.app
     }
@@ -930,7 +936,7 @@ impl Paykit {
         self.clock.now_ms()
     }
 
-    /// The highest service time the app verified (Switch spec 10.1), for the deadlines the
+    /// The highest service time the app verified (Dispatch spec 10.1), for the deadlines the
     /// spec reads on the service's clock; `None` before any verified answer.
     pub(crate) fn service_time(&self) -> Option<u64> {
         self.app.highest_service_time()
@@ -983,7 +989,7 @@ impl Paykit {
     }
 
     /// The refusal the app's current certificate meets by Paykit's checks (Paykit wire 3.1),
-    /// such as a renewal's the Switch took: `Some` while it fails them, read from the stored
+    /// such as a renewal's the Dispatch took: `Some` while it fails them, read from the stored
     /// certificate, so it holds across reloads until a certificate that passes replaces it.
     /// The host shows it to the user: meanwhile the app sends nothing, pays nothing and
     /// holds the entries it receives, unprocessed.
@@ -995,7 +1001,7 @@ impl Paykit {
 
     /// The certificate may have been renewed: the protocol follows it, once it passes
     /// Paykit's verifiers' checks as at load (Paykit wire 3.1). A renewed certificate they
-    /// refuse, which the Switch took, is [`Refusal::CertificateRefused`], and the protocol
+    /// refuse, which the Dispatch took, is [`Refusal::CertificateRefused`], and the protocol
     /// keeps the one before. Every call that writes or sends runs this first, so no Paykit
     /// action is taken under a certificate that fails; the refusal holds as long as the
     /// stored certificate fails, so it needs no mark of its own.
@@ -1007,7 +1013,7 @@ impl Paykit {
     }
 
     /// Note a counterparty with Paykit activity, for re-sends after a `missed` item or a
-    /// provider loss (Paykit spec 9, Switch spec 12.6).
+    /// provider loss (Paykit spec 9, Dispatch spec 12.6).
     pub(crate) fn note_peer(&self, tx: &mut Tx, pubky: &[u8; 32]) -> Result<()> {
         tx.put(&key::peer(pubky), &self.now())?;
         Ok(())
@@ -1016,7 +1022,7 @@ impl Paykit {
     // ---------------------------------------------------------------------------------
     // Receiving and flushing (Paykit spec 9)
 
-    /// Read the feed (Switch spec 8.2): each Paykit message's effect is committed with the
+    /// Read the feed (Dispatch spec 8.2): each Paykit message's effect is committed with the
     /// cursor move, in the batch that carries it ([`crate::PaykitProtocol`]). Then the
     /// `resend_request`s received are answered and the re-sends the app needs are asked for
     /// (Paykit spec 9). `wait` is the long-poll wait in seconds.
@@ -1052,15 +1058,15 @@ impl Paykit {
     ///
     /// # Errors
     ///
-    /// The client's errors; [`Refusal::SwitchUnavailable`] while the account may have been
-    /// erased and the client's wait before it takes it as gone goes on, as for a switch that
-    /// doesn't answer (Switch spec 12.7). A message whose effect couldn't be written yet
+    /// The client's errors; [`Refusal::DispatchUnavailable`] while the account may have been
+    /// erased and the client's wait before it takes it as gone goes on, as for a Dispatch that
+    /// doesn't answer (Dispatch spec 12.7). A message whose effect couldn't be written yet
     /// stays before the cursor, and the next call hands it over again. One waiting for a
     /// scope key the app doesn't hold yet is stored by the client and passed at once, not
     /// held behind the cursor, and is read again once the key comes.
     ///
     /// A `missed` item's listing is made inside the client's read, before any later entry is
-    /// handed over (Switch spec 8.2): a listing that fails there fails the read, and this
+    /// handed over (Dispatch spec 8.2): a listing that fails there fails the read, and this
     /// call returns its error; the next receive lists first.
     pub async fn receive(&mut self, wait: Option<u32>) -> Result<ReceiveSummary> {
         let _delivery = self.delivery_operation();
@@ -1086,7 +1092,7 @@ impl Paykit {
         // would otherwise take its size of the stack there, beside the client's read, and a
         // host thread of 2 MiB would not hold a deep read in a debug build.
         // Confirm the newest own identity before the restore's first page. A read that
-        // cannot be made leaves the first read owed (Switch spec 12.4, "The held cursor").
+        // cannot be made leaves the first read owed (Dispatch spec 12.4, "The held cursor").
         let first_read = self.first_read_pending();
         if first_read && self.certificate_refused().is_none() {
             let refreshed = self.app.refresh_identity().await;
@@ -1096,7 +1102,8 @@ impl Paykit {
                 Ok(IdentityRefresh::Current { .. } | IdentityRefresh::Newer { .. }) => {}
                 Ok(_) | Err(AppError::Transport(_)) => {
                     return Err(Refusal::IdentityUnavailable(
-                        "Switch spec 12.4: the restore's first read awaits the own identity".into(),
+                        "Dispatch spec 12.4: the restore's first read awaits the own identity"
+                            .into(),
                     )
                     .into());
                 }
@@ -1118,7 +1125,7 @@ impl Paykit {
         // An app holding `paykit_contacts` reads the flagged senders again first, at most every 10
         // minutes, for the spam rule (Paykit wire 4.1).
         Box::pin(self.refresh_lists_when_due()).await?;
-        // This app's blocks that may not reach the switch otherwise are written again: one
+        // This app's blocks that may not reach the Dispatch otherwise are written again: one
         // whose batch the client neither keeps nor applied, a restored one among them.
         if self.certificate_refused().is_none() && !first_read {
             Box::pin(self.send_own_blocks_again()).await?;
@@ -1139,10 +1146,10 @@ impl Paykit {
         self.note_own_record_write(&received);
         let report = match received {
             Ok(report) => report,
-            // The erasure's wait: the switch answers as for an account it doesn't host, and
+            // The erasure's wait: the Dispatch answers as for an account it doesn't host, and
             // nothing authenticates that, so it counts as not answering until the wait ends.
             Err(error @ AppError::NotAnsweringAsAccount { .. }) => {
-                return Err(Refusal::SwitchUnavailable(error.to_string()).into());
+                return Err(Refusal::DispatchUnavailable(error.to_string()).into());
             }
             Err(error) => return Err(error.into()),
         };
@@ -1218,7 +1225,7 @@ impl Paykit {
         // The duty events about stored entries and divergent records are taken before
         // anything returns, so that once the host acknowledges what this report showed none
         // is lost: only the SDK's own marks and notes are kept here, and nothing is written at
-        // the switch (`stored.rs`, `divergent.rs`).
+        // the Dispatch (`stored.rs`, `divergent.rs`).
         Box::pin(self.take_stored_events(&duties)).await?;
         if account_gone {
             // Nothing more is read or written there: the summary tells the host.
@@ -1315,7 +1322,7 @@ impl Paykit {
         }
         // The Allowance answers the read kept go into their records next, in the order their
         // inbox accepted them, after the stored entries noted above, so an earlier answer
-        // whose write the switch refused is seen first (`allowances.rs`).
+        // whose write the Dispatch refused is seen first (`allowances.rs`).
         Box::pin(self.recover_pending_replies()).await?;
         Box::pin(self.place_kept_allowance_responses(pending_read)).await?;
         // The payees' cancellations the read kept go into their records, as later writes of
@@ -1410,7 +1417,7 @@ impl Paykit {
         })
     }
 
-    /// Try every queued message once (Switch spec 11).
+    /// Try every queued message once (Dispatch spec 11).
     ///
     /// # Errors
     ///
@@ -1436,7 +1443,7 @@ mod tests {
     use std::sync::Arc;
 
     use paykit_lib::AttemptId;
-    use pubky_switch_client::app::{AppEnv, AppEvent, HeldCursor, JoinRequest, UserConfirmed};
+    use pubky_dispatch_client::app::{AppEnv, AppEvent, HeldCursor, JoinRequest, UserConfirmed};
 
     use super::{Paykit, PaykitBackup, PaykitConfig, ReceiveSummary};
     use crate::pay::{PayOptions, UnrequestedPayment};

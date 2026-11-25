@@ -2,7 +2,7 @@
 
 use std::collections::BTreeSet;
 
-use pubky_switch_core::{
+use pubky_dispatch_core::{
     chain::{SignedHead, TransitionProof},
     enc::{hash, lp},
     ops::SignedOp,
@@ -38,7 +38,7 @@ pub enum RecoveryWitness<'a> {
 /// What a recovery inventory entry concerns.
 #[derive(Clone, Copy)]
 pub enum RecoverySubject<'a> {
-    /// A Switch shared record key.
+    /// A Dispatch shared record key.
     Record([u8; 32]),
     /// A Paykit obligation's claim key.
     Claim([u8; 32]),
@@ -248,7 +248,7 @@ impl RecoveryCommitments {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pubky_switch_core::enc::b64;
+    use pubky_dispatch_core::enc::b64;
 
     #[test]
     fn test_recovery_evidence_matches_the_wire_examples_in_either_order() {

@@ -5,17 +5,17 @@ use std::{collections::BTreeMap, error::Error, sync::Arc};
 use paykit_sdk::{
     rail::FakeRail, AppScopes, PayOptions, PayOutcome, Paykit, RequestRef, RequestStatus,
 };
-use pubky_switch_client::app::{AppError, AppEvent, Refusal as ClientRefusal};
-use pubky_switch_client::error::StoreError;
-use pubky_switch_client::store::{Fault, FaultStore};
-use pubky_switch_core::http::NoticeReason;
-use pubky_switch_harness::{Backend, World};
+use pubky_dispatch_client::app::{AppError, AppEvent, Refusal as ClientRefusal};
+use pubky_dispatch_client::error::StoreError;
+use pubky_dispatch_client::store::{Fault, FaultStore};
+use pubky_dispatch_core::http::NoticeReason;
+use pubky_dispatch_harness::{Backend, World};
 
 use crate::common::{draft, enrolled_wallet, request_from, store, TestTimer};
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
-/// How many times the fixture pays a request a check held before its dispatch.
+/// How many times the fixture pays a request a check held before its handoff.
 const MAX_HELD_PAYMENTS: usize = 3;
 
 #[tokio::test]
@@ -89,7 +89,7 @@ async fn payer_notice(world: &World) -> TestResult {
         // a read during that check fails: `Pending`, with the method not called. A host
         // follows it as the wallet says: a resume closes it unpaid, and the request is paid
         // again. Each is tried at most `MAX_HELD_PAYMENTS` times, and must end in flight.
-        // The method's call hangs; a payment held before its dispatch doesn't call it, so
+        // The method's call hangs; a payment held before its handoff doesn't call it, so
         // the one `Hang` waits for the call the retry makes.
         let mut started = None;
         rail.next(paykit_sdk::rail::Behaviour::Hang);
@@ -107,7 +107,7 @@ async fn payer_notice(world: &World) -> TestResult {
             }
             Box::pin(payer.resume_payments()).await?;
         }
-        attempts.push(started.ok_or("a payment was held before its dispatch every time")?);
+        attempts.push(started.ok_or("a payment was held before its handoff every time")?);
     }
     // Both method calls started: each entry is `Paying`, so the resume below meets two
     // payments in flight.
@@ -242,7 +242,7 @@ async fn reopen_held_payer(
     let [first, later] = held;
     let refused = |resumed: &paykit_sdk::Result<Vec<PayOutcome>>| {
         matches!(resumed, Err(paykit_sdk::PaykitError::Client(AppError::Refused(refused))) if refused == &reason)
-            || matches!(resumed, Err(error) if error.code() == Some(pubky_switch_core::http::ErrorCode::RecoveryRequired))
+            || matches!(resumed, Err(error) if error.code() == Some(pubky_dispatch_core::http::ErrorCode::RecoveryRequired))
     };
     let resumed = Box::pin(payer.resume_payments()).await;
     assert!(refused(&resumed), "{resumed:?}");

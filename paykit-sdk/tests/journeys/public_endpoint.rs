@@ -3,8 +3,8 @@
 
 use paykit_sdk::rail::FakeRail;
 use paykit_sdk::{PayOptions, Paykit, PaykitConfig, PaymentMode, Refusal, UnrequestedPayment};
-use pubky_switch_client::app::{AppConfig, UserConfirmed};
-use pubky_switch_harness::World;
+use pubky_dispatch_client::app::{AppConfig, UserConfirmed};
+use pubky_dispatch_harness::World;
 
 use super::{
     btc, checkout, endpoint, on_both_backends, paid_and_receipted, payload, Checkout, Expected,

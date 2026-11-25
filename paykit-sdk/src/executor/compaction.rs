@@ -8,9 +8,9 @@ use paykit_lib::allowances::{
 };
 use paykit_lib::records::bind_ledger;
 use paykit_lib::{AttemptId, Body};
-use pubky_switch_client::app::{App, KeptOp, RecordTarget};
-use pubky_switch_core::chain::TransitionProof;
-use pubky_switch_core::ops::{Condition, OpKind, SignedOp};
+use pubky_dispatch_client::app::{App, KeptOp, RecordTarget};
+use pubky_dispatch_core::chain::TransitionProof;
+use pubky_dispatch_core::ops::{Condition, OpKind, SignedOp};
 use serde::{Deserialize, Serialize};
 
 use super::checkpoint::AcceptedLedger;
@@ -65,7 +65,7 @@ impl LedgerCompaction {
             && matches!(&after.body().kind, OpKind::RecordPut(w) if &w.key == ledger)
             && after.body().conditions.contains(&prior)
             && self.opening.as_ref().is_none_or(|kept| verify(kept).is_some_and(|(opening, _)| {
-                matches!(&opening.body().kind, OpKind::Claim(c) if c.kind == pubky_switch_core::claims::ClaimType::Attempt)
+                matches!(&opening.body().kind, OpKind::Claim(c) if c.kind == pubky_dispatch_core::claims::ClaimType::Attempt)
                     && opening.body().batch == after.body().batch
             }))
     }
@@ -75,7 +75,7 @@ impl LedgerCompaction {
         Ok(format!(
             "{}{}",
             key::ledger_compactions(ledger),
-            pubky_switch_core::enc::b64(&hash)
+            pubky_dispatch_core::enc::b64(&hash)
         ))
     }
 }
@@ -130,7 +130,7 @@ impl CompactionRead<'_> {
         };
         let held = bind(&before)?;
         let newer = bind(&after)?;
-        // An orderly generation change continues the sequence (Switch spec 12.5).
+        // An orderly generation change continues the sequence (Dispatch spec 12.5).
         if before.revision.generation > after.revision.generation
             || after.revision.generation > self.current.revision.generation
             || before.revision.seq <= self.accepted.grant.revision.seq
@@ -242,7 +242,7 @@ impl CompactionRead<'_> {
 mod tests {
     use super::*;
     use crate::executor::{reconciled_usage, ReservationClaim};
-    use crate::rail::{AllowanceDispatch, RailOutcome};
+    use crate::rail::{AllowanceHandoff, RailOutcome};
     use paykit_lib::allowances::{compact, AllowanceTerms};
     use paykit_lib::{AllowanceId, Decimal, PaymentAmount};
 
@@ -277,7 +277,7 @@ mod tests {
         let held = compact(&terms, &ledger, now).unwrap().unwrap();
         assert!(held.entries.is_empty());
         assert_eq!(held.failed[0].attempt_id, id);
-        let dispatch = AllowanceDispatch {
+        let handoff = AllowanceHandoff {
             attempt_id: id,
             amount: transfer.clone(),
             outcome: RailOutcome::Failed,
@@ -316,7 +316,7 @@ mod tests {
             };
             let facts = HashMap::from([(id, evidence)]);
             let mut empty = HashMap::new();
-            let before = read(&held, &claims, &facts, &mut empty, dispatch.clone()).unwrap();
+            let before = read(&held, &claims, &facts, &mut empty, handoff.clone()).unwrap();
             assert_eq!(before.counted.lifetime().as_str(), "7");
             assert!(before.unclassified.is_empty());
             let paid = record_outcomes(&terms, &held, &facts).unwrap().unwrap();
@@ -328,7 +328,7 @@ mod tests {
                 .into_iter()
                 .map(|e| (e.member().0, e))
                 .collect();
-            let mut different = dispatch.clone();
+            let mut different = handoff.clone();
             different.amount.value = Decimal::new("6").unwrap();
             assert!(read(&paid, &claims, &facts, &mut retired, different.clone()).is_none());
             assert!(read(&held, &claims, &facts, &mut empty, different).is_none());
@@ -339,13 +339,13 @@ mod tests {
                     state: ClaimState::Done,
                 },
             )]);
-            assert!(read(&held, &other, &facts, &mut empty, dispatch.clone()).is_none());
+            assert!(read(&held, &other, &facts, &mut empty, handoff.clone()).is_none());
             let repeated = read(
                 &paid,
                 &HashMap::new(),
                 &HashMap::new(),
                 &mut retired,
-                dispatch.clone(),
+                handoff.clone(),
             )
             .unwrap();
             assert_eq!(repeated.counted.lifetime().as_str(), "7");
@@ -358,7 +358,7 @@ mod tests {
                 .into_iter()
                 .map(|e| (e.member().0, e))
                 .collect();
-            let mut settled = dispatch.clone();
+            let mut settled = handoff.clone();
             settled.outcome = RailOutcome::Paid(crate::rail::RailPaid::new(Default::default()));
             let agreed = read(
                 &paid,
@@ -381,7 +381,7 @@ mod tests {
                 &HashMap::new(),
                 &HashMap::new(),
                 &mut oldest,
-                dispatch.clone(),
+                handoff.clone(),
             )
             .unwrap();
             assert_eq!(read_back.counted.lifetime().as_str(), "7");

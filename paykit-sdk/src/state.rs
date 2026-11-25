@@ -1,20 +1,20 @@
 //! Paykit's own local state, in the protocol key space (`p/`) of the client's namespace
-//! (`STATE.md` of `pubky-switch-client`).
+//! (`STATE.md` of `pubky-dispatch-client`).
 //!
 //! Paykit never writes the host store itself: every write is a client
 //! [`LocalWrite`] or a kept native batch ID, committed by the client so it lands with what it
 //! belongs to:
 //!
 //! - with a received message's effect, its processed pair and its cursor move
-//!   ([`pubky_switch_client::app::ReceiveContext::local`]);
-//! - with the first keep of a batch, for its protocol-local ID ([`pubky_switch_client::app::OpBatch::keep_id_at`]);
+//!   ([`pubky_dispatch_client::app::ReceiveContext::local`]);
+//! - with the first keep of a batch, for its protocol-local ID ([`pubky_dispatch_client::app::OpBatch::keep_id_at`]);
 //! - with the answer of a batch of operations, never if the batch is refused
-//!   ([`pubky_switch_client::app::OpBatch::local`]);
-//! - on its own, in one store commit ([`pubky_switch_client::app::App::protocol_commit`]).
+//!   ([`pubky_dispatch_client::app::OpBatch::local`]);
+//! - on its own, in one store commit ([`pubky_dispatch_client::app::App::protocol_commit`]).
 //!
-//! Reads go through the client too: [`pubky_switch_client::app::App::protocol_get`],
-//! [`pubky_switch_client::app::App::protocol_scan`], the receive context's and, in the
-//! protocol's other callbacks, a [`pubky_switch_client::app::LocalView`]. Only this module
+//! Reads go through the client too: [`pubky_dispatch_client::app::App::protocol_get`],
+//! [`pubky_dispatch_client::app::App::protocol_scan`], the receive context's and, in the
+//! protocol's other callbacks, a [`pubky_dispatch_client::app::LocalView`]. Only this module
 //! makes them, and it binds every value it reads to its key before any caller sees it
 //! ([`Stored`]), at a restore as at runtime.
 //! Paykit values are `{"v":1,"d":<record>}`. An outstanding list publication holds the
@@ -22,7 +22,7 @@
 //!
 //! The whole of it is Paykit's layer in the app's backups ([`crate::PaykitBackup`]), which a
 //! restore installs, the journal checked and marked restored, in the commit of the
-//! client's own state (Switch spec 12.4).
+//! client's own state (Dispatch spec 12.4).
 //!
 //! | Key (after `p/`) | Holds | Sensitive |
 //! |---|---|---|
@@ -33,7 +33,7 @@
 //! | `off/<attempt_id>` | the original batch ID for an unresolved offline recording, committed with its signed operations before first submission (Paykit spec 8.4) | yes |
 //! | `j/<attempt_id>` | the payment journal: one payment, from before its `attempt` | yes |
 //! | `side/<msg_id>` | the side a cancellation is sent from, kept with the batch that queues it | |
-//! | `ex/<msg_id>` | why an acceptance this app sent may go while sends to its payee are held: a payment dispatched, or the user's confirmation of that blocked subscription, bound to its payee and request; kept before or with the batch that queues it (`send_holds.rs`) | |
+//! | `ex/<msg_id>` | why an acceptance this app sent may go while sends to its payee are held: a payment handed off, or the user's confirmation of that blocked subscription, bound to its payee and request; kept before or with the batch that queues it (`send_holds.rs`) | |
 //! | `qs/<msg_id>` | a held message this app queued (a rejection or payer's cancellation, a payment request, period details, a list request or a subscription acceptance): its kind, counterparty, request, signed hash, `created_at` and the activity record that holds it, written in the commit that queues it, so the receive step ends its outbox copy past 30 days, telling the host as its request record decides, with that decision; gone once neither the outbox nor a report of its end the host hasn't acknowledged names it (`send_holds.rs`); restored whole, since a restored outbox can hold the copy and a restored client an unacknowledged report of its end | |
 //! | `ar/<payee>/<app_id>` | a payee app's records that took part in its comparison, for its public endpoints | |
 //! | `ct` | the acceptance time of the last Paykit entry the receive step passed | |
@@ -65,7 +65,7 @@
 //! | `lc` | the certificate the shared records were last listed under, signed: a certificate held now other than it means the copy may lack records until Paykit lists them, since one held between may have read less (`hold.rs`); written only by a Paykit listing, in its commit; absent from a join or a restore until that listing, which leaves the records unlisted; never restored | |
 //! | `ro` | records to check after a restore for possibly delivered messages, with the time limit for unreadable records and any counterparties waiting for their period's request | |
 //! | `ha/<payee>/<msg_id>` | the wallet's held answer and request. A backup marks it restored so it cannot authorize delivery | |
-//! | `pp` | set by a restore: a payer pass is owed, so no new attempt is made and nothing is dispatched; cleared only after a reconcile under `paykit_pay` ran that pass (`hold.rs`); never restored | |
+//! | `pp` | set by a restore: a payer pass is owed, so no new attempt is made and nothing is handed off; cleared only after a reconcile under `paykit_pay` ran that pass (`hold.rs`); never restored | |
 //! | `lq/<payee>[/<app_id>]` | a `private_payment_list_request` asked of a payee's app, or of none: the version it named and when (Paykit spec 8.4) | |
 //! | `nt/outgoing/<recipient>/<msg_id>/<hash>` | the disposition of an exact original delivery is unknown: after restore, or a counterparty's current list given up with an unknown outcome. Acknowledgment is retained for repeated imports; a list's notice goes once a newer version supersedes it | |
 //! | `nt/<attempt_id>/<kind>`, `nt/<sender>/<msg_id>`, `nt/<tag>` | a notice for the host about a payment, a message given up, or the identity as a whole, until acknowledged (`notices.rs`); an identity-wide one is never restored and is told again at each load while what it tells stands | |
@@ -76,7 +76,7 @@
 //! | `fk` | what this app keeps of the identity's block floor: the highest floor it has seen and whether it has seen the record divergent, the durable divergence hold; both only grow, and an in-place restore keeps the higher of the backup's and the installation's (`crate::floor::FloorKept`, Paykit wire 5.6) | yes |
 //! | `rr` | the block floor raises this app owes, tried and left unwritten for a cause other than the divergence hold: how many such tries in a row (`tries`) and the last one's time on this device's clock (`tried_at_ms`); each raise owed then, named apart from its time (`tried`: the unblocks' raise as one, each widening by its hold or restore, window and floor); the floor record held then, named by its state and the exact write the next write builds on (`floor`); and which parts the floor needs to read were there (`ready`: the scope keys, the listing, an open value). The wait is derived from the tries. Only a hint: one that doesn't read is taken as none (`crate::floor::RaiseRetry`, Paykit wire 5.6, Raising); never restored | |
 //! | `fo/<record key>` | a request record a read opened without `manual_only`, checked against the block floor once the read is done and marked if dated before it (`crate::floor`); never restored | |
-//! | `bk/<pubky>` | this app's block or unblock of `pubky` not yet shown by the list (`OwnBlockMark`): a block from before the switch is asked, an unblock only with the batch the client keeps; a block counts until a read of the list shows it, and is written again at a receive while the client neither keeps nor applied its batch, a restored one too, since the kept batch stays with the device that kept it; an unblock counts for payments and held sends only while the client still keeps its batch, never for the spam rule, and isn't restored (Paykit spec 8.1) | |
+//! | `bk/<pubky>` | this app's block or unblock of `pubky` not yet shown by the list (`OwnBlockMark`): a block from before the Dispatch is asked, an unblock only with the batch the client keeps; a block counts until a read of the list shows it, and is written again at a receive while the client neither keeps nor applied its batch, a restored one too, since the kept batch stays with the device that kept it; an unblock counts for payments and held sends only while the client still keeps its batch, never for the spam rule, and isn't restored (Paykit spec 8.1) | |
 //! | `ra/<sender>` | signed recovery requests for dropped replies, their first-delivery outcomes and any unresolved original missing from a restore | |
 //! | `pd/<sender>` | a mark of a sender's replies dropped for the bounds on kept replies: the earliest and the latest acceptance among them, and when it was last asked to send them again (`marks.rs`); at most `MAX_DROPPED_MARKS` in each family of marks (`pd/`, `ud/`, `kw/`, `bd/`), and a restore refuses a backup holding more | |
 //! | `bd/<sender>` | a mark of a sender's messages dropped for the user's block, each as one never processed (its pair forgotten), as `pd/` holds; it asks that sender once it is neither blocked nor flagged (`marks.rs`, Paykit spec 8.1) | |
@@ -108,10 +108,10 @@ use paykit_lib::bodies::ResendRequest;
 use paykit_lib::derive::natural_key;
 use paykit_lib::scopes::verify_certificate;
 use paykit_lib::{AttemptId, Body};
-use pubky_switch_client::app::{LocalView, LocalWrite, ReceiveContext, RecordTarget};
-use pubky_switch_core::ident::record_key_from_blinded;
-use pubky_switch_core::records::AppCert;
-use pubky_switch_core::sig::SignedDoc;
+use pubky_dispatch_client::app::{LocalView, LocalWrite, ReceiveContext, RecordTarget};
+use pubky_dispatch_core::ident::record_key_from_blinded;
+use pubky_dispatch_core::records::AppCert;
+use pubky_dispatch_core::sig::SignedDoc;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
@@ -350,7 +350,7 @@ pub(crate) struct Binder<'a> {
     blind: Option<Blind<'a>>,
 }
 
-/// The naming key's blinding (Switch spec 13.3).
+/// The naming key's blinding (Dispatch spec 13.3).
 type Blind<'a> = &'a dyn Fn(&[u8]) -> [u8; 32];
 
 impl<'a> Binder<'a> {
@@ -393,7 +393,7 @@ impl<'a> Binder<'a> {
         self.blind.ok_or_else(PaykitError::corrupt)
     }
 
-    /// The record key of `target`, as the client derives it (Switch spec 13.3).
+    /// The record key of `target`, as the client derives it (Dispatch spec 13.3).
     pub(crate) fn record_key(&self, target: &RecordTarget) -> Result<[u8; 32]> {
         let policy = target
             .collection
@@ -451,7 +451,7 @@ pub(crate) fn bound<T: BoundRead>(key: &[u8], bytes: &[u8], binder: &Binder<'_>)
 
 /// The value at `key`, read through the receive context and bound to it as
 /// [`Paykit::local_get`] binds it. A value that doesn't bind is a corrupt store, which parks
-/// the entry (Switch spec 8.2).
+/// the entry (Dispatch spec 8.2).
 pub(crate) fn cx_get<T: Stored>(
     cx: &ReceiveContext<'_>,
     key: &str,
@@ -488,7 +488,7 @@ pub(crate) fn cx_scan<T: BoundRead>(
 
 /// Read the owning protocol's exact value with the delivery's current certificate and naming key.
 pub(crate) fn delivery_get<T: Stored>(
-    delivery: &pubky_switch_client::app::DeliveryView<'_>,
+    delivery: &pubky_dispatch_client::app::DeliveryView<'_>,
     key: &str,
 ) -> Result<Option<T>> {
     let Some(bytes) = delivery.local().local_get(key.as_bytes())? else {
@@ -565,7 +565,7 @@ impl Stored for LedgerBatchIds {
     }
 }
 
-/// The original batch ID is written by the Switch client as exactly sixteen bytes.
+/// The original batch ID is written by the Dispatch client as exactly sixteen bytes.
 impl Stored for [u8; 16] {
     fn read_bytes(bytes: &[u8], _: &Binder<'_>) -> Result<Self> {
         bytes.try_into().map_err(|_| PaykitError::corrupt())
@@ -768,7 +768,7 @@ impl Stored for OwnBlockMark {
 /// protected-record contract"): the newest such version, and the delete's item hash. While
 /// it is kept, no value at that key is taken, and no list of that payee app is used, for
 /// any list version and whatever marks a value holds: a later authorization over a delete
-/// needs the Switch's lineage proof and its Paykit mapping, which this revision lacks, so
+/// needs the Dispatch's lineage proof and its Paykit mapping, which this revision lacks, so
 /// wire 5 withholds it. An absence of the record keeps its list held too.
 ///
 /// It is never removed: removing it would let a later absence of the record, or a value
@@ -781,7 +781,7 @@ pub(crate) struct LostListRecord {
     /// it again, or of an older one, as a covering read or a restore's listing gives,
     /// changes nothing.
     deleted: [u64; 2],
-    /// That delete's item hash, as the client reports a delete it verified (Switch wire
+    /// That delete's item hash, as the client reports a delete it verified (Dispatch wire
     /// 6.6), which tells two deletes at one version apart, as a recovery can upload them
     /// (Paykit spec 6); `None` when no report gave it, or two deletes at the version were
     /// seen. Only an exact match is the same delete: any other at its version is merged.
@@ -794,7 +794,7 @@ impl LostListRecord {
     /// or a value carrying `lost_to_delete` written at that version: it names a delete that
     /// lost content, which this app may never have seen (Paykit spec 6; wire 5).
     pub(crate) fn over(
-        deleted: pubky_switch_core::ops::RecordVersion,
+        deleted: pubky_dispatch_core::ops::RecordVersion,
         item: Option<[u8; 32]>,
     ) -> Self {
         Self {
@@ -805,7 +805,7 @@ impl LostListRecord {
 
     /// Whether the newest delete kept is the one at `version`, known by its item hash: one
     /// kept without it can't be told from another delete at that version.
-    pub(crate) fn deleted_at(&self, version: pubky_switch_core::ops::RecordVersion) -> bool {
+    pub(crate) fn deleted_at(&self, version: pubky_dispatch_core::ops::RecordVersion) -> bool {
         self.deleted == [version.generation, version.version] && self.item.is_some()
     }
 
@@ -838,7 +838,7 @@ impl LostListRecord {
 impl sealed::Sealed for LostListRecord {}
 
 /// Its delete's version is one a delete has: a write's, of a generation of at least 1
-/// (Switch wire 1.7, 3.3, 6.3).
+/// (Dispatch wire 1.7, 3.3, 6.3).
 impl Stored for LostListRecord {
     fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
         const MAX_INT: u64 = (1 << 53) - 1;
@@ -990,7 +990,7 @@ impl Stored for crate::send_holds::SendExemption {
 
 impl sealed::Sealed for SeenRecords {}
 
-/// A payee app's records seen (Switch spec 4.2): each the payee's, as it signed it, of the
+/// A payee app's records seen (Dispatch spec 4.2): each the payee's, as it signed it, of the
 /// app its key names.
 impl Stored for SeenRecords {
     fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
@@ -1082,7 +1082,7 @@ impl sealed::Sealed for KeptMessage {}
 ///   or proof, or a payee's period details, its inbox accepted, from that sender and of that
 ///   `msg_id`, kept under the record key of the request record it waits for, of the request
 ///   it names first: this app's payee record, under its label, for a reply; the payer's
-///   record of the sender's request for details (Switch spec 8.2, Paykit spec 8.1, 8.2); or
+///   record of the sender's request for details (Dispatch spec 8.2, Paykit spec 8.1, 8.2); or
 ///   a `paykit.payment_receipt`, kept under the record key of the payer's record it names
 ///   ([`crate::receive::receipt_target`]); or a proof of a payment without a request, from
 ///   that sender and of that `msg_id`, whose record, the payee's of its settlement, is
@@ -1505,7 +1505,7 @@ impl Stored for DropMark {
                     && self
                         .pending_forget
                         .iter()
-                        .all(|id| pubky_switch_core::json::check_uuid_v4(id).is_ok())
+                        .all(|id| pubky_dispatch_core::json::check_uuid_v4(id).is_ok())
                     && self
                         .pending_forget
                         .iter()
@@ -1769,7 +1769,7 @@ impl Stored for OwedEnd {
         match family {
             StateKey::OwedEnd(record)
                 if self.record == *record
-                    && pubky_switch_core::json::check_uuid_v4(&self.msg_id).is_ok() =>
+                    && pubky_dispatch_core::json::check_uuid_v4(&self.msg_id).is_ok() =>
             {
                 Ok(())
             }
@@ -1919,7 +1919,7 @@ impl PublicationKey {
             "{}{}/{}",
             key::publication_prefix(&self.recipient),
             num(self.generation),
-            pubky_switch_core::enc::b64(&self.hash)
+            pubky_dispatch_core::enc::b64(&self.hash)
         )
     }
 
@@ -1928,7 +1928,7 @@ impl PublicationKey {
         if ids.is_empty() {
             return Ok(LocalWrite::Delete { key });
         }
-        if ids.len() as u64 > pubky_switch_client::store::MAX_VALUE_BYTES / 16 {
+        if ids.len() as u64 > pubky_dispatch_client::store::MAX_VALUE_BYTES / 16 {
             return Err(PaykitError::corrupt());
         }
         Ok(LocalWrite::Put {
@@ -1960,7 +1960,7 @@ pub(crate) fn num(n: u64) -> String {
 /// Key builders.
 pub(crate) mod key {
     use paykit_lib::AttemptId;
-    use pubky_switch_core::enc::b64;
+    use pubky_dispatch_core::enc::b64;
 
     use super::num;
 
@@ -2280,7 +2280,7 @@ pub(crate) mod key {
     pub(crate) const TAKEN: &str = "dt/";
 
     /// The mark of the duty event `id`, taken.
-    pub(crate) fn taken(id: &pubky_switch_client::app::EventId) -> String {
+    pub(crate) fn taken(id: &pubky_dispatch_client::app::EventId) -> String {
         format!("{TAKEN}{id}")
     }
 
@@ -2439,15 +2439,15 @@ pub(crate) mod key {
     }
 
     /// This app's block or unblock of `pubky` not yet shown by a read of the lists
-    /// ([`OwnBlockMark`](super::OwnBlockMark)). A block is marked before the switch is asked, so a crash before
-    /// the call leaves it counted; its mark goes once the switch took it, or once a read of
+    /// ([`OwnBlockMark`](super::OwnBlockMark)). A block is marked before the Dispatch is asked, so a crash before
+    /// the call leaves it counted; its mark goes once the Dispatch took it, or once a read of
     /// the lists shows it, and until then a block whose batch the client neither keeps nor
     /// applied is written again at each receive. An unblock counts for payments and held
     /// sends only while the client keeps its batch, and never for the spam rule.
     pub(crate) fn list_recipient(recipient: &[u8; 32]) -> String {
         format!(
             "{LIST_RECIPIENTS}{}",
-            pubky_switch_core::enc::b64(recipient)
+            pubky_dispatch_core::enc::b64(recipient)
         )
     }
 
@@ -2549,7 +2549,7 @@ pub(crate) enum StateKey {
     },
     /// `j/<attempt ID>`: a journal entry.
     Journal(AttemptId),
-    /// The original Switch batch ID of a paid offline attempt.
+    /// The original Dispatch batch ID of a paid offline attempt.
     OfflineBatch(AttemptId),
     /// A requested receipt delivery, awaiting its answer or holding its verified application.
     ReceiptBatch {
@@ -2851,14 +2851,14 @@ impl StateKey {
     pub(crate) fn parse(key: &[u8]) -> Option<Self> {
         let text = std::str::from_utf8(key).ok()?;
         let b64_32 = |s: &str| {
-            pubky_switch_core::enc::unb64_array::<32>(s)
+            pubky_dispatch_core::enc::unb64_array::<32>(s)
                 .ok()
-                .filter(|bytes| pubky_switch_core::enc::b64(bytes) == s)
+                .filter(|bytes| pubky_dispatch_core::enc::b64(bytes) == s)
         };
         let b64_16 = |s: &str| {
-            pubky_switch_core::enc::unb64_array::<16>(s)
+            pubky_dispatch_core::enc::unb64_array::<16>(s)
                 .ok()
-                .filter(|bytes| pubky_switch_core::enc::b64(bytes) == s)
+                .filter(|bytes| pubky_dispatch_core::enc::b64(bytes) == s)
         };
         let number = |s: &str| {
             (s.len() == 20 && s.bytes().all(|b| b.is_ascii_digit()))
@@ -2866,7 +2866,7 @@ impl StateKey {
                 .flatten()
         };
         let msg_id = |s: &str| {
-            pubky_switch_core::json::check_uuid_v4(s)
+            pubky_dispatch_core::json::check_uuid_v4(s)
                 .is_ok()
                 .then(|| s.to_owned())
         };
@@ -2916,8 +2916,8 @@ impl StateKey {
                     "sb" => Self::SettlementBucket(b64_32(rest)?),
                     "sm" => {
                         let (record, mark) = rest.split_once('/')?;
-                        let bytes = pubky_switch_core::enc::unb64_array(mark).ok()?;
-                        if pubky_switch_core::enc::b64(&bytes) != mark {
+                        let bytes = pubky_dispatch_core::enc::unb64_array(mark).ok()?;
+                        if pubky_dispatch_core::enc::b64(&bytes) != mark {
                             return None;
                         }
                         Self::SettlementMark {
@@ -3103,7 +3103,7 @@ impl StateKey {
                         },
                     },
                     "dt" => {
-                        let id = rest.parse::<pubky_switch_client::app::EventId>().ok()?;
+                        let id = rest.parse::<pubky_dispatch_client::app::EventId>().ok()?;
                         (id.to_string() == rest).then(|| Self::Taken(rest.to_owned()))?
                     }
                     "ra" => Self::ReplyAsks {
@@ -3118,9 +3118,9 @@ impl StateKey {
                     "bd" => Self::DroppedBlocked {
                         sender: b64_32(rest)?,
                     },
-                    "bw" => {
-                        Self::BlockedWidening(pubky_switch_core::enc::unb64_array::<16>(rest).ok()?)
-                    }
+                    "bw" => Self::BlockedWidening(
+                        pubky_dispatch_core::enc::unb64_array::<16>(rest).ok()?,
+                    ),
                     "bl" => {
                         let (sender, id) = rest.split_once('/')?;
                         Self::LostOwed {
@@ -3229,8 +3229,8 @@ impl StateKey {
 mod tests {
     use std::sync::Arc;
 
-    use pubky_switch_client::app::PROTOCOL_PREFIX;
-    use pubky_switch_client::store::{MemoryStore, StateStore};
+    use pubky_dispatch_client::app::PROTOCOL_PREFIX;
+    use pubky_dispatch_client::store::{MemoryStore, StateStore};
 
     use super::*;
 
@@ -3386,7 +3386,7 @@ mod tests {
     #[test]
     fn test_ledger_batch_ids_bind_to_a_proposal_and_remain_distinct_across_restore() {
         let record = [3; 32];
-        let hash = pubky_switch_core::enc::b64(&[4; 32]);
+        let hash = pubky_dispatch_core::enc::b64(&[4; 32]);
         let key = format!("{}{hash}", key::ledger_batches(&record));
         let binder = Binder::unblinded([1; 32]);
         let read = |key: &str, ids: &[u8]| restored::<LedgerBatchIds>(key.as_bytes(), ids, &binder);
@@ -3528,7 +3528,7 @@ mod tests {
         }
         // A key per record with no hold identifier is not a key the SDK writes.
         for prefix in [key::HOLD_CONFIRMED, key::HOLD_CONFIRMED_BEFORE] {
-            let bare = format!("{prefix}{}", pubky_switch_core::enc::b64(&record));
+            let bare = format!("{prefix}{}", pubky_dispatch_core::enc::b64(&record));
             assert_eq!(StateKey::parse(bare.as_bytes()), None);
         }
     }
@@ -3650,9 +3650,9 @@ mod tests {
         let id = "6f1c2b8e-3d4a-4f5b-9c6d-7e8f9a0b1c2d";
         let owed = |sender: u8, earliest: u64, latest: u64, msg_id: &str| {
             serde_json::json!({
-                "sender": pubky_switch_core::enc::b64(&[sender; 32]),
+                "sender": pubky_dispatch_core::enc::b64(&[sender; 32]),
                 "earliest_ms": earliest, "latest_ms": latest, "raised_ms": 9,
-                "msg_id": msg_id, "hash": pubky_switch_core::enc::b64(&[3; 32]),
+                "msg_id": msg_id, "hash": pubky_dispatch_core::enc::b64(&[3; 32]),
             })
         };
         let at = key::lost_owed(&[1; 32], id);
@@ -3749,7 +3749,7 @@ mod tests {
             assert_eq!(one.clone().then(other), lost_at(4, None));
         }
         // Only a delete known by its item is the one a later report may name again.
-        let version = pubky_switch_core::ops::RecordVersion {
+        let version = pubky_dispatch_core::ops::RecordVersion {
             generation: 1,
             version: 4,
         };
@@ -3761,7 +3761,7 @@ mod tests {
     fn test_state_marks_bound_to_their_sender_with_times_not_crossed() {
         let mark = |sender: u8, earliest: u64, latest: u64| {
             serde_json::json!({
-                "sender": pubky_switch_core::enc::b64(&[sender; 32]),
+                "sender": pubky_dispatch_core::enc::b64(&[sender; 32]),
                 "earliest_ms": earliest, "latest_ms": latest, "due": false,
                 "asked_at_ms": null, "queued": null,
             })
@@ -3845,7 +3845,7 @@ mod tests {
         // at runtime and at a restore alike.
         let binder = Binder::unblinded([1; 32]);
         for exemption in [
-            crate::send_holds::SendExemption::dispatched(id),
+            crate::send_holds::SendExemption::handed_off(id),
             crate::send_holds::SendExemption::confirmed_while_blocked(id, [3; 32], [4; 32]),
         ] {
             let bytes = encode(&exemption).unwrap();
@@ -3870,7 +3870,7 @@ mod tests {
         let pubky = [3u8; 32];
         let id = "123e4567-e89b-42d3-a456-426614174000";
         let other = "223e4567-e89b-42d3-a456-426614174000";
-        let sender = pubky_switch_core::enc::b64(&pubky);
+        let sender = pubky_dispatch_core::enc::b64(&pubky);
         // Times and counts, at their families only; a `missed` item at its key's time.
         assert!(reads::<u64>(&key::peer(&pubky), serde_json::json!(4)));
         assert!(reads::<u64>(key::CURSOR_TIME, serde_json::json!(4)));
@@ -3945,7 +3945,7 @@ mod tests {
         ));
         assert!(!reads::<HeldAnswer>(
             &key::held_answer(&pubky, id),
-            held(&pubky_switch_core::enc::b64(&[4; 32]), id)
+            held(&pubky_dispatch_core::enc::b64(&[4; 32]), id)
         ));
         assert!(!reads::<HeldAnswer>(&key::side(id), held(&sender, id)));
         // A list ask of the payee and app its key names.
@@ -3978,7 +3978,7 @@ mod tests {
         ));
         assert!(!reads::<NoticeTarget>(&key::side(id), target(id)));
         // An owed crossing end, of the record its key names, with a `msg_id`.
-        let owed = |record: [u8; 32], msg_id: &str| serde_json::json!({ "record": pubky_switch_core::enc::b64(&record), "msg_id": msg_id });
+        let owed = |record: [u8; 32], msg_id: &str| serde_json::json!({ "record": pubky_dispatch_core::enc::b64(&record), "msg_id": msg_id });
         assert!(reads::<OwedEnd>(
             &key::owed_end(&[6; 32]),
             owed([6; 32], id)
@@ -4095,7 +4095,7 @@ mod tests {
         assert_eq!(writes.len(), 3);
         // The client qualifies each key with its registered protocol name.
         let store: Arc<dyn StateStore> = Arc::new(MemoryStore::new());
-        let mut batch = pubky_switch_client::store::WriteBatch::new();
+        let mut batch = pubky_dispatch_client::store::WriteBatch::new();
         for write in &writes {
             if let LocalWrite::Put { key, value } = write {
                 batch
@@ -4415,7 +4415,7 @@ mod tests {
                 format!(
                     "{}{}",
                     key::ledger_compactions(&pubky),
-                    pubky_switch_core::enc::b64(&[4; 32])
+                    pubky_dispatch_core::enc::b64(&[4; 32])
                 ),
                 StateKey::LedgerCompaction {
                     ledger: pubky,

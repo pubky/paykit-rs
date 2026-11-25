@@ -1,9 +1,9 @@
-//! Reconciliation (Paykit spec 7.3; Switch spec 10.2, 12.4).
+//! Reconciliation (Paykit spec 7.3; Dispatch spec 10.2, 12.4).
 //!
 //! After a restore, or with continuity unverified, the app is in reconcile mode and makes no
 //! new attempt. [`Paykit::reconcile`] reads the shared records again, finishes the payments
 //! its journal holds, and resolves every open attempt of its own on the payer's obligations
-//! from the payment method's history: a dispatch the history shows paid is written `done`
+//! from the payment method's history: a handoff the history shows paid is written `done`
 //! (basis `owner`) with the payer's activity record and the proof, then the proof is sent,
 //! as any payment's outcome (Paykit spec 7.2 steps 3 and 4); one it shows failed `failed`.
 //! An attempt the journal doesn't hold, made after the backup a restore came from, has its
@@ -23,8 +23,8 @@
 //! or state it wasn't paid before that loss ([`Paykit::confirm_not_paid_before_loss`]).
 //!
 //! The payer pass, the reading of the payer's obligations above, needs `paykit_pay`: without it the
-//! switch answers no claim read. After a restore, no new attempt is made and nothing is
-//! dispatched until a reconcile under `paykit_pay` has run it, even once reconcile mode has ended,
+//! Dispatch answers no claim read. After a restore, no new attempt is made and nothing is
+//! handed off until a reconcile under `paykit_pay` has run it, even once reconcile mode has ended,
 //! since only it finds the attempts made after the backup ([`ReconcileReport::payer_skipped`]).
 //!
 //! Only the payee's yes counts: a receipt settles an attempt; nothing from the payee shows an
@@ -36,11 +36,11 @@ use paykit_lib::derive::natural_key;
 use paykit_lib::periods::{BillingPeriod, PeriodRef};
 use paykit_lib::records::{ActivityRecord, ActivitySide, DestinationSource, RecordBinding};
 use paykit_lib::{AttemptId, Body};
-use pubky_switch_client::app::{
+use pubky_dispatch_client::app::{
     ClaimOp, ObligationDeadline, OpBatch, RecordContent, UserConfirmed,
 };
-use pubky_switch_core::claims::{Basis, ClaimStatus, Outcome};
-use pubky_switch_core::ops::{Condition, OpKind};
+use pubky_dispatch_core::claims::{Basis, ClaimStatus, Outcome};
+use pubky_dispatch_core::ops::{Condition, OpKind};
 
 use crate::activity::ActivityTarget;
 use crate::destination::Carrier;
@@ -283,7 +283,7 @@ impl Paykit {
         Ok(out)
     }
 
-    /// Reconcile (Paykit spec 7.3, Switch spec 12.4): read the records again, finish the
+    /// Reconcile (Paykit spec 7.3, Dispatch spec 12.4): read the records again, finish the
     /// journal's payments, resolve the own open attempts the payment method's history can,
     /// and report what stays doubtful. The app stays in reconcile mode until
     /// [`Paykit::end_reconcile`].
@@ -293,7 +293,7 @@ impl Paykit {
     /// Returns [`crate::Refusal::NotNow`] while more collection pages remain or a wider
     /// certificate's scope keys are missing. Call again to continue the listing. The payer
     /// pass needs the keys to read every obligation. [`Paykit::resume_payments`] can still
-    /// finish payments already dispatched. Client and rail errors propagate to the caller.
+    /// finish payments already handed off. Client and rail errors propagate to the caller.
     pub async fn reconcile(&mut self) -> Result<ReconcileReport> {
         // A delivery operation for the whole call (Paykit spec 8.1).
         let _delivery = self.delivery_operation();
@@ -371,7 +371,7 @@ impl Paykit {
                         }
                         Some(RailOutcome::Failed) => {
                             // Reported failed by the method, so asked again while its history
-                            // keeps the dispatch, and a payment that completed after all sends
+                            // keeps the handoff, and a payment that completed after all sends
                             // its proof (Paykit spec 7.2): only with an entry that can do it.
                             // Without one, writing `failed` would free the claim for a second
                             // payment while a late success could never be reported: the
@@ -600,7 +600,7 @@ impl Paykit {
             attempt_id: attempt.to_text(),
             obligation: obligation.claim_key,
             payee: obligation.payee,
-            request_hash: Some(pubky_switch_core::enc::b64(&request_hash)),
+            request_hash: Some(pubky_dispatch_core::enc::b64(&request_hash)),
             natural_key: obligation.natural_key.clone(),
             amount: KeptAmount::of(&body.amount),
             payment_amount: KeptAmount::of(&body.amount),
@@ -646,7 +646,7 @@ impl Paykit {
     /// Write the user's resolution of a doubtful attempt (Paykit spec 7.3): `done` with basis
     /// `reconcile` or `unknown` for an orphaned attempt, `failed` for an `unknown` one or an
     /// orphaned one whose owner isn't current. An attempt of this app's own is reported as
-    /// its owner reports it: `done` with basis `owner`, or `failed` (Switch spec 10.2 rows 2
+    /// its owner reports it: `done` with basis `owner`, or `failed` (Dispatch spec 10.2 rows 2
     /// and 5). The user has seen "may already be paid". The attempt's journal entry, if this
     /// app holds one, is finished in the same batch.
     ///
@@ -668,12 +668,12 @@ impl Paykit {
     /// # Errors
     ///
     /// [`Refusal::NotFound`] for a claim without the attempt, unless it is this app's own
-    /// restored dispatch still open, which no claim shows, as after a provider loss: the
+    /// restored handoff still open, which no claim shows, as after a provider loss: the
     /// user's `done` or `failed` then finishes its journal entry, `done` with the record's
     /// update, and writes no claim entry (Paykit spec 7.2, 8.4), while `unknown` is refused;
     /// [`Refusal::AlreadyPaid`] for
     /// `failed` or `unknown` on an own attempt the method reported paid; [`Refusal::RecordHeld`] for a
-    /// `done` whose record can't be updated, with nothing written; the switch's refusal, such
+    /// `done` whose record can't be updated, with nothing written; the Dispatch's refusal, such
     /// as `409 conflict`, for a resolution its rows don't allow now.
     pub async fn resolve_attempt(
         &mut self,
@@ -701,7 +701,7 @@ impl Paykit {
         self.records_known().await?;
         // The journal entry of an own attempt is finished with the resolution, in its batch:
         // the user decided, so it neither blocks another payment as one in progress nor is
-        // resumed, and never dispatched again (Paykit spec 7.2, "No second execution").
+        // resumed, and never handed off again (Paykit spec 7.2, "No second execution").
         // Read bound to its key and to `obligation`: an entry of another attempt, or of this
         // attempt on another claim, is a corrupt store, and nothing is written.
         let mut entry = self.journal_entry_on(&attempt, obligation).await?;
@@ -726,7 +726,7 @@ impl Paykit {
                 (basis, Some(op))
             }
             // No claim shows the attempt, as after a provider loss or once the claim is gone
-            // past its window: an own restored dispatch still open stays "potentially paid",
+            // past its window: an own restored handoff still open stays "potentially paid",
             // and only a receipt or the user can resolve it (Paykit spec 7.2, 8.4). The user's
             // `done` or `failed` finishes its journal entry, `done` with the record's update,
             // and writes no claim entry, there being none to write on.
@@ -734,12 +734,12 @@ impl Paykit {
                 && entry.as_ref().is_some_and(|e| {
                     e.restored
                         && e.open()
-                        && (e.may_have_dispatched() || e.stage == Stage::RailPaid)
+                        && (e.may_have_handed_off() || e.stage == Stage::RailPaid)
                 }) =>
             {
                 (Basis::Owner, None)
             }
-            // A restored dispatch the method reported paid is never marked `unknown`: it
+            // A restored handoff the method reported paid is never marked `unknown`: it
             // holds its proof (Paykit spec 7.2, "Failed means definitively not paid").
             None if entry
                 .as_ref()
@@ -777,8 +777,8 @@ impl Paykit {
                 };
             }
         }
-        // The user's `done` on a payment this app may have dispatched
-        // ([`JournalEntry::may_have_dispatched`]) says it was made: the user's word stands
+        // The user's `done` on a payment this app may have handed off
+        // ([`JournalEntry::may_have_handed_off`]) says it was made: the user's word stands
         // where the method's history would, so an acceptance the entry still owes goes
         // first, and the record places it (Paykit spec 7.2 step 2). One that can't be queued
         // now refuses the call with nothing written; the user tries again. The entry can't
@@ -795,7 +795,7 @@ impl Paykit {
             _ => None,
         };
         if resolution == Resolution::Done && basis == Basis::Owner {
-            if let Some(owed) = entry.as_mut().filter(|e| e.may_have_dispatched()) {
+            if let Some(owed) = entry.as_mut().filter(|e| e.may_have_handed_off()) {
                 if owed.owes_acceptance()? {
                     self.release_acceptance(owed, None).await?;
                 }
@@ -979,10 +979,10 @@ impl Paykit {
             .await?)
     }
 
-    /// Paykit's reconciliation finished (Switch spec 12.4 step 2.4). The app stays in
+    /// Paykit's reconciliation finished (Dispatch spec 12.4 step 2.4). The app stays in
     /// reconcile mode until every registered protocol has finished. The host completes
     /// its other protocols through
-    /// [`App::end_reconcile_for`](pubky_switch_client::app::App::end_reconcile_for).
+    /// [`App::end_reconcile_for`](pubky_dispatch_client::app::App::end_reconcile_for).
     /// New attempts wait until then.
     ///
     /// After a restore, the re-send requests to open requests' counterparties are queued

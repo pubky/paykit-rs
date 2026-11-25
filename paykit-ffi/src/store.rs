@@ -1,5 +1,5 @@
 //! Device-bound, durable storage supplied by the host.
-use pubky_switch_client::store::{
+use pubky_dispatch_client::store::{
     check_owned_batch, AcquireOutcome, CommitOutcome, KeyValue, StateStore, StoreError, StoreLease,
     StoreOwner, Write, WriteBatch,
 };
@@ -201,7 +201,8 @@ impl WalletStoreSession {
         namespace: String,
     ) -> Result<Arc<Self>, StoreError> {
         let runtime = tokio::runtime::Handle::current();
-        let token = pubky_switch_core::enc::random_bytes().map_err(|_| StoreError::Unavailable)?;
+        let token =
+            pubky_dispatch_core::enc::random_bytes().map_err(|_| StoreError::Unavailable)?;
         tokio::task::spawn_blocking(move || {
             LeaseOwner::retry_failed(&namespace);
             let owner = Arc::new(LeaseOwner {

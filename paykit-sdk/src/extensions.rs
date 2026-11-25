@@ -5,7 +5,7 @@
 //!   ([`crate::PaykitConfig::with_extension_kinds`]). The app's record accepts each one
 //!   whose prefix the certificate holds ([`crate::PaykitProtocol`]'s `accepts`), so senders
 //!   wrap them to this app; a kind not registered is dropped at check 10, kept as processed
-//!   (Switch wire 5.1).
+//!   (Dispatch wire 5.1).
 //! - **Receiving.** A registered kind passes check 10 as its body arrived: the SDK never
 //!   parses it beyond the common checks, never records it in a collection, and never takes
 //!   it as a destination or an answer. The receive step keeps it for the host
@@ -30,12 +30,12 @@
 //!   deny list holds it, or its copy isn't known; Paykit spec 8.1).
 
 use paykit_lib::kinds::ExtensionKind;
-use pubky_switch_client::app::{
+use pubky_dispatch_client::app::{
     AppError, Effect, FeedPosition, LocalWrite, Outcome, OutgoingMessage, ReceiveContext,
     ReceivedMessage, Refusal as ClientRefusal,
 };
-use pubky_switch_core::enc::serde_b64;
-use pubky_switch_core::message::Message;
+use pubky_dispatch_core::enc::serde_b64;
+use pubky_dispatch_core::message::Message;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -66,7 +66,7 @@ pub struct ExtensionMessage {
     pub kind: String,
     /// The message ID.
     pub msg_id: String,
-    /// `created_at`, Unix milliseconds; informational (Switch spec 5.3).
+    /// `created_at`, Unix milliseconds; informational (Dispatch spec 5.3).
     pub created_at_ms: u64,
     /// When the inbox accepted it, service time in Unix milliseconds.
     pub accepted_at_ms: u64,
@@ -93,16 +93,16 @@ struct ExtensionBody<'a> {
 }
 
 impl ExtensionBody<'_> {
-    fn check(&self) -> std::result::Result<(), pubky_switch_core::Error> {
+    fn check(&self) -> std::result::Result<(), pubky_dispatch_core::Error> {
         let bytes = serde_json::to_vec(self)?;
-        pubky_switch_core::json::check_json_as(
+        pubky_dispatch_core::json::check_json_as(
             &bytes,
-            pubky_switch_core::json::Doc::Message(paykit_lib::kinds::OPAQUE_MEMBERS),
+            pubky_dispatch_core::json::Doc::Message(paykit_lib::kinds::OPAQUE_MEMBERS),
         )
     }
 }
 
-/// The signed carrier and its original inbox generation (Switch spec 8.2).
+/// The signed carrier and its original inbox generation (Dispatch spec 8.2).
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct KeptExtension {
@@ -144,7 +144,7 @@ impl ExtensionMessage {
             refs: message
                 .refs
                 .iter()
-                .map(|r| pubky_switch_core::enc::b64(r))
+                .map(|r| pubky_dispatch_core::enc::b64(r))
                 .collect(),
             body: message.body,
         }
@@ -259,8 +259,8 @@ fn to_drop<'a>(
 
 impl Paykit {
     /// Bring the record's `accepts` to the kinds the protocol handles for the certificate,
-    /// the registered extension kinds included, when they differ (Switch spec 3.4,
-    /// [`pubky_switch_client::app::App::update_accepts`]): the record is signed again,
+    /// the registered extension kinds included, when they differ (Dispatch spec 3.4,
+    /// [`pubky_dispatch_client::app::App::update_accepts`]): the record is signed again,
     /// delivered and published. A delivery that fails stays owed by the client, which sends
     /// it again at a later read; only a store failure or an alarm is an error.
     ///
@@ -268,12 +268,12 @@ impl Paykit {
     ///
     /// A store failure or an alarm.
     pub(crate) async fn align_accepts(&mut self) -> Result<()> {
-        use pubky_switch_client::app::{AppError, Protocol};
+        use pubky_dispatch_client::app::{AppError, Protocol};
         let is_extension = |kind: &String| ExtensionKind::parse(kind).is_ok();
         let mut wanted = self.protocol.accepts(self.app.cert());
         wanted.retain(is_extension);
         let mut held =
-            pubky_switch_core::records::AppRecord::verify(self.app.record(), &self.identity())
+            pubky_dispatch_core::records::AppRecord::verify(self.app.record(), &self.identity())
                 .map(|record| record.body().accepts.clone())
                 .unwrap_or_default();
         held.retain(is_extension);
@@ -323,13 +323,13 @@ impl Paykit {
     /// Send `to` an extension message of `kind`, with `refs` and `body` (Paykit spec 3.3,
     /// Paykit wire 4.3), queued and flushed; returns its `msg_id`. It goes only to the
     /// recipient's apps whose certificate holds `paykit_ext:<prefix>` and whose record accepts the
-    /// kind (Switch spec 3.4). The body follows the JSON rules of every message: a decimal
+    /// kind (Dispatch spec 3.4). The body follows the JSON rules of every message: a decimal
     /// is written as a string, outside `metadata`.
     ///
     /// # Errors
     ///
     /// [`Refusal::CertificateRefused`]; [`Refusal::ScopeMissing`] without `paykit_contacts` or `paykit_ext:<prefix>`;
-    /// [`Refusal::Usage`] for the app's own identity, or a body the switch would refuse;
+    /// [`Refusal::Usage`] for the app's own identity, or a body the Dispatch would refuse;
     /// [`Refusal::HeldForUser`] while the deny list holds `to`, and [`Refusal::NotNow`] while
     /// its copy isn't known, with nothing signed or queued; the client's errors.
     pub async fn send_extension(

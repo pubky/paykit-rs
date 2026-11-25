@@ -2,8 +2,8 @@
 //! single-use endpoints reserved in the attempt's batch, and credited once by settlement.
 
 use paykit_sdk::{PayOptions, PayOutcome, PayeeStatus, Paykit, Refusal, UnrequestedPayment};
-use pubky_switch_client::app::AppEvent;
-use pubky_switch_client::clock::Clock;
+use pubky_dispatch_client::app::AppEvent;
+use pubky_dispatch_client::clock::Clock;
 
 use crate::common::{btc, endpoint, list_version, single_use_payload, World, HOUR_MS};
 
@@ -157,7 +157,7 @@ async fn test_unrequested_without_a_list_refused() {
     let public = wallet
         .pay_without_request(to_bob(&w, "1", "btc-lightning-bolt12").with_options(
             PayOptions::default().with_mode(paykit_sdk::PaymentMode::Public(
-                pubky_switch_client::app::UserConfirmed::new(),
+                pubky_dispatch_client::app::UserConfirmed::new(),
             )),
         ))
         .await
@@ -294,9 +294,9 @@ async fn test_unrequested_after_an_idle_spell_not_refused_for_its_deadline() {
     w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 1))
         .await;
     wallet.receive(None).await.unwrap();
-    // The wallet hears nothing from its switch for 11 minutes: the highest service time it
+    // The wallet hears nothing from its Dispatch for 11 minutes: the highest service time it
     // verified is older than the deadline's 10 minutes. The deadline is set from the latest
-    // service time, read first, never from that old one (Paykit spec 8.4, Switch spec 10.1).
+    // service time, read first, never from that old one (Paykit spec 8.4, Dispatch spec 10.1).
     w.clock.advance_ms(11 * 60_000);
     let outcome = wallet
         .pay_without_request(to_bob(&w, "0.0015", "btc-lightning-bolt12"))
@@ -348,7 +348,7 @@ async fn test_unrequested_proof_and_receipt_carry_the_attempt_and_no_request_mem
     let record: serde_json::Value = serde_json::from_slice(&held).unwrap();
     let body = |member: &str| {
         let json = record[member]["plaintext"]["json"].as_str().unwrap();
-        let bytes = pubky_switch_core::enc::unb64(json).unwrap();
+        let bytes = pubky_dispatch_core::enc::unb64(json).unwrap();
         let message: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         message["body"].clone()
     };
@@ -380,7 +380,7 @@ async fn test_unrequested_next_generation_list_replaces_the_last_counter() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
-    let last = list_version(1, pubky_switch_core::json::MAX_INT);
+    let last = list_version(1, pubky_dispatch_core::json::MAX_INT);
     let next = list_version(2, 1);
     w.list_to_alice(&mut shop, &[wallet.app_id()], last).await;
     wallet.receive(None).await.unwrap();
@@ -393,7 +393,7 @@ async fn test_unrequested_next_generation_list_replaces_the_last_counter() {
     w.bob
         .sign_next(|body| {
             body.service_keys
-                .push(pubky_switch_core::records::ServiceKeyEntry {
+                .push(pubky_dispatch_core::records::ServiceKeyEntry {
                     generation: old.generation(),
                     key: old.body().inbox.service_key,
                 });
@@ -454,12 +454,12 @@ fn stored_list(w: &World, version: paykit_lib::ListVersion, payload: &str) -> se
     let keys = w.bob.identity().app_keys("shop");
     let cert = w.bob.switch().app(&keys.app_id_bytes()).cert.unwrap();
     serde_json::json!({
-        "sender": pubky_switch_core::enc::pubky_id(&w.bob_id()),
+        "sender": pubky_dispatch_core::enc::pubky_id(&w.bob_id()),
         "cert": { "body": cert.signed().body, "sig": cert.signed().sig },
         "plaintext": {
-            "sender_app": pubky_switch_core::enc::b64(&plaintext.sender_app_id()),
-            "signature": pubky_switch_core::enc::b64(&plaintext.signature()),
-            "json": pubky_switch_core::enc::b64(plaintext.json()),
+            "sender_app": pubky_dispatch_core::enc::b64(&plaintext.sender_app_id()),
+            "signature": pubky_dispatch_core::enc::b64(&plaintext.signature()),
+            "json": pubky_dispatch_core::enc::b64(plaintext.json()),
         },
         "accepted_at": null,
     })
@@ -469,11 +469,11 @@ fn stored_list(w: &World, version: paykit_lib::ListVersion, payload: &str) -> se
 async fn list_record(
     app: &paykit_sdk::Paykit,
     w: &World,
-) -> (pubky_switch_client::app::RecordTarget, serde_json::Value) {
+) -> (pubky_dispatch_client::app::RecordTarget, serde_json::Value) {
     use paykit_lib::collections::Collection;
     let shop = w.bob.identity().app_keys("shop").app_id_bytes();
-    let target = pubky_switch_client::app::RecordTarget::new(
-        pubky_switch_client::app::Collection::new(
+    let target = pubky_dispatch_client::app::RecordTarget::new(
+        pubky_dispatch_client::app::Collection::new(
             Collection::PaymentLists.name(),
             Collection::PaymentLists.policy(None),
         ),
@@ -497,7 +497,7 @@ async fn written_by_the_phone(
     change: impl FnOnce(&World, &mut serde_json::Value),
 ) -> (
     serde_json::Value,
-    Vec<pubky_switch_client::app::FlaggedWrite>,
+    Vec<pubky_dispatch_client::app::FlaggedWrite>,
     serde_json::Value,
 ) {
     let mut wallet = w.wallet("wallet").await;
@@ -526,7 +526,7 @@ async fn written_by_the_phone(
         .unwrap();
     phone
         .app_mut()
-        .submit_batch(pubky_switch_client::app::OpBatch::for_protocol("paykit").entry(entry))
+        .submit_batch(pubky_dispatch_client::app::OpBatch::for_protocol("paykit").entry(entry))
         .await
         .unwrap();
     wallet.receive(None).await.unwrap();
@@ -570,7 +570,7 @@ async fn test_unrequested_later_list_record_dropping_a_used_mark_flagged() {
 #[tokio::test]
 async fn test_unrequested_list_over_a_record_that_doesnt_read_keeps_single_use_marks() {
     use paykit_lib::collections::Collection;
-    use pubky_switch_client::app::{Collection as SwitchCollection, OpBatch, RecordTarget};
+    use pubky_dispatch_client::app::{Collection as DispatchCollection, OpBatch, RecordTarget};
 
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
@@ -595,7 +595,7 @@ async fn test_unrequested_list_over_a_record_that_doesnt_read_keeps_single_use_m
     // A faulty own app writes a value that doesn't read over the record.
     let collection = Collection::PaymentLists;
     let target = RecordTarget::new(
-        SwitchCollection::new(collection.name(), collection.policy(None)),
+        DispatchCollection::new(collection.name(), collection.policy(None)),
         &paykit_lib::derive::natural_key::payment_list(&w.bob_id(), &shop.app_id()),
     );
     tool.app_mut().read_record(&target).await.unwrap();
@@ -629,15 +629,15 @@ async fn test_unrequested_list_over_a_record_that_doesnt_read_keeps_single_use_m
 /// armed, and whose commits keeping a batch the client signed fail once `batch_keeps` is.
 #[derive(Default)]
 struct FailingListStore {
-    inner: pubky_switch_client::store::MemoryStore,
+    inner: pubky_dispatch_client::store::MemoryStore,
     lost_reads: std::sync::atomic::AtomicBool,
     batch_keeps: std::sync::atomic::AtomicBool,
 }
 
 impl FailingListStore {
     /// Whether `batch` is to fail: armed, it keeps a batch, as its next creation number shows.
-    fn fails(&self, batch: &pubky_switch_client::store::WriteBatch) -> bool {
-        use pubky_switch_client::store::Write;
+    fn fails(&self, batch: &pubky_dispatch_client::store::WriteBatch) -> bool {
+        use pubky_dispatch_client::store::Write;
         self.batch_keeps.load(std::sync::atomic::Ordering::SeqCst)
             && batch.writes().iter().any(|write| match write {
                 Write::Put { key, .. } | Write::Delete { key, .. } => key.ends_with(b"keptn"),
@@ -646,16 +646,16 @@ impl FailingListStore {
     }
 }
 
-impl pubky_switch_client::store::StateStore for FailingListStore {
+impl pubky_dispatch_client::store::StateStore for FailingListStore {
     fn get(
         &self,
         ns: &str,
         key: &[u8],
-    ) -> Result<Option<Vec<u8>>, pubky_switch_client::error::StoreError> {
+    ) -> Result<Option<Vec<u8>>, pubky_dispatch_client::error::StoreError> {
         if self.lost_reads.load(std::sync::atomic::Ordering::SeqCst)
             && key.windows(6).any(|part| part == b"lgone/")
         {
-            return Err(pubky_switch_client::error::StoreError::Unavailable);
+            return Err(pubky_dispatch_client::error::StoreError::Unavailable);
         }
         self.inner.get(ns, key)
     }
@@ -666,17 +666,17 @@ impl pubky_switch_client::store::StateStore for FailingListStore {
         prefix: &[u8],
         after: Option<&[u8]>,
         limit: u32,
-    ) -> Result<Vec<pubky_switch_client::store::KeyValue>, pubky_switch_client::error::StoreError>
+    ) -> Result<Vec<pubky_dispatch_client::store::KeyValue>, pubky_dispatch_client::error::StoreError>
     {
         self.inner.scan(ns, prefix, after, limit)
     }
 
     fn commit(
         &self,
-        batch: pubky_switch_client::store::WriteBatch,
-    ) -> Result<(), pubky_switch_client::error::StoreError> {
+        batch: pubky_dispatch_client::store::WriteBatch,
+    ) -> Result<(), pubky_dispatch_client::error::StoreError> {
         if self.fails(&batch) {
-            return Err(pubky_switch_client::error::StoreError::Unavailable);
+            return Err(pubky_dispatch_client::error::StoreError::Unavailable);
         }
         self.inner.commit(batch)
     }
@@ -684,21 +684,23 @@ impl pubky_switch_client::store::StateStore for FailingListStore {
     fn acquire(
         &self,
         ns: &str,
-        owner: pubky_switch_client::store::StoreOwner,
-    ) -> Result<pubky_switch_client::store::AcquireOutcome, pubky_switch_client::error::StoreError>
-    {
+        owner: pubky_dispatch_client::store::StoreOwner,
+    ) -> Result<
+        pubky_dispatch_client::store::AcquireOutcome,
+        pubky_dispatch_client::error::StoreError,
+    > {
         self.inner.acquire(ns, owner)
     }
 
     fn commit_if(
         &self,
         ns: &str,
-        owner: pubky_switch_client::store::StoreOwner,
-        batch: pubky_switch_client::store::WriteBatch,
-    ) -> Result<pubky_switch_client::store::CommitOutcome, pubky_switch_client::error::StoreError>
+        owner: pubky_dispatch_client::store::StoreOwner,
+        batch: pubky_dispatch_client::store::WriteBatch,
+    ) -> Result<pubky_dispatch_client::store::CommitOutcome, pubky_dispatch_client::error::StoreError>
     {
         if self.fails(&batch) {
-            return Err(pubky_switch_client::error::StoreError::Unavailable);
+            return Err(pubky_dispatch_client::error::StoreError::Unavailable);
         }
         self.inner.commit_if(ns, owner, batch)
     }
@@ -712,7 +714,7 @@ async fn test_unrequested_held_list_placement_reports_a_store_failure_keeping_it
         .wallet_on(
             "wallet",
             std::sync::Arc::clone(&failing)
-                as std::sync::Arc<dyn pubky_switch_client::store::StateStore>,
+                as std::sync::Arc<dyn pubky_dispatch_client::store::StateStore>,
         )
         .await;
     let mut phone = w.wallet("phone").await;
@@ -744,7 +746,7 @@ async fn test_unrequested_held_list_placement_reports_a_failed_batch_keep_keepin
         .wallet_on(
             "wallet",
             std::sync::Arc::clone(&failing)
-                as std::sync::Arc<dyn pubky_switch_client::store::StateStore>,
+                as std::sync::Arc<dyn pubky_dispatch_client::store::StateStore>,
         )
         .await;
     let mut shop = w.shop().await;
@@ -758,7 +760,7 @@ async fn test_unrequested_held_list_placement_reports_a_failed_batch_keep_keepin
     wallet.receive(None).await.unwrap();
     assert_eq!(wallet.held_lists().await.unwrap().len(), 1);
     // The store fails keeping the placement's batch: the receive reports it, rather than
-    // end as if the write were sent or refused by the switch (Paykit spec 6).
+    // end as if the write were sent or refused by the Dispatch (Paykit spec 6).
     failing
         .batch_keeps
         .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -766,7 +768,7 @@ async fn test_unrequested_held_list_placement_reports_a_failed_batch_keep_keepin
     assert!(
         matches!(
             error,
-            paykit_sdk::PaykitError::Client(pubky_switch_client::app::AppError::Store(_))
+            paykit_sdk::PaykitError::Client(pubky_dispatch_client::app::AppError::Store(_))
         ),
         "{error:?}"
     );
@@ -785,7 +787,7 @@ async fn test_unrequested_held_list_placement_reports_a_failed_batch_keep_keepin
 #[tokio::test]
 async fn test_unrequested_list_after_a_delete_stays_held_and_its_single_use_endpoint_unpaid() {
     use paykit_lib::collections::Collection;
-    use pubky_switch_client::app::{Collection as SwitchCollection, OpBatch, RecordTarget};
+    use pubky_dispatch_client::app::{Collection as DispatchCollection, OpBatch, RecordTarget};
 
     let w = World::new();
     let storage = crate::common::store();
@@ -805,7 +807,7 @@ async fn test_unrequested_list_after_a_delete_stays_held_and_its_single_use_endp
     // the delete.
     let collection = Collection::PaymentLists;
     let target = RecordTarget::new(
-        SwitchCollection::new(collection.name(), collection.policy(None)),
+        DispatchCollection::new(collection.name(), collection.policy(None)),
         &paykit_lib::derive::natural_key::payment_list(&w.bob_id(), &shop.app_id()),
     );
     phone.app_mut().read_record(&target).await.unwrap();
@@ -915,14 +917,14 @@ async fn test_unrequested_list_after_a_delete_stays_held_and_its_single_use_endp
 }
 
 #[tokio::test]
-async fn test_unrequested_with_the_own_switch_down_refused_and_nothing_paid() {
+async fn test_unrequested_with_the_own_dispatch_down_refused_and_nothing_paid() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
     w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 1))
         .await;
     wallet.receive(None).await.unwrap();
-    // Alice's switch stops answering: the SDK makes no payment without it (Paykit spec 8.4
+    // Alice's Dispatch stops answering: the SDK makes no payment without it (Paykit spec 8.4
     // allows one to a reusable public endpoint; this SDK pays attempt-first only).
     w.router.remove(w.alice.origin());
     let refused = wallet
@@ -931,7 +933,7 @@ async fn test_unrequested_with_the_own_switch_down_refused_and_nothing_paid() {
         .outcome
         .unwrap_err();
     assert!(
-        matches!(refused.refusal(), Some(Refusal::SwitchUnavailable(_))),
+        matches!(refused.refusal(), Some(Refusal::DispatchUnavailable(_))),
         "{refused:?}"
     );
     assert!(w.rail.all_executions().is_empty());
@@ -939,8 +941,8 @@ async fn test_unrequested_with_the_own_switch_down_refused_and_nothing_paid() {
 }
 
 #[tokio::test]
-async fn test_unrequested_with_the_own_switch_unavailable_refused_and_nothing_paid() {
-    // The switch answers `503 unavailable`: the same refusal as one that doesn't answer.
+async fn test_unrequested_with_the_own_dispatch_unavailable_refused_and_nothing_paid() {
+    // The Dispatch answers `503 unavailable`: the same refusal as one that doesn't answer.
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
@@ -949,9 +951,9 @@ async fn test_unrequested_with_the_own_switch_unavailable_refused_and_nothing_pa
     wallet.receive(None).await.unwrap();
     w.alice
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::Error {
+        .fail_next(pubky_dispatch_client::testing::Fault::Error {
             path: "/claims".into(),
-            code: pubky_switch_core::http::ErrorCode::Unavailable,
+            code: pubky_dispatch_core::http::ErrorCode::Unavailable,
             current: serde_json::Value::Null,
         });
     let refused = wallet
@@ -960,7 +962,7 @@ async fn test_unrequested_with_the_own_switch_unavailable_refused_and_nothing_pa
         .outcome
         .unwrap_err();
     assert!(
-        matches!(refused.refusal(), Some(Refusal::SwitchUnavailable(_))),
+        matches!(refused.refusal(), Some(Refusal::DispatchUnavailable(_))),
         "{refused:?}"
     );
     assert!(w.rail.all_executions().is_empty());
@@ -978,7 +980,7 @@ async fn test_unrequested_paid_with_its_outcome_unwritten_is_no_error() {
     // The attempt's batch goes through; the outcome's, after the method paid, can't connect.
     w.alice
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+        .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
             path: "/ops".into(),
             after: 1,
         });
@@ -1032,7 +1034,7 @@ async fn test_unrequested_list_ask_mark_backs_up_and_restores() {
 }
 
 /// The signer stores app `app`'s key bundle for `cert`, every data epoch up to the current.
-pub(crate) fn store_bundle(w: &World, app: [u8; 16], cert: &pubky_switch_core::records::AppCert) {
+pub(crate) fn store_bundle(w: &World, app: [u8; 16], cert: &pubky_dispatch_core::records::AppCert) {
     store_bundle_from(w, app, cert, 1);
 }
 
@@ -1041,7 +1043,7 @@ pub(crate) fn store_bundle(w: &World, app: [u8; 16], cert: &pubky_switch_core::r
 pub(crate) fn store_bundle_from(
     w: &World,
     app: [u8; 16],
-    cert: &pubky_switch_core::records::AppCert,
+    cert: &pubky_dispatch_core::records::AppCert,
     first: u64,
 ) {
     store_bundle_at(w, w.alice.switch(), app, cert, first);
@@ -1049,15 +1051,15 @@ pub(crate) fn store_bundle_from(
 
 pub(crate) fn store_bundle_at(
     w: &World,
-    switch: &pubky_switch_client::testing::ScriptedSwitch,
+    dispatch: &pubky_dispatch_client::testing::ScriptedSwitch,
     app: [u8; 16],
-    cert: &pubky_switch_core::records::AppCert,
+    cert: &pubky_dispatch_core::records::AppCert,
     first: u64,
 ) {
-    use pubky_switch_client::app::Protocol as _;
-    let epoch = switch.identity_doc().unwrap().data_epoch();
+    use pubky_dispatch_client::app::Protocol as _;
+    let epoch = dispatch.identity_doc().unwrap().data_epoch();
     let protocol = paykit_sdk::PaykitProtocol::new();
-    let parts = pubky_switch_core::records::seal_bundle_parts(
+    let parts = pubky_dispatch_core::records::seal_bundle_parts(
         w.alice.identity().key(),
         cert,
         first,
@@ -1066,9 +1068,9 @@ pub(crate) fn store_bundle_at(
     )
     .unwrap();
     for part in parts {
-        switch
-            .signer_op(pubky_switch_core::ops::OpKind::KeyBundlePut(
-                pubky_switch_core::ops::KeyBundlePut {
+        dispatch
+            .signer_op(pubky_dispatch_core::ops::OpKind::KeyBundlePut(
+                pubky_dispatch_core::ops::KeyBundlePut {
                     target_app_id: app,
                     bundle: part.bundle,
                     first_epoch: part.first_epoch,
@@ -1122,7 +1124,7 @@ async fn test_unrequested_list_over_a_value_awaiting_its_epoch_key_keeps_single_
         .unwrap();
     phone
         .app_mut()
-        .submit_batch(pubky_switch_client::app::OpBatch::for_protocol("paykit").entry(op))
+        .submit_batch(pubky_dispatch_client::app::OpBatch::for_protocol("paykit").entry(op))
         .await
         .unwrap();
     wallet.receive(None).await.unwrap();
@@ -1136,8 +1138,8 @@ async fn test_unrequested_list_over_a_value_awaiting_its_epoch_key_keeps_single_
     assert!(
         matches!(
             held.content,
-            pubky_switch_client::app::RecordContent::Unreadable(
-                pubky_switch_client::app::Unopened::KeyNotHeld { .. }
+            pubky_dispatch_client::app::RecordContent::Unreadable(
+                pubky_dispatch_client::app::Unopened::KeyNotHeld { .. }
             )
         ),
         "{:?}",
@@ -1277,7 +1279,7 @@ async fn test_unrequested_proof_of_a_settlement_seen_not_credited_again_over_its
         .into_iter()
         .find(|sent| sent.kind == "paykit.payment_proof")
         .unwrap();
-    let message = pubky_switch_core::message::Message::parse(
+    let message = pubky_dispatch_core::message::Message::parse(
         sent.plaintext.json(),
         paykit_lib::kinds::OPAQUE_MEMBERS,
     )
@@ -1285,8 +1287,8 @@ async fn test_unrequested_proof_of_a_settlement_seen_not_credited_again_over_its
     let paykit_lib::Body::PaymentProof(proof) = paykit_lib::Body::parse(&message).unwrap() else {
         panic!("a proof");
     };
-    let target = pubky_switch_client::app::RecordTarget::new(
-        pubky_switch_client::app::Collection::new(
+    let target = pubky_dispatch_client::app::RecordTarget::new(
+        pubky_dispatch_client::app::Collection::new(
             paykit_lib::collections::Collection::PayeeActivity.name(),
             paykit_lib::collections::Collection::PayeeActivity.policy(None),
         ),
@@ -1318,7 +1320,7 @@ async fn test_unrequested_proof_of_a_settlement_seen_not_credited_again_over_its
     let held = shop.app().shared_record(&key).await.unwrap().unwrap();
     assert_eq!(
         held.content,
-        pubky_switch_client::app::RecordContent::Deleted
+        pubky_dispatch_client::app::RecordContent::Deleted
     );
     assert!(shop.payee_activity().await.unwrap().is_empty());
 }
@@ -1405,7 +1407,7 @@ async fn test_unrequested_list_above_the_payees_generation_not_paid() {
     w.bob
         .sign_next(|body| {
             body.service_keys
-                .push(pubky_switch_core::records::ServiceKeyEntry {
+                .push(pubky_dispatch_core::records::ServiceKeyEntry {
                     generation: old.generation(),
                     key: old.body().inbox.service_key,
                 });
@@ -1546,7 +1548,7 @@ async fn test_unrequested_reusable_endpoint_over_a_refused_marking_write_not_pai
     // that version: the wallet sees the write and refuses it, keeping the unmarked list it
     // selects from. Its attempts on the single-use and the reusable endpoint are conditioned
     // on the version of the write it took, not the refused one, fail, and nothing is paid (Paykit spec 8.4,
-    // wire 5.4; Switch spec 8.2).
+    // wire 5.4; Dispatch spec 8.2).
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut phone = w.wallet("phone").await;
@@ -1571,7 +1573,7 @@ async fn test_unrequested_reusable_endpoint_over_a_refused_marking_write_not_pai
         .unwrap();
     phone
         .app_mut()
-        .submit_batch(pubky_switch_client::app::OpBatch::for_protocol("paykit").entry(entry))
+        .submit_batch(pubky_dispatch_client::app::OpBatch::for_protocol("paykit").entry(entry))
         .await
         .unwrap();
     wallet.receive(None).await.unwrap();
@@ -1642,7 +1644,7 @@ async fn test_unrequested_reusable_endpoint_of_a_version_used_elsewhere_not_paid
 #[tokio::test]
 async fn test_unrequested_list_held_over_a_forgotten_delete_stays_held_after_a_fresh_restore() {
     use paykit_lib::collections::Collection;
-    use pubky_switch_client::app::{Collection as SwitchCollection, OpBatch, RecordTarget};
+    use pubky_dispatch_client::app::{Collection as DispatchCollection, OpBatch, RecordTarget};
 
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
@@ -1659,7 +1661,7 @@ async fn test_unrequested_list_held_over_a_forgotten_delete_stays_held_after_a_f
     assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
     let collection = Collection::PaymentLists;
     let target = RecordTarget::new(
-        SwitchCollection::new(collection.name(), collection.policy(None)),
+        DispatchCollection::new(collection.name(), collection.policy(None)),
         &paykit_lib::derive::natural_key::payment_list(&w.bob_id(), &shop.app_id()),
     );
     phone.app_mut().read_record(&target).await.unwrap();
@@ -1699,7 +1701,7 @@ async fn test_unrequested_list_held_over_a_forgotten_delete_stays_held_after_a_f
     crate::common::finish_listing(&mut restored).await;
     restored.reconcile().await.unwrap();
     restored
-        .end_reconcile(pubky_switch_client::app::UserConfirmed::new())
+        .end_reconcile(pubky_dispatch_client::app::UserConfirmed::new())
         .await
         .unwrap();
     restored.receive(None).await.unwrap();
@@ -1750,8 +1752,8 @@ async fn test_unrequested_list_held_over_a_forgotten_delete_stays_held_after_a_f
     assert_eq!(w.record_writes(&w.alice, &key), writes);
 }
 
-/// The `payment_lists` record of bob's shop list, in alice's switch.
-fn shop_list_target(w: &World, shop: &Paykit) -> pubky_switch_client::app::RecordTarget {
+/// The `payment_lists` record of bob's shop list, in alice's dispatch.
+fn shop_list_target(w: &World, shop: &Paykit) -> pubky_dispatch_client::app::RecordTarget {
     payment_list_target(&w.bob_id(), &shop.app_id())
 }
 
@@ -1759,12 +1761,12 @@ fn shop_list_target(w: &World, shop: &Paykit) -> pubky_switch_client::app::Recor
 fn payment_list_target(
     payee: &[u8; 32],
     app_id: &[u8; 16],
-) -> pubky_switch_client::app::RecordTarget {
+) -> pubky_dispatch_client::app::RecordTarget {
     use paykit_lib::collections::Collection;
-    use pubky_switch_client::app::{Collection as SwitchCollection, RecordTarget};
+    use pubky_dispatch_client::app::{Collection as DispatchCollection, RecordTarget};
     let collection = Collection::PaymentLists;
     RecordTarget::new(
-        SwitchCollection::new(collection.name(), collection.policy(None)),
+        DispatchCollection::new(collection.name(), collection.policy(None)),
         &paykit_lib::derive::natural_key::payment_list(payee, app_id),
     )
 }
@@ -1778,7 +1780,7 @@ async fn pay_single_use_then_delete_elsewhere(
     phone: &mut Paykit,
     shop: &mut Paykit,
 ) -> ([u8; 32], serde_json::Value) {
-    use pubky_switch_client::app::OpBatch;
+    use pubky_dispatch_client::app::OpBatch;
     w.list_to_alice(shop, &[wallet.app_id()], list_version(1, 1))
         .await;
     wallet.receive(None).await.unwrap();
@@ -1807,7 +1809,7 @@ async fn pay_single_use_then_delete_elsewhere(
 /// Restore `backup` onto `storage`, list the restored app's side and end its reconcile.
 async fn restored_onto(
     w: &World,
-    storage: std::sync::Arc<dyn pubky_switch_client::store::StateStore>,
+    storage: std::sync::Arc<dyn pubky_dispatch_client::store::StateStore>,
     backup: &paykit_sdk::PaykitBackup,
 ) -> Paykit {
     let mut restored = Paykit::restore(
@@ -1822,7 +1824,7 @@ async fn restored_onto(
     crate::common::finish_listing(&mut restored).await;
     restored.reconcile().await.unwrap();
     restored
-        .end_reconcile(pubky_switch_client::app::UserConfirmed::new())
+        .end_reconcile(pubky_dispatch_client::app::UserConfirmed::new())
         .await
         .unwrap();
     restored
@@ -1908,7 +1910,7 @@ async fn test_unrequested_hold_over_a_delete_survives_an_in_place_restore_from_b
         .unwrap();
     phone
         .app_mut()
-        .submit_batch(pubky_switch_client::app::OpBatch::for_protocol("paykit").entry(op))
+        .submit_batch(pubky_dispatch_client::app::OpBatch::for_protocol("paykit").entry(op))
         .await
         .unwrap();
     wallet.receive(None).await.unwrap();
@@ -1927,7 +1929,7 @@ async fn test_unrequested_hold_over_a_delete_survives_an_in_place_restore_from_b
 
 #[tokio::test]
 async fn test_unrequested_list_held_for_a_refused_write_stays_held_over_a_later_delete() {
-    use pubky_switch_client::app::OpBatch;
+    use pubky_dispatch_client::app::OpBatch;
 
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
@@ -2041,7 +2043,7 @@ async fn test_unrequested_unmarked_create_over_a_forgotten_delete_keeps_the_list
             installation of this App ID, which only a faulty own app writes, is not observed \
             until the client reports it"]
 async fn test_unrequested_delete_by_another_installation_of_the_app_keeps_a_later_list_held() {
-    use pubky_switch_client::app::OpBatch;
+    use pubky_dispatch_client::app::OpBatch;
 
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
@@ -2089,7 +2091,7 @@ async fn test_unrequested_delete_by_another_installation_of_the_app_keeps_a_late
             .await
             .unwrap()
             .map(|r| r.content),
-        Some(pubky_switch_client::app::RecordContent::Deleted)
+        Some(pubky_dispatch_client::app::RecordContent::Deleted)
     ));
     // The second installation is backed up and restored onto a fresh store; the service
     // forgets the delete.
@@ -2102,7 +2104,7 @@ async fn test_unrequested_delete_by_another_installation_of_the_app_keeps_a_late
 }
 
 #[tokio::test]
-#[ignore = "after a delete this app saw, nothing at the key is placed until the Switch proves a record's lineage and Paykit maps that proof (Paykit spec 6; wire 5, Incomplete protected-record contract)"]
+#[ignore = "after a delete this app saw, nothing at the key is placed until the Dispatch proves a record's lineage and Paykit maps that proof (Paykit spec 6; wire 5, Incomplete protected-record contract)"]
 async fn test_unrequested_put_back_of_the_known_history_after_a_newer_recreation_places_the_list() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
@@ -2212,7 +2214,7 @@ async fn test_unrequested_marks_kept_through_a_fresh_restore() {
     wallet.receive(None).await.unwrap();
     let (_, both) = list_record(&wallet, &w).await;
     assert_eq!(both["used"].as_array().unwrap().len(), 2, "{both}");
-    // Restored onto a fresh store, the wallet keeps what it saw of the record (Switch spec
+    // Restored onto a fresh store, the wallet keeps what it saw of the record (Dispatch spec
     // 12.4): a newly joined app's write of the newer list with the first mark only drops a
     // mark it saw, so it isn't taken, and the paid endpoint isn't paid again (Paykit wire
     // 5.4, "Seen lists").
@@ -2242,7 +2244,7 @@ async fn test_unrequested_marks_kept_through_a_fresh_restore() {
 /// SDK's own writes.
 async fn put_list_record(
     app: &mut Paykit,
-    target: &pubky_switch_client::app::RecordTarget,
+    target: &pubky_dispatch_client::app::RecordTarget,
     value: Option<&serde_json::Value>,
 ) {
     let bytes = value.map(|v| serde_json::to_vec(v).unwrap());
@@ -2252,7 +2254,7 @@ async fn put_list_record(
         .await
         .unwrap();
     app.app_mut()
-        .submit_batch(pubky_switch_client::app::OpBatch::for_protocol("paykit").entry(op))
+        .submit_batch(pubky_dispatch_client::app::OpBatch::for_protocol("paykit").entry(op))
         .await
         .unwrap();
 }
@@ -2565,7 +2567,7 @@ async fn test_unrequested_put_back_carrying_lost_to_delete_not_paid() {
     // A put-back from an older copy, holding every mark and naming the delete it answered:
     // never paid automatically (Paykit wire 5).
     let mut put_back = marked.clone();
-    put_back["lost_to_delete"] = serde_json::json!(pubky_switch_core::enc::b64(&[5u8; 32]));
+    put_back["lost_to_delete"] = serde_json::json!(pubky_dispatch_core::enc::b64(&[5u8; 32]));
     put_list_record(&mut phone, &target, Some(&put_back)).await;
     wallet.receive(None).await.unwrap();
     wallet.receive(None).await.unwrap();
@@ -2695,8 +2697,8 @@ async fn test_unrequested_delete_over_a_refused_write_keeps_no_copy() {
 fn lost_entries(backup: &paykit_sdk::PaykitBackup) -> Vec<serde_json::Value> {
     let value: serde_json::Value = serde_json::from_slice(&backup.to_bytes().unwrap()).unwrap();
     let data = value["layers"][0]["data"].as_str().unwrap();
-    let bytes = pubky_switch_core::enc::unb64(data).unwrap();
-    pubky_switch_client::app::decode_local_state(&bytes)
+    let bytes = pubky_dispatch_core::enc::unb64(data).unwrap();
+    pubky_dispatch_client::app::decode_local_state(&bytes)
         .unwrap()
         .into_iter()
         .filter(|(key, _)| key.starts_with(b"lgone/"))
@@ -2711,7 +2713,7 @@ fn lost_entries(backup: &paykit_sdk::PaykitBackup) -> Vec<serde_json::Value> {
 fn marked_put_back(marked: &serde_json::Value, named: u8) -> serde_json::Value {
     let mut put_back = marked.clone();
     put_back["used"] = serde_json::json!([]);
-    put_back["lost_to_delete"] = serde_json::json!(pubky_switch_core::enc::b64(&[named; 32]));
+    put_back["lost_to_delete"] = serde_json::json!(pubky_dispatch_core::enc::b64(&[named; 32]));
     put_back
 }
 
@@ -2741,7 +2743,7 @@ async fn test_unrequested_loss_marker_kept_only_for_a_list_bound_to_its_key() {
     assert!(lost_entries(&wallet.backup().await.unwrap()).is_empty());
     let own = shop_list_target(&w, &shop);
     let mut payee = marked_put_back(&foreign, 6);
-    payee["payee"] = serde_json::json!(pubky_switch_core::enc::b64(&w.alice_id()));
+    payee["payee"] = serde_json::json!(pubky_dispatch_core::enc::b64(&w.alice_id()));
     phone.app_mut().read_record(&own).await.unwrap();
     put_list_record(&mut phone, &own, Some(&payee)).await;
     wallet.receive(None).await.unwrap();
@@ -2847,7 +2849,7 @@ async fn test_unrequested_loss_marker_read_first_kept_through_a_fresh_restore() 
     w.alice.switch().drop_record(&key).unwrap();
     let mut put_back = marked.clone();
     put_back["used"] = serde_json::json!([]);
-    put_back["lost_to_delete"] = serde_json::json!(pubky_switch_core::enc::b64(&[5u8; 32]));
+    put_back["lost_to_delete"] = serde_json::json!(pubky_dispatch_core::enc::b64(&[5u8; 32]));
     let mut laptop = w.wallet("laptop").await;
     put_list_record(&mut laptop, &target, Some(&put_back)).await;
     tablet.receive(None).await.unwrap();
@@ -2908,7 +2910,7 @@ async fn test_unrequested_write_dropping_a_loss_marker_after_a_fresh_restore_sho
     w.alice.switch().drop_record(&key).unwrap();
     let mut put_back = marked.clone();
     put_back["used"] = serde_json::json!([]);
-    put_back["lost_to_delete"] = serde_json::json!(pubky_switch_core::enc::b64(&[5u8; 32]));
+    put_back["lost_to_delete"] = serde_json::json!(pubky_dispatch_core::enc::b64(&[5u8; 32]));
     let mut laptop = w.wallet("laptop").await;
     put_list_record(&mut laptop, &target, Some(&put_back)).await;
     tablet.receive(None).await.unwrap();
@@ -2966,7 +2968,7 @@ async fn test_unrequested_flagged_put_back_then_a_dropped_marker_not_paid_after_
     w.alice.switch().drop_record(&key).unwrap();
     let mut put_back = marked.clone();
     put_back["used"] = serde_json::json!([]);
-    put_back["lost_to_delete"] = serde_json::json!(pubky_switch_core::enc::b64(&[5u8; 32]));
+    put_back["lost_to_delete"] = serde_json::json!(pubky_dispatch_core::enc::b64(&[5u8; 32]));
     let mut laptop = w.wallet("laptop").await;
     put_list_record(&mut laptop, &target, Some(&put_back)).await;
     wallet.receive(None).await.unwrap();
@@ -3004,7 +3006,7 @@ async fn test_unrequested_later_write_dropping_lost_to_delete_flagged_and_not_pa
     // delete: an app that joins now never saw the delete, and reads the put-back first.
     let mut put_back = marked.clone();
     put_back["used"] = serde_json::json!([]);
-    put_back["lost_to_delete"] = serde_json::json!(pubky_switch_core::enc::b64(&[5u8; 32]));
+    put_back["lost_to_delete"] = serde_json::json!(pubky_dispatch_core::enc::b64(&[5u8; 32]));
     put_list_record(&mut phone, &target, Some(&put_back)).await;
     let mut tablet = w.wallet("tablet").await;
     tablet.receive(None).await.unwrap();
@@ -3039,7 +3041,7 @@ async fn test_unrequested_delete_over_a_dropped_loss_marker_keeps_no_copy() {
     // delete; an app that joins now reads that put-back first.
     let mut put_back = marked.clone();
     put_back["used"] = serde_json::json!([]);
-    put_back["lost_to_delete"] = serde_json::json!(pubky_switch_core::enc::b64(&[5u8; 32]));
+    put_back["lost_to_delete"] = serde_json::json!(pubky_dispatch_core::enc::b64(&[5u8; 32]));
     put_list_record(&mut phone, &target, Some(&put_back)).await;
     let mut tablet = w.wallet("tablet").await;
     tablet.receive(None).await.unwrap();
@@ -3080,14 +3082,14 @@ async fn test_unrequested_later_write_changing_lost_to_delete_taken() {
         pay_single_use_then_delete_elsewhere(&w, &mut wallet, &mut phone, &mut shop).await;
     let target = shop_list_target(&w, &shop);
     let mut put_back = marked.clone();
-    put_back["lost_to_delete"] = serde_json::json!(pubky_switch_core::enc::b64(&[5u8; 32]));
+    put_back["lost_to_delete"] = serde_json::json!(pubky_dispatch_core::enc::b64(&[5u8; 32]));
     put_list_record(&mut phone, &target, Some(&put_back)).await;
     let mut tablet = w.wallet("tablet").await;
     tablet.receive(None).await.unwrap();
     // A later put-back naming another delete changes the marker: it is taken, not flagged
     // (Paykit wire 5, "Repeated deletes").
     let mut renamed = put_back.clone();
-    renamed["lost_to_delete"] = serde_json::json!(pubky_switch_core::enc::b64(&[6u8; 32]));
+    renamed["lost_to_delete"] = serde_json::json!(pubky_dispatch_core::enc::b64(&[6u8; 32]));
     put_list_record(&mut phone, &target, Some(&renamed)).await;
     tablet.receive(None).await.unwrap();
     assert!(tablet.app().flagged_writes().await.unwrap().is_empty());
@@ -3095,10 +3097,10 @@ async fn test_unrequested_later_write_changing_lost_to_delete_taken() {
 
 #[tokio::test]
 async fn test_unrequested_loss_marker_of_a_recovery_upload_kept_through_an_in_place_restore() {
-    use pubky_switch_client::client::answers::{RecoveryUpload, UploadedOp};
-    use pubky_switch_client::client::{Credentials, SwitchClient};
-    use pubky_switch_client::testing::{Fault, SWITCH_ORIGIN};
-    use pubky_switch_core::ops::{Entry, OpsRequest};
+    use pubky_dispatch_client::client::answers::{RecoveryUpload, UploadedOp};
+    use pubky_dispatch_client::client::{Credentials, SwitchClient};
+    use pubky_dispatch_client::testing::{Fault, SWITCH_ORIGIN};
+    use pubky_dispatch_core::ops::{Entry, OpsRequest};
     let w = World::new();
     let storage = crate::common::store();
     let mut tablet = w.wallet_on("tablet", std::sync::Arc::clone(&storage)).await;
@@ -3146,7 +3148,7 @@ async fn test_unrequested_loss_marker_of_a_recovery_upload_kept_through_an_in_pl
         path: "/ops".into(),
         after: 0,
     });
-    let batch = pubky_switch_client::app::OpBatch::for_protocol("paykit").entry(op);
+    let batch = pubky_dispatch_client::app::OpBatch::for_protocol("paykit").entry(op);
     assert!(phone.app_mut().submit_batch(batch).await.is_err());
     let missed = w.alice.switch().unreached_bodies().pop().unwrap();
     let records = OpsRequest::parse(&missed)
@@ -3228,12 +3230,12 @@ async fn test_unrequested_loss_marker_of_a_recovery_upload_kept_through_an_in_pl
     // The receive key the tablet registered at the new service after the backup is its own.
     restored
         .app_mut()
-        .confirm_restored_registrations(pubky_switch_client::app::UserConfirmed::new())
+        .confirm_restored_registrations(pubky_dispatch_client::app::UserConfirmed::new())
         .await
         .unwrap();
     restored.reconcile().await.unwrap();
     restored
-        .end_reconcile(pubky_switch_client::app::UserConfirmed::new())
+        .end_reconcile(pubky_dispatch_client::app::UserConfirmed::new())
         .await
         .unwrap();
     restored.receive(None).await.unwrap();
@@ -3428,7 +3430,7 @@ async fn test_unrequested_held_list_over_an_absent_key_never_created_over_a_forg
     let mut tool = w.wallet("tool").await;
     let mut shop = w.shop().await;
     // The wallet holds the list over the absent key, its first write refused, and its next
-    // pass sends nothing that reaches the switch, or a create built then would be kept.
+    // pass sends nothing that reaches the Dispatch, or a create built then would be kept.
     w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 1))
         .await;
     crate::common::refuse_writes(&w.alice, 2);
@@ -3436,7 +3438,7 @@ async fn test_unrequested_held_list_over_an_absent_key_never_created_over_a_forg
     assert_eq!(wallet.held_lists().await.unwrap().len(), 1);
     w.alice
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+        .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
             path: "/ops".into(),
             after: 0,
         });
@@ -3459,7 +3461,7 @@ async fn test_unrequested_held_list_over_an_absent_key_never_created_over_a_forg
             )
             .await
             .unwrap();
-        let batch = pubky_switch_client::app::OpBatch::for_protocol("paykit").entry(op);
+        let batch = pubky_dispatch_client::app::OpBatch::for_protocol("paykit").entry(op);
         assert!(tool.app_mut().submit_batch(batch).await.is_err());
     }
     assert!(!w.alice.switch().unreached_bodies().is_empty());
@@ -3499,10 +3501,10 @@ async fn test_unrequested_held_list_over_an_absent_key_never_created_over_a_forg
 }
 
 #[tokio::test]
-async fn test_unrequested_open_attempt_to_a_list_not_dispatched_again_after_its_delete() {
+async fn test_unrequested_open_attempt_to_a_list_not_handed_off_again_after_its_delete() {
     use paykit_sdk::rail::{FAKE_LONGEST_COMPLETION_MS, FAKE_PAYMENT_TIME_TOLERANCE_MS};
     let w = World::new();
-    // An idempotent method without a history: a resume repeats the dispatch.
+    // An idempotent method without a history: a resume repeats the handoff.
     w.rail.set_declaration(
         paykit_sdk::RailDeclaration::new(
             FAKE_LONGEST_COMPLETION_MS,
@@ -3531,7 +3533,7 @@ async fn test_unrequested_open_attempt_to_a_list_not_dispatched_again_after_its_
     phone.app_mut().read_record(&target).await.unwrap();
     put_list_record(&mut phone, &target, None).await;
     wallet.receive(None).await.unwrap();
-    // A resume doesn't dispatch the saved list destination again (Paykit spec 6; wire 5):
+    // A resume doesn't hand off the saved list destination again (Paykit spec 6; wire 5):
     // the attempt stays open, "may be paid", for the user to reconcile.
     let resumed = wallet.resume_payments().await.unwrap();
     assert!(
@@ -3559,7 +3561,7 @@ async fn test_unrequested_open_attempt_to_a_list_not_dispatched_again_after_its_
 #[tokio::test]
 async fn test_unrequested_loss_marker_kept_through_an_in_place_restore_of_a_backup_without_pay() {
     use paykit_sdk::AppScopes;
-    use pubky_switch_core::ops::OpKind;
+    use pubky_dispatch_core::ops::OpKind;
     let w = World::new();
     let storage = crate::common::store();
     // The tablet starts without `paykit_pay`, so it reads no `payment_lists` record, and is
@@ -3589,7 +3591,7 @@ async fn test_unrequested_loss_marker_kept_through_an_in_place_restore_of_a_back
     // for a full one.
     let store_bundle = || {
         let epoch = w.alice.switch().identity_doc().unwrap().data_epoch();
-        for part in pubky_switch_core::records::seal_bundle_parts(
+        for part in pubky_dispatch_core::records::seal_bundle_parts(
             w.alice.identity().key(),
             &wider,
             1,
@@ -3600,12 +3602,14 @@ async fn test_unrequested_loss_marker_kept_through_an_in_place_restore_of_a_back
         {
             w.alice
                 .switch()
-                .signer_op(OpKind::KeyBundlePut(pubky_switch_core::ops::KeyBundlePut {
-                    target_app_id: me,
-                    bundle: part.bundle,
-                    first_epoch: part.first_epoch,
-                    last_epoch: part.last_epoch,
-                }))
+                .signer_op(OpKind::KeyBundlePut(
+                    pubky_dispatch_core::ops::KeyBundlePut {
+                        target_app_id: me,
+                        bundle: part.bundle,
+                        first_epoch: part.first_epoch,
+                        last_epoch: part.last_epoch,
+                    },
+                ))
                 .unwrap();
         }
     };
@@ -3683,7 +3687,7 @@ async fn test_unrequested_loss_marker_kept_through_an_in_place_restore_of_a_back
         }
     }
     restored
-        .end_reconcile(pubky_switch_client::app::UserConfirmed::new())
+        .end_reconcile(pubky_dispatch_client::app::UserConfirmed::new())
         .await
         .unwrap();
     let again = restored
