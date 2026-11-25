@@ -11,7 +11,7 @@ use pubky_dispatch_client::app::{DeliveryView, QueuedMessage, ReceiveReport, Rep
 use pubky_dispatch_core::message::Message;
 
 use crate::activity::{family, ActivityTarget, KeptSide, SideTag};
-use crate::notices::{GivenUpFrom, GivenUpOrigin, KeptNotice};
+use crate::notices::{GivenUpOrigin, KeptNotice, StopSubject};
 use crate::protocol::BACKUP_NAME;
 use crate::records::KeptMessage;
 use crate::requests::{expiry_deadline, payment_ended, request_of, Fresh};
@@ -140,7 +140,8 @@ fn mark_after(swept: bool, mark_stays: bool, pass: HeldPass, still_held: Option<
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum StopEvidence {
     Recorded,
-    Open,
+    /// Still open for the user to stop again: what to stop.
+    Open(StopSubject),
     Absent,
     Unreadable,
 }
@@ -149,7 +150,7 @@ pub(crate) enum StopEvidence {
 enum Decision {
     Release,
     Withdraw,
-    StopNotRecorded,
+    StopNotRecorded(StopSubject),
     Wait,
 }
 
@@ -160,7 +161,7 @@ fn decide(role: HeldRole, evidence: StopEvidence) -> Decision {
         Message(PaymentRequestCancellation | PaymentRequestRejection | AllowanceEnd) => {
             match evidence {
                 StopEvidence::Recorded => Decision::Release,
-                StopEvidence::Open => Decision::StopNotRecorded,
+                StopEvidence::Open(subject) => Decision::StopNotRecorded(subject),
                 StopEvidence::Absent => Decision::Withdraw,
                 StopEvidence::Unreadable => Decision::Wait,
             }
@@ -187,7 +188,7 @@ fn decide(role: HeldRole, evidence: StopEvidence) -> Decision {
         // record left open for the user to answer.
         Message(PaymentProof) => match evidence {
             StopEvidence::Recorded => Decision::Release,
-            StopEvidence::Open | StopEvidence::Absent => Decision::Withdraw,
+            StopEvidence::Open(_) | StopEvidence::Absent => Decision::Withdraw,
             StopEvidence::Unreadable => Decision::Wait,
         },
     }
@@ -522,12 +523,12 @@ impl Paykit {
                     .await?;
                 Ok(Outcome::Released)
             }
-            Decision::Withdraw | Decision::StopNotRecorded => {
-                if decision == Decision::StopNotRecorded {
+            Decision::Withdraw | Decision::StopNotRecorded(_) => {
+                if let Decision::StopNotRecorded(subject) = decision {
                     let request = msg
                         .filter(|_| role != HeldRole::Message(Kind::AllowanceEnd))
                         .and_then(|m| m.refs.first().copied());
-                    self.note_unrecorded_stop(q, request).await?;
+                    self.note_unrecorded_stop(q, request, subject).await?;
                 } else if by_evidence {
                     // The counterparty's stop, or a record that holds neither: nothing to tell.
                     self.local_delete(&notice).await?;
@@ -558,16 +559,17 @@ impl Paykit {
         &mut self,
         q: &QueuedMessage,
         request: Option<[u8; 32]>,
+        subject: StopSubject,
     ) -> Result<()> {
         let at = key::unrecorded_stop(&q.to, &q.msg_id);
         if self.kept_notice(&at).await?.is_none() {
-            let notice = KeptNotice::given_up(
+            // Shown only once the withdrawal is told (`Paykit::show_pending_stop`).
+            let notice = KeptNotice::unrecorded_stop(
                 q.to,
                 &q.msg_id,
                 request,
+                subject,
                 self.service_time().unwrap_or(0),
-                // Shown only once the withdrawal is told (`Paykit::show_pending_stop`).
-                GivenUpFrom::Origin(GivenUpOrigin::UnrecordedStopPending),
             );
             self.local_put(&at, &notice).await?;
         }
@@ -687,7 +689,21 @@ impl Paykit {
             && request_of(&record).is_some_and(|(r, terms)| {
                 r.hash() == *hash && !self.deadline_passed(expiry_deadline(&record, terms))
             });
-        Ok(if open { Open } else { Absent })
+        if !open {
+            return Ok(Absent);
+        }
+        // What the user stops again: a request sent, by the record the sale names, its label
+        // included; one this identity was asked to pay, by its payee and hash.
+        Ok(Open(if target.side == SideTag::Payee {
+            StopSubject::SentRequest {
+                record: self.activity_key(&target)?,
+            }
+        } else {
+            StopSubject::Request(crate::RequestRef {
+                payee: q.to,
+                request_hash: *hash,
+            })
+        }))
     }
 
     /// The payer's record of a carried proof's payment, read afresh (Paykit spec 7.2): a
@@ -1416,17 +1432,19 @@ mod tests {
             HeldRole::Extension,
             HeldRole::Unknown,
         ]) {
-            // Per evidence: Recorded, Open, Absent, Unreadable (Paykit spec 7.2).
+            // Per evidence: Recorded, Open, Absent, Unreadable (Paykit spec 7.2). An open
+            // record's notice names what it was open for.
+            let subject = StopSubject::Allowance { record: [7; 32] };
             let expected = match role {
                 Message(PaymentRequestCancellation | PaymentRequestRejection | AllowanceEnd) => {
-                    [Release, StopNotRecorded, Withdraw, Wait]
+                    [Release, StopNotRecorded(subject), Withdraw, Wait]
                 }
                 Message(PaymentProof) => [Release, Withdraw, Withdraw, Wait],
                 _ => [Withdraw, Withdraw, Withdraw, Withdraw],
             };
             let evidence = [
                 StopEvidence::Recorded,
-                StopEvidence::Open,
+                StopEvidence::Open(subject),
                 StopEvidence::Absent,
                 StopEvidence::Unreadable,
             ];

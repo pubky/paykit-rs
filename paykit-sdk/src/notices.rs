@@ -332,6 +332,61 @@ impl SettlementSubject {
     }
 }
 
+/// What a [`NoticeKind::StopNotRecorded`] notice asks the user to stop again, as the call
+/// that stops it takes it (Paykit spec 7.2). One counterparty can have several requests or
+/// Allowances open at once, so the notice names the one its held stop was for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum StopSubject {
+    /// A request this identity was asked to pay, by its payee and request hash:
+    /// [`Paykit::cancel_request`] or [`Paykit::reject_request`] stops it again.
+    Request(crate::RequestRef),
+    /// A request this identity sent, by the record key of its payee activity record, which
+    /// its label's policy derives (Paykit spec 6): [`Paykit::cancel_sent_request`] stops it
+    /// again.
+    SentRequest {
+        /// The record key.
+        record: [u8; 32],
+    },
+    /// An Allowance, by the record key of its `allowances` record (Paykit spec 8.3):
+    /// [`Paykit::end_allowance`] ends it again.
+    Allowance {
+        /// The record key.
+        record: [u8; 32],
+    },
+}
+
+impl StopSubject {
+    pub(crate) fn path(self) -> String {
+        match self {
+            Self::Request(r) => format!("request/{}/{}", b64(&r.payee), b64(&r.request_hash)),
+            Self::SentRequest { record } => format!("sent/{}", b64(&record)),
+            Self::Allowance { record } => format!("allowance/{}", b64(&record)),
+        }
+    }
+
+    pub(crate) fn parse(path: &str) -> Option<Self> {
+        let (family, data) = path.split_once('/')?;
+        let subject = match family {
+            "request" => {
+                let (payee, hash) = data.split_once('/')?;
+                Self::Request(crate::RequestRef {
+                    payee: unb64_array(payee).ok()?,
+                    request_hash: unb64_array(hash).ok()?,
+                })
+            }
+            "sent" => Self::SentRequest {
+                record: unb64_array(data).ok()?,
+            },
+            "allowance" => Self::Allowance {
+                record: unb64_array(data).ok()?,
+            },
+            _ => return None,
+        };
+        (subject.path() == path).then_some(subject)
+    }
+}
+
 /// A notice for the host to show, until it acknowledges it ([`Paykit::acknowledge_notice`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -374,6 +429,9 @@ pub struct Notice {
     /// For [`NoticeKind::PublicEndpointChangeNotPublished`]: the public endpoints the change
     /// would have given a new payload.
     pub endpoints_changed: Vec<paykit_lib::PaymentEndpointIdentifier>,
+    /// For [`NoticeKind::StopNotRecorded`]: the request or Allowance to stop again, always
+    /// given for that kind and never for another.
+    pub stop: Option<StopSubject>,
 }
 
 /// A notice as kept (`p/nt/<attempt_id>/<kind>`, `p/nt/<sender>/<msg_id>` for a message
@@ -410,6 +468,9 @@ pub(crate) struct KeptNotice {
     /// withdraw and offer or change, when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) endpoints: Option<crate::own_record::EndpointChange>,
+    /// For a stop not recorded: what to stop again ([`StopSubject::path`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) stop: Option<String>,
 }
 
 /// Where a message given up with no entry stored came from: no entry, so no handle.
@@ -511,6 +572,7 @@ impl KeptNotice {
             origin: None,
             lost: None,
             endpoints: None,
+            stop: None,
         }
     }
 
@@ -529,6 +591,7 @@ impl KeptNotice {
             origin: None,
             lost: None,
             endpoints: None,
+            stop: None,
         }
     }
 
@@ -548,6 +611,7 @@ impl KeptNotice {
             origin: None,
             lost: None,
             endpoints: None,
+            stop: None,
         }
     }
 
@@ -573,6 +637,7 @@ impl KeptNotice {
             origin: None,
             lost: None,
             endpoints: None,
+            stop: None,
         }
     }
 
@@ -603,7 +668,30 @@ impl KeptNotice {
             origin,
             lost: None,
             endpoints: None,
+            stop: None,
         }
+    }
+
+    /// The notice of a held stop absent from its open record (Paykit spec 7.2), written
+    /// before the stop's withdrawal and shown once it is told
+    /// ([`GivenUpOrigin::UnrecordedStopPending`]): `request` is the request a request's stop
+    /// names, `None` for an Allowance's end.
+    pub(crate) fn unrecorded_stop(
+        to: [u8; 32],
+        msg_id: &str,
+        request: Option<[u8; 32]>,
+        subject: StopSubject,
+        at: u64,
+    ) -> Self {
+        let mut notice = Self::given_up(
+            to,
+            msg_id,
+            request,
+            at,
+            GivenUpFrom::Origin(GivenUpOrigin::UnrecordedStopPending),
+        );
+        notice.stop = Some(subject.path());
+        notice
     }
 
     pub(crate) fn withdrawal_confirmed(end: &paykit_lib::records::StoredMessage) -> Result<Self> {
@@ -621,6 +709,7 @@ impl KeptNotice {
             origin: None,
             lost: None,
             endpoints: None,
+            stop: None,
         })
     }
 
@@ -666,6 +755,7 @@ impl KeptNotice {
             origin: None,
             lost: None,
             endpoints: None,
+            stop: None,
         }
     }
 
@@ -720,6 +810,7 @@ impl KeptNotice {
             origin: None,
             lost: Some((from, until.max(from))),
             endpoints: None,
+            stop: None,
         }
     }
 
@@ -842,6 +933,11 @@ impl KeptNotice {
             endpoints_withdrawn: identifiers(self.endpoints.as_ref().map(|c| &c.withdrawn))?,
             endpoints_offered: identifiers(self.endpoints.as_ref().map(|c| &c.offered))?,
             endpoints_changed: identifiers(self.endpoints.as_ref().map(|c| &c.changed))?,
+            stop: self
+                .stop
+                .as_deref()
+                .map(|path| StopSubject::parse(path).ok_or_else(PaykitError::corrupt))
+                .transpose()?,
         })
     }
 }
@@ -903,6 +999,7 @@ pub(crate) fn bind_notice(key: &str, notice: &KeptNotice) -> Result<()> {
                 && notice.origin.is_none()
                 && notice.lost.is_none()
                 && notice.request_hash.is_none()
+                && notice.stop.is_none()
             {
                 Ok(())
             } else {
@@ -910,6 +1007,29 @@ pub(crate) fn bind_notice(key: &str, notice: &KeptNotice) -> Result<()> {
             }
         }
         _ if notice.settlement.is_some() => Err(PaykitError::corrupt()),
+        // A stop not recorded names what to stop again, and no other notice does: a request
+        // by the request hash it names too, an Allowance by its record alone.
+        Some(StateKey::UnrecordedStop { to, msg_id })
+            if notice.kind == NoticeKind::StopNotRecorded =>
+        {
+            let request = notice
+                .request_hash
+                .as_deref()
+                .map(unb64_array::<32>)
+                .transpose()
+                .map_err(|_| PaykitError::corrupt())?;
+            let bound = match notice.stop.as_deref().and_then(StopSubject::parse) {
+                Some(StopSubject::Request(r)) => r.payee == to && request == Some(r.request_hash),
+                Some(StopSubject::SentRequest { .. }) => request.is_some(),
+                Some(StopSubject::Allowance { .. }) => request.is_none(),
+                None => false,
+            };
+            if !bound {
+                return Err(PaykitError::corrupt());
+            }
+            notice.check_message(&to, &msg_id)
+        }
+        _ if notice.stop.is_some() => Err(PaykitError::corrupt()),
         Some(StateKey::IdentityNotice(kind)) => {
             let mut plain = notice.clone();
             if kind == NoticeKind::PublicEndpointChangeNotPublished {
@@ -938,11 +1058,6 @@ pub(crate) fn bind_notice(key: &str, notice: &KeptNotice) -> Result<()> {
         }
         _ if notice.message_hash.is_some() => Err(PaykitError::corrupt()),
         Some(StateKey::Notice { attempt, kind }) => notice.check(&attempt, kind),
-        Some(StateKey::UnrecordedStop { to, msg_id })
-            if notice.kind == NoticeKind::StopNotRecorded =>
-        {
-            notice.check_message(&to, &msg_id)
-        }
         Some(StateKey::MessageNotice { sender, msg_id })
             if notice.kind != NoticeKind::StopNotRecorded =>
         {
@@ -1283,6 +1398,7 @@ mod tests {
             origin: None,
             lost: None,
             endpoints: None,
+            stop: None,
         }
     }
 
@@ -1413,6 +1529,7 @@ mod tests {
                 origin: None,
                 lost: None,
                 endpoints: None,
+                stop: None,
             };
             for acknowledged in [false, true] {
                 notice.acknowledged = acknowledged;
@@ -1488,6 +1605,7 @@ mod tests {
             origin: None,
             lost: None,
             endpoints: None,
+            stop: None,
         };
         let key = key::restored_delivery(&to, id, &hash);
         assert!(bind_notice(&key, &notice).is_ok());
@@ -1578,15 +1696,79 @@ mod tests {
     fn test_notices_unrecorded_stop_is_bound_to_outgoing_message() {
         let id = "123e4567-e89b-42d3-a456-426614174000";
         let to = [1; 32];
-        let notice = KeptNotice::given_up(
+        let notice = KeptNotice::unrecorded_stop(
             to,
             id,
             None,
+            StopSubject::Allowance { record: [2; 32] },
             3,
-            GivenUpFrom::Origin(GivenUpOrigin::UnrecordedStop),
         );
         assert!(bind_notice(&key::unrecorded_stop(&to, id), &notice).is_ok());
         assert!(bind_notice(&key::message_notice(&to, id), &notice).is_err());
+    }
+
+    #[test]
+    fn test_notices_unrecorded_stop_names_what_to_stop_again() {
+        let id = "123e4567-e89b-42d3-a456-426614174000";
+        let to = [1; 32];
+        let at = key::unrecorded_stop(&to, id);
+        let request = crate::RequestRef {
+            payee: to,
+            request_hash: [3; 32],
+        };
+        let sent = StopSubject::SentRequest { record: [4; 32] };
+        let allowance = StopSubject::Allowance { record: [5; 32] };
+        // Each subject binds with the request it names: a request's hash, an Allowance none.
+        for (request_hash, subject) in [
+            (Some([3; 32]), StopSubject::Request(request)),
+            (Some([3; 32]), sent),
+            (None, allowance),
+        ] {
+            let notice = KeptNotice::unrecorded_stop(to, id, request_hash, subject, 3);
+            assert!(bind_notice(&at, &notice).is_ok(), "{subject:?}");
+            assert_eq!(notice.view(id.into()).unwrap().stop, Some(subject));
+            assert_eq!(StopSubject::parse(&subject.path()), Some(subject));
+        }
+        let refused = [
+            // No subject at all, as an earlier build would have kept it.
+            KeptNotice::given_up(
+                to,
+                id,
+                None,
+                3,
+                GivenUpFrom::Origin(GivenUpOrigin::UnrecordedStop),
+            ),
+            // A request of another payee, or with another hash than the notice's.
+            KeptNotice::unrecorded_stop(
+                to,
+                id,
+                Some([3; 32]),
+                StopSubject::Request(crate::RequestRef {
+                    payee: [9; 32],
+                    ..request
+                }),
+                3,
+            ),
+            KeptNotice::unrecorded_stop(to, id, Some([8; 32]), StopSubject::Request(request), 3),
+            // A sent request with no request, an Allowance with one.
+            KeptNotice::unrecorded_stop(to, id, None, sent, 3),
+            KeptNotice::unrecorded_stop(to, id, Some([3; 32]), allowance, 3),
+            // A subject that doesn't parse.
+            KeptNotice {
+                stop: Some("allowance/not-a-key".into()),
+                ..KeptNotice::unrecorded_stop(to, id, None, allowance, 3)
+            },
+        ];
+        for notice in refused {
+            assert!(bind_notice(&at, &notice).is_err(), "{notice:?}");
+        }
+        // No other notice names one.
+        let given_up = KeptNotice {
+            stop: Some(allowance.path()),
+            ..KeptNotice::given_up(to, id, None, 3, GivenUpFrom::Origin(GivenUpOrigin::KeyWait))
+        };
+        assert!(bind_notice(&key::message_notice(&to, id), &given_up).is_err());
+        assert!(StopSubject::parse("request/AAAA").is_none());
     }
 
     #[test]

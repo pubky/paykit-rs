@@ -112,7 +112,7 @@ pub use hold::{AllowanceHold, HeldRequest};
 pub use journal::{PaymentView, Stage};
 pub use loss::{LossBoundary, RecoveryMembers, RecoveryReport};
 pub use marks::MAX_DROPPED_MARKS;
-pub use notices::{Notice, NoticeKind, SettlementSubject};
+pub use notices::{Notice, NoticeKind, SettlementSubject, StopSubject};
 pub use own_record::MAX_OWN_PUBLIC_ENDPOINTS;
 pub use pay::{
     BlockedPayment, PayOptions, PayOutcome, PayResult, PaymentDoubt, PaymentMode, TransferQuote,

@@ -346,6 +346,12 @@ impl crate::Paykit {
         }
         let open = record.conflicted.is_none()
             && accepted.is_some_and(|a| msg.refs.as_slice() == [record.proposal.hash(), a.hash()]);
-        Ok(if open { Open } else { Absent })
+        Ok(if open {
+            // Named by its record, which `end_allowance` takes: one counterparty can have
+            // several Allowances open.
+            Open(crate::StopSubject::Allowance { record: key })
+        } else {
+            Absent
+        })
     }
 }
