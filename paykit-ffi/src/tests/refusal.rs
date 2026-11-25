@@ -1474,7 +1474,7 @@ fn test_wallet_errors_dispatch_client_failures_follow_the_sdk_wait_table() {
     use pubky_dispatch_client::error::{ClientError as C, TransportError as T};
     let reason = || String::from("reason");
     let unread = |status, code| {
-        AppError::Switch(C::BodyUnread {
+        AppError::Dispatch(C::BodyUnread {
             status,
             code,
             retry_after: None,
@@ -1493,20 +1493,20 @@ fn test_wallet_errors_dispatch_client_failures_follow_the_sdk_wait_table() {
         AppError::Transport(T::Refused(reason())),
         AppError::Transport(T::TooLarge(1)),
         AppError::Transport(T::InvalidRequest(reason())),
-        AppError::Switch(C::Transport(T::Timeout)),
-        AppError::Switch(C::BadServiceSignature { status: 503 }),
-        AppError::Switch(C::BadServiceSignature { status: 401 }),
+        AppError::Dispatch(C::Transport(T::Timeout)),
+        AppError::Dispatch(C::BadServiceSignature { status: 503 }),
+        AppError::Dispatch(C::BadServiceSignature { status: 401 }),
         unread(429, ErrorCode::RateLimited),
         unread(404, ErrorCode::NotFound),
         unread(413, ErrorCode::TooLarge),
-        AppError::Switch(C::StaleAnswer { server_time_ms: 0 }),
-        AppError::Switch(C::DisplayReadPending),
-        AppError::Switch(C::InvalidResponse(reason())),
-        AppError::Switch(C::Core(pubky_dispatch_core::Error::Invalid(reason()))),
-        AppError::Switch(C::Usage(reason())),
-        AppError::Switch(C::BodyOverCap { cap: 1 }),
-        AppError::Switch(C::Unpinned),
-        AppError::Switch(C::OwnRecoveryRequired { generation: 1 }),
+        AppError::Dispatch(C::StaleAnswer { server_time_ms: 0 }),
+        AppError::Dispatch(C::DisplayReadPending),
+        AppError::Dispatch(C::InvalidResponse(reason())),
+        AppError::Dispatch(C::Core(pubky_dispatch_core::Error::Invalid(reason()))),
+        AppError::Dispatch(C::Usage(reason())),
+        AppError::Dispatch(C::BodyOverCap { cap: 1 }),
+        AppError::Dispatch(C::Unpinned),
+        AppError::Dispatch(C::OwnRecoveryRequired { generation: 1 }),
         AppError::InvalidData(reason()),
         AppError::Refused(AppRefusal::NotNow(reason())),
         AppError::Refused(AppRefusal::Usage(reason())),
@@ -1529,7 +1529,7 @@ fn test_wallet_errors_dispatch_client_failures_follow_the_sdk_wait_table() {
         "a limit these bindings don't know",
     ] {
         let mut answer = dispatch_answer(ErrorCode::QuotaExceeded, None);
-        if let AppError::Switch(C::Switch { current, .. }) = &mut answer {
+        if let AppError::Dispatch(C::Dispatch { current, .. }) = &mut answer {
             *current = serde_json::json!({ "limit": limit });
         }
         errors.push(answer);
