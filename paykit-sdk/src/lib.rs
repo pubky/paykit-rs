@@ -33,9 +33,8 @@
 //!   ([`Paykit::divergent_records`], [`Paykit::confirm_divergent`], [`DivergentRecord`]).
 //!
 //! Stored state and backups written by a build before the first release of v0.2 are not
-//! carried across builds: a later build may refuse them rather than read them, and upgrades
-//! nothing. From the first release on, every change to a stored format comes with a
-//! migration.
+//! carried across builds: a later build may refuse them, and nothing is upgraded. From the
+//! first release on, every change to a stored format comes with a migration.
 //!
 //! The host manages scheduling and timers. It can use [`paykit_lib::periods::Recurrence::periods`]
 //! to calculate the Billing Periods of a recurring request. When the user chooses a period,

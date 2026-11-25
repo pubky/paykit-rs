@@ -8,9 +8,8 @@ host-protected storage and serialize operations on the handle. A memory store
 cannot preserve unanswered writes or payments across a restart.
 
 Stored state and backups written by a build before the first release of v0.2 are
-not carried across builds: a later build may refuse them rather than read them, and
-upgrades nothing. From the first release on, every change to a stored format comes
-with a migration.
+not carried across builds: a later build may refuse them, and nothing is upgraded.
+From the first release on, every change to a stored format comes with a migration.
 
 The integrator chooses whether to enroll an App ID per installation or share one
 App ID and its keys. A separate App ID has its own signer approval and can be
