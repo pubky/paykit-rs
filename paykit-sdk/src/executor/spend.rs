@@ -723,7 +723,14 @@ impl Paykit {
         };
         let view = self.allowance(record).await?;
         let consent = Box::pin(self.consent_state(record)).await?;
-        if let Some(refusal) = standing(self, &view, consent).refusal(&view.hold) {
+        let standing = standing(self, &view, consent);
+        if standing == Standing::Confirm {
+            // Asked to confirm only where confirming can lift the hold: a restore behind
+            // this executor's own ledger refuses for good, as the confirmation would
+            // ([`crate::HeldForUserReason::AllowanceNotResumedAfterRestore`]).
+            Box::pin(self.paying_base(record, LedgerRead::Inventory)).await?;
+        }
+        if let Some(refusal) = standing.refusal(&view.hold) {
             return Err(refusal.into());
         }
         if view.counterparty != *payee {
@@ -748,8 +755,7 @@ impl Paykit {
         {
             return Err(Refusal::HeldForUser(crate::HeldForUserReason::HeldFromAutomatic).into());
         }
-        let checked = self
-            .executor_base(record, LedgerRead::Inventory)
+        let checked = Box::pin(self.paying_base(record, LedgerRead::Inventory))
             .await?
             .ok_or_else(stopped)?;
         Ok(AllowanceReservation {

@@ -8,6 +8,25 @@ use std::{
     sync::Mutex,
 };
 
+/// A connection to a test database file. The file is in WAL mode, set when it is created, so a
+/// reader never blocks a commit; a writer waits up to 30 seconds for another, so a loaded
+/// machine slows a test's write rather than failing it.
+pub(super) fn connect(path: &Path) -> Connection {
+    let db = Connection::open(path).unwrap();
+    db.busy_timeout(std::time::Duration::from_secs(30)).unwrap();
+    db
+}
+
+/// Creates the test database at `path` in WAL mode with `schema`.
+pub(super) fn create(path: &Path, schema: &str) {
+    let db = connect(path);
+    let mode: String = db
+        .query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(mode, "wal");
+    db.execute_batch(schema).unwrap();
+}
+
 /// Device files opened independently by each host instance.
 pub(super) struct DeviceStore {
     root: PathBuf,
@@ -19,11 +38,14 @@ impl DeviceStore {
             root: root.to_owned(),
             leases: Mutex::new(BTreeMap::new()),
         };
-        store.db().execute_batch("PRAGMA secure_delete=ON; CREATE TABLE IF NOT EXISTS wallet(ns TEXT,k BLOB,v BLOB,PRIMARY KEY(ns,k));").unwrap();
+        create(
+            &root.join("wallet.sqlite"),
+            "PRAGMA secure_delete=ON; CREATE TABLE IF NOT EXISTS wallet(ns TEXT,k BLOB,v BLOB,PRIMARY KEY(ns,k));",
+        );
         store
     }
     pub(super) fn hold_enrollment_completion(root: &Path, hold: bool) {
-        let db = Connection::open(root.join("wallet.sqlite")).unwrap();
+        let db = connect(&root.join("wallet.sqlite"));
         if hold {
             db.execute_batch(
                 "CREATE TRIGGER hold_completion BEFORE INSERT ON wallet
@@ -38,7 +60,7 @@ impl DeviceStore {
     }
     /// Interrupt the native app's write after the enrollment has pinned its approval.
     pub(super) fn hold_installation(root: &Path, hold: bool) {
-        let db = Connection::open(root.join("wallet.sqlite")).unwrap();
+        let db = connect(&root.join("wallet.sqlite"));
         let statement = if hold {
             "CREATE TRIGGER hold_app BEFORE INSERT ON wallet
              WHEN new.ns NOT LIKE 'paykit-enrollment/%'
@@ -50,7 +72,7 @@ impl DeviceStore {
     }
 
     fn db(&self) -> Connection {
-        Connection::open(self.root.join("wallet.sqlite")).unwrap()
+        connect(&self.root.join("wallet.sqlite"))
     }
     fn reserve(&self, ns: &str) -> Result<Option<File>, StorageError> {
         let path = self.root.join(b64(&hash(ns.as_bytes())));
@@ -147,6 +169,35 @@ impl WalletStore for DeviceStore {
         self.apply(&namespace, writes)?;
         Ok(true)
     }
+}
+
+/// A reader with a transaction open on the store's file doesn't make a commit fail: the commit
+/// goes through while the reader holds its snapshot, so a loaded machine can't fail a test's
+/// write on a read in flight.
+#[test]
+fn test_device_store_commits_while_a_reader_is_open() {
+    let root = tempfile::tempdir().unwrap();
+    let store = DeviceStore::open(root.path());
+    let ns = "app".to_owned();
+    let owner = vec![1; 32];
+    assert!(store.acquire(ns.clone(), owner.clone()).unwrap());
+    let reader = connect(&root.path().join("wallet.sqlite"));
+    reader.execute_batch("BEGIN").unwrap();
+    let before: i64 = reader
+        .query_row("SELECT count(*) FROM wallet", [], |row| row.get(0))
+        .unwrap();
+    let put = vec![StoreWrite::Put {
+        key: vec![1],
+        value: vec![1],
+    }];
+    assert!(matches!(store.commit_if(ns.clone(), owner, put), Ok(true)));
+    // The reader keeps the snapshot it began with.
+    let during: i64 = reader
+        .query_row("SELECT count(*) FROM wallet", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(during, before);
+    reader.execute_batch("COMMIT").unwrap();
+    assert_eq!(store.get(ns, vec![1]).unwrap(), Some(vec![1]));
 }
 
 #[test]

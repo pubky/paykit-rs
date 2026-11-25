@@ -492,41 +492,28 @@ async fn restored_behind(world: &World) -> TestResult {
         .ok_or("the restored subscription isn't held")?;
     Box::pin(restored.confirm_possibly_cancelled(&request, &held, UserConfirmed::new())).await?;
 
-    // Under the Allowance, execution is refused and nothing is executed: the old device
-    // advanced the Allowance's ledger after the backup, which this installation can't
-    // establish (Paykit spec 8.3, "Resuming the same executor"). The executor asks for the
-    // user's confirmation, and the confirmation is held for the user: no later read brings
-    // the grant and ledger back, so the user ends the Allowance or pays by hand.
-    let refused = Box::pin(restored.pay_period_under_allowance(&request, &periods[1]))
+    // Under the Allowance, execution is refused for good and nothing is executed: the old
+    // device advanced the Allowance's ledger after the backup, which this installation can't
+    // establish (Paykit spec 8.3, "Resuming the same executor"). No later read brings it
+    // back and no confirmation lifts it, so the user isn't asked to confirm: the user ends
+    // the Allowance or pays by hand, and reconciling it says the same.
+    let not_resumed =
+        Refusal::HeldForUser(paykit_sdk::HeldForUserReason::AllowanceNotResumedAfterRestore);
+    for attempt in ["first", "again"] {
+        let refused = Box::pin(restored.pay_period_under_allowance(&request, &periods[1]))
+            .await
+            .outcome
+            .expect_err("executed under the Allowance");
+        if refused.refusal() != Some(&not_resumed) {
+            return Err(format!("{attempt}: not refused as not resumed: {refused:?}").into());
+        }
+    }
+    let reconciling = Box::pin(restored.reconcile_allowance(&key))
         .await
-        .outcome
-        .expect_err("executed under the Allowance");
-    let Some(Refusal::AllowanceConfirmationNeeded { hold }) = refused.refusal() else {
-        return Err(format!("not asked to confirm the executor: {refused:?}").into());
-    };
-    let confirmed = Box::pin(restored.confirm_allowance_executor(hold, UserConfirmed::new()))
-        .await
-        .expect_err("the executor was confirmed");
-    assert!(
-        matches!(
-            confirmed.refusal(),
-            Some(Refusal::HeldForUser(
-                paykit_sdk::HeldForUserReason::AllowanceExecutionHeld(_)
-            ))
-        ),
-        "{confirmed:?}"
-    );
-    let again = Box::pin(restored.pay_period_under_allowance(&request, &periods[1]))
-        .await
-        .outcome
-        .expect_err("executed under the Allowance");
-    assert!(
-        matches!(
-            again.refusal(),
-            Some(Refusal::AllowanceConfirmationNeeded { .. })
-        ),
-        "{again:?}"
-    );
+        .expect_err("the restored executor reconciled the Allowance");
+    if reconciling.refusal() != Some(&not_resumed) {
+        return Err(format!("reconciling: {reconciling:?}").into());
+    }
     assert_eq!(method_calls(rail), 1);
 
     // The user's ways forward. By hand, the period is paid once, credited and receipted.

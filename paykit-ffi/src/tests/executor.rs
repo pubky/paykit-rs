@@ -424,7 +424,7 @@ async fn release(world: &World) -> TestResult {
     // The service applied the reservation but its reply never reached the executor (Paykit spec 8.3).
     world.lose_answer("POST", "/ops");
     let result = p.payer.pay_under_allowance(request, record.clone()).await?;
-    let lost = refusal(decision(result), "outcome_unknown", "transport")?;
+    let lost = refusal(decision(result), "outcome_unknown", "transport_no_answer")?;
     assert!(lost.kept_batch().is_some());
     receive(&p.payer).await?;
     let entries = p.payer.payments().await?;
@@ -467,6 +467,155 @@ async fn release(world: &World) -> TestResult {
 fn test_allowance_reservation_comes_back_on_another_apps_confirmed_failure() {
     run(Backend::Scripted, release);
     run(Backend::Service, release);
+}
+
+/// The refusal after a provider loss names the repair the user makes: no retry clears it.
+fn not_resumed<T>(result: Result<T, WalletError>) -> TestResult {
+    let failure = refusal(result, "needs_user", "allowance_not_resumed")?;
+    let refused = failure.refusal().ok_or("missing the typed refusal")?;
+    assert!(matches!(
+        refused.kind(),
+        RefusalKind::HeldForUser {
+            reason: crate::HeldForUserKind::AllowanceNotResumed
+        }
+    ));
+    Ok(())
+}
+
+/// The grants this app holds on the Allowance record, as its store has it.
+async fn grant_count(wallet: &NativeWallet, record: &[u8]) -> TestResult<usize> {
+    let key = crate::fixed(record.to_vec(), "record")?;
+    wallet
+        .lend(async |app| {
+            let held = app
+                .app()
+                .shared_record(&key)
+                .await?
+                .ok_or("missing the Allowance record")?;
+            let value = held
+                .content
+                .value()
+                .ok_or("the Allowance record doesn't read")?;
+            let allowance = paykit_lib::records::AllowanceRecord::read(value, &app.identity())?;
+            Ok::<_, Box<dyn Error>>(allowance.grants.len())
+        })
+        .await?
+}
+
+/// After a provider loss the user confirms the Allowance again and the regrant's reply is
+/// lost. The call again lands the kept regrant and builds no second one; the resume then
+/// answers that automatic payments under it don't resume in this version, as a typed
+/// refusal, the same every time (Paykit spec 8.3, "After provider loss").
+async fn regrant_lost(world: &World) -> TestResult {
+    let mut p = Box::pin(Parties::open(world)).await?;
+    let record = Box::pin(p.accept()).await?;
+    let before = grant_count(&p.payer, &record).await?;
+
+    let buyer = world.identity("buyer")?;
+    let successor = "https://recovered-buyer.payments.test";
+    world.advance_ms(11 * 60_000);
+    world
+        .set_account_missing("https://buyer.payments.test", &buyer, true)
+        .await?;
+    world.add_switch(successor, &[&buyer]).await?;
+    let opening = Box::pin(p.signer.declare_provider_loss(
+        successor,
+        pubky_switch_signer::UserConfirmed::shown_and_confirmed(),
+    ))
+    .await?;
+    Box::pin(p.signer.end_staged_admission()).await?;
+    after_loss(&p.payer, opening.generation()).await?;
+    let shop = p.shop.identity();
+    p.payer
+        .lend(async move |app| app.app_mut().invite(&shop).await)
+        .await??;
+    world.advance_ms(pubky_switch_client::app::DOC_CACHE_MS + 1);
+    Box::pin(receive_app(&mut p.shop)).await?;
+
+    let view = p.payer.allowance(record.clone()).await?;
+    assert!(
+        view.confirmation_needed,
+        "the loss asks the user to confirm again"
+    );
+    world.lose_answer("POST", "/ops");
+    let lost = p
+        .payer
+        .confirm_allowance_executor(view.hold.clone(), true)
+        .await;
+    let (case, _) = lost
+        .err()
+        .and_then(categorized)
+        .ok_or("the regrant's answer is lost")?;
+    assert_eq!(case, "outcome_unknown");
+    // The service applied it, and this app doesn't know yet.
+    assert_eq!(
+        grant_count(&p.payer, &record).await?,
+        before,
+        "the lost regrant isn't landed here yet"
+    );
+    // The call again sends the kept regrant first, so it lands here, once.
+    match p
+        .payer
+        .confirm_allowance_executor(view.hold.clone(), true)
+        .await
+    {
+        Ok(()) => {}
+        again => not_resumed(again)?,
+    }
+    assert_eq!(
+        grant_count(&p.payer, &record).await?,
+        before + 1,
+        "the call again lands the regrant"
+    );
+    // Automatic payments under it don't resume, and no retry changes that.
+    not_resumed(p.payer.resume_allowance_executor(record.clone()).await)?;
+    receive(&p.payer).await?;
+    assert_eq!(
+        grant_count(&p.payer, &record).await?,
+        before + 1,
+        "no retry builds another grant"
+    );
+    assert_eq!(p.account.count(), 0);
+    p.payer.shutdown().await?;
+    Ok(())
+}
+
+/// The wallet follows the provider loss to `generation`: it lists its records and ends the
+/// reconciliation the loss opened.
+async fn after_loss(wallet: &NativeWallet, generation: u64) -> TestResult {
+    let mut listed = false;
+    for _ in 0..12 {
+        let page = wallet.receive().await?;
+        if page.generation >= generation
+            && !page.stopped
+            && !page.more
+            && page.records_unlisted.is_none()
+        {
+            listed = true;
+            break;
+        }
+    }
+    if !listed {
+        return Err("the wallet did not list its records after the loss".into());
+    }
+    for _ in 0..12 {
+        match wallet.reconcile().await {
+            // The records are still being listed: a wait.
+            Err(WalletError::RetryLater { failure }) if failure.code() == "records_unlisted" => {}
+            result => {
+                result?;
+                wallet.end_confirmed_reconciliation().await?;
+                return Ok(());
+            }
+        }
+    }
+    Err("the reconciliation after the loss did not finish its listing".into())
+}
+
+#[test]
+fn test_allowance_regrant_after_a_lost_reply_answers_not_resumed() {
+    run(Backend::Scripted, regrant_lost);
+    run(Backend::Service, regrant_lost);
 }
 
 const MISSING_LEDGER: &str =

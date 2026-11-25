@@ -563,6 +563,9 @@ pub enum HeldForUserKind {
     /// After a provider loss this version doesn't resume automatic payments under the
     /// Allowance: the user ends it and sets up a new one.
     AllowanceNotResumed,
+    /// After a restore this installation can't establish the Allowance's ledger history: the
+    /// user ends it and sets up a new one, or pays by hand.
+    AllowanceNotResumedAfterRestore,
     /// This app's execution of the Allowance is held until the user or the host acts, as the
     /// message names.
     AllowanceExecutionHeld,
@@ -640,6 +643,7 @@ impl From<&paykit_sdk::HeldForUserReason> for HeldForUserKind {
             R::RecordUnreadable(_) => Self::RecordUnreadable,
             R::FloorRecordUnreadable => Self::FloorRecordUnreadable,
             R::AllowanceNotResumed => Self::AllowanceNotResumed,
+            R::AllowanceNotResumedAfterRestore => Self::AllowanceNotResumedAfterRestore,
             R::AllowanceExecutionHeld(_) => Self::AllowanceExecutionHeld,
             R::AttemptCheck(_) => Self::AttemptCheck,
             R::ReloadRequired => Self::ReloadRequired,
