@@ -1297,8 +1297,12 @@ async fn abort_and_resume_panic(task: tokio::task::JoinHandle<()>) {
 /// would find the slot absent and only move the cursor, so the count of
 /// cursor-only advances may grow by at most the one batch commit of ignored
 /// cursors after an in-stream audit. Bob's real packet then arrives
-/// through the same ordered stream, so once it is buffered every earlier
-/// unrelated event has been handled.
+/// through the same ordered stream. The buffered packet must carry the cursor
+/// of its own PUT event, the newest event under Bob's private directory once
+/// the packet is published. An acquisition started by an unrelated event
+/// could find the packet already published and buffer it under that earlier
+/// event's cursor, so only the exact event ID proves the stream reached the
+/// packet's event and handled every earlier unrelated event first.
 #[tokio::test]
 async fn test_private_intake_stream_ignores_unrelated_private_events() {
     let pair = linked_two_party().await;
@@ -1326,6 +1330,9 @@ async fn test_private_intake_stream_ignores_unrelated_private_events() {
     // seconds of jitter.
     tokio::time::sleep(Duration::from_secs(7)).await;
     let advances_before = cursor_only_advances.load(Ordering::SeqCst);
+    let baseline_cursor = intake_cursor(&pair.alice.storage, &pair.bob.public_key).expect(
+        "startup reconciliation should have stored the private intake cursor before the publish",
+    );
 
     let bob_write_folder = encrypted_link_write_path(&pair.bob, &pair.alice.public_key).await;
     let other_link_folder = format!(
@@ -1352,15 +1359,25 @@ async fn test_private_intake_stream_ignores_unrelated_private_events() {
     bob_storage.delete(&unrelated_paths[0]).await.unwrap();
 
     publish_private_lists(&pair.bob, &pair.alice, 1).await;
+    // One send writes exactly one file under Bob's private directory, the
+    // packet's slot, and Bob writes nothing after it, so the newest private
+    // event is the packet's own PUT.
+    let packet_event_id = newest_private_event_id(&pair, &pair.bob).await;
 
     wait_for_buffered(&pair.alice.storage, &pair.bob.public_key, 1).await;
     let state = pair.alice.storage.snapshot().unwrap();
     let buffered = &state.private_intake_peers[&pair.bob.public_key].buffered_packets;
     assert_eq!(buffered.len(), 1);
-    assert!(
-        buffered[0].source_cursor.is_some(),
-        "packet must arrive through the live event stream, not an audit"
+    let source_cursor = buffered[0]
+        .source_cursor
+        .as_ref()
+        .expect("packet must arrive through the live event stream, not an audit");
+    assert_eq!(source_cursor.subscribed_user, pair.bob.public_key);
+    assert_eq!(
+        source_cursor.event_id, packet_event_id,
+        "packet must be buffered from its own PUT event, not from an unrelated event that found it already published"
     );
+    assert_eq!(source_cursor.homeserver, baseline_cursor.homeserver);
     // The one legitimate cursor-only advance is the batch commit of Bob's
     // highest ignored cursor after an in-stream audit, which can land in this
     // window when an SSE reconnect restarts the audit timer. A per-event
@@ -1370,8 +1387,9 @@ async fn test_private_intake_stream_ignores_unrelated_private_events() {
         advances <= 1,
         "unrelated private events must not start an acquisition, got {advances} cursor-only advances"
     );
-    // The stream has handled every unrelated event by now. The live insert
-    // sets `Replaying`, so only `Stale` is ruled out.
+    // The packet came from its own PUT event, so the stream has handled every
+    // earlier unrelated event by now. The live insert sets `Replaying`, so
+    // only `Stale` is ruled out.
     assert_ne!(
         supervisor.health().await.peers.get(&pair.bob.public_key),
         Some(&PrivateIntakeTransportState::Stale),
