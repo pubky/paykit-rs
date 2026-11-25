@@ -2216,6 +2216,21 @@ async fn test_divergent_receipt_kept_before_its_record_read_moves_over_it_once_i
 /// admits, it is kept; once the record reads again, naming bob, it goes at that receive,
 /// never written.
 async fn receipt_without_request_over_unread_paused(stranger: bool) {
+    receipt_without_request_over_unread_paused_held(stranger, false).await;
+}
+
+#[tokio::test]
+async fn test_divergent_receipt_from_another_identity_kept_while_a_batch_of_its_write_is_kept() {
+    // As below, but the client still keeps a batch of the receipt's later write once the
+    // record reads, naming bob: it may still land, so the receipt stays kept over the record
+    // until the client drops the batch, then goes (Paykit spec 8.1, Stored entries, Kept
+    // batch).
+    receipt_without_request_over_unread_paused_held(true, true).await;
+}
+
+/// [`receipt_without_request_over_unread_paused`]; with `batch_held`, the client keeps a batch of
+/// the stranger's receipt's later write once the record reads.
+async fn receipt_without_request_over_unread_paused_held(stranger: bool, batch_held: bool) {
     let w = World::new();
     let seen = Arc::new(crate::outcome_record::NoSeenMarks::default());
     let base = Arc::clone(&seen) as Arc<dyn StateStore>;
@@ -2325,6 +2340,18 @@ async fn receipt_without_request_over_unread_paused(stranger: bool) {
         .submit_batch(pubky_dispatch_client::app::OpBatch::for_protocol("paykit").entry(op))
         .await
         .unwrap();
+    if batch_held {
+        let kept = crate::stored::kept(&wallet, "dw/").await;
+        crate::common::hold_kept_write(&w.alice, &mut wallet, &kept[0]).await;
+        wallet.receive(None).await.unwrap();
+        assert_eq!(crate::stored::kept(&wallet, "dw/").await, kept);
+        crate::common::resend_kept_batch(
+            &w,
+            &w.alice,
+            pubky_dispatch_core::http::ErrorCode::PermissionMissing,
+        );
+        wallet.receive(None).await.unwrap();
+    }
     wallet.receive(None).await.unwrap();
     assert!(crate::stored::kept(&wallet, "dw/").await.is_empty());
     let listed = wallet.divergent_records().await.unwrap();

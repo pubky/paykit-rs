@@ -1043,6 +1043,12 @@ impl Paykit {
         stored_id: Option<u64>,
         report: Option<&pubky_dispatch_client::app::ReceiveReport>,
     ) -> Result<Option<Placed>> {
+        // While the client keeps a batch of this proposal's write, which may still land, it
+        // is neither written again, which would keep another batch behind it, nor given up
+        // (Paykit spec 8.1, Stored entries, Kept batch).
+        if self.held_write_kept(message).await? {
+            return Ok(Some(Placed::Waits));
+        }
         let own = self.identity();
         let peer = message.sender();
         let id = super::named_allowance(message.body()).ok_or_else(PaykitError::corrupt)?;
@@ -1064,22 +1070,22 @@ impl Paykit {
         let original = message.message().msg_id.as_str();
         let mut effects = state::Tx::default();
         let held = if let Some(stored_id) = stored_id {
-            let key = key::stored_note(&peer, original);
-            let Some(mut note) = self.local_get::<StoredNote>(&key).await? else {
+            let note_key = key::stored_note(&peer, original);
+            let Some(mut note) = self.local_get::<StoredNote>(&note_key).await? else {
                 return Ok(Some(Placed::Done));
             };
             if note.placed || note.stored_id != stored_id {
                 return Ok(Some(Placed::Done));
             }
             note.placed = true;
-            effects.put(&key, &note)?;
+            effects.put(&note_key, &note)?;
             note.message
         } else {
-            let key = key::kept_reply(&peer, &a_key, original);
-            let Some(held) = self.local_get::<KeptMessage>(&key).await? else {
+            let kept_key = key::kept_reply(&peer, &a_key, original);
+            let Some(held) = self.local_get::<KeptMessage>(&kept_key).await? else {
                 return Ok(Some(Placed::Done));
             };
-            effects.delete(&key);
+            effects.delete(&kept_key);
             held
         };
         let position = evidence.position().ok_or_else(PaykitError::corrupt)?;
@@ -1187,9 +1193,14 @@ impl Paykit {
                 effects.put(&key::allowance_end(&a_key, &end.message().msg_id), &stop)?;
             }
         }
-        let batch = OpBatch::for_protocol(crate::protocol::BACKUP_NAME)
-            .entry(put)
-            .locals(effects.into_writes());
+        // The client names the batch it keeps of this write at the proposal's marker
+        // (`crate::stored::holding`), so its give-up waits on it.
+        let batch = crate::stored::holding(
+            OpBatch::for_protocol(crate::protocol::BACKUP_NAME)
+                .entry(put)
+                .locals(effects.into_writes()),
+            message,
+        );
         Ok(Some(submitted(self.submit(batch).await)?))
     }
 
