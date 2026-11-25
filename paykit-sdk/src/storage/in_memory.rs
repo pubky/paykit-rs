@@ -375,7 +375,7 @@ impl StorageTransaction for StorageStateTransaction {
             })?;
         if link.generation != packet.link_generation {
             return Err(PaykitSdkError::Storage {
-                context: "private intake packet generation does not match Encrypted Link".into(),
+                context: PRIVATE_INTAKE_PACKET_GENERATION_MISMATCH.into(),
                 source: None,
             });
         }
