@@ -1018,6 +1018,20 @@ WalletEventData from app::AppEvent {
         duty_events: u64,
         /// The owed protocol calls left behind.
         owed_calls: u64,
+        /// The held record changes left behind.
+        record_edits: u64,
+    },
+    /// A restore holds messages until their protocol releases or withdraws each.
+    MessagesHeldAtRestore {
+        /// How many it holds.
+        held: u64,
+    },
+    /// Unsigned record changes held aside for their protocols; Paykit decides its own.
+    RecordEditsHeld {
+        /// The protocols whose change is held.
+        protocols: Vec<String>,
+        /// Whether accepted kinds are held.
+        accepts_changed: bool,
     },
     /// The authenticated account is unavailable.
     AccountGone as (Source::AccountGone { .. }),
