@@ -787,10 +787,10 @@ fn retire(
     let mut writes = vec![LocalWrite::Delete {
         key: key::pending_conflict(key).into_bytes(),
     }];
-    for (at, message) in kept {
+    for (kept_key, message) in kept {
         if answers(p, &message.stored(own)?) {
             writes.push(LocalWrite::Delete {
-                key: at.into_bytes(),
+                key: kept_key.into_bytes(),
             });
         }
     }
@@ -1185,6 +1185,12 @@ impl Paykit {
                 PendingReply::Undecided
             }
         };
+        // While the client keeps a batch of this answer's write, which may still land, it is
+        // neither written again, which would keep another batch behind it, nor given up
+        // (Paykit spec 8.1, Stored entries, Kept batch).
+        if self.held_write_kept(reply).await? {
+            return Ok(waiting());
+        }
         if accepting
             && (Box::pin(
                 self.pending_acceptance_stopped(
@@ -1211,7 +1217,7 @@ impl Paykit {
             let record = self.app.record_key(&permanent)?;
             let original = &reply.message().msg_id;
             let kept_key = key::kept_reply(&peer, &record, original);
-            let stored_key = key::stored_note(&peer, original);
+            let note_key = key::stored_note(&peer, original);
             let mut writes = Vec::new();
             let bind = |held: &mut KeptMessage| -> Result<bool> {
                 if held.position() != Some(position) || held.stored(&own)?.hash() != reply.hash() {
@@ -1230,14 +1236,14 @@ impl Paykit {
                 writes.push(state::local_put(&kept_key, &held)?);
             }
             if let Some(mut note) = self
-                .local_get::<StoredNote>(&stored_key)
+                .local_get::<StoredNote>(&note_key)
                 .await?
                 .filter(|n| !n.placed)
             {
                 if !bind(&mut note.message)? {
                     return Ok(waiting());
                 }
-                writes.push(state::local_put(&stored_key, &note)?);
+                writes.push(state::local_put(&note_key, &note)?);
             }
             if writes.is_empty() {
                 return Ok(waiting());
@@ -1377,6 +1383,9 @@ impl Paykit {
         for write in writes {
             batch = batch.entry(write);
         }
+        // The client names the batch it keeps of this write at the answer's marker
+        // (`crate::stored::holding`), so its give-up waits on it.
+        let batch = crate::stored::holding(batch, reply);
         match crate::stored::submitted(self.submit(batch).await) {
             Ok(crate::stored::Placed::Done) => {
                 if track_application {

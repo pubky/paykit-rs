@@ -89,6 +89,7 @@
 //! | `dt/<event ID>` | a duty event the SDK has taken (`stored.rs`), until it is acknowledged; never restored: a restore's events are taken again, which changes nothing, since a dropped entry's time is already in its sender's mark | |
 //! | `dv/<record key>` | the pause mark of a record the app has seen divergent: paused until the user confirms, or the write the user confirmed over, with the write a credit's refusal showed it at and the write a credit's confirmation was given over, which is always the write that showing names, at or before the plain confirmation: any other stored state reads as a corrupt store (`divergent.rs`); a restore installs it paused, neither shown nor confirmed for a credit | |
 //! | `dw/<record key>/<role>/<sender>/<msg_id>` | a received message, by its sender and `msg_id`, whose write over a divergent record waits for the user's confirmation, or for the messages kept over the record before it, to write into its record later, in the order its inbox accepted them (by acceptance time, then the feed `seq` its entry was read at, as the kept replies are, never by `msg_id`), a receipt over a payer record that doesn't read included, written once the record also reads, and one kept in `pr/` whose record read paused; never one from anyone but the counterparty of a record that reads; given up at its 30 days, also one that no longer points to its record (`divergent.rs`) | |
+//! | `hw/<sender>/<msg_id>` | the ID of the batch the client keeps of the later write of a kept message (a stored entry's, a reply's kept before its record, one kept over a divergent record, a stored Allowance message), saved by the client in the commit that keeps it and removed when it applies: while the client still keeps that batch, the message is neither written again nor given up (`stored.rs`); never restored, since the client's kept batches aren't | |
 //! | `se/<sender>/<msg_id>` | the message of an entry the client stored for good, with the entry's ID and message hash and the feed `seq` it was read at, to write into its record later (`stored.rs`); never restored, since the client tells of the entries it restores again | |
 //! | `ae/<record key>/<msg_id>` | a counterparty's `allowance_end`, kept as the stop until the Allowance record holds an end or a rejection; every distinct end is kept, each under its `msg_id` and with the feed `seq` that orders it, until the record shows which one names what it holds (`allowances.rs`, Paykit spec 8.3) | |
 //! | `lv/<record key>` | the payer's pending or verified executor grant and its later accepted ledger | |
@@ -250,6 +251,27 @@ impl Paykit {
             }
             Ok(out)
         })
+    }
+
+    /// Every marker of a batch the client keeps of a kept message's later write
+    /// ([`key::held_write`]), by its key, with the batch ID it names, `None` for one that
+    /// doesn't read as one (`stored.rs`, [`Paykit::sweep_held_writes`]).
+    ///
+    /// # Errors
+    ///
+    /// A store failure.
+    pub(crate) async fn held_write_markers(&self) -> Result<Vec<(String, Option<[u8; 16]>)>> {
+        let held = self
+            .app
+            .protocol_scan(crate::protocol::BACKUP_NAME, key::HELD_WRITES.as_bytes())
+            .await?;
+        Ok(held
+            .into_iter()
+            .filter_map(|(key, value)| {
+                let key = String::from_utf8(key).ok()?;
+                Some((key, <[u8; 16]>::try_from(value.as_slice()).ok()))
+            })
+            .collect())
     }
 
     /// [`Paykit::local_scan`], leaving out a value that doesn't read or bind to its key: for
@@ -575,6 +597,7 @@ impl Stored for [u8; 16] {
     fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
         match family {
             StateKey::OfflineBatch(_)
+            | StateKey::HeldWrite { .. }
             | StateKey::EndBatch(_)
             | StateKey::FloorBatch
             | StateKey::GrantBatch(_) => Ok(()),
@@ -2333,6 +2356,14 @@ pub(crate) mod key {
         format!("{STORED_NOTES}{}/{msg_id}", b64(sender))
     }
 
+    /// The batch the client keeps of the later write of `sender`'s message `msg_id`, which
+    /// may still land (`stored.rs`, [`crate::stored::held_write`]).
+    pub(crate) fn held_write(sender: &[u8; 32], msg_id: &str) -> String {
+        format!("{HELD_WRITES}{}/{msg_id}", b64(sender))
+    }
+
+    pub(crate) const HELD_WRITES: &str = "hw/";
+
     /// The notice that `sender`'s message `msg_id` was given up.
     pub(crate) fn message_notice(sender: &[u8; 32], msg_id: &str) -> String {
         format!("{NOTICES}{}/{msg_id}", b64(sender))
@@ -2804,6 +2835,11 @@ pub(crate) enum StateKey {
         sender: [u8; 32],
         msg_id: String,
     },
+    /// `hw/<sender>/<msg_id>`: the batch the client keeps of a kept message's later write.
+    HeldWrite {
+        sender: [u8; 32],
+        msg_id: String,
+    },
     /// A notice of a possibly delivered outgoing message (Paykit spec 7.2).
     RestoredDelivery {
         to: [u8; 32],
@@ -3213,6 +3249,13 @@ impl StateKey {
                     "se" => {
                         let (sender, id) = rest.split_once('/')?;
                         Self::StoredNote {
+                            sender: b64_32(sender)?,
+                            msg_id: msg_id(id)?,
+                        }
+                    }
+                    "hw" => {
+                        let (sender, id) = rest.split_once('/')?;
+                        Self::HeldWrite {
                             sender: b64_32(sender)?,
                             msg_id: msg_id(id)?,
                         }
@@ -4531,6 +4574,13 @@ mod tests {
             (key::notice_target(id), StateKey::NoticeTarget(id.into())),
             (key::end_origin(id), StateKey::EndOrigin(id.into())),
             (key::end_batch(id), StateKey::EndBatch(id.into())),
+            (
+                key::held_write(&pubky, id),
+                StateKey::HeldWrite {
+                    sender: pubky,
+                    msg_id: id.into(),
+                },
+            ),
             (key::grant_batch(&pubky), StateKey::GrantBatch(pubky)),
         ];
         for (built, family) in cases {

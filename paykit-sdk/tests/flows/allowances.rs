@@ -1439,6 +1439,47 @@ async fn test_allowances_answer_before_its_record_kept_then_given_up() {
         .is_empty());
 }
 
+#[tokio::test]
+async fn test_allowances_answer_before_its_record_kept_while_a_batch_of_its_write_is_kept() {
+    // As above, but the client keeps a batch of the acceptance's later write: past its 30
+    // days, with no record, it stays kept while that batch may still land, and goes once the
+    // client drops it, nothing told (Paykit spec 8.1, Stored entries, Kept batch).
+    let w = World::new();
+    let mut shop = Box::pin(shop(&w)).await;
+    let _wallet = Box::pin(wallet(&w)).await;
+    w.inject(
+        &w.alice,
+        "wallet",
+        &w.bob,
+        &[shop.app_id()],
+        "paykit.allowance_acceptance",
+        vec![[7; 32]],
+        json!({ "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4" })
+            .as_object()
+            .cloned()
+            .unwrap(),
+    );
+    shop.receive(None).await.unwrap();
+    let kept = crate::common::kept_keys(&shop, "pr/").await;
+    assert_eq!(kept.len(), 1);
+    w.clock.advance_ms(31 * 24 * HOUR_MS);
+    shop.app_mut().invite(&w.alice_id()).await.unwrap();
+    shop.app_mut().rotate().await.unwrap();
+    shop.app_mut().flush_cursor().await.unwrap();
+    crate::common::hold_kept_write(&w.bob, &mut shop, &kept[0]).await;
+    shop.receive(None).await.unwrap();
+    assert_eq!(crate::common::kept_keys(&shop, "pr/").await, kept);
+    crate::common::resend_kept_batch(
+        &w,
+        &w.bob,
+        pubky_dispatch_core::http::ErrorCode::PermissionMissing,
+    );
+    shop.receive(None).await.unwrap();
+    shop.receive(None).await.unwrap();
+    assert!(crate::common::kept_keys(&shop, "pr/").await.is_empty());
+    assert!(shop.notices().await.unwrap().is_empty());
+}
+
 /// Alice's executor app, holding `paykit_allowance_execute`, writes its grant into the accepted
 /// Allowance at `record` and puts it on its consent list, as the executor does at
 /// acceptance.
@@ -3584,6 +3625,187 @@ async fn test_allowances_earliest_withdrawal_waits_outside_the_bound_for_its_pen
         .await
         .unwrap()
         .is_none());
+}
+
+#[tokio::test]
+async fn test_allowances_rejection_whose_proposal_ended_kept_while_a_batch_of_its_write_is_kept() {
+    // As below, but once the proposal is deleted, the client still keeps a batch of the
+    // rejection's later write: the rejection, whose proposal has ended, stays kept while
+    // that batch may still land, and goes once the client drops it (Paykit spec 8.1, Stored
+    // entries, Kept batch).
+    let w = World::new();
+    let mut shop = Box::pin(shop(&w)).await;
+    let mut wallet = Box::pin(paying_wallet(&w)).await;
+    let (_, _, id) = Box::pin(recorded_proposal_of(&w, &mut shop, &mut wallet)).await;
+    let physical = pending_key(&wallet, &w.bob_id(), &id);
+    let theirs = shop.allowances().await.unwrap()[0].record;
+    let rejection = shop.reject_allowance(&theirs).await.unwrap();
+    wallet.app_mut().receive(None).await.unwrap();
+    assert!(Box::pin(keeps(&wallet, b"pr/", &rejection)).await);
+    w.clock
+        .advance_ms(paykit_sdk::KEPT_MESSAGE_MS + pubky_dispatch_core::records::DAY_MS);
+    wallet.app_mut().rotate().await.unwrap();
+    wallet.app_mut().flush_cursor().await.unwrap();
+    refuse_writes(&w, 1);
+    wallet.receive(None).await.unwrap();
+    let kept = crate::common::kept_key_of(&wallet, "pr/", &rejection).await;
+    // Another of alice's apps deletes the proposal; the rejection's own write isn't made.
+    Box::pin(delete_pending_record(&w, &id)).await;
+    crate::common::hold_kept_write(&w.alice, &mut wallet, &kept).await;
+    wallet.receive(None).await.unwrap();
+    assert!(Box::pin(held_deleted(&wallet, &physical)).await);
+    assert!(Box::pin(keeps(&wallet, b"pr/", &rejection)).await);
+    crate::common::resend_kept_batch(
+        &w,
+        &w.alice,
+        pubky_dispatch_core::http::ErrorCode::PermissionMissing,
+    );
+    wallet.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert!(!Box::pin(keeps(&wallet, b"pr/", &rejection)).await);
+}
+
+/// The next write at alice's Dispatch is refused for room (`429 quota_exceeded`): the client
+/// keeps its batch to send again.
+fn fill_alices_account(w: &World) {
+    w.alice
+        .switch()
+        .fail_next(pubky_dispatch_client::testing::Fault::Error {
+            path: "/ops".into(),
+            code: pubky_dispatch_core::http::ErrorCode::QuotaExceeded,
+            current: Value::Null,
+        });
+}
+
+#[tokio::test]
+async fn test_allowances_kept_proposal_held_past_30_days_while_the_batch_of_its_create_is_kept() {
+    // Bob's proposal is kept, its first write refused. Past its 30 days the first send of its
+    // later create is refused for room, so the client keeps that batch, named at the
+    // proposal's marker. A
+    // receive while it is kept, its send refused for room, neither creates the proposal
+    // again, which would only wait behind that batch, nor gives it up. Then the batch lands
+    // and the proposal is placed, nothing told (Paykit spec 8.1, Stored entries, Kept batch).
+    let w = World::new();
+    let mut shop = Box::pin(shop(&w)).await;
+    let mut wallet = Box::pin(wallet(&w)).await;
+    shop.propose_allowance(w.alice_id(), AllowanceRole::Allowee, terms())
+        .await
+        .unwrap();
+    refuse_writes(&w, 1);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(Box::pin(kept_under(&wallet, b"pr/")).await, 1);
+    w.clock
+        .advance_ms(paykit_sdk::KEPT_MESSAGE_MS + pubky_dispatch_core::records::DAY_MS);
+    wallet.app_mut().rotate().await.unwrap();
+    wallet.app_mut().flush_cursor().await.unwrap();
+    fill_alices_account(&w);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(Box::pin(kept_under(&wallet, b"hw/")).await, 1);
+    assert!(wallet.notices().await.unwrap().is_empty());
+    fill_alices_account(&w);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(Box::pin(kept_under(&wallet, b"hw/")).await, 1);
+    assert_eq!(Box::pin(kept_under(&wallet, b"pr/")).await, 1);
+    assert!(wallet.notices().await.unwrap().is_empty());
+    for _ in 0..2 {
+        wallet.receive(None).await.unwrap();
+    }
+    assert_eq!(Box::pin(kept_under(&wallet, b"pr/")).await, 0);
+    assert_eq!(Box::pin(kept_under(&wallet, b"hw/")).await, 0);
+    assert!(wallet.notices().await.unwrap().is_empty());
+    assert_eq!(wallet.allowances().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn test_allowances_kept_acceptance_held_past_30_days_while_the_batch_of_its_write_is_kept() {
+    // Bob's acceptance of alice's proposal is kept. Its later write, which opens the
+    // Allowance and the payer's ledger, has its first send refused for room, so the client
+    // keeps that batch, named at the acceptance's marker. A receive while it is kept, its send refused for
+    // room, doesn't write it again, which would only wait behind that batch. Past the
+    // acceptance's 30 days, the batch still kept, it isn't given up. Then the batch lands
+    // and the Allowance is open, written once, nothing told (Paykit spec 8.1, Stored
+    // entries, Kept batch).
+    let w = World::new();
+    let mut shop = Box::pin(shop(&w)).await;
+    let mut wallet = Box::pin(paying_wallet(&w)).await;
+    let (_, _, id) = Box::pin(recorded_proposal_of(&w, &mut shop, &mut wallet)).await;
+    let physical = pending_key(&wallet, &w.bob_id(), &id);
+    let theirs = shop.allowances().await.unwrap()[0].record;
+    let acceptance = shop.accept_allowance(&theirs).await.unwrap();
+    wallet.app_mut().receive(None).await.unwrap();
+    assert!(Box::pin(keeps(&wallet, b"pr/", &acceptance)).await);
+    let writes = w.record_writes(&w.alice, &physical);
+    // Two days on, so the batch's first send comes after the acceptance's: the client keeps
+    // it past the acceptance's 30 days.
+    w.clock.advance_ms(2 * pubky_dispatch_core::records::DAY_MS);
+    wallet.app_mut().rotate().await.unwrap();
+    wallet.app_mut().flush_cursor().await.unwrap();
+    fill_alices_account(&w);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(Box::pin(kept_under(&wallet, b"hw/")).await, 1);
+    fill_alices_account(&w);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(Box::pin(kept_under(&wallet, b"hw/")).await, 1);
+    assert_eq!(w.record_writes(&w.alice, &physical), writes);
+    w.clock
+        .advance_ms(paykit_sdk::KEPT_MESSAGE_MS - pubky_dispatch_core::records::DAY_MS);
+    wallet.app_mut().rotate().await.unwrap();
+    wallet.app_mut().flush_cursor().await.unwrap();
+    // Past its 30 days, the batch's send refused again: kept, not given up.
+    fill_alices_account(&w);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(Box::pin(kept_under(&wallet, b"hw/")).await, 1);
+    assert!(Box::pin(keeps(&wallet, b"pr/", &acceptance)).await);
+    assert!(wallet.notices().await.unwrap().is_empty());
+    for _ in 0..3 {
+        wallet.receive(None).await.unwrap();
+    }
+    assert!(!Box::pin(keeps(&wallet, b"pr/", &acceptance)).await);
+    assert_eq!(Box::pin(kept_under(&wallet, b"hw/")).await, 0);
+    assert!(wallet.notices().await.unwrap().is_empty());
+    assert!(Box::pin(held_deleted(&wallet, &physical)).await);
+    assert_eq!(w.record_writes(&w.alice, &physical), writes + 1);
+    let listed = wallet.allowances().await.unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(w.record_writes(&w.alice, &listed[0].record), 1);
+    let view = wallet.allowance(&listed[0].record).await.unwrap();
+    assert_eq!(view.status, AllowanceStatus::Accepted);
+}
+
+#[tokio::test]
+async fn test_allowances_kept_rejection_held_while_the_batch_of_its_delete_is_kept() {
+    // Bob's rejection of alice's proposal is kept. The first send of its later write, the
+    // proposal's delete, is refused for room, so the client keeps that batch, named at the
+    // rejection's marker.
+    // While it is kept, its resend refused again, the delete isn't sent again; once room
+    // frees, it lands and the rejection goes, nothing told (Paykit spec 8.1, Stored
+    // entries, Kept batch).
+    let w = World::new();
+    let mut shop = Box::pin(shop(&w)).await;
+    let mut wallet = Box::pin(paying_wallet(&w)).await;
+    let (_, _, id) = Box::pin(recorded_proposal_of(&w, &mut shop, &mut wallet)).await;
+    let physical = pending_key(&wallet, &w.bob_id(), &id);
+    let theirs = shop.allowances().await.unwrap()[0].record;
+    let rejection = shop.reject_allowance(&theirs).await.unwrap();
+    wallet.app_mut().receive(None).await.unwrap();
+    assert!(Box::pin(keeps(&wallet, b"pr/", &rejection)).await);
+    let writes = w.record_writes(&w.alice, &physical);
+    fill_alices_account(&w);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(Box::pin(kept_under(&wallet, b"hw/")).await, 1);
+    fill_alices_account(&w);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(Box::pin(kept_under(&wallet, b"hw/")).await, 1);
+    assert!(Box::pin(keeps(&wallet, b"pr/", &rejection)).await);
+    assert_eq!(w.record_writes(&w.alice, &physical), writes);
+    for _ in 0..3 {
+        wallet.receive(None).await.unwrap();
+    }
+    assert!(Box::pin(held_deleted(&wallet, &physical)).await);
+    assert_eq!(w.record_writes(&w.alice, &physical), writes + 1);
+    assert!(!Box::pin(keeps(&wallet, b"pr/", &rejection)).await);
+    assert_eq!(Box::pin(kept_under(&wallet, b"hw/")).await, 0);
+    assert!(wallet.notices().await.unwrap().is_empty());
 }
 
 #[tokio::test]

@@ -76,6 +76,7 @@ struct Inner {
     idempotent: bool,
     forgotten: Vec<AttemptId>,
     lookups_failing: u64,
+    unavailable_lookups: Vec<AttemptId>,
     calls: BTreeMap<AttemptId, u64>,
     call_amounts: BTreeMap<AttemptId, Vec<PaymentAmount>>,
     declaration: Option<RailDeclaration>,
@@ -312,6 +313,16 @@ impl FakeRail {
     /// unreachable for now ([`RailError::Unavailable`]).
     pub fn fail_next_lookups(&self, n: u64) {
         self.lock().lookups_failing = n;
+    }
+
+    /// Make every lookup of `key`'s payment fail as the method's history being unreachable
+    /// for now ([`RailError::Unavailable`]), until `unavailable` is false again.
+    pub fn set_lookup_unavailable(&self, key: &AttemptId, unavailable: bool) {
+        let mut inner = self.lock();
+        inner.unavailable_lookups.retain(|k| k != key);
+        if unavailable {
+            inner.unavailable_lookups.push(*key);
+        }
     }
 
     /// Finish a payment left in flight: paid or failed.
@@ -565,8 +576,11 @@ impl Rail for FakeRail {
         idempotency_key: AttemptId,
     ) -> BoxFuture<'_, Result<Option<RailOutcome>, RailError>> {
         let mut inner = self.lock();
-        if inner.lookups_failing > 0 {
-            inner.lookups_failing -= 1;
+        let unavailable = inner.unavailable_lookups.contains(&idempotency_key);
+        if unavailable || inner.lookups_failing > 0 {
+            if !unavailable {
+                inner.lookups_failing -= 1;
+            }
             drop(inner);
             return Box::pin(async {
                 Err(RailError::Unavailable(
