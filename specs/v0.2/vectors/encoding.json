@@ -73,5 +73,5 @@
       }
     ]
   },
-  "description": "Decimal amounts (wire 1.2): valid amounts with the normalized spelling of each, and invalid ones with the reason. The other primitive encodings are the Switch set's encoding.json."
+  "description": "Decimal amounts (wire 1.2): valid amounts with the normalized spelling of each, and invalid ones with the reason. The other primitive encodings are the Dispatch set's encoding.json."
 }
