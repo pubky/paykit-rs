@@ -221,8 +221,13 @@ impl Paykit {
                 .map(|id| id.as_str().to_owned())
                 .collect(),
             offered: endpoints
+                .keys()
+                .filter(|id| !signed.contains_key(*id))
+                .map(|id| id.as_str().to_owned())
+                .collect(),
+            changed: endpoints
                 .iter()
-                .filter(|(id, payload)| signed.get(*id) != Some(*payload))
+                .filter(|(id, payload)| signed.get(*id).is_some_and(|held| held != *payload))
                 .map(|(id, _)| id.as_str().to_owned())
                 .collect(),
         };
@@ -389,7 +394,7 @@ impl Paykit {
     /// the app or a restore holds a change the client saved and didn't sign aside for its
     /// protocol (Dispatch spec 4.2). A held change of Paykit's member is never signed, a
     /// withdrawal included: it is cleared, and the host is told which public endpoints it
-    /// would have withdrawn and offered or changed, from what the user's call asked
+    /// would have withdrawn, offered, or given a new payload, from what the user's call asked
     /// ([`EndpointChange`]; [`crate::NoticeKind::PublicEndpointChangeNotPublished`]). The
     /// notice is raised before the clear, so a crash between them tells it again; a notice
     /// that can't be raised for a reason other than the store's doesn't keep the held
@@ -606,7 +611,7 @@ pub(crate) fn holds_capabilities(cert: &AppCert) -> bool {
 /// ([`holds_capabilities`]), and the ask is for no expiry once no public endpoint is left.
 /// Everything else of the member stays as it is, fields this version doesn't read included,
 /// and a member with nothing left is removed. Otherwise the member and its ask are unchanged.
-/// The public endpoints the user's last call would withdraw and offer or change, by
+/// The public endpoints the user's last call would withdraw, offer, or give a new payload, by
 /// Payment Endpoint Identifier, against the record signed then (Paykit spec 4, "Changes saved
 /// and not yet signed"). Kept before the client is asked to save the change, only to tell the
 /// host exactly what a held change was; never read to sign. Gone once the change is signed,
@@ -616,11 +621,12 @@ pub(crate) fn holds_capabilities(cert: &AppCert) -> bool {
 pub(crate) struct EndpointChange {
     pub(crate) withdrawn: BTreeSet<String>,
     pub(crate) offered: BTreeSet<String>,
+    pub(crate) changed: BTreeSet<String>,
 }
 
 impl EndpointChange {
     pub(crate) fn is_empty(&self) -> bool {
-        self.withdrawn.is_empty() && self.offered.is_empty()
+        self.withdrawn.is_empty() && self.offered.is_empty() && self.changed.is_empty()
     }
 }
 

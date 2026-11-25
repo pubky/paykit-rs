@@ -139,9 +139,10 @@ pub enum NoticeKind {
     /// A change of the app's public endpoints that it saved and didn't sign wasn't published:
     /// a later run of the app or a restore held it aside, and Paykit never signs such a
     /// change, a withdrawal included (Paykit spec 4, "Changes saved and not yet signed").
-    /// [`Notice::endpoints_withdrawn`] and [`Notice::endpoints_offered`] name what it asked.
-    /// The host withdraws again the endpoints it would have withdrawn, and has the user make
-    /// the offers and changes again; with neither list, it shows the current endpoints. Kept
+    /// [`Notice::endpoints_withdrawn`], [`Notice::endpoints_offered`] and
+    /// [`Notice::endpoints_changed`] name what it asked, by class. The host withdraws again the
+    /// endpoints it would have withdrawn, and asks the user before making the offers and
+    /// payload changes again; with no list, it shows the current endpoints. Kept
     /// until acknowledged, and through a restore; it can be told again for the same change.
     PublicEndpointChangeNotPublished,
 }
@@ -359,12 +360,14 @@ pub struct Notice {
     /// For [`NoticeKind::BlockedMessagesLost`] or [`NoticeKind::DroppedMessagesLost`]: the latest such time.
     pub lost_until_ms: Option<u64>,
     /// For [`NoticeKind::PublicEndpointChangeNotPublished`]: the public endpoints the change
-    /// would have withdrawn. Empty, with [`Notice::endpoints_offered`], when the change isn't
-    /// known, as after a restore from a backup taken before it.
+    /// would have withdrawn. Empty, with the other two lists, when the change isn't known.
     pub endpoints_withdrawn: Vec<paykit_lib::PaymentEndpointIdentifier>,
     /// For [`NoticeKind::PublicEndpointChangeNotPublished`]: the public endpoints the change
-    /// would have offered or changed.
+    /// would have offered, not signed before.
     pub endpoints_offered: Vec<paykit_lib::PaymentEndpointIdentifier>,
+    /// For [`NoticeKind::PublicEndpointChangeNotPublished`]: the public endpoints the change
+    /// would have given a new payload.
+    pub endpoints_changed: Vec<paykit_lib::PaymentEndpointIdentifier>,
 }
 
 /// A notice as kept (`p/nt/<attempt_id>/<kind>`, `p/nt/<sender>/<msg_id>` for a message
@@ -810,6 +813,7 @@ impl KeptNotice {
             lost_until_ms: self.lost.map(|(_, until)| until),
             endpoints_withdrawn: identifiers(self.endpoints.as_ref().map(|c| &c.withdrawn))?,
             endpoints_offered: identifiers(self.endpoints.as_ref().map(|c| &c.offered))?,
+            endpoints_changed: identifiers(self.endpoints.as_ref().map(|c| &c.changed))?,
         })
     }
 }
@@ -1131,6 +1135,7 @@ impl Paykit {
         let mut endpoints = notice.endpoints.take().unwrap_or_default();
         endpoints.withdrawn.extend(asked.withdrawn);
         endpoints.offered.extend(asked.offered);
+        endpoints.changed.extend(asked.changed);
         notice.endpoints = (!endpoints.is_empty()).then_some(endpoints);
         self.local_put(&key, &notice).await
     }

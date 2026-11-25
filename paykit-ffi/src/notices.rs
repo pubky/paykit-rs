@@ -63,8 +63,8 @@ pub enum WalletNoticeKind {
     /// Shown once, and again after each reopen.
     AutomaticPaymentsHeld,
     /// A change of the app's public endpoints saved and not signed wasn't published after a
-    /// restart or a restore (Paykit spec 4): withdraw again the endpoints it names to withdraw,
-    /// and have the user make its offers and changes again.
+    /// restart or a restore (Paykit spec 4): withdraw again the endpoints it names to withdraw;
+    /// ask the user before making its offers and payload changes again.
     PublicEndpointChangeNotPublished,
     /// A native case that this binding does not recognize.
     Other,
@@ -214,9 +214,12 @@ pub struct WalletNotice {
     pub lost_until_ms: Option<u64>,
     /// For `NoticeKind::PublicEndpointChangeNotPublished`: the endpoints to withdraw again.
     pub endpoints_withdrawn: Vec<String>,
-    /// For `NoticeKind::PublicEndpointChangeNotPublished`: the endpoints the user offers or
-    /// changes again.
+    /// For `NoticeKind::PublicEndpointChangeNotPublished`: the endpoints to offer again, when
+    /// the user asks.
     pub endpoints_offered: Vec<String>,
+    /// For `NoticeKind::PublicEndpointChangeNotPublished`: the endpoints whose new payload to
+    /// set again, when the user asks.
+    pub endpoints_changed: Vec<String>,
 }
 /// The original retained deletion notice that the host can acknowledge.
 #[derive(uniffi::Object)]
@@ -290,6 +293,11 @@ impl NativeWallet {
                             .collect(),
                         endpoints_offered: n
                             .endpoints_offered
+                            .iter()
+                            .map(|id| id.as_str().to_owned())
+                            .collect(),
+                        endpoints_changed: n
+                            .endpoints_changed
                             .iter()
                             .map(|id| id.as_str().to_owned())
                             .collect(),

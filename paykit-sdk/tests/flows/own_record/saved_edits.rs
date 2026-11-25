@@ -347,7 +347,7 @@ async fn test_own_record_withdrawal_saved_during_an_outage_is_told_after_a_resta
         ids(&notice.endpoints_withdrawn),
         vec![a().as_str().to_owned()]
     );
-    assert!(notice.endpoints_offered.is_empty());
+    assert!(notice.endpoints_offered.is_empty() && notice.endpoints_changed.is_empty());
     assert!(!still_held(&mut shop).await);
     withdraw_again(&mut shop).await;
     assert!(shop.own_public_endpoints().unwrap().is_empty());
@@ -378,6 +378,7 @@ async fn test_own_record_withdrawal_saved_during_an_outage_is_told_after_a_resto
         ids(&notice.endpoints_withdrawn),
         vec![a().as_str().to_owned()]
     );
+    assert!(notice.endpoints_offered.is_empty() && notice.endpoints_changed.is_empty());
     assert!(!still_held(&mut restored).await);
     withdraw_again(&mut restored).await;
     assert_eq!(published_endpoints(&w, &restored), 0);
@@ -406,7 +407,7 @@ async fn test_own_record_offer_saved_during_an_outage_is_not_published_after_a_r
         ids(&notice.endpoints_offered),
         vec![a().as_str().to_owned()]
     );
-    assert!(notice.endpoints_withdrawn.is_empty());
+    assert!(notice.endpoints_withdrawn.is_empty() && notice.endpoints_changed.is_empty());
     assert!(!still_held(&mut shop).await);
 
     let backup = shop.backup().await.unwrap();
@@ -541,6 +542,7 @@ async fn test_own_record_reload_signs_nothing_and_tells_a_withdrawal_over_anothe
         ids(&notice.endpoints_withdrawn),
         vec![a().as_str().to_owned()]
     );
+    assert!(notice.endpoints_offered.is_empty() && notice.endpoints_changed.is_empty());
     withdraw_again(&mut first).await;
     let want = vec![(b().as_str().to_owned(), "bc1qnew".to_owned())];
     assert_eq!(signed_endpoints(&first), want);
@@ -571,6 +573,9 @@ async fn test_own_record_restore_tells_a_withdrawal_over_another_devices_change(
     .await
     .unwrap();
     restored.receive(None).await.unwrap();
+    let notice = told(&restored).await.unwrap();
+    assert_eq!(ids(&notice.endpoints_withdrawn), vec![a().as_str().to_owned()]);
+    assert!(notice.endpoints_offered.is_empty() && notice.endpoints_changed.is_empty());
     withdraw_again(&mut restored).await;
     let want = vec![(b().as_str().to_owned(), "bc1qnew".to_owned())];
     assert_eq!(signed_endpoints(&restored), want);
@@ -599,7 +604,11 @@ async fn test_own_record_held_change_without_its_record_is_told_without_endpoint
     let mut shop = load_recorded(&w, kept, app_id, publishing(), &recorded).await;
     shop.receive(None).await.unwrap();
     let notice = told(&shop).await.unwrap();
-    assert!(notice.endpoints_withdrawn.is_empty() && notice.endpoints_offered.is_empty());
+    assert!(
+        notice.endpoints_withdrawn.is_empty()
+            && notice.endpoints_offered.is_empty()
+            && notice.endpoints_changed.is_empty()
+    );
     // Acknowledging it twice is no error.
     shop.acknowledge_notice(&notice.id).await.unwrap();
     shop.acknowledge_notice(&notice.id).await.unwrap();
@@ -640,4 +649,38 @@ async fn test_own_record_restored_capability_change_never_erases_a_later_offer()
     );
     assert_eq!(published_endpoints(&w, &restored), 1);
     assert!(told(&restored).await.is_none());
+}
+
+#[tokio::test]
+async fn test_own_record_payload_change_saved_during_an_outage_is_told_as_a_payload_change() {
+    // A new payload for an endpoint already signed, saved during an outage, then a restart:
+    // never signed, and told as a payload change, which the host makes again only when the
+    // user asks. The old payload stays signed meanwhile.
+    let w = World::new();
+    let kept = store();
+    let mut shop = shop_on(&w, false, Arc::clone(&kept)).await;
+    shop.set_public_endpoint(a(), payload("lno1tips"))
+        .await
+        .unwrap();
+    time_read_fails(&w, &w.bob);
+    assert!(shop
+        .set_public_endpoint(a(), payload("lno1new"))
+        .await
+        .is_err());
+    let app_id = shop.app_id();
+    drop(shop);
+    let recorded = Recorded::over(Arc::clone(&w.router) as Arc<dyn Transport>);
+    let mut shop = load_recorded(&w, kept, app_id, publishing(), &recorded).await;
+    shop.receive(None).await.unwrap();
+    assert!(!recorded.sent("lno1new"));
+    assert_eq!(
+        signed_endpoints(&shop),
+        vec![(a().as_str().to_owned(), "lno1tips".to_owned())]
+    );
+    let notice = told(&shop).await.unwrap();
+    assert_eq!(
+        ids(&notice.endpoints_changed),
+        vec![a().as_str().to_owned()]
+    );
+    assert!(notice.endpoints_withdrawn.is_empty() && notice.endpoints_offered.is_empty());
 }
