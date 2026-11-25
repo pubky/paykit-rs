@@ -1413,6 +1413,8 @@ pub(crate) async fn given_up(w: &World) -> (paykit_sdk::Paykit, paykit_sdk::Noti
     wallet.app_mut().receive(None).await.unwrap();
     refuse_writes(&w.alice, 1);
     wallet.receive(None).await.unwrap();
+    // Given up: the kept copy goes in the commit that tells the host.
+    assert!(kept(&wallet, "se/").await.is_empty());
     let notice = wallet.notices().await.unwrap().remove(0);
     (wallet, notice)
 }

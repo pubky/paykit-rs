@@ -944,21 +944,28 @@ fn held_bound(
 /// its acceptance, on the highest service time verified, the message is given up, the host
 /// told ([`NoticeKind::MessageGivenUp`]), and the entry is passed, processed, nothing written.
 fn hold_until_it_reads(cx: &mut ReceiveContext<'_>, stored: &StoredMessage) -> Result<(), Fail> {
-    hold_entry_for(cx, stored, crate::notices::GivenUpOrigin::HeldUnread)
+    hold_entry_for(
+        cx,
+        stored,
+        crate::notices::GivenUpOrigin::HeldUnread,
+        "activity record unresolved",
+    )
 }
 
-/// Hold `stored`'s entry unprocessed until
+/// Hold `stored`'s entry unprocessed, for `reason`, until
 /// [`KEPT_MESSAGE_MS`] have passed since its acceptance on the highest service time
 /// verified; then give it up, the host told once ([`NoticeKind::MessageGivenUp`], from
-/// `origin`), and pass the entry, processed, nothing written.
+/// `origin`), and pass the entry, processed. The caller calls it before queuing any write of
+/// the message's own: a message given up is in no record (Paykit spec 8.1).
 pub(crate) fn hold_entry_for(
     cx: &mut ReceiveContext<'_>,
     stored: &StoredMessage,
     origin: crate::notices::GivenUpOrigin,
+    reason: &'static str,
 ) -> Result<(), Fail> {
     let accepted_at = stored.accepted_at().ok_or_else(Fail::corrupt)?;
     if !crate::stored::past_window(accepted_at, cx.highest_service_time()) {
-        return Err(Fail::wait_for("activity record unresolved"));
+        return Err(Fail::wait_for(reason));
     }
     let notice = key::message_notice(&stored.sender(), &stored.message().msg_id);
     if state::cx_get::<KeptNotice>(cx, &notice)?.is_none() {
@@ -1896,6 +1903,9 @@ fn receipt_effect(
         let key = cx.record_key(&target.record_target())?;
         conditions.push(cx.record_condition(&key)?);
     }
+    // The receipt's own write, queued only once its claim read is decided below: a receipt
+    // given up on a claim that doesn't read is in no record (Paykit spec 8.1).
+    let mut placement = None;
     let parent = if let Some(parent_target) = receipt_parent(stored) {
         let parent_key = cx.record_key(&parent_target.record_target())?;
         conditions.push(cx.record_condition(&parent_key)?);
@@ -1916,16 +1926,12 @@ fn receipt_effect(
         }
         let mut updated = record.clone();
         if activity::place(&mut updated, Role::Receipt, stored.clone()) {
-            cx.put_record(
-                &target.record_target(),
-                &updated.to_json()?,
-                conditions.clone(),
-            )?;
+            placement = Some(ReceiptPlacement::Period(Box::new(updated)));
         }
         Some(parent)
     } else {
         if found.names_held_proof {
-            place(cx, &target, sender, Role::Receipt, stored, seq, settlement)?;
+            placement = Some(ReceiptPlacement::Record);
         }
         None
     };
@@ -1947,20 +1953,19 @@ fn receipt_effect(
     )
     .map_err(|_| Fail::corrupt())?;
     // A receipt reaches only an app holding `paykit_pay`, which carries `claims.write`, and an
-    // entry that comes under a certificate without it is held unprocessed: this returns only for a
-    // certificate Paykit's checks would refuse.
-    if !cx.cert().has_permission(Permission::ClaimsWrite) {
-        return Ok(());
-    }
+    // entry that comes under a certificate without it is held unprocessed: without it, which
+    // only a certificate Paykit's checks would refuse has, the receipt is placed and settles
+    // nothing.
+    let claims_write = cx.cert().has_permission(Permission::ClaimsWrite);
     let obligation = claim;
-    let deadline = receipt_deadline(
-        stored,
-        parent.as_ref().unwrap_or(&record),
-        journaled.as_ref(),
-    );
     // A claim the app keeps no view of is read from the switch first, so the receipt
     // settles it in the cursor's batch (Switch spec 10.2 row 3).
-    let read = match cx.switch_claim(&obligation) {
+    let fetched = if claims_write {
+        cx.switch_claim(&obligation)
+    } else {
+        None
+    };
+    let read = match fetched {
         Some(ClaimFetch::Read(read)) => Some(SwitchClaim::Read(Some(read.view.clone()))),
         Some(ClaimFetch::Absent) => Some(SwitchClaim::Read(None)),
         // Refused for good: no later read by this app passes, such as without `claims.read`.
@@ -1976,12 +1981,39 @@ fn receipt_effect(
         // Paykit spec 8.1). The client refuses for good, before this sees them, a read
         // answered `409 conflict`, `stale_epoch`, `stale_generation`, `stale_key`,
         // `not_current`, `cert_expired` or `stale_identity`; it holds the entry itself on the
-        // others a later read may pass.
+        // others a later read may pass. Decided before the receipt's own write is queued, so a
+        // receipt given up is in no record.
         Some(_) => {
-            return hold_entry_for(cx, stored, crate::notices::GivenUpOrigin::ClaimUnread);
+            return hold_entry_for(
+                cx,
+                stored,
+                crate::notices::GivenUpOrigin::ClaimUnread,
+                "receipt claim unread",
+            );
         }
         None => None,
     };
+    match placement {
+        Some(ReceiptPlacement::Period(updated)) => {
+            cx.put_record(
+                &target.record_target(),
+                &updated.to_json()?,
+                conditions.clone(),
+            )?;
+        }
+        Some(ReceiptPlacement::Record) => {
+            place(cx, &target, sender, Role::Receipt, stored, seq, settlement)?;
+        }
+        None => {}
+    }
+    if !claims_write {
+        return Ok(());
+    }
+    let deadline = receipt_deadline(
+        stored,
+        parent.as_ref().unwrap_or(&record),
+        journaled.as_ref(),
+    );
     let view = match failure_view(cx.claim_view(&obligation)?, read) {
         FailureView::View(view) => view,
         FailureView::Refused => return Ok(()),
@@ -2015,6 +2047,15 @@ fn receipt_effect(
         keep_local(cx, local(&key::journal(&attempt_id), &entry)?);
     }
     Ok(())
+}
+
+/// The write a receipt makes to its record ([`receipt_effect`]), queued once its claim read
+/// is decided.
+enum ReceiptPlacement {
+    /// A period's receipt, into the period's record as updated.
+    Period(Box<ActivityRecord>),
+    /// Into the record at its target, by [`place`].
+    Record,
 }
 
 /// A receipt whose payer record at `target` the app holds but can't read now: a value that
@@ -4596,8 +4637,8 @@ pub(crate) fn unrequested_of(
 mod tests {
     use super::*;
 
-    /// Every answer of the switch to a receipt's claim read, by the Switch's own table
-    /// (Switch spec 6.4): refused for good only where the same read never passes.
+    /// Every answer of the switch to a receipt's claim read, each classified here by name:
+    /// refused for good only where no later read by this app passes without its user.
     #[test]
     fn test_receive_claim_read_refused_only_when_no_later_read_passes() {
         use super::ClaimReadAfter as After;

@@ -336,8 +336,11 @@ async fn test_notices_receipt_claim_read_to_try_again_settles_it_once_read() {
     let w = World::new();
     let (mut other, obligation) = receipt_read_answered(&w, ErrorCode::Conflict).await;
     other.receive(None).await.unwrap();
-    // Held, the claim not settled yet.
-    let held = other
+    // Held: the receipt isn't in the record, and the claim, read through another wallet so
+    // this one keeps no view of it, isn't settled yet.
+    assert!(other.requests().await.unwrap()[0].receipt.is_none());
+    let mut inspector = w.wallet("inspector").await;
+    let held = inspector
         .app_mut()
         .read_claim(&obligation)
         .await
@@ -345,6 +348,7 @@ async fn test_notices_receipt_claim_read_to_try_again_settles_it_once_read() {
         .unwrap();
     assert_ne!(held.view.status, ClaimStatus::Settled);
     other.receive(None).await.unwrap();
+    assert!(other.requests().await.unwrap()[0].receipt.is_some());
     let claim = other
         .app_mut()
         .read_claim(&obligation)
@@ -358,7 +362,7 @@ async fn test_notices_receipt_claim_read_to_try_again_settles_it_once_read() {
 async fn test_notices_receipt_claim_read_never_passing_given_up_at_its_window() {
     // The claim read keeps answering `409 conflict`: the receipt is held, while a request bob
     // sends after it is taken meanwhile. Past the receipt's 30 days it is given up, the host
-    // told, nothing written (Paykit spec 8.1).
+    // told, and is in no record (Paykit spec 8.1).
     let w = World::new();
     let (mut other, _, mut shop) = receipt_read_answered_by(&w, ErrorCode::Conflict).await;
     other.receive(None).await.unwrap();
@@ -397,6 +401,12 @@ async fn test_notices_receipt_claim_read_never_passing_given_up_at_its_window() 
     }
     assert_eq!(notices.len(), 1, "{notices:?}");
     assert_eq!(notices[0].kind, NoticeKind::MessageGivenUp);
+    assert!(other
+        .requests()
+        .await
+        .unwrap()
+        .iter()
+        .all(|request| request.receipt.is_none()));
 }
 
 #[tokio::test]
