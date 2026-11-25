@@ -2,7 +2,7 @@
 
 This draft defines Paykit’s encodings and validation. The [specification](spec.md) identifies the normative Pubky Dispatch revision and each separately adopted contract. Wire Section 5 identifies the protected-record paths whose positive wire contract is incomplete. Appendix A lists encoding choices.
 
-**Invitation delivery.** Invitations follow the [Dispatch wire format](https://github.com/pubky/pubky-dispatch/blob/c2b19c95f5f60937df3995efda13e477e9b1ff47/spec/wire-format.md). These include registration (6.2), its service-written `reply.add` transition (6.5), the request header and trusted-time rule (7.1, 7.3), append and retry by the same sealed envelope (7.4.3), the allowlist response (7.4.6), readable feed entries (7.5) and export parts (10.3). No invitation member is added to a signed Paykit message body, and the stored Paykit vectors are unchanged. The [implementation table](implementation.md) links the SDK runtime checks.
+**Invitation delivery.** Invitations follow the invitation rules of the [Dispatch wire format](https://github.com/pubky/pubky-dispatch/blob/c2b19c95f5f60937df3995efda13e477e9b1ff47/spec/wire-format.md): registration of a code (6.2); its redemption, the first append that needs the code for admission, which creates the service-written `reply.add` (6.5, 7.4.3); the request header and trusted-time rule (7.1, 7.3); append and retry by the same sealed envelope (7.4.3); the allowlist response (7.4.6); readable feed entries (7.5); and export parts (10.3). No invitation member is added to a signed Paykit message body, and the stored Paykit vectors are unchanged. The [implementation table](implementation.md) links the SDK runtime checks.
 
 **Test vectors.** The [vector guide](vectors/README.md) lists the files, fixed inputs and regeneration order. The [implementation table](implementation.md) distinguishes library checks, generated examples and wallet behavior.
 
@@ -150,7 +150,7 @@ Vectors: `documents.json` `multi_protocol_certificates` and `messages.json` `mul
 
 ### 3.2 App records
 
-A Paykit App's outer record body is defined by [Dispatch wire 3.2](https://github.com/pubky/pubky-dispatch/blob/c2b19c95f5f60937df3995efda13e477e9b1ff47/spec/wire-format.md#32-app-record), with the host-local display-name change adopted in the spec's introduction. Display names stay in the host's local state. Its `accepts` holds Paykit's kinds (`paykit.payment_request`) or extension kinds (`paykit-cap.offer`, 4.3) under an extension scope the certificate holds, and its Paykit member is `protocols.paykit` (Dispatch wire 3.2, "Protocols' members"), an object:
+A Paykit App's outer record body is defined by [Dispatch wire 3.2](https://github.com/pubky/pubky-dispatch/blob/c2b19c95f5f60937df3995efda13e477e9b1ff47/spec/wire-format.md#32-app-record), with display names kept in the host's local state, as spec Section 4 says. Its `accepts` holds Paykit's kinds (`paykit.payment_request`) or extension kinds (`paykit-cap.offer`, 4.3) under an extension scope the certificate holds, and its Paykit member is `protocols.paykit` (Dispatch wire 3.2, "Protocols' members"), an object:
 
 | Field | Type | Req | Constraints | Notes |
 |---|---|---|---|---|
