@@ -2135,6 +2135,7 @@ impl Paykit {
             acceptance_plaintext: None,
             acceptance_cert: None,
             acceptance_released: false,
+            acceptance_withdrawn: false,
             rail_proof: None,
             paid_at_ms: None,
             proof_msg_id: None,
@@ -2397,6 +2398,7 @@ impl Paykit {
             acceptance_plaintext: None,
             acceptance_cert: None,
             acceptance_released: false,
+            acceptance_withdrawn: false,
             rail_proof: None,
             paid_at_ms: None,
             proof_msg_id: None,
@@ -4216,7 +4218,8 @@ impl Paykit {
     /// of that ID and is not a delivery (Dispatch spec 11). Resume signs again only while
     /// the payer record still lacks the acceptance (Paykit spec 7.2).
     async fn restored_acceptance_lost(&self, entry: &JournalEntry) -> Result<bool> {
-        if !entry.restored {
+        // One a restore held and withdrew was told as unknown: it is never replaced.
+        if !entry.restored || entry.acceptance_withdrawn {
             return Ok(false);
         }
         if let Some(msg_id) = &entry.acceptance_msg_id {
@@ -4234,6 +4237,24 @@ impl Paykit {
             Some(RecordContent::Unreadable(_)) => false,
             None | Some(RecordContent::Deleted) => true,
         })
+    }
+
+    /// Mark each restored payment whose released acceptance `msg_id` a restore holds: a
+    /// held acceptance is withdrawn or given up, told as unknown, and never replaced
+    /// (Paykit spec 7.2; conformance, "Restored delivery origin"). Written before anything
+    /// can end it, so no crash between them leaves a resume that signs another.
+    pub(crate) async fn acceptance_withdrawn_at_restore(&mut self, msg_id: &str) -> Result<()> {
+        for mut entry in self.journal().await? {
+            if entry.restored
+                && entry.acceptance_released
+                && !entry.acceptance_withdrawn
+                && entry.acceptance_msg_id.as_deref() == Some(msg_id)
+            {
+                entry.acceptance_withdrawn = true;
+                self.save(&entry).await?;
+            }
+        }
+        Ok(())
     }
 
     /// A new acceptance of `entry`'s request, set in the entry, not saved.
@@ -4347,15 +4368,6 @@ impl Paykit {
         // which sends it also over a view still divergent.
         if Box::pin(self.handed_off_write_waits(&key)).await? {
             return Ok(());
-        }
-        // An acceptance a restore holds isn't decided yet: the entry stays owed until the
-        // restore's pass releases or withdraws it, so a withdrawn one is signed again here
-        // while the payer record holds no response (Paykit spec 7.2).
-        if let Some(msg_id) = &entry.acceptance_msg_id {
-            let held = self.app.held_messages(crate::protocol::BACKUP_NAME).await?;
-            if held.contains(msg_id) {
-                return Ok(());
-            }
         }
         self.release_acceptance(entry, None).await?;
         let held = self.app.shared_record(&key).await?;

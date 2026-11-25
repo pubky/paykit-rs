@@ -151,9 +151,11 @@ impl Paykit {
     /// that failure is reported as itself, never as a corrupt store.
     pub(crate) async fn send_outbox(&mut self) -> Result<OutboxReport> {
         self.require_first_read()?;
-        // The flush can expire a carried list: what it owes is recorded first (Paykit spec
-        // 7.2, `Paykit::carried_lists_owed`).
+        // The flush can expire a carried list: what it owes is recorded first, or nothing is
+        // flushed (Paykit spec 7.2, `Paykit::carried_lists_owed`); then what a restore holds
+        // past its deadline is given up, as at a receive.
         Box::pin(self.carried_lists_owed()).await?;
+        Box::pin(self.give_up_expired_held()).await?;
         let _delivery = self.delivery_operation();
         self.service_time_for_delivery().await?;
         Ok(Box::pin(self.app.flush_outbox()).await?)

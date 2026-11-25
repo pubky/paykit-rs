@@ -769,25 +769,30 @@ impl Paykit {
         Ok(true)
     }
 
-    /// Whether the stored note `bound`, not placed yet, may go into one of `records`: its
-    /// place is one of them, an Allowance's or its proposal's at one of them, or not decided
-    /// yet, which may be one of them (Paykit spec 7.2: a held decision waits for it).
+    /// Whether the stored note `bound`, not placed yet, may go into one of `records`, of
+    /// `kind` (Paykit spec 7.2: a held decision waits for it). Its place is one of them; or
+    /// an Allowance's or its proposal's at one of them; or, for activity records, not
+    /// decided yet (`place_of` gives an undecided place only to a request's messages, so
+    /// never to an Allowance's record); or a payee's cancellation this app doesn't place
+    /// itself, matched by the request it names to the payer's record.
     pub(crate) async fn unplaced_note_in(
         &self,
         bound: &BoundNote,
         records: &[[u8; 32]],
+        kind: crate::restore_held::Records,
     ) -> Result<bool> {
+        use crate::restore_held::Records;
         if bound.note.placed {
             return Ok(false);
         }
         let seq = bound.note.message.order()?.1;
+        let sender = bound.message.sender();
         Ok(match self.place_of(&bound.message, seq).await? {
             Some(Place::Record { target, .. }) => records.contains(&self.activity_key(&target)?),
             Some(Place::Allowance | Place::Stop(_)) => {
                 let Some(id) = crate::allowances::named_allowance(bound.message.body()) else {
                     return Ok(true);
                 };
-                let sender = bound.message.sender();
                 let mut named = false;
                 for collection in [Collection::Allowances, Collection::AllowanceProposals] {
                     let target =
@@ -796,8 +801,20 @@ impl Paykit {
                 }
                 named
             }
-            Some(Place::AwaitsRequest(_) | Place::AwaitsWrite | Place::Undecided) => true,
-            Some(Place::List(_) | Place::Taken) | None => false,
+            Some(Place::AwaitsRequest(_) | Place::AwaitsWrite | Place::Undecided) => {
+                kind == Records::Activity
+            }
+            Some(Place::List(_) | Place::Taken) => false,
+            None => match (bound.message.body(), bound.message.message().refs.first()) {
+                (Body::PaymentRequestCancellation(_), Some(request))
+                    if kind == Records::Activity =>
+                {
+                    let payer =
+                        ActivityTarget::payer(natural_key::request_record(&sender, request));
+                    records.contains(&self.activity_key(&payer)?)
+                }
+                _ => false,
+            },
         })
     }
 
