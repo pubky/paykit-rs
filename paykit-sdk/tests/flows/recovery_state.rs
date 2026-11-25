@@ -1,5 +1,5 @@
 //! Recovery checkpoints keep their current complete shape (Paykit spec 7.2, 9;
-//! Switch spec 12.4), without changing which old restore-local values are discarded.
+//! Dispatch spec 12.4), without changing which old restore-local values are discarded.
 
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -8,11 +8,11 @@ use std::sync::{
 
 use paykit_lib::records::{ActivityRecord, ActivitySide, StoredMessage};
 use paykit_sdk::{AppScopes, Paykit, PaykitBackup, PaykitConfig, Rail};
-use pubky_switch_client::app::{AppError, LocalWrite};
-use pubky_switch_client::clock::Clock;
-use pubky_switch_client::error::StoreError;
-use pubky_switch_client::store::{Fault, FaultStore, KeyValue, MemoryStore, StateStore, Write};
-use pubky_switch_client::testing::{Seeds, TestIdentity, TestSigner};
+use pubky_dispatch_client::app::{AppError, LocalWrite};
+use pubky_dispatch_client::clock::Clock;
+use pubky_dispatch_client::error::StoreError;
+use pubky_dispatch_client::store::{Fault, FaultStore, KeyValue, MemoryStore, StateStore, Write};
+use pubky_dispatch_client::testing::{Seeds, TestIdentity, TestSigner};
 use serde_json::{json, Value};
 
 use crate::common::{draft, request_from, store, World};
@@ -152,13 +152,14 @@ fn damage(bytes: &[u8], how: Damage) -> Vec<u8> {
 
 fn replace(backup: &PaykitBackup, changes: &[(Vec<u8>, Vec<u8>)]) -> PaykitBackup {
     let mut value: Value = serde_json::from_slice(&backup.to_bytes().unwrap()).unwrap();
-    let data = pubky_switch_core::enc::unb64(value["layers"][0]["data"].as_str().unwrap()).unwrap();
-    let mut layer = pubky_switch_client::app::decode_local_state(&data).unwrap();
+    let data =
+        pubky_dispatch_core::enc::unb64(value["layers"][0]["data"].as_str().unwrap()).unwrap();
+    let mut layer = pubky_dispatch_client::app::decode_local_state(&data).unwrap();
     for (key, bytes) in changes {
         layer.iter_mut().find(|(k, _)| k == key).unwrap().1 = bytes.clone();
     }
-    value["layers"][0]["data"] = Value::String(pubky_switch_core::enc::b64(
-        &pubky_switch_client::app::encode_local_state(&layer),
+    value["layers"][0]["data"] = Value::String(pubky_dispatch_core::enc::b64(
+        &pubky_dispatch_client::app::encode_local_state(&layer),
     ));
     PaykitBackup::from_bytes(&serde_json::to_vec(&value).unwrap()).unwrap()
 }
@@ -519,12 +520,12 @@ impl StateStore for RestoreStampStore {
 
     fn commit(
         &self,
-        batch: pubky_switch_client::store::WriteBatch,
-    ) -> Result<(), pubky_switch_client::error::StoreError> {
+        batch: pubky_dispatch_client::store::WriteBatch,
+    ) -> Result<(), pubky_dispatch_client::error::StoreError> {
         self.commit_with(batch, |batch| {
             self.inner
                 .commit(batch)
-                .map(|()| pubky_switch_client::store::CommitOutcome::Applied)
+                .map(|()| pubky_dispatch_client::store::CommitOutcome::Applied)
         })
         .map(|_| ())
     }
@@ -532,18 +533,20 @@ impl StateStore for RestoreStampStore {
     fn acquire(
         &self,
         ns: &str,
-        owner: pubky_switch_client::store::StoreOwner,
-    ) -> Result<pubky_switch_client::store::AcquireOutcome, pubky_switch_client::error::StoreError>
-    {
+        owner: pubky_dispatch_client::store::StoreOwner,
+    ) -> Result<
+        pubky_dispatch_client::store::AcquireOutcome,
+        pubky_dispatch_client::error::StoreError,
+    > {
         self.inner.acquire(ns, owner)
     }
 
     fn commit_if(
         &self,
         ns: &str,
-        owner: pubky_switch_client::store::StoreOwner,
-        batch: pubky_switch_client::store::WriteBatch,
-    ) -> Result<pubky_switch_client::store::CommitOutcome, pubky_switch_client::error::StoreError>
+        owner: pubky_dispatch_client::store::StoreOwner,
+        batch: pubky_dispatch_client::store::WriteBatch,
+    ) -> Result<pubky_dispatch_client::store::CommitOutcome, pubky_dispatch_client::error::StoreError>
     {
         self.commit_with(batch, |batch| self.inner.commit_if(ns, owner, batch))
     }
@@ -551,14 +554,14 @@ impl StateStore for RestoreStampStore {
 impl RestoreStampStore {
     fn commit_with(
         &self,
-        batch: pubky_switch_client::store::WriteBatch,
+        batch: pubky_dispatch_client::store::WriteBatch,
         apply: impl FnOnce(
-            pubky_switch_client::store::WriteBatch,
+            pubky_dispatch_client::store::WriteBatch,
         ) -> Result<
-            pubky_switch_client::store::CommitOutcome,
-            pubky_switch_client::error::StoreError,
+            pubky_dispatch_client::store::CommitOutcome,
+            pubky_dispatch_client::error::StoreError,
         >,
-    ) -> Result<pubky_switch_client::store::CommitOutcome, pubky_switch_client::error::StoreError>
+    ) -> Result<pubky_dispatch_client::store::CommitOutcome, pubky_dispatch_client::error::StoreError>
     {
         let stamps = batch.writes().iter().any(|write| match write {
             Write::Put { key, value, .. } if key == b"p/paykit/ro" => {
@@ -774,7 +777,7 @@ async fn checkpoint_own_request(w: &World) -> (Paykit, Arc<dyn StateStore>, Stor
     request.proposal_expires_at_ms = None;
     w.alice
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::LoseAnswer {
+        .fail_next(pubky_dispatch_client::testing::Fault::LoseAnswer {
             path: "/ops".into(),
         });
     let sent = shop.send_request(w.bob_id(), request).await.unwrap();
@@ -967,8 +970,8 @@ async fn checkpoint_partial_asks(w: &World) -> PartialAsks {
     let held = wallet.app().shared_record(&key).await.unwrap().unwrap();
     assert!(matches!(
         held.content,
-        pubky_switch_client::app::RecordContent::Unreadable(
-            pubky_switch_client::app::Unopened::KeyNotHeld { .. }
+        pubky_dispatch_client::app::RecordContent::Unreadable(
+            pubky_dispatch_client::app::Unopened::KeyNotHeld { .. }
         )
     ));
     let mut asked = vec![w.bob_id(), w.carol_id()];
@@ -1116,8 +1119,9 @@ async fn test_recovery_checkpoint_malformed_live_transients_remain_backable() {
     let ro = checkpoint_put(&mut wallet, b"ro", &owed).await;
     let backup = wallet.backup().await.unwrap();
     let value: Value = serde_json::from_slice(&backup.to_bytes().unwrap()).unwrap();
-    let data = pubky_switch_core::enc::unb64(value["layers"][0]["data"].as_str().unwrap()).unwrap();
-    let layer = pubky_switch_client::app::decode_local_state(&data).unwrap();
+    let data =
+        pubky_dispatch_core::enc::unb64(value["layers"][0]["data"].as_str().unwrap()).unwrap();
+    let layer = pubky_dispatch_client::app::decode_local_state(&data).unwrap();
     assert_eq!(layer.iter().find(|(key, _)| key == b"ro").unwrap().1, ro);
     Box::pin(checkpoint_regenerated(&w, &backup)).await;
 }

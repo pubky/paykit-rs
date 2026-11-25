@@ -19,19 +19,19 @@ use paykit_lib::bodies::{ListEndpoint, PrivatePaymentList, PRIVATE_LIST_MAX_AGE_
 use paykit_lib::derive::natural_key;
 use paykit_lib::records::{ListPublicationRecord, UnknownMembers};
 use paykit_lib::{Kind, ListVersion, PaymentEndpointIdentifier, PaymentEndpointPayload};
-use pubky_switch_client::app::{
+use pubky_dispatch_client::app::{
     Collection, DeliveryView, KeptBatchDrop, KeptBatchStatus, KeptReason, LocalWrite, OpBatch,
     OutgoingMessage, ReceiveReport, RecordContent, RecordRead, RecordTarget, SharedRecord,
     StoreFailure, UserConfirmed,
 };
-use pubky_switch_core::ident::Policy;
-use pubky_switch_core::ops::Condition;
-use pubky_switch_core::records::DAY_MS as DAY;
+use pubky_dispatch_core::ident::Policy;
+use pubky_dispatch_core::ops::Condition;
+use pubky_dispatch_core::records::DAY_MS as DAY;
 
 use crate::error::{Refusal, Result};
 use crate::state::{self, key, PublicationIds, PublicationKey, Tx};
 use crate::Paykit;
-use pubky_switch_core::enc::random_bytes;
+use pubky_dispatch_core::enc::random_bytes;
 use serde::{Deserialize, Serialize};
 
 pub(crate) const COLLECTION: &str = "private_list_publications";
@@ -94,7 +94,7 @@ pub(crate) fn foreign_publication(
 }
 
 /// The conflict at a recipient's counter whose held write another write at its version
-/// replaced, or which is divergent (Paykit wire 5.8; Switch spec 12.6).
+/// replaced, or which is divergent (Paykit wire 5.8; Dispatch spec 12.6).
 const PUBLICATION_CONFLICTS: &str = "Paykit spec 8.4.1: the recipient's publication counter \
     cannot be verified: another write is at its version, or the record is divergent";
 
@@ -125,7 +125,7 @@ fn list_revision(endpoints: &BTreeMap<String, String>) -> [u8; 16] {
     for (id, payload) in endpoints {
         parts.extend([id.as_bytes(), payload.as_bytes()]);
     }
-    let digest = pubky_switch_core::enc::hash(&pubky_switch_core::enc::lp(&parts));
+    let digest = pubky_dispatch_core::enc::hash(&pubky_dispatch_core::enc::lp(&parts));
     let mut revision = [0; 16];
     revision.copy_from_slice(&digest[..16]);
     revision
@@ -221,7 +221,7 @@ pub(crate) struct ListRecipient {
 impl ListRecipient {
     pub(crate) fn check(&self) -> Result<()> {
         if self.restored_generation.is_some_and(|(generation, _)| {
-            !(2..=pubky_switch_core::json::MAX_INT).contains(&generation)
+            !(2..=pubky_dispatch_core::json::MAX_INT).contains(&generation)
         }) {
             return Err(crate::PaykitError::corrupt());
         }
@@ -295,7 +295,7 @@ impl ListReservation {
         if let Some(missing) = self.missing {
             missing.check(version)?;
         }
-        pubky_switch_core::json::check_uuid_v4(&self.id)?;
+        pubky_dispatch_core::json::check_uuid_v4(&self.id)?;
         self.answer.check()
     }
 
@@ -358,7 +358,7 @@ impl RestoredPublications {
             {
                 return Err(Refusal::HeldForUser(crate::HeldForUserReason::PublicationConflict(format!(
                     "Paykit wire 5.8: different signed lists at generation {generation} counter {counter} for recipient {}",
-                    pubky_switch_core::enc::zbase32_encode(&recipient),
+                    pubky_dispatch_core::enc::zbase32_encode(&recipient),
                 ))).into());
             }
             _ => {}
@@ -553,7 +553,7 @@ pub(crate) fn may_send(view: &DeliveryView<'_>) -> std::result::Result<bool, Sto
 
 fn current_publication(record: &SharedRecord) -> Result<ListPublicationRecord> {
     // Another write at the version held, or a divergent record, is a conflict the user
-    // resolves (Paykit wire 5.8; Switch spec 12.6); a write not taken waits for a read.
+    // resolves (Paykit wire 5.8; Dispatch spec 12.6); a write not taken waits for a read.
     if record.different_write_at_held_version || record.divergent {
         return Err(
             Refusal::HeldForUser(crate::HeldForUserReason::PublicationConflict(
@@ -563,7 +563,7 @@ fn current_publication(record: &SharedRecord) -> Result<ListPublicationRecord> {
         );
     }
     // A write not taken lasts until a write the app takes replaces it, which no read does
-    // (Switch spec 8.2): it is held with the rest.
+    // (Dispatch spec 8.2): it is held with the rest.
     if !record.authenticated || record.flagged || record.not_taken || record.doubtful {
         return Err(counter_unavailable().into());
     }
@@ -573,7 +573,7 @@ fn current_publication(record: &SharedRecord) -> Result<ListPublicationRecord> {
         return Err(
             Refusal::HeldForUser(crate::HeldForUserReason::PublicationConflict(format!(
                 "Paykit wire 5.8: app {} wrote another publisher's counter",
-                pubky_switch_core::enc::zbase32_encode(&record.writer),
+                pubky_dispatch_core::enc::zbase32_encode(&record.writer),
             )))
             .into(),
         );
@@ -585,7 +585,7 @@ fn bound_publication(
     record: &SharedRecord,
     derive: impl FnOnce(
         &RecordTarget,
-    ) -> std::result::Result<[u8; 32], pubky_switch_client::app::AppError>,
+    ) -> std::result::Result<[u8; 32], pubky_dispatch_client::app::AppError>,
 ) -> Result<ListPublicationRecord> {
     let publication = current_publication(record)?;
     let expected = target(
@@ -1452,7 +1452,7 @@ impl Paykit {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pubky_switch_core::ops::RecordVersion;
+    use pubky_dispatch_core::ops::RecordVersion;
 
     fn publication() -> ListPublicationRecord {
         ListPublicationRecord {
@@ -1492,11 +1492,11 @@ mod tests {
 
     #[test]
     fn test_publication_binds_the_signed_record_vectors() {
-        use pubky_switch_core::enc::hash;
-        use pubky_switch_core::keys::IdentityKey;
-        use pubky_switch_core::ops::{OpKind, SignedOp};
-        use pubky_switch_core::records::AppCert;
-        use pubky_switch_core::sealed::RecordValue;
+        use pubky_dispatch_core::enc::hash;
+        use pubky_dispatch_core::keys::IdentityKey;
+        use pubky_dispatch_core::ops::{OpKind, SignedOp};
+        use pubky_dispatch_core::records::AppCert;
+        use pubky_dispatch_core::sealed::RecordValue;
         use serde_json::Value;
 
         let vectors =
@@ -1581,7 +1581,7 @@ mod tests {
                 let refused = current_publication(&record(&observed, sibling)).unwrap_err();
                 assert!(refused
                     .to_string()
-                    .contains(&pubky_switch_core::enc::zbase32_encode(&sibling)));
+                    .contains(&pubky_dispatch_core::enc::zbase32_encode(&sibling)));
             }
             let mut recovered = issued.clone();
             recovered.counter += 1;

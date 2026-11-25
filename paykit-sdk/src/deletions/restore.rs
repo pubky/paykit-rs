@@ -11,7 +11,7 @@ use crate::state;
 use paykit_lib::collections::Collection;
 use paykit_lib::records::{ActivityRecord, ActivitySide};
 use paykit_lib::Label;
-use pubky_switch_client::app::{LocalWrite, RestoreContext};
+use pubky_dispatch_client::app::{LocalWrite, RestoreContext};
 
 /// Positive credit evidence and restrictions selected before the atomic restore.
 /// Imported notice assertions never strengthen the previous installation's facts.

@@ -9,13 +9,13 @@ use std::sync::Arc;
 use paykit_lib::periods::{AnchoredRule, Recurrence, Unit};
 use paykit_lib::records::AllowanceRecord;
 use paykit_sdk::{AllowanceStatus, AppScopes, Paykit, Refusal};
-use pubky_switch_client::app::UserConfirmed;
-use pubky_switch_client::clock::Clock;
+use pubky_dispatch_client::app::UserConfirmed;
+use pubky_dispatch_client::clock::Clock;
 
 use super::{first_grant_in, terms};
 use crate::common::{draft, request_from, store, World};
 
-type Service = std::sync::Arc<pubky_switch_client::testing::ScriptedSwitch>;
+type Service = std::sync::Arc<pubky_dispatch_client::testing::ScriptedSwitch>;
 
 fn refusal_of<T: std::fmt::Debug>(result: paykit_sdk::Result<T>) -> Refusal {
     result
@@ -44,7 +44,7 @@ async fn lost(
     let until = Box::pin(crate::provider_loss::follow_loss(&mut payer)).await;
     payer.app_mut().invite(&shop.identity()).await.unwrap();
     w.clock
-        .set_ms(until.max(w.clock.now_ms()) + pubky_switch_client::app::DOC_CACHE_MS);
+        .set_ms(until.max(w.clock.now_ms()) + pubky_dispatch_client::app::DOC_CACHE_MS);
     Box::pin(shop.receive(None)).await.unwrap();
     (w, payer, shop, key, service)
 }
@@ -254,7 +254,7 @@ async fn test_allowance_regrant_no_other_own_app_lifts_the_pause() {
         .unwrap();
     phone
         .app_mut()
-        .submit_batch(pubky_switch_client::app::OpBatch::new().entry(write))
+        .submit_batch(pubky_dispatch_client::app::OpBatch::new().entry(write))
         .await
         .unwrap();
     Box::pin(payer.receive(None)).await.unwrap();
@@ -321,7 +321,7 @@ async fn test_allowance_regrant_expiry_crossed_by_the_regrants_read_writes_nothi
     // time up to date, and the confirmation is refused as ended, writing no grant.
     use paykit_lib::allowances::TermsTime;
     let mut expiring = terms();
-    let end = pubky_switch_client::testing::START_MS + 48 * crate::common::HOUR_MS;
+    let end = pubky_dispatch_client::testing::START_MS + 48 * crate::common::HOUR_MS;
     expiring.expires_at = Some(TermsTime::new(end));
     let (w, payer, shop, key) = Box::pin(first_grant_in(store(), expiring)).await;
     let (w, mut payer, _shop, key, _) = Box::pin(lost(w, payer, shop, key)).await;
@@ -339,7 +339,7 @@ async fn test_allowance_regrant_expiry_crossed_by_the_regrants_read_writes_nothi
 async fn test_allowance_regrant_a_known_wait_comes_before_the_confirmation() {
     // A `missed` item's mark not yet applied: the Allowance waits for it, and the user isn't
     // asked to confirm until it is.
-    use pubky_switch_client::app::LocalWrite;
+    use pubky_dispatch_client::app::LocalWrite;
     let (_w, mut payer, _shop, key) = Box::pin(granted_then_lost()).await;
     payer
         .app_mut()
@@ -366,7 +366,7 @@ async fn test_allowance_regrant_kept_and_landed_under_a_newer_hold_asks_again() 
     // The regrant's batch is kept unanswered; a `missed` item sets a newer hold before it
     // lands. The grant landed, the user is asked again under the newer hold, and that
     // confirmation consents; the usage still waits for its repair.
-    use pubky_switch_client::testing::Fault;
+    use pubky_dispatch_client::testing::Fault;
     let (w, payer, shop, key) = Box::pin(first_grant_in(store(), terms())).await;
     let (w, mut payer, _shop, key, service) = Box::pin(lost(w, payer, shop, key)).await;
     let shown = payer.allowance(&key).await.unwrap().hold;
@@ -408,7 +408,7 @@ async fn test_allowance_regrant_kept_and_landed_under_a_newer_hold_asks_again() 
 async fn test_allowance_regrant_ending_after_a_second_loss_works() {
     // After a second loss the new service holds the record's write at a lower version than
     // the app's copy names: ending the Allowance builds on the version the service holds,
-    // so the user's way out stays open (Pubky Switch wire 6.3, 7.6).
+    // so the user's way out stays open (Pubky Dispatch wire 6.3, 7.6).
     let (w, mut payer, _shop, key) = Box::pin(granted_then_lost()).await;
     let _service = crate::provider_loss::declare_second_loss(&w);
     Box::pin(crate::provider_loss::follow_loss(&mut payer)).await;
@@ -519,7 +519,7 @@ async fn test_allowance_regrant_confirmation_after_another_apps_end_is_refused()
 async fn test_allowance_regrant_lost_answer_writes_one_grant() {
     // The regrant applies and its answer is lost: a call again lands what was sent, builds
     // no second grant, and answers with the wait for the repair.
-    use pubky_switch_client::testing::Fault;
+    use pubky_dispatch_client::testing::Fault;
     let (w, payer, shop, key) = Box::pin(first_grant_in(store(), terms())).await;
     let (_w, mut payer, _shop, key, service) = Box::pin(lost(w, payer, shop, key)).await;
     let (_, grants) = Box::pin(confirmed(&payer, &key)).await;
@@ -615,7 +615,7 @@ async fn test_allowance_regrant_new_allowance_after_a_loss_pays_its_periods() {
 async fn test_allowance_regrant_kept_unapplied_and_confirmed_again_writes_one_grant() {
     // The regrant's batch is kept unapplied and the user confirms again: the call lands the
     // kept batch first and builds no second grant over it.
-    use pubky_switch_client::testing::Fault;
+    use pubky_dispatch_client::testing::Fault;
     let (w, payer, shop, key) = Box::pin(first_grant_in(store(), terms())).await;
     let (_w, mut payer, _shop, key, service) = Box::pin(lost(w, payer, shop, key)).await;
     let (_, grants) = Box::pin(confirmed(&payer, &key)).await;
@@ -645,7 +645,7 @@ async fn test_allowance_regrant_kept_unapplied_and_confirmed_again_writes_one_gr
 async fn test_allowance_regrant_ordinary_end_reads_nothing_first() {
     // A record never uploaded: ending it builds on the version held, with no read first, so
     // a read the service doesn't answer doesn't stop the user's end.
-    use pubky_switch_client::testing::Fault;
+    use pubky_dispatch_client::testing::Fault;
     let (w, mut payer, _shop, key) = Box::pin(first_grant_in(store(), terms())).await;
     w.alice.switch().fail_next(Fault::Unreachable {
         path: "/records/".into(),

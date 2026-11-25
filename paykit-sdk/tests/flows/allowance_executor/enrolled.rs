@@ -5,11 +5,11 @@ use std::sync::Arc;
 
 use paykit_lib::{records::AllowanceRecord, Collection};
 use paykit_sdk::{AppScopes, Paykit, PaykitBackup, Rail, RequestedScopes};
-use pubky_switch_client::app::{AppEnv, KeptOp, UserConfirmed};
-use pubky_switch_client::store::{Fault, FaultStore, MemoryStore, StateStore};
-use pubky_switch_client::transport::{BoxFuture, Request, Response, Transport, TransportError};
-use pubky_switch_harness::{parties::Asking, Backend, World};
-use pubky_switch_signer::{Protocols, Signer};
+use pubky_dispatch_client::app::{AppEnv, KeptOp, UserConfirmed};
+use pubky_dispatch_client::store::{Fault, FaultStore, MemoryStore, StateStore};
+use pubky_dispatch_client::transport::{BoxFuture, Request, Response, Transport, TransportError};
+use pubky_dispatch_harness::{parties::Asking, Backend, World};
+use pubky_dispatch_signer::{Protocols, Signer};
 
 mod payments;
 mod refusals;
@@ -191,7 +191,7 @@ async fn grant(
             .await
             .is_err());
         Box::pin(payer.receive(None)).await?;
-        let at = format!("lv/{}", pubky_switch_core::enc::b64(&key));
+        let at = format!("lv/{}", pubky_dispatch_core::enc::b64(&key));
         let saved = payer
             .app()
             .protocol_get("paykit", at.as_bytes())
@@ -244,7 +244,7 @@ async fn grant(
     })
 }
 
-// Finish enrollment before polling a payment so its Switch reads have the wallet stack.
+// Finish enrollment before polling a payment so its Dispatch reads have the wallet stack.
 async fn run_grant_flow(world: &World, proposer: AllowanceRole, flow: GrantFlow) -> TestResult {
     let GrantedWallets {
         mut payer,
@@ -304,22 +304,22 @@ async fn test_enrolled_rounded_allowance_payments_after_an_older_grant_backup() 
 }
 
 #[tokio::test]
-async fn test_enrolled_unanswered_reservation_on_scripted_switch() -> TestResult {
+async fn test_enrolled_unanswered_reservation_on_scripted_dispatch() -> TestResult {
     enrolled_on(Backend::Scripted, GrantFlow::UnansweredReservation).await
 }
 
 #[tokio::test]
-async fn test_enrolled_unanswered_reservation_on_switch_service() -> TestResult {
+async fn test_enrolled_unanswered_reservation_on_dispatch_service() -> TestResult {
     enrolled_on(Backend::Service, GrantFlow::UnansweredReservation).await
 }
 
 #[tokio::test]
-async fn test_enrolled_late_period_proof_on_scripted_switch() -> TestResult {
+async fn test_enrolled_late_period_proof_on_scripted_dispatch() -> TestResult {
     enrolled_on(Backend::Scripted, GrantFlow::LatePeriodProof).await
 }
 
 #[tokio::test]
-async fn test_enrolled_late_period_proof_on_switch_service() -> TestResult {
+async fn test_enrolled_late_period_proof_on_dispatch_service() -> TestResult {
     enrolled_on(Backend::Service, GrantFlow::LatePeriodProof).await
 }
 
@@ -449,7 +449,7 @@ async fn incoming_acceptance(world: &World) -> TestResult<IncomingAcceptance> {
     Box::pin(seller.accept_allowance(&peer.record)).await?;
     storage.refuse_puts_as_too_large(Some(b"opq/"));
     assert!(Box::pin(payer.receive(None)).await.is_err());
-    let at = format!("ao/{}", pubky_switch_core::enc::b64(&offer.record));
+    let at = format!("ao/{}", pubky_dispatch_core::enc::b64(&offer.record));
     let prepared = payer
         .app()
         .protocol_get("paykit", at.as_bytes())
@@ -509,7 +509,7 @@ async fn finish_restore(payer: &mut Paykit) -> TestResult {
 }
 
 async fn original_bytes(payer: &Paykit, key: &[u8; 32]) -> TestResult<Vec<u8>> {
-    let at = format!("ao/{}", pubky_switch_core::enc::b64(key));
+    let at = format!("ao/{}", pubky_dispatch_core::enc::b64(key));
     Ok(payer
         .app()
         .protocol_get("paykit", at.as_bytes())
@@ -559,8 +559,8 @@ async fn grant_after_original_application(world: &World) -> TestResult {
     let failure = Box::pin(payer.receive(None)).await.unwrap_err();
     assert!(matches!(
         failure,
-        paykit_sdk::PaykitError::Client(pubky_switch_client::app::AppError::Store(
-            pubky_switch_client::error::StoreError::TooLarge { .. }
+        paykit_sdk::PaykitError::Client(pubky_dispatch_client::app::AppError::Store(
+            pubky_dispatch_client::error::StoreError::TooLarge { .. }
         ))
     ));
     assert_eq!(Box::pin(original_bytes(&payer, &keys[0])).await?, prepared);
@@ -580,13 +580,13 @@ async fn grant_after_original_application(world: &World) -> TestResult {
                     let cert =
                         paykit_lib::scopes::verify_certificate(&kept.cert, &payer.identity())
                             .unwrap();
-                    let op = pubky_switch_core::ops::SignedOp::verify_with_cert(
+                    let op = pubky_dispatch_core::ops::SignedOp::verify_with_cert(
                         &kept.op,
                         &cert,
                         &payer.identity(),
                     )
                     .unwrap();
-                    matches!(&op.body().kind, pubky_switch_core::ops::OpKind::RecordPut(put)
+                    matches!(&op.body().kind, pubky_dispatch_core::ops::OpKind::RecordPut(put)
                 if &put.key == key && op.body().batch.count == 3 && cert.app_id() == payer.app_id())
                 })
                 .expect("applied original member")

@@ -2,12 +2,12 @@
 
 use paykit_lib::collections::Collection;
 use paykit_lib::records::{ActivitySide, StoredMessage};
-use pubky_switch_client::app::{KeptOp, RecordRead, RecordTarget, SharedRecord};
-use pubky_switch_core::ident::collection_id;
-use pubky_switch_core::ops::{Condition, OpKind, SignedOp};
-use pubky_switch_core::records::{AppCert, IdentityDoc};
-use pubky_switch_core::sealed::RecordValue;
-use pubky_switch_core::sig::SignedDoc;
+use pubky_dispatch_client::app::{KeptOp, RecordRead, RecordTarget, SharedRecord};
+use pubky_dispatch_core::ident::collection_id;
+use pubky_dispatch_core::ops::{Condition, OpKind, SignedOp};
+use pubky_dispatch_core::records::{AppCert, IdentityDoc};
+use pubky_dispatch_core::sealed::RecordValue;
+use pubky_dispatch_core::sig::SignedDoc;
 use serde::{Deserialize, Serialize};
 
 use crate::activity::ActivityTarget;
@@ -55,7 +55,7 @@ impl ReceiptApplication {
             return None;
         };
         let dated =
-            pubky_switch_core::shared::date_write(self.write.proof.as_ref()?, &op, &doc).ok()?;
+            pubky_dispatch_core::shared::date_write(self.write.proof.as_ref()?, &op, &doc).ok()?;
         if dated.version.is_none()
             || op.body().generation != doc.generation()
             || op.body().batch.id != self.batch

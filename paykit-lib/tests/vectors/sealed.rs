@@ -17,10 +17,10 @@ use paykit_lib::records::{
     MAX_SETTLEMENT_MARKS,
 };
 use paykit_lib::scopes::{holds, Label, PaykitScope, ScopeName, SETTLEMENTS};
-use pubky_switch_core::enc::b64;
-use pubky_switch_core::ident::{key_of_scope, NamingKey, Policy};
-use pubky_switch_core::records::AppCert;
-use pubky_switch_core::sealed::{aad, pad, RecordValue, SealedValue};
+use pubky_dispatch_core::enc::b64;
+use pubky_dispatch_core::ident::{key_of_scope, NamingKey, Policy};
+use pubky_dispatch_core::records::AppCert;
+use pubky_dispatch_core::sealed::{aad, pad, RecordValue, SealedValue};
 use serde_json::Value;
 
 use crate::common::{
@@ -59,8 +59,8 @@ pub(crate) fn check() {
 /// seen roles, the seen Allowance and attempted periods.
 fn check_activity_rules(keys: &Keys) {
     use paykit_lib::identifiers::AllowanceId;
-    use pubky_switch_core::message::MessagePlaintext;
-    use pubky_switch_core::ops::Condition;
+    use pubky_dispatch_core::message::MessagePlaintext;
+    use pubky_dispatch_core::ops::Condition;
 
     let (alice, bob) = (pubky(ALICE), pubky(BOB));
     let nk = keys.identity(&alice).naming_key();
@@ -328,7 +328,7 @@ fn check_bindings(keys: &Keys, v: &Value) {
     let granted = AllowanceRecord::read(&serde_json::to_vec(&with_grant).unwrap(), &alice).unwrap();
     let (_, executor) = granted.current_grant(&alice).unwrap();
     assert_eq!(executor.app_id(), keys.app("executor").keys.app_id_bytes());
-    let after = pubky_switch_core::ops::RecordVersion {
+    let after = pubky_dispatch_core::ops::RecordVersion {
         generation: 1,
         version: 13,
     };
@@ -554,7 +554,7 @@ pub(crate) fn stored_message(keys: &Keys, name: &str) -> paykit_lib::records::St
 /// A stored message from a message case: its `json`, `signature` and `sender_app`, with the
 /// sender app's certificate of this set.
 fn stored_json(keys: &Keys, m: &Value) -> paykit_lib::records::StoredMessage {
-    use pubky_switch_core::message::MessagePlaintext;
+    use pubky_dispatch_core::message::MessagePlaintext;
     let sender = keys.app_by_id(st(m, "sender_app"));
     let plaintext = MessagePlaintext::from_parts(
         sender.keys.app_id_bytes(),
@@ -562,7 +562,7 @@ fn stored_json(keys: &Keys, m: &Value) -> paykit_lib::records::StoredMessage {
         st(m, "json").as_bytes().to_vec(),
     )
     .unwrap();
-    let to = pubky_switch_core::message::Message::parse(
+    let to = pubky_dispatch_core::message::Message::parse(
         st(m, "json").as_bytes(),
         paykit_lib::kinds::OPAQUE_MEMBERS,
     )
@@ -1528,14 +1528,14 @@ fn binding_value(keys: &Keys, case: &Value) -> String {
     }
     let value: Value = serde_json::from_str(&text).unwrap();
     let proposal = stored_message(keys, "allowance_proposal");
-    let mut response = pubky_switch_core::message::Message::parse(
-        &pubky_switch_core::enc::unb64(st(&value["response"]["plaintext"], "json")).unwrap(),
+    let mut response = pubky_dispatch_core::message::Message::parse(
+        &pubky_dispatch_core::enc::unb64(st(&value["response"]["plaintext"], "json")).unwrap(),
         paykit_lib::kinds::OPAQUE_MEMBERS,
     )
     .unwrap();
     response.refs = vec![proposal.hash()];
     let sender = keys.app_by_id(&response.from.app_id_text());
-    let response = pubky_switch_core::message::MessagePlaintext::sign_json(
+    let response = pubky_dispatch_core::message::MessagePlaintext::sign_json(
         &sender.keys,
         response.to_json().unwrap(),
         paykit_lib::kinds::OPAQUE_MEMBERS,
@@ -1985,9 +1985,9 @@ fn test_activity_record_writes_canonical_msg_ids() {
 
 /// A stored message as a record holds it (Paykit wire 5.2), from a message case signed by
 /// `sender_app`, with the certificate `cert`; built by hand, since a reader refuses it.
-fn stored_value(m: &Value, cert: &pubky_switch_core::sig::SignedDoc) -> Value {
+fn stored_value(m: &Value, cert: &pubky_dispatch_core::sig::SignedDoc) -> Value {
     let json = st(m, "json");
-    let message = pubky_switch_core::message::Message::parse(
+    let message = pubky_dispatch_core::message::Message::parse(
         json.as_bytes(),
         paykit_lib::kinds::OPAQUE_MEMBERS,
     )
@@ -2000,7 +2000,7 @@ fn stored_value(m: &Value, cert: &pubky_switch_core::sig::SignedDoc) -> Value {
             "sender_app": b64(&message.from.app_id),
             "signature": st(m, "signature"),
         },
-        "sender": pubky_switch_core::enc::pubky_id(&message.from.identity),
+        "sender": pubky_dispatch_core::enc::pubky_id(&message.from.identity),
     })
 }
 
@@ -2008,7 +2008,7 @@ fn stored_value(m: &Value, cert: &pubky_switch_core::sig::SignedDoc) -> Value {
 /// names, the message case and the sender certificate presented with it.
 fn unauthorized_stored(
     keys: &Keys,
-) -> Vec<(&'static str, Value, pubky_switch_core::sig::SignedDoc)> {
+) -> Vec<(&'static str, Value, pubky_dispatch_core::sig::SignedDoc)> {
     let labels = paykit("messages.json");
     let shop2 = arr(&labels["label_rejections"], "cases")
         .iter()
@@ -2206,10 +2206,10 @@ fn resigned(
 fn resign_with(
     keys: &Keys,
     base: &str,
-    change: impl FnOnce(&mut pubky_switch_core::message::Message),
+    change: impl FnOnce(&mut pubky_dispatch_core::message::Message),
 ) -> paykit_lib::records::StoredMessage {
-    use pubky_switch_core::message::MessagePlaintext;
-    let mut m = pubky_switch_core::message::Message::parse(
+    use pubky_dispatch_core::message::MessagePlaintext;
+    let mut m = pubky_dispatch_core::message::Message::parse(
         &message_json(base),
         paykit_lib::kinds::OPAQUE_MEMBERS,
     )
@@ -2311,7 +2311,7 @@ fn allowance_cases(keys: &Keys) -> (Vec<AllowanceCase>, Vec<AllowanceCase>) {
     let end = stored_message(keys, "allowance_end");
     let end_with = |refs: Vec<[u8; 32]>| resigned(keys, "allowance_end", Some(refs), |_| {});
     let withdrawal = resign_with(keys, "allowance_end", |m| {
-        m.from = pubky_switch_core::message::Sender {
+        m.from = pubky_dispatch_core::message::Sender {
             identity: pubky(BOB),
             app_id: keys.app("shop").keys.app_id_bytes(),
         };
@@ -2522,7 +2522,7 @@ fn conflicting_response_cases(
     });
     let from_proposer = resign_with(keys, "allowance_acceptance", |m| {
         m.msg_id = SECOND_RESPONSE.into();
-        m.from = pubky_switch_core::message::Sender {
+        m.from = pubky_dispatch_core::message::Sender {
             identity: pubky(BOB),
             app_id: keys.app("shop").keys.app_id_bytes(),
         };
@@ -2646,12 +2646,12 @@ fn record_with_unstorable(
     keys: &Keys,
     base: &str,
     member: &str,
-    change: impl FnOnce(&mut pubky_switch_core::message::Message),
+    change: impl FnOnce(&mut pubky_dispatch_core::message::Message),
 ) -> (Vec<u8>, [u8; 32]) {
-    use pubky_switch_core::message::MessagePlaintext;
+    use pubky_dispatch_core::message::MessagePlaintext;
     let s = bound_sealed();
     let accepted = &arr(&s, "binding_accepted")[1];
-    let mut m = pubky_switch_core::message::Message::parse(
+    let mut m = pubky_dispatch_core::message::Message::parse(
         &message_json(base),
         paykit_lib::kinds::OPAQUE_MEMBERS,
     )
@@ -2673,14 +2673,14 @@ fn record_with_unstorable(
             "sender_app": b64(&m.from.app_id),
             "signature": b64(&plaintext.signature()),
         },
-        "sender": pubky_switch_core::enc::pubky_id(&sender.identity),
+        "sender": pubky_dispatch_core::enc::pubky_id(&sender.identity),
     });
     let mut record: Value = serde_json::from_slice(value(accepted)).unwrap();
     record[member] = stored;
     (serde_json::to_vec(&record).unwrap(), key(accepted))
 }
 
-fn signed_json_doc(doc: &pubky_switch_core::sig::SignedDoc) -> Value {
+fn signed_json_doc(doc: &pubky_dispatch_core::sig::SignedDoc) -> Value {
     serde_json::json!({ "body": doc.body, "sig": doc.sig })
 }
 
@@ -2703,7 +2703,7 @@ fn executor_scoped_cert(keys: &Keys, app: &str) -> AppCert {
 fn handed_on(keys: &Keys, base: &AllowanceRecord) -> AllowanceRecord {
     use paykit_lib::grant::{ExecutorGrant, LedgerHandoff};
     use paykit_lib::records::GrantEntry;
-    use pubky_switch_core::ops::RecordVersion;
+    use pubky_dispatch_core::ops::RecordVersion;
     let alice = pubky(ALICE);
     let terms = base.terms_hash().unwrap();
     let at = |version| RecordVersion {
@@ -2757,7 +2757,7 @@ fn handed_on(keys: &Keys, base: &AllowanceRecord) -> AllowanceRecord {
 /// that misses the rule takes it.
 fn handed_on_naming_no_write(keys: &Keys, handed: &AllowanceRecord) -> AllowanceRecord {
     use paykit_lib::grant::{handoff_fields, LedgerHandoff, LEDGER_HANDOFF_LABEL};
-    use pubky_switch_core::ops::RecordVersion;
+    use pubky_dispatch_core::ops::RecordVersion;
     let alice = pubky(ALICE);
     let valid = handed.ledger_handoff.clone().unwrap();
     let no_write = RecordVersion {
@@ -2783,7 +2783,7 @@ fn handed_on_naming_no_write(keys: &Keys, handed: &AllowanceRecord) -> Allowance
         &valid.item_hash,
     );
     let refs: Vec<&[u8]> = fields.iter().map(Vec::as_slice).collect();
-    pubky_switch_core::sig::verify(
+    pubky_dispatch_core::sig::verify(
         &keys.app("executor").keys.signing_public(),
         LEDGER_HANDOFF_LABEL,
         &refs,
@@ -2960,7 +2960,7 @@ fn test_ledger_handoff_counts_only_signed_by_the_previous_executor() {
     // a reader holding the record without it; once another grant of the executor follows,
     // the handoff to the wallet counts for nothing.
     use paykit_lib::grant::LedgerHandoff;
-    use pubky_switch_core::ops::RecordVersion;
+    use pubky_dispatch_core::ops::RecordVersion;
     let keys = Keys::from_seeds();
     let alice = pubky(ALICE);
     let base = AllowanceRecord::read(&allowance_record_value(&keys), &alice).unwrap();
@@ -3047,7 +3047,7 @@ fn handed_back(
     handed: &AllowanceRecord,
 ) -> (AllowanceRecord, paykit_lib::grant::LedgerHandoff) {
     use paykit_lib::grant::{ExecutorGrant, LedgerHandoff};
-    use pubky_switch_core::ops::RecordVersion;
+    use pubky_dispatch_core::ops::RecordVersion;
     let alice = pubky(ALICE);
     let at = |version| RecordVersion {
         generation: 1,
@@ -3148,7 +3148,7 @@ fn test_ledger_handoff_later_write_refuses_a_changed_same_grant() {
             &handed.counterparty,
             &handed.allowance_id,
             seen.grant,
-            pubky_switch_core::ops::RecordVersion {
+            pubky_dispatch_core::ops::RecordVersion {
                 generation: 1,
                 version,
             },
@@ -3205,7 +3205,7 @@ fn test_ledger_handoff_later_write_seen_after_skipped_versions_is_taken() {
     let base = AllowanceRecord::read(&allowance_record_value(&keys), &alice).unwrap();
     let handed = handed_on(&keys, &base);
     let (mut later, _) = handed_back(&keys, &handed);
-    let built_on = pubky_switch_core::ops::RecordVersion {
+    let built_on = pubky_dispatch_core::ops::RecordVersion {
         generation: 1,
         version: 7,
     };
@@ -3270,7 +3270,7 @@ fn test_allowance_later_write_keeps_the_current_grant_the_last_entry() {
 fn crossing_proposal(keys: &Keys) -> paykit_lib::records::StoredMessage {
     resign_with(keys, "allowance_proposal", |m| {
         m.msg_id = CROSSING_PROPOSAL.into();
-        m.from = pubky_switch_core::message::Sender {
+        m.from = pubky_dispatch_core::message::Sender {
             identity: pubky(ALICE),
             app_id: keys.app("phone").keys.app_id_bytes(),
         };
@@ -3941,7 +3941,7 @@ fn test_allowance_record_conflicted_has_no_current_grant() {
     // Nothing is paid under it: no current grant. The grant history still names the
     // executor at each version, so the outcomes of attempts already open are recorded.
     assert!(conflicted.current_grant(&alice).is_none());
-    let after = pubky_switch_core::ops::RecordVersion {
+    let after = pubky_dispatch_core::ops::RecordVersion {
         generation: 1,
         version: 13,
     };
@@ -4095,7 +4095,7 @@ fn test_payment_list_record_reads_and_writes_lost_to_delete() {
         Value::Null,
         Value::Bool(true),
         Value::String("AA".into()),
-        Value::String(format!("{}=", pubky_switch_core::enc::b64(&hash))),
+        Value::String(format!("{}=", pubky_dispatch_core::enc::b64(&hash))),
     ] {
         value["lost_to_delete"] = bad.clone();
         let bytes = serde_json::to_vec(&value).unwrap();
@@ -4172,7 +4172,7 @@ fn test_stored_message_from_received_is_its_plaintexts() {
     let keys = Keys::from_seeds();
     let request = stored_message(&keys, "payment_request");
     let other = stored_message(&keys, "payment_request_recurring");
-    let built = |s: &StoredMessage, message: &pubky_switch_core::message::Message| {
+    let built = |s: &StoredMessage, message: &pubky_dispatch_core::message::Message| {
         StoredMessage::from_received(
             s.sender(),
             s.cert().clone(),
@@ -4849,7 +4849,7 @@ fn test_allowance_record_unknown_members_stay_with_their_grant() {
 fn test_allowance_record_renewed_grant_leaves_the_history_grant_its_own_members() {
     use paykit_lib::grant::ExecutorGrant;
     use paykit_lib::records::GrantEntry;
-    use pubky_switch_core::ops::RecordVersion;
+    use pubky_dispatch_core::ops::RecordVersion;
     let keys = Keys::from_seeds();
     let (alice, bob) = (pubky(ALICE), pubky(BOB));
     let s = bound_sealed();
@@ -5003,7 +5003,7 @@ fn test_activity_record_half_second_anchor_names_periods_by_their_second() {
     use paykit_lib::bodies::Body;
     use paykit_lib::identifiers::AllowanceId;
     use paykit_lib::records::{reassociation_condition, Reassociation};
-    use pubky_switch_core::ops::Condition;
+    use pubky_dispatch_core::ops::Condition;
     let keys = Keys::from_seeds();
     let b = bases(&keys);
     let (alice, bob) = (pubky(ALICE), pubky(BOB));
@@ -5145,7 +5145,7 @@ fn test_allowance_record_history_grant_made_current_keeps_its_members() {
 
 #[test]
 fn test_activity_record_attempted_entry_naming_no_period_drops_without_a_claim() {
-    use pubky_switch_core::ops::Condition;
+    use pubky_dispatch_core::ops::Condition;
     let keys = Keys::from_seeds();
     let b = bases(&keys);
     let (alice, bob) = (pubky(ALICE), pubky(BOB));
@@ -5607,11 +5607,11 @@ fn check_settlement_mark_merges(nk: &NamingKey, cases: &Value) {
     }
 }
 
-/// The record key of bucket `bucket` under `policy`, with `naming_key` (Switch wire 1.5).
+/// The record key of bucket `bucket` under `policy`, with `naming_key` (Dispatch wire 1.5).
 fn naming_record_key(
-    naming_key: &pubky_switch_core::ident::NamingKey,
+    naming_key: &pubky_dispatch_core::ident::NamingKey,
     bucket: u16,
-    policy: &pubky_switch_core::ident::Policy,
+    policy: &pubky_dispatch_core::ident::Policy,
 ) -> [u8; 32] {
     naming_key.record_key(
         Collection::Settlements.name(),

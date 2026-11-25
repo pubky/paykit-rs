@@ -1,5 +1,5 @@
 //! Stored discovery inputs retain their complete current shape (Paykit spec 4, 8.4;
-//! Paykit wire 4.14; Switch spec 4.2, 12.4).
+//! Paykit wire 4.14; Dispatch spec 4.2, 12.4).
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -9,11 +9,11 @@ use paykit_lib::PaymentEndpointPayload;
 use paykit_sdk::{
     PayOptions, Paykit, PaykitBackup, PaykitConfig, PaykitError, Rail, Refusal, UnrequestedPayment,
 };
-use pubky_switch_client::app::{AppError, LocalWrite, UserConfirmed};
-use pubky_switch_client::clock::Clock;
-use pubky_switch_client::store::{Fault, FaultStore, StateStore};
-use pubky_switch_core::enc::b64;
-use pubky_switch_core::records::app_record_path;
+use pubky_dispatch_client::app::{AppError, LocalWrite, UserConfirmed};
+use pubky_dispatch_client::clock::Clock;
+use pubky_dispatch_client::store::{Fault, FaultStore, StateStore};
+use pubky_dispatch_core::enc::b64;
+use pubky_dispatch_core::records::app_record_path;
 use serde_json::{json, Value};
 
 use crate::common::{btc, endpoint, is_corrupt, list_version, store, World, HOUR_MS};
@@ -256,11 +256,12 @@ fn damage(bytes: &[u8], how: Damage) -> Vec<u8> {
 
 fn replace(backup: &PaykitBackup, key: &[u8], bytes: Vec<u8>) -> PaykitBackup {
     let mut value: Value = serde_json::from_slice(&backup.to_bytes().unwrap()).unwrap();
-    let data = pubky_switch_core::enc::unb64(value["layers"][0]["data"].as_str().unwrap()).unwrap();
-    let mut layer = pubky_switch_client::app::decode_local_state(&data).unwrap();
+    let data =
+        pubky_dispatch_core::enc::unb64(value["layers"][0]["data"].as_str().unwrap()).unwrap();
+    let mut layer = pubky_dispatch_client::app::decode_local_state(&data).unwrap();
     layer.iter_mut().find(|(k, _)| k == key).unwrap().1 = bytes;
     value["layers"][0]["data"] =
-        Value::String(b64(&pubky_switch_client::app::encode_local_state(&layer)));
+        Value::String(b64(&pubky_dispatch_client::app::encode_local_state(&layer)));
     PaykitBackup::from_bytes(&serde_json::to_vec(&value).unwrap()).unwrap()
 }
 

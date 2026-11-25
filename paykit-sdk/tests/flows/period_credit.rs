@@ -11,7 +11,7 @@ use paykit_lib::records::{ActivityRecord, ActivitySide};
 use paykit_lib::{Asset, AttemptId, Body, Decimal, PaymentAmount, PaymentEndpointPayload, Rate};
 use paykit_sdk::rail::{Rail, RailOutcome};
 use paykit_sdk::{Paykit, PaykitConfig};
-use pubky_switch_client::clock::Clock;
+use pubky_dispatch_client::clock::Clock;
 
 use crate::common::{btc, endpoint, list_version, store, World, HOUR_MS};
 

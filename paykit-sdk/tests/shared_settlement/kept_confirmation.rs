@@ -1,6 +1,6 @@
 use super::*;
 use paykit_sdk::Refusal;
-use pubky_switch_client::app::{AppEvent, UserConfirmed};
+use pubky_dispatch_client::app::{AppEvent, UserConfirmed};
 
 /// A confirmation of a held request, kept in an attempt's batch whose answer was lost and
 /// applied only after a newer `missed` item, confirms nothing: on both services the request
@@ -93,7 +93,7 @@ async fn missed_while_away(
 /// Whether `wallet` holds its first grant's checkpoint (`lv/`) for the Allowance at
 /// `record`: the local write of the grant's batch, applied when the batch is.
 async fn granted(wallet: &Paykit, record: &[u8; 32]) -> TestResult<bool> {
-    let key = format!("lv/{}", pubky_switch_core::enc::b64(record));
+    let key = format!("lv/{}", pubky_dispatch_core::enc::b64(record));
     Ok(wallet
         .app()
         .protocol_get("paykit", key.as_bytes())

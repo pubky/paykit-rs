@@ -5,13 +5,13 @@ use paykit_lib::derive::{natural_key, SETTLEMENT_BUCKETS};
 use paykit_lib::records::{
     SeenMarks, SeenMerge, SettlementBucket, SettlementMark, SETTLEMENT_MARK_LEN,
 };
-use pubky_switch_client::app::{
+use pubky_dispatch_client::app::{
     KeptReason, LocalWrite, ReceiveContext, RecordObservation, RecordRead, RecordTarget,
     SharedRecord, StoreFailure,
 };
-use pubky_switch_core::enc::{b64, serde_b64};
-use pubky_switch_core::ops::Condition;
-use pubky_switch_core::shared::ApplicationRef;
+use pubky_dispatch_core::enc::{b64, serde_b64};
+use pubky_dispatch_core::ops::Condition;
+use pubky_dispatch_core::shared::ApplicationRef;
 use serde::{Deserialize, Serialize};
 
 use crate::activity::family;
@@ -359,7 +359,7 @@ impl Paykit {
                             .app
                             .raise_rollback(crate::protocol::BACKUP_NAME, reason)
                             .await?;
-                        return Err(pubky_switch_client::app::AppError::Alarm(alarm).into());
+                        return Err(pubky_dispatch_client::app::AppError::Alarm(alarm).into());
                     }
                     if history.repair {
                         // No present value needs repair. A later observation compares every retained mark again.

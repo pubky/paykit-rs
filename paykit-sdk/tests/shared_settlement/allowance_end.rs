@@ -2,7 +2,7 @@
 use super::*;
 use paykit_lib::allowances::AllowanceTerms;
 use paykit_sdk::{AllowanceRole, AllowanceStatus, NoticeKind, Refusal};
-use pubky_switch_client::app::{AppEvent, RecordApplication, UserConfirmed};
+use pubky_dispatch_client::app::{AppEvent, RecordApplication, UserConfirmed};
 
 #[tokio::test]
 async fn test_enrolled_allowance_ends_before_and_after_placing_the_original() -> TestResult {
@@ -122,7 +122,7 @@ async fn ends(w: &World) -> TestResult {
         Arc::new(TestTimer),
     ))
     .await?;
-    w.advance_ms(paykit_sdk::KEPT_MESSAGE_MS + pubky_switch_core::records::DAY_MS);
+    w.advance_ms(paykit_sdk::KEPT_MESSAGE_MS + pubky_dispatch_core::records::DAY_MS);
     Box::pin(payer.receive(None)).await?;
     for (placed, key, answer) in offers {
         let view = payer.allowance(&key).await?;
@@ -241,12 +241,12 @@ struct Withdrawn {
 
 // A second enrolled app uploads the original signed write without its service proof.
 // The payer keeps that proof, with enough other records that its own upload exceeds
-// the normal 16 MiB request limit (Switch wire 7.1, 7.4.14).
+// the normal 16 MiB request limit (Dispatch wire 7.1, 7.4.14).
 async fn retain_large_inventory(payer: &mut Paykit) -> TestResult {
-    use pubky_switch_client::app::{Collection, RecordTarget};
+    use pubky_dispatch_client::app::{Collection, RecordTarget};
     let collection = Collection::new(
         "notes",
-        pubky_switch_core::ident::Policy::new("paykit_allowance", &["paykit_allowance"]),
+        pubky_dispatch_core::ident::Policy::new("paykit_allowance", &["paykit_allowance"]),
     );
     let value = serde_json::to_vec(&"a".repeat(200 << 10))?;
     for number in 0u8..36 {
@@ -261,11 +261,11 @@ async fn upload_without_proof(
     world: &World,
     phone: &mut Paykit,
     origin: &str,
-    opening: pubky_switch_core::sig::SignedDoc,
-    original: &pubky_switch_client::app::KeptOp,
+    opening: pubky_dispatch_core::sig::SignedDoc,
+    original: &pubky_dispatch_client::app::KeptOp,
 ) -> TestResult {
-    use pubky_switch_client::client::answers::{RecoveryUpload, UploadedOp};
-    use pubky_switch_client::client::{Credentials, SwitchClient};
+    use pubky_dispatch_client::client::answers::{RecoveryUpload, UploadedOp};
+    use pubky_dispatch_client::client::{Credentials, SwitchClient};
     phone.app_mut().refresh_identity().await?;
     phone.app_mut().follow_provider().await?;
     let buyer = world.identity("buyer")?;
@@ -302,7 +302,7 @@ async fn upload_without_proof(
 async fn check_incomplete_backup(
     w: &World,
     payer: &mut Paykit,
-    target: &pubky_switch_client::app::RecordTarget,
+    target: &pubky_dispatch_client::app::RecordTarget,
     offer: &paykit_sdk::SentAllowance,
     seller: &[u8; 32],
     rail: &Arc<FakeRail>,
@@ -347,8 +347,8 @@ async fn receive_fenced_acceptance(
     w: &World,
     case: RecoveredProposal,
 ) -> TestResult<Option<Box<Withdrawn>>> {
-    use pubky_switch_client::app::{Collection, RecordTarget};
-    use pubky_switch_core::ops::Condition;
+    use pubky_dispatch_client::app::{Collection, RecordTarget};
+    use pubky_dispatch_core::ops::Condition;
 
     let rail = Arc::new(FakeRail::with_clock(w.clock().clone()));
     let payer_store = Arc::new(MemoryStore::new());
@@ -495,7 +495,7 @@ async fn receive_fenced_acceptance(
     w.add_switch(next, &[&w.identity("buyer")?]).await?;
     Box::pin(signer.declare_provider_loss(
         next,
-        pubky_switch_signer::UserConfirmed::shown_and_confirmed(),
+        pubky_dispatch_signer::UserConfirmed::shown_and_confirmed(),
     ))
     .await?;
     Box::pin(signer.end_staged_admission()).await?;
@@ -524,7 +524,7 @@ async fn receive_fenced_acceptance(
             .await?;
         assert!(uploads.iter().any(|upload| matches!(
             upload.outcome,
-            pubky_switch_client::app::LossUploadOutcome::TooLarge
+            pubky_dispatch_client::app::LossUploadOutcome::TooLarge
         )));
     }
     Box::pin(finish_restored_withdrawal(&mut payer)).await?;
@@ -536,15 +536,15 @@ async fn receive_fenced_acceptance(
     shop.app_mut().identity_of(&payer.identity(), true).await?;
     let expected_version = if case == RecoveredProposal::UploadWithoutProof {
         assert!(original.version.version > 1);
-        pubky_switch_core::ops::RecordVersion::new(original_generation, 1)
+        pubky_dispatch_core::ops::RecordVersion::new(original_generation, 1)
     } else {
         original.version
     };
     let selection = if case != RecoveredProposal::Missing {
         let restored = payer.app_mut().read_record_fresh(&target).await?;
         let live = match restored {
-            pubky_switch_client::app::RecordRead::Fresh(live) => live,
-            pubky_switch_client::app::RecordRead::Kept { reason, record } => {
+            pubky_dispatch_client::app::RecordRead::Fresh(live) => live,
+            pubky_dispatch_client::app::RecordRead::Kept { reason, record } => {
                 return Err(format!(
                     "replacement pending read: {reason:?}, cached {}",
                     record.is_some()
@@ -822,7 +822,7 @@ async fn receive_fenced_acceptance(
         .find(|item| item.kind == "paykit.allowance_end")
         .expect("receiving the fenced original acceptance withdraws the exact live proposal");
     if let Some(key) = prepared_key {
-        assert!(key.ends_with(pubky_switch_core::enc::b64(&end.plaintext.hash()).as_bytes()));
+        assert!(key.ends_with(pubky_dispatch_core::enc::b64(&end.plaintext.hash()).as_bytes()));
     }
     let end = end.msg_id.clone();
     let RecordApplication {
@@ -837,14 +837,14 @@ async fn receive_fenced_acceptance(
         .ok_or("missing applied pending deletion")?;
     assert!(deleted.authenticated && deletion.proof.is_some() && deleted.content.value().is_none());
     assert_eq!(at.generation, payer.app().own_identity().generation());
-    let op = pubky_switch_core::ops::SignedOp::verify_with_cert(
+    let op = pubky_dispatch_core::ops::SignedOp::verify_with_cert(
         &deletion.op,
         payer.app().cert(),
         &payer.identity(),
     )?;
     assert!(op.body().conditions.contains(&selection));
     assert!(
-        matches!(&op.body().kind, pubky_switch_core::ops::OpKind::RecordPut(put)
+        matches!(&op.body().kind, pubky_dispatch_core::ops::OpKind::RecordPut(put)
         if put.key == pending_key && put.expected_version == expected_version)
     );
     Ok(Some(Box::new(Withdrawn {
@@ -863,7 +863,7 @@ async fn receive_fenced_acceptance(
 }
 
 async fn receive_withdrawal_return(w: &World, withdrawn: Box<Withdrawn>) -> TestResult {
-    use pubky_switch_client::app::{Collection, RecordTarget};
+    use pubky_dispatch_client::app::{Collection, RecordTarget};
     let Withdrawn {
         case,
         rail,
@@ -894,7 +894,7 @@ async fn receive_withdrawal_return(w: &World, withdrawn: Box<Withdrawn>) -> Test
         .iter()
         .all(|n| n.kind != NoticeKind::AllowanceWithdrawalConfirmed));
     if let Some(other) = unrelated {
-        let at = format!("ao/{}", pubky_switch_core::enc::b64(&offer.record));
+        let at = format!("ao/{}", pubky_dispatch_core::enc::b64(&offer.record));
         let protected = payer
             .app()
             .protocol_get("paykit", at.as_bytes())
@@ -965,7 +965,7 @@ async fn receive_withdrawal_return(w: &World, withdrawn: Box<Withdrawn>) -> Test
     )?;
     assert_eq!(signed.message().refs.as_slice(), [stored.proposal.hash()]);
     let returned_id = &ended.message().msg_id;
-    let protected_key = format!("ao/{}", pubky_switch_core::enc::b64(&offer.record));
+    let protected_key = format!("ao/{}", pubky_dispatch_core::enc::b64(&offer.record));
     if case == RecoveredProposal::Collected {
         (payer, payer_store) = Box::pin(receive_return_without_tombstone(
             w,
@@ -1152,7 +1152,7 @@ async fn redeliver_return(
     Box::pin(finish_restored_withdrawal(&mut payer)).await?;
     assert!(matches!(
         shop.app_mut().resend(returned_id).await?,
-        pubky_switch_client::app::Delivery::Accepted { .. }
+        pubky_dispatch_client::app::Delivery::Accepted { .. }
     ));
     let repeat = Box::pin(payer.receive(None)).await?;
     assert!(

@@ -16,8 +16,8 @@ use paykit_sdk::{
     AppScopes, PayOptions, PayOutcome, Paykit, PaykitConfig, Rail, RequestedScopes,
     UnrequestedPayment,
 };
-use pubky_switch_client::testing::TestSigner;
-use pubky_switch_client::transport::BoxFuture;
+use pubky_dispatch_client::testing::TestSigner;
+use pubky_dispatch_client::transport::BoxFuture;
 use serde_json::{json, Map, Value};
 
 use crate::common::{btc, endpoint, list_version, store, World};
@@ -434,16 +434,16 @@ async fn test_custom_rail_two_payments_the_method_names_apart_are_both_credited(
 }
 
 /// Whether the read dropped a proof because its payment method names no settlement for it.
-fn dropped_unnamed(events: &[pubky_switch_client::app::AppEvent]) -> bool {
+fn dropped_unnamed(events: &[pubky_dispatch_client::app::AppEvent]) -> bool {
     events.iter().any(|event| {
-        matches!(event, pubky_switch_client::app::AppEvent::MessageDropped { reason, .. }
+        matches!(event, pubky_dispatch_client::app::AppEvent::MessageDropped { reason, .. }
             if reason.contains("names no settlement"))
     })
 }
 
 #[tokio::test]
 async fn test_custom_rail_unrequested_proof_without_a_rail_is_dropped_with_its_reason() {
-    use pubky_switch_client::app::{App, ProtocolSet};
+    use pubky_dispatch_client::app::{App, ProtocolSet};
     // A protocol with no rail names no settlement: an unrequested proof is dropped with
     // that reason, never applied, and no record is written (Paykit wire 1.5).
     let w = World::new();
@@ -537,7 +537,7 @@ async fn test_custom_rail_requested_proof_spelled_like_another_method_credited_b
     let sent = shop
         .send_request(
             w.alice_id(),
-            crate::common::draft("1", pubky_switch_client::clock::Clock::now_ms(&*w.clock)),
+            crate::common::draft("1", pubky_dispatch_client::clock::Clock::now_ms(&*w.clock)),
         )
         .await
         .unwrap()
@@ -605,7 +605,7 @@ fn test_custom_rail_paykit_reads_no_proof_itself() {
 #[tokio::test]
 async fn test_payee_deletion_a_restored_custom_receipt_waits_for_its_payment_method() {
     use paykit_lib::collections::Collection;
-    use pubky_switch_client::app::{Collection as SwitchCollection, RecordTarget};
+    use pubky_dispatch_client::app::{Collection as DispatchCollection, RecordTarget};
     let w = World::new();
     let rail = Arc::new(LedgerRail {
         fake: Arc::clone(&w.rail),
@@ -653,7 +653,7 @@ async fn test_payee_deletion_a_restored_custom_receipt_waits_for_its_payment_met
     let receipt = shop.confirm_payment(&key).await.unwrap().unwrap();
     let proof = rail.last.lock().unwrap().clone().unwrap();
     let target = RecordTarget::new(
-        SwitchCollection::new(
+        DispatchCollection::new(
             Collection::PayeeActivity.name(),
             Collection::PayeeActivity.fixed_policy(),
         ),
@@ -712,8 +712,8 @@ async fn test_payee_deletion_a_restored_custom_receipt_waits_for_its_payment_met
 #[tokio::test]
 async fn test_custom_rail_requested_proof_without_a_settlement_id_keeps_its_own_warning() {
     use paykit_sdk::{NoticeKind, ReceiptDetails, Refusal, SettlementSubject};
-    use pubky_switch_client::app::UserConfirmed;
-    use pubky_switch_client::clock::Clock;
+    use pubky_dispatch_client::app::UserConfirmed;
+    use pubky_dispatch_client::clock::Clock;
     let w = World::new();
     let rail = Arc::new(LedgerRail {
         fake: w.rail.clone(),

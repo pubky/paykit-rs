@@ -4,10 +4,10 @@
 //! sent under a label uses that label's policy instead. Apps ignore any record in these
 //! collections whose policy differs, so no app can plant a record readable under another
 //! scope or another label. Record keys derive from the collection, the blinded natural key
-//! and the policy hash (Switch wire 1.5), so a labelled request's record sits at another key
+//! and the policy hash (Dispatch wire 1.5), so a labelled request's record sits at another key
 //! than an unlabelled one's.
 
-use pubky_switch_core::ident::{NamingKey, Policy};
+use pubky_dispatch_core::ident::{NamingKey, Policy};
 
 use crate::error::Result;
 use crate::scopes::{Label, PaykitScope, ScopeName};
@@ -128,12 +128,12 @@ impl Collection {
     }
 
     /// The record key of a natural key in this collection, under the policy for `label`
-    /// ([`Collection::policy`]), blinded with the naming key of the identity whose switch
-    /// holds it (Switch wire 1.5).
+    /// ([`Collection::policy`]), blinded with the naming key of the identity whose Dispatch
+    /// holds it (Dispatch wire 1.5).
     ///
     /// # Errors
     ///
-    /// [`crate::Error::Switch`] if the policy hash can't be computed.
+    /// [`crate::Error::Dispatch`] if the policy hash can't be computed.
     pub fn record_key(
         self,
         naming_key: &NamingKey,

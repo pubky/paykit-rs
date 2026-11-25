@@ -5,10 +5,10 @@ use paykit_lib::derive::natural_key;
 use paykit_lib::records::ListPublicationRecord;
 use paykit_lib::PaymentEndpointPayload;
 use paykit_sdk::{PayOutcome, Paykit, UnrequestedPayment};
-use pubky_switch_client::app::{
+use pubky_dispatch_client::app::{
     Collection, KeptReason, RecordApplication, RecordRead, RecordTarget,
 };
-use pubky_switch_core::ident::Policy;
+use pubky_dispatch_core::ident::Policy;
 
 pub(super) fn target(shop: &Paykit, recipient: &[u8; 32], generation: u64) -> RecordTarget {
     let policy = Policy::new("paykit_request", &["paykit_request"]).permanent(Some(generation));
@@ -81,7 +81,7 @@ async fn test_publication_updates_one_contacts_payable_list() {
 async fn test_publication_restored_withdrawal_never_admits_its_recipient() {
     use crate::common::store;
     use paykit_sdk::PaykitConfig;
-    use pubky_switch_client::app::Delivery;
+    use pubky_dispatch_client::app::Delivery;
 
     let w = World::new();
     let mut shop = w
@@ -170,7 +170,7 @@ async fn test_publication_restored_withdrawal_never_admits_its_recipient() {
 async fn test_publication_restore_lists_former_and_current_recipients() {
     use crate::common::{store, BOB_ORIGIN};
     use paykit_sdk::PaykitConfig;
-    use pubky_switch_core::records::Inbox;
+    use pubky_dispatch_core::records::Inbox;
     let w = World::new();
     let mut shop = w.shop().await;
     let mut wallet = w.wallet("wallet").await;
@@ -289,7 +289,7 @@ async fn test_publication_restore_lists_former_and_current_recipients() {
     let sent = sent.iter().find(|m| m.msg_id == withdrawn.msg_id).unwrap();
     assert_eq!(sent.plaintext.hash(), withdrawn.message_hash);
     assert!(sent.accepted_at_ms.is_some());
-    let signed = pubky_switch_core::message::Message::parse(
+    let signed = pubky_dispatch_core::message::Message::parse(
         sent.plaintext.json(),
         paykit_lib::kinds::OPAQUE_MEMBERS,
     )
@@ -349,7 +349,7 @@ async fn test_publication_restore_lists_former_and_current_recipients() {
 async fn test_publication_lost_first_race_reads_the_winning_counter() {
     use crate::common::{store, ReadHook};
     use paykit_sdk::{AppScopes, PaykitConfig};
-    use pubky_switch_core::http::ErrorCode;
+    use pubky_dispatch_core::http::ErrorCode;
     use std::sync::Arc;
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
@@ -385,7 +385,7 @@ async fn test_publication_lost_first_race_reads_the_winning_counter() {
     let target = target(&shop, &recipient, 1);
     let key = shop.app().record_key(&target).unwrap();
     hook.after_read(
-        &format!("records/{}", pubky_switch_core::enc::b64(&key)),
+        &format!("records/{}", pubky_dispatch_core::enc::b64(&key)),
         move || {
             std::thread::spawn(move || {
                 tokio::runtime::Builder::new_current_thread()
@@ -422,8 +422,8 @@ async fn test_publication_lost_first_race_reads_the_winning_counter() {
 async fn test_publication_lost_answer_settles_the_original_before_replacing_its_list() {
     use crate::common::store;
     use paykit_sdk::{AppScopes, PaykitConfig, Refusal};
-    use pubky_switch_client::app::{Delivery, KeptBatchStatus};
-    use pubky_switch_client::testing::Fault;
+    use pubky_dispatch_client::app::{Delivery, KeptBatchStatus};
+    use pubky_dispatch_client::testing::Fault;
 
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
@@ -505,8 +505,8 @@ async fn test_publication_lost_answer_settles_the_original_before_replacing_its_
 
 #[tokio::test]
 async fn test_publication_expired_original_batch_still_waits_at_the_same_counter() {
-    use pubky_switch_client::app::{KeptBatchDrop, KeptBatchStatus};
-    use pubky_switch_client::testing::Fault;
+    use pubky_dispatch_client::app::{KeptBatchDrop, KeptBatchStatus};
+    use pubky_dispatch_client::testing::Fault;
 
     let w = World::new();
     let mut shop = w.shop().await;
@@ -565,9 +565,9 @@ async fn test_publication_expired_original_batch_still_waits_at_the_same_counter
 
 #[tokio::test]
 async fn test_publication_imported_original_settles_before_a_new_generation_list() {
-    use pubky_switch_client::app::{AppEvent, KeptBatchStatus};
-    use pubky_switch_client::testing::Fault;
-    use pubky_switch_core::records::Inbox;
+    use pubky_dispatch_client::app::{AppEvent, KeptBatchStatus};
+    use pubky_dispatch_client::testing::Fault;
+    use pubky_dispatch_core::records::Inbox;
     const NEXT: &str = "https://moved-merchant.example";
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
@@ -722,7 +722,7 @@ async fn interrupted_keep(after_commit: bool) {
     use crate::common::FailNextKeep;
     use paykit_sdk::{AppScopes, PaykitConfig};
 
-    use pubky_switch_client::store::StateStore;
+    use pubky_dispatch_client::store::StateStore;
     use std::sync::Arc;
 
     let w = World::new();
@@ -777,7 +777,7 @@ async fn interrupted_keep(after_commit: bool) {
         shop.app_mut().receive(None).await.unwrap();
         assert!(matches!(
             shop.app().kept_batch(batch).await.unwrap(),
-            Some(pubky_switch_client::app::KeptBatchStatus::Applied { .. })
+            Some(pubky_dispatch_client::app::KeptBatchStatus::Applied { .. })
         ));
     }
 
@@ -808,9 +808,9 @@ async fn test_publication_reloads_the_original_after_its_first_keep_answer_is_lo
 
 #[tokio::test]
 async fn test_publication_later_provider_refusal_does_not_release_the_lost_original() {
-    use pubky_switch_client::app::{KeptBatchDrop, KeptBatchStatus};
-    use pubky_switch_client::testing::{Fault, ScriptedSwitch};
-    use pubky_switch_core::records::Inbox;
+    use pubky_dispatch_client::app::{KeptBatchDrop, KeptBatchStatus};
+    use pubky_dispatch_client::testing::{Fault, ScriptedSwitch};
+    use pubky_dispatch_core::records::Inbox;
     const NEXT: &str = "https://recovered-merchant.example";
     let w = World::new();
     let mut shop = w.shop().await;
@@ -891,7 +891,7 @@ async fn test_publication_later_provider_refusal_does_not_release_the_lost_origi
 async fn test_publication_older_in_place_restore_retains_the_later_unresolved_recipient() {
     use crate::common::store;
     use paykit_sdk::{AppScopes, PaykitConfig, Refusal};
-    use pubky_switch_client::testing::Fault;
+    use pubky_dispatch_client::testing::Fault;
     let w = World::new();
     let storage = store();
     let mut shop = w
@@ -995,10 +995,10 @@ async fn test_publication_requires_a_current_own_identity_after_reading_the_coun
     let clock = w.clock.clone();
     let homeserver = w.homeserver.clone();
     hook.after_read(
-        &format!("records/{}", pubky_switch_core::enc::b64(&key)),
+        &format!("records/{}", pubky_dispatch_core::enc::b64(&key)),
         move || {
             clock.advance_ms(60_000);
-            homeserver.remove(owner, pubky_switch_core::records::IDENTITY_PATH);
+            homeserver.remove(owner, pubky_dispatch_core::records::IDENTITY_PATH);
         },
     );
     let denied = shop.publish_list_to(recipient).await.unwrap_err();
@@ -1030,7 +1030,7 @@ async fn test_publication_requires_a_current_own_identity_after_reading_the_coun
 async fn test_publication_restored_pending_batch_needs_its_matching_applied_write() {
     use crate::common::store;
     use paykit_sdk::{AppScopes, PaykitConfig, Refusal};
-    use pubky_switch_client::testing::Fault;
+    use pubky_dispatch_client::testing::Fault;
 
     let w = World::new();
     let disk = store();
@@ -1082,7 +1082,7 @@ async fn test_publication_restored_pending_batch_needs_its_matching_applied_writ
     shop.app_mut().receive(None).await.unwrap();
     assert!(matches!(
         shop.app().kept_batch(batch).await.unwrap(),
-        Some(pubky_switch_client::app::KeptBatchStatus::Applied { .. })
+        Some(pubky_dispatch_client::app::KeptBatchStatus::Applied { .. })
     ));
     let original = target(&shop, &recipient, 1);
     let key = shop.app().record_key(&original).unwrap();
@@ -1120,7 +1120,7 @@ async fn test_publication_restored_pending_batch_needs_its_matching_applied_writ
 async fn test_publication_observed_by_a_second_installation_survives_selected_restore() {
     use crate::common::store;
     use paykit_sdk::PaykitConfig;
-    use pubky_switch_core::enc::b64;
+    use pubky_dispatch_core::enc::b64;
 
     let w = World::new();
     let mut publisher = w.shop().await;
@@ -1218,8 +1218,8 @@ async fn test_publication_observed_by_a_second_installation_survives_selected_re
 #[tokio::test]
 async fn test_publication_retained_report_remains_available_after_selling_scope_is_removed() {
     use paykit_sdk::AppScopes;
-    use pubky_switch_client::app::LocalWrite;
-    use pubky_switch_core::enc::b64;
+    use pubky_dispatch_client::app::LocalWrite;
+    use pubky_dispatch_core::enc::b64;
 
     let w = World::new();
     let mut app = w
@@ -1311,7 +1311,7 @@ async fn test_publication_retained_report_remains_available_after_selling_scope_
 async fn test_publication_labelled_seller_can_ask_and_pay_as_a_payer() {
     use paykit_lib::{kinds::Kind, Label};
     use paykit_sdk::{AppScopes, PayOptions, Refusal};
-    use pubky_switch_client::app::AppEvent;
+    use pubky_dispatch_client::app::AppEvent;
 
     let w = World::new();
     let label = Label::parse("shop1").unwrap();
@@ -1330,7 +1330,7 @@ async fn test_publication_labelled_seller_can_ask_and_pay_as_a_payer() {
     let mut shop = w.labelled_shop("seller-wallet", "shop1").await;
     let asks = Kind::PrivatePaymentListRequest.as_str();
     let accepts = |app: &Paykit, kind: &str| {
-        pubky_switch_core::records::AppRecord::verify(app.app().record(), &app.identity())
+        pubky_dispatch_core::records::AppRecord::verify(app.app().record(), &app.identity())
             .unwrap()
             .body()
             .accepts
@@ -1407,7 +1407,7 @@ async fn test_publication_restored_while_labelled_discovers_a_former_recipient_w
     use crate::common::store;
     use paykit_lib::Label;
     use paykit_sdk::{AppScopes, PaykitConfig};
-    use pubky_switch_client::app::Delivery;
+    use pubky_dispatch_client::app::Delivery;
 
     let w = World::new();
     let labelled = AppScopes::new()
@@ -1533,7 +1533,7 @@ async fn send_list_request(
     wallet.flush().await.unwrap();
     let id = wallet
         .app_mut()
-        .queue(pubky_switch_client::app::OutgoingMessage::new(
+        .queue(pubky_dispatch_client::app::OutgoingMessage::new(
             shop.identity(),
             paykit_lib::Kind::PrivatePaymentListRequest.as_str(),
             body,
@@ -1543,7 +1543,7 @@ async fn send_list_request(
     let delivery = wallet.flush_message_in_delivery(&id).await.unwrap();
     assert!(matches!(
         delivery,
-        Some(pubky_switch_client::app::Delivery::Accepted { .. })
+        Some(pubky_dispatch_client::app::Delivery::Accepted { .. })
     ));
     id
 }
@@ -1568,7 +1568,7 @@ async fn published(shop: &Paykit, wallet: &Paykit) -> Vec<Published> {
         if sent.kind != paykit_lib::Kind::PrivatePaymentList.as_str() {
             continue;
         }
-        let signed = pubky_switch_core::message::Message::parse(
+        let signed = pubky_dispatch_core::message::Message::parse(
             sent.plaintext.json(),
             paykit_lib::kinds::OPAQUE_MEMBERS,
         )
@@ -1782,7 +1782,7 @@ async fn test_publication_answers_only_its_chosen_contact_and_resends_the_same_l
         .iter()
         .filter(|sent| sent.kind == paykit_lib::Kind::PaymentProof.as_str())
     {
-        let message = pubky_switch_core::message::Message::parse(
+        let message = pubky_dispatch_core::message::Message::parse(
             signed.plaintext.json(),
             paykit_lib::kinds::OPAQUE_MEMBERS,
         )
@@ -1858,7 +1858,7 @@ async fn test_publication_answers_only_its_chosen_contact_and_resends_the_same_l
 async fn test_publication_request_for_an_unchanged_offer_uses_the_active_generation() {
     use crate::common::BOB_ORIGIN;
     use paykit_lib::ListVersion;
-    use pubky_switch_core::records::Inbox;
+    use pubky_dispatch_core::records::Inbox;
 
     for moved in [false, true] {
         for names_offer in [true, false] {
@@ -1912,7 +1912,7 @@ async fn contemporaneous_publishers(
     Paykit,
     Paykit,
     Paykit,
-    std::sync::Arc<dyn pubky_switch_client::store::StateStore>,
+    std::sync::Arc<dyn pubky_dispatch_client::store::StateStore>,
 ) {
     use crate::common::store;
     use paykit_sdk::{AppScopes, PaykitConfig};
@@ -2062,7 +2062,7 @@ async fn test_publication_repeats_the_newest_signed_list_after_a_generation_chan
 async fn repeat_across_generations(second_installation_withdraws: bool) {
     use crate::common::{store, BOB_ORIGIN};
     use paykit_sdk::PaykitConfig;
-    use pubky_switch_core::records::Inbox;
+    use pubky_dispatch_core::records::Inbox;
 
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
@@ -2175,9 +2175,9 @@ async fn test_publication_waits_for_an_unknown_counter_key_before_repeating_an_o
     use crate::common::{ALICE_ORIGIN, HOUR_MS};
     use crate::unrequested::store_bundle_at;
     use paykit_sdk::AppScopes;
-    use pubky_switch_client::app::{RecordContent, Unopened};
-    use pubky_switch_client::testing::ScriptedSwitch;
-    use pubky_switch_core::records::Inbox;
+    use pubky_dispatch_client::app::{RecordContent, Unopened};
+    use pubky_dispatch_client::testing::ScriptedSwitch;
+    use pubky_dispatch_core::records::Inbox;
 
     let w = World::new();
     let scopes = AppScopes::new().request().build().unwrap();
@@ -2290,7 +2290,7 @@ async fn test_publication_waits_for_an_unknown_counter_key_before_repeating_an_o
 async fn test_publication_restored_answers_use_the_retained_request_and_current_sharing_choice() {
     use crate::common::{store, BOB_ORIGIN};
     use paykit_sdk::{AppScopes, PaykitConfig};
-    use pubky_switch_core::records::Inbox;
+    use pubky_dispatch_core::records::Inbox;
 
     for (in_place, moved) in [(false, false), (true, false), (false, true), (true, true)] {
         let w = World::new();
@@ -2384,7 +2384,7 @@ async fn test_publication_restored_answers_use_the_retained_request_and_current_
 async fn test_publication_replaces_an_undelivered_withdrawal_only_when_due() {
     use crate::common::{store, HOUR_MS};
     use paykit_sdk::{AppScopes, PaykitConfig};
-    use pubky_switch_client::app::{AppEvent, Delivery};
+    use pubky_dispatch_client::app::{AppEvent, Delivery};
 
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
@@ -2554,7 +2554,7 @@ async fn test_publication_reselecting_one_contact_retires_only_its_withdrawal_re
     assert_eq!(withdrawal.repeats, 0);
     assert!(matches!(
         shop.app().delivery(&withdrawal.id).await.unwrap(),
-        Some(pubky_switch_client::app::Delivery::Accepted { .. })
+        Some(pubky_dispatch_client::app::Delivery::Accepted { .. })
     ));
     assert_eq!(shop.app_mut().allow_list().await.unwrap(), before);
 
@@ -2575,7 +2575,7 @@ async fn test_publication_reselecting_one_contact_retires_only_its_withdrawal_re
     assert_eq!(before_resend, before);
     assert!(matches!(
         shop.app_mut().resend(&withdrawal.id).await.unwrap(),
-        pubky_switch_client::app::Delivery::Accepted { .. }
+        pubky_dispatch_client::app::Delivery::Accepted { .. }
     ));
     let resent = published(&shop, &carol).await;
     assert_eq!(
@@ -2642,8 +2642,8 @@ async fn test_publication_retry_waits_when_a_restored_publisher_already_withdrew
 #[tokio::test]
 async fn test_publication_retry_after_a_move_requires_the_original_application() {
     use crate::common::{BOB_ORIGIN, HOUR_MS};
-    use pubky_switch_core::ops::{Condition, OpKind};
-    use pubky_switch_core::records::Inbox;
+    use pubky_dispatch_core::ops::{Condition, OpKind};
+    use pubky_dispatch_core::records::Inbox;
 
     let w = World::new();
     let buyer = w.wallet("wallet").await;
@@ -2707,7 +2707,7 @@ async fn test_publication_withdrawal_retry_respects_a_newer_issue_in_an_interven
 async fn retry_after_two_moves(restored_withdraws: bool) {
     use crate::common::{store, BOB_ORIGIN, HOUR_MS};
     use paykit_sdk::PaykitConfig;
-    use pubky_switch_core::records::Inbox;
+    use pubky_dispatch_core::records::Inbox;
 
     let w = World::new();
     let buyer = w.wallet("wallet").await;
@@ -2815,8 +2815,8 @@ async fn test_publication_stops_retrying_when_its_only_older_offer_never_reached
 #[tokio::test]
 async fn test_publication_keeps_an_unknown_withdrawal_and_a_failed_resend_from_authorizing_another()
 {
-    use pubky_switch_client::app::AppEvent;
-    use pubky_switch_client::testing::Fault;
+    use pubky_dispatch_client::app::AppEvent;
+    use pubky_dispatch_client::testing::Fault;
 
     for accepted in [false, true] {
         let w = World::new();
@@ -2878,7 +2878,7 @@ async fn unknown_list(
     payer: [u8; 32],
     send: impl AsyncFnOnce(&mut Paykit),
 ) -> (ListPublicationRecord, [u8; 32]) {
-    use pubky_switch_client::testing::Fault;
+    use pubky_dispatch_client::testing::Fault;
     w.alice.switch().fail_next(Fault::Unanswered {
         path: "/inbox".into(),
         after: 0,
@@ -2972,7 +2972,7 @@ async fn pays(w: &World, buyer: &mut Paykit) -> bool {
 #[tokio::test]
 async fn test_publication_reports_an_unknown_withdrawal_and_sends_another_only_once_confirmed() {
     use paykit_sdk::{NoticeKind, Refusal, UserConfirmed};
-    use pubky_switch_client::clock::Clock;
+    use pubky_dispatch_client::clock::Clock;
 
     let w = World::new();
     let mut buyer = w.wallet("wallet").await;
@@ -3363,7 +3363,7 @@ async fn test_publication_answers_past_their_bounds_issue_nothing_over_a_given_u
 
 #[tokio::test]
 async fn test_publication_notice_of_a_version_superseded_while_its_batch_waited_goes() {
-    use pubky_switch_client::testing::Fault;
+    use pubky_dispatch_client::testing::Fault;
 
     let w = World::new();
     let buyer = w.wallet("wallet").await;
@@ -3472,7 +3472,7 @@ async fn test_publication_confirmed_withdrawal_builds_on_a_counter_another_insta
 async fn test_publication_confirmed_withdrawal_after_two_moves_starts_the_current_generation() {
     use crate::common::BOB_ORIGIN;
     use paykit_sdk::UserConfirmed;
-    use pubky_switch_core::records::Inbox;
+    use pubky_dispatch_core::records::Inbox;
 
     let w = World::new();
     let buyer = w.wallet("wallet").await;
@@ -3540,7 +3540,7 @@ async fn test_publication_stops_reporting_an_unknown_withdrawal_once_nothing_is_
 
 #[tokio::test]
 async fn test_publication_takes_only_a_proof_naming_its_own_unknown_list_as_its_arrival() {
-    use pubky_switch_client::testing::Fault;
+    use pubky_dispatch_client::testing::Fault;
 
     let w = World::new();
     let buyer = w.wallet("wallet").await;
@@ -3647,7 +3647,7 @@ async fn test_publication_takes_only_a_proof_naming_its_own_unknown_list_as_its_
 
 #[tokio::test]
 async fn test_publication_takes_a_proof_paid_from_the_unknown_list_as_its_arrival() {
-    use pubky_switch_client::testing::Fault;
+    use pubky_dispatch_client::testing::Fault;
 
     let w = World::new();
     let mut buyer = w.wallet("wallet").await;
@@ -3685,7 +3685,7 @@ async fn test_publication_takes_a_proof_paid_from_the_unknown_list_as_its_arriva
 
 #[tokio::test]
 async fn test_publication_takes_a_list_request_naming_the_unknown_withdrawal_as_its_arrival() {
-    use pubky_switch_client::testing::Fault;
+    use pubky_dispatch_client::testing::Fault;
 
     let w = World::new();
     let mut buyer = w.wallet("wallet").await;
@@ -3757,7 +3757,7 @@ async fn test_publication_takes_a_list_request_naming_the_unknown_withdrawal_as_
 /// lists, so it can block the payer.
 async fn contacts_shop(
     w: &World,
-    store: std::sync::Arc<dyn pubky_switch_client::store::StateStore>,
+    store: std::sync::Arc<dyn pubky_dispatch_client::store::StateStore>,
 ) -> Paykit {
     w.join_with(
         &w.bob,
@@ -3864,11 +3864,11 @@ async fn test_publication_proof_naming_an_unknown_withdrawal_leaves_it_unknown()
 async fn unknown_list_over_an_unread_settlement(
     w: &World,
 ) -> (Paykit, paykit_sdk::UnknownListDelivery, [u8; 32]) {
-    use pubky_switch_client::app::OpBatch;
+    use pubky_dispatch_client::app::OpBatch;
 
     let seen = std::sync::Arc::new(crate::outcome_record::NoSeenMarks::default());
-    let base =
-        std::sync::Arc::clone(&seen) as std::sync::Arc<dyn pubky_switch_client::store::StateStore>;
+    let base = std::sync::Arc::clone(&seen)
+        as std::sync::Arc<dyn pubky_dispatch_client::store::StateStore>;
     let payer = w.alice_id();
     let mut shop = w
         .join_with(
@@ -3947,7 +3947,7 @@ async fn test_publication_proof_kept_over_an_unread_settlement_record_settles_th
 
 #[tokio::test]
 async fn test_publication_proof_dropped_to_make_room_leaves_the_list_unknown() {
-    use pubky_switch_client::clock::Clock;
+    use pubky_dispatch_client::clock::Clock;
 
     let w = World::new();
     let buyer = w.wallet("wallet").await;
@@ -4049,9 +4049,9 @@ async fn test_publication_proof_of_a_held_settlement_while_the_lists_are_unknown
     w.clock.advance_ms(paykit_sdk::LISTS_REFRESH_MS);
     w.bob
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::Error {
+        .fail_next(pubky_dispatch_client::testing::Fault::Error {
             path: "/allow".into(),
-            code: pubky_switch_core::http::ErrorCode::Unavailable,
+            code: pubky_dispatch_core::http::ErrorCode::Unavailable,
             current: serde_json::Value::Null,
         });
     let again = proof_naming(&w, shop.app_id(), Some(shown.version()), "t1");

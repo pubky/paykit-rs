@@ -4,17 +4,17 @@ use paykit_lib::allowances::{check_successor, Ledger};
 use paykit_lib::derive::natural_key;
 use paykit_lib::records::{bind_ledger, AllowanceRecord};
 use paykit_lib::{AllowanceId, AttemptId, Body, Collection};
-use pubky_switch_client::app::{App, KeptOp, RecordTarget};
-use pubky_switch_core::enc::{hash, serde_b64};
-use pubky_switch_core::ops::Condition;
-use pubky_switch_core::sig::SignedDoc;
+use pubky_dispatch_client::app::{App, KeptOp, RecordTarget};
+use pubky_dispatch_core::enc::{hash, serde_b64};
+use pubky_dispatch_core::ops::Condition;
+use pubky_dispatch_core::sig::SignedDoc;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashSet};
 
 use super::approval::ApprovedOpening;
 use super::evidence::AppliedRecord;
-use crate::activity::switch_collection;
+use crate::activity::dispatch_collection;
 use crate::allowances::allowance_target;
 
 /// Signed originals the executor accepted before the backup. The grant names the initial
@@ -118,7 +118,7 @@ impl ReservationSigners {
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub(super) enum GrantEvidence {
-    /// Installed by the Switch client's applied-local transaction for this grant batch.
+    /// Installed by the Dispatch client's applied-local transaction for this grant batch.
     AwaitingProof {
         #[serde(with = "serde_b64")]
         value_hash: [u8; 32],
@@ -156,17 +156,17 @@ impl ExecutorHistory {
                     let cert =
                         paykit_lib::scopes::verify_certificate(&kept.cert, binder.identity())
                             .ok()?;
-                    let op = pubky_switch_core::ops::SignedOp::verify_with_cert(
+                    let op = pubky_dispatch_core::ops::SignedOp::verify_with_cert(
                         &kept.op,
                         &cert,
                         binder.identity(),
                     )
                     .ok()?;
-                    let p = pubky_switch_core::chain::TransitionProof::peek(kept.proof.as_ref()?)
+                    let p = pubky_dispatch_core::chain::TransitionProof::peek(kept.proof.as_ref()?)
                         .ok()?;
                     p.check_binds(&op).ok()?;
                     p.record_revision().ok()?;
-                    let pubky_switch_core::ops::OpKind::RecordPut(put) = &op.body().kind else {
+                    let pubky_dispatch_core::ops::OpKind::RecordPut(put) = &op.body().kind else {
                         return None;
                     };
                     (put.key == *key && cert.app_id() == executor).then_some(())
@@ -272,7 +272,7 @@ impl ExecutorHistory {
 
 pub(super) fn ledger_target(counterparty: &[u8; 32], id: &AllowanceId) -> RecordTarget {
     RecordTarget::new(
-        switch_collection(Collection::AllowanceLedgers, None),
+        dispatch_collection(Collection::AllowanceLedgers, None),
         &natural_key::allowance(counterparty, id),
     )
 }
