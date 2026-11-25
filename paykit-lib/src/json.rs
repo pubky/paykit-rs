@@ -1,10 +1,10 @@
-//! Reading the members of Paykit's JSON objects (Switch wire 1.1, Paykit wire Conventions).
+//! Reading the members of Paykit's JSON objects (Dispatch wire 1.1, Paykit wire Conventions).
 //!
 //! Readers ignore unknown members and read `null` as a missing member, unless a table gives
 //! `null` its own meaning. Error text names the section and the member, never the value.
 
-use pubky_switch_core::enc;
-use pubky_switch_core::time::parse_rfc3339;
+use pubky_dispatch_core::enc;
+use pubky_dispatch_core::time::parse_rfc3339;
 use serde_json::{Map, Value};
 
 use crate::error::{Error, Result};
@@ -79,7 +79,7 @@ impl<'a> Obj<'a> {
             .transpose()
     }
 
-    /// A required integer member (Switch wire 1.1: 0 to 2^53 - 1).
+    /// A required integer member (Dispatch wire 1.1: 0 to 2^53 - 1).
     pub(crate) fn req_int(&self, key: &str) -> Result<u64> {
         as_int(self.req(key)?, self.ctx, key)
     }
@@ -116,7 +116,7 @@ impl<'a> Obj<'a> {
             .transpose()
     }
 
-    /// A required time member, in Unix milliseconds (Switch wire 1.6).
+    /// A required time member, in Unix milliseconds (Dispatch wire 1.6).
     pub(crate) fn req_time(&self, key: &str) -> Result<u64> {
         time(self.req_str(key)?, self.ctx, key)
     }
@@ -128,7 +128,7 @@ impl<'a> Obj<'a> {
             .transpose()
     }
 
-    /// A required base64url member of exactly `N` bytes (Switch wire 1.2).
+    /// A required base64url member of exactly `N` bytes (Dispatch wire 1.2).
     pub(crate) fn req_b64<const N: usize>(&self, key: &str) -> Result<[u8; N]> {
         b64::<N>(self.req_str(key)?, self.ctx, key)
     }
@@ -140,12 +140,12 @@ impl<'a> Obj<'a> {
             .transpose()
     }
 
-    /// A required Pubky ID member, as its key (Switch wire 1.3).
+    /// A required Pubky ID member, as its key (Dispatch wire 1.3).
     pub(crate) fn req_pubky(&self, key: &str) -> Result<[u8; 32]> {
         enc::pubky_key(self.req_str(key)?).map_err(|_| bad(self.ctx, key, "not a Pubky ID"))
     }
 
-    /// A required App ID member, as its 16 bytes (Switch wire 1.3).
+    /// A required App ID member, as its 16 bytes (Dispatch wire 1.3).
     pub(crate) fn req_app_id(&self, key: &str) -> Result<[u8; 16]> {
         app_id(self.req_str(key)?, self.ctx, key)
     }
@@ -158,32 +158,32 @@ impl<'a> Obj<'a> {
     }
 }
 
-/// An integer of Switch wire 1.1.
+/// An integer of Dispatch wire 1.1.
 pub(crate) fn as_int(value: &Value, ctx: &str, key: &str) -> Result<u64> {
     value
         .as_u64()
-        .filter(|n| *n <= pubky_switch_core::json::MAX_INT)
-        .ok_or_else(|| bad(ctx, key, "not an integer of Switch wire 1.1"))
+        .filter(|n| *n <= pubky_dispatch_core::json::MAX_INT)
+        .ok_or_else(|| bad(ctx, key, "not an integer of Dispatch wire 1.1"))
 }
 
-/// A time of Switch wire 1.6, in Unix milliseconds.
+/// A time of Dispatch wire 1.6, in Unix milliseconds.
 pub(crate) fn time(text: &str, ctx: &str, key: &str) -> Result<u64> {
-    parse_rfc3339(text).map_err(|_| bad(ctx, key, "not a time of Switch wire 1.6"))
+    parse_rfc3339(text).map_err(|_| bad(ctx, key, "not a time of Dispatch wire 1.6"))
 }
 
-/// Base64url of exactly `N` bytes (Switch wire 1.2).
+/// Base64url of exactly `N` bytes (Dispatch wire 1.2).
 pub(crate) fn b64<const N: usize>(text: &str, ctx: &str, key: &str) -> Result<[u8; N]> {
     enc::unb64_array::<N>(text).map_err(|_| bad(ctx, key, &format!("not base64url of {N} bytes")))
 }
 
-/// An App ID's 16 bytes (Switch wire 1.3).
+/// An App ID's 16 bytes (Dispatch wire 1.3).
 pub(crate) fn app_id(text: &str, ctx: &str, key: &str) -> Result<[u8; 16]> {
     enc::app_id_decode(text).map_err(|_| bad(ctx, key, "not an App ID"))
 }
 
-/// Parse a JSON document strictly (Switch wire 1.1) into an object.
+/// Parse a JSON document strictly (Dispatch wire 1.1) into an object.
 pub(crate) fn parse_object(bytes: &[u8], ctx: &str) -> Result<Map<String, Value>> {
-    let value: Value = pubky_switch_core::json::parse_json(bytes)?;
+    let value: Value = pubky_dispatch_core::json::parse_json(bytes)?;
     match value {
         Value::Object(map) => Ok(map),
         _ => Err(Error::Invalid(format!("{ctx}: not a JSON object"))),
@@ -228,7 +228,7 @@ mod tests {
     }
 
     #[test]
-    fn test_json_integers_follow_the_switch_bound() {
+    fn test_json_integers_follow_the_dispatch_bound() {
         let value = json!({ "ok": 9_007_199_254_740_991u64, "big": 9_007_199_254_740_992u64 });
         let o = obj(&value);
         assert!(o.req_int("ok").is_ok());

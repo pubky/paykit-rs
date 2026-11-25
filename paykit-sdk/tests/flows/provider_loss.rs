@@ -1,4 +1,4 @@
-//! A provider loss (Paykit spec 7.3, "After a provider loss"; Pubky Switch spec 12.6): the
+//! A provider loss (Paykit spec 7.3, "After a provider loss"; Pubky Dispatch spec 12.6): the
 //! signer declares alice's generation lost at a new service, the old one stops answering,
 //! and her apps follow the loss there.
 
@@ -12,11 +12,11 @@ use paykit_sdk::{
     Doubtful, LossBoundary, PayOptions, PayOutcome, Paykit, PaykitBackup, PaykitConfig,
     PaykitError, PaymentDoubt, Rail, RailDeclaration, Refusal, RequestRef, RequestStatus,
 };
-use pubky_switch_client::app::UserConfirmed;
-use pubky_switch_client::clock::Clock;
-use pubky_switch_client::testing::{ScriptedSwitch, SWITCH_ORIGIN};
-use pubky_switch_core::claims::ClaimStatus;
-use pubky_switch_core::records::{Inbox, CLOCK_TOLERANCE_MS};
+use pubky_dispatch_client::app::UserConfirmed;
+use pubky_dispatch_client::clock::Clock;
+use pubky_dispatch_client::testing::{ScriptedSwitch, SWITCH_ORIGIN};
+use pubky_dispatch_core::claims::ClaimStatus;
+use pubky_dispatch_core::records::{Inbox, CLOCK_TOLERANCE_MS};
 
 use crate::common::{draft, request_from, store, World, ALICE_ORIGIN};
 use crate::restore::{is_refused, layer_of, nothing_restored, refused_restore, with_layer};
@@ -27,7 +27,7 @@ const NEXT_SECRET: [u8; 32] = [0x4e; 32];
 /// The key secret of the service after a second loss.
 const LATER_SECRET: [u8; 32] = [0x4f; 32];
 
-/// Alice's signer declares her current generation lost (Switch spec 12.6 step 1): a new
+/// Alice's signer declares her current generation lost (Dispatch spec 12.6 step 1): a new
 /// service recovering the account at the next generation, routed at [`SWITCH_ORIGIN`], the
 /// next `identity.json` naming it with `recovery_from`, delivered there and published; then
 /// the old service is unreachable.
@@ -50,7 +50,7 @@ pub(super) fn declare_third_loss(w: &World) -> Arc<ScriptedSwitch> {
 /// across then refuses the lost generation's evidence.
 pub(super) fn declare_loss_keeping_key(w: &World) -> Arc<ScriptedSwitch> {
     let lost = w.homeserver.identity_doc(&w.alice_id()).unwrap();
-    let entry = pubky_switch_core::records::ServiceKeyEntry {
+    let entry = pubky_dispatch_core::records::ServiceKeyEntry {
         generation: lost.generation(),
         key: lost.inbox().service_key,
     };
@@ -66,7 +66,7 @@ fn declare_loss_with(
     w: &World,
     lost_origin: &str,
     secret: [u8; 32],
-    kept_key: Option<pubky_switch_core::records::ServiceKeyEntry>,
+    kept_key: Option<pubky_dispatch_core::records::ServiceKeyEntry>,
 ) -> Arc<ScriptedSwitch> {
     let lost_generation = w
         .homeserver
@@ -115,7 +115,7 @@ pub(super) async fn follow_loss(app: &mut Paykit) -> u64 {
     // Reconciliation requests a fresh listing, even when receive finished its own listing.
     let pages = crate::certificate::client_listing_requests(app.app().cert());
     let mut reconciled = app.reconcile().await;
-    for _ in 1..pages.div_ceil(pubky_switch_client::app::LISTING_PAGES_PER_READ as usize) {
+    for _ in 1..pages.div_ceil(pubky_dispatch_client::app::LISTING_PAGES_PER_READ as usize) {
         let Err(error) = &reconciled else { break };
         assert!(
             matches!(
@@ -135,7 +135,7 @@ pub(super) async fn follow_loss(app: &mut Paykit) -> u64 {
 }
 
 /// The payer's activity for this request, as both of Alice's apps address it.
-fn request_target(request: &RequestRef) -> pubky_switch_client::app::RecordTarget {
+fn request_target(request: &RequestRef) -> pubky_dispatch_client::app::RecordTarget {
     use paykit_lib::collections::Collection;
     activity_target(request, Collection::PayerActivity)
 }
@@ -143,11 +143,11 @@ fn request_target(request: &RequestRef) -> pubky_switch_client::app::RecordTarge
 fn activity_target(
     request: &RequestRef,
     family: paykit_lib::collections::Collection,
-) -> pubky_switch_client::app::RecordTarget {
+) -> pubky_dispatch_client::app::RecordTarget {
     use paykit_lib::derive::natural_key;
-    use pubky_switch_client::app::{Collection as SwitchCollection, RecordTarget};
+    use pubky_dispatch_client::app::{Collection as DispatchCollection, RecordTarget};
     RecordTarget::new(
-        SwitchCollection::new(family.name(), family.fixed_policy()),
+        DispatchCollection::new(family.name(), family.fixed_policy()),
         &natural_key::request_record(&request.payee, &request.request_hash),
     )
 }
@@ -157,8 +157,8 @@ fn period_target(
     request: &RequestRef,
     family: paykit_lib::collections::Collection,
     period: &paykit_lib::periods::PeriodRef,
-) -> pubky_switch_client::app::RecordTarget {
-    pubky_switch_client::app::RecordTarget::new(
+) -> pubky_dispatch_client::app::RecordTarget {
+    pubky_dispatch_client::app::RecordTarget::new(
         activity_target(request, family).collection,
         &paykit_lib::derive::natural_key::period_record(
             &request.payee,
@@ -182,7 +182,7 @@ async fn recover_activity_with_phone_write(
     w: &World,
     wallet: &mut Paykit,
     phone: &mut Paykit,
-    target: &pubky_switch_client::app::RecordTarget,
+    target: &pubky_dispatch_client::app::RecordTarget,
     delete_held: bool,
 ) -> Arc<ScriptedSwitch> {
     recover_activity_writes(w, wallet, phone, &[(target, delete_held)]).await
@@ -192,27 +192,27 @@ async fn recover_activity_writes(
     w: &World,
     wallet: &mut Paykit,
     phone: &mut Paykit,
-    targets: &[(&pubky_switch_client::app::RecordTarget, bool)],
+    targets: &[(&pubky_dispatch_client::app::RecordTarget, bool)],
 ) -> Arc<ScriptedSwitch> {
     let writes = competing_activity_writes(w, wallet, phone, targets).await;
     recover_competing_writes(w, wallet, phone, targets, writes).await
 }
 
 struct CompetingWrites {
-    records: Vec<pubky_switch_client::client::answers::UploadedOp>,
-    applied: Vec<([u8; 32], pubky_switch_core::ops::RecordVersion)>,
+    records: Vec<pubky_dispatch_client::client::answers::UploadedOp>,
+    applied: Vec<([u8; 32], pubky_dispatch_core::ops::RecordVersion)>,
 }
 
 async fn competing_activity_writes(
     w: &World,
     wallet: &mut Paykit,
     phone: &mut Paykit,
-    targets: &[(&pubky_switch_client::app::RecordTarget, bool)],
+    targets: &[(&pubky_dispatch_client::app::RecordTarget, bool)],
 ) -> CompetingWrites {
-    use pubky_switch_client::app::OpBatch;
-    use pubky_switch_client::client::answers::UploadedOp;
-    use pubky_switch_client::testing::Fault;
-    use pubky_switch_core::ops::{Entry, OpKind, OpsRequest, SignedOp};
+    use pubky_dispatch_client::app::OpBatch;
+    use pubky_dispatch_client::client::answers::UploadedOp;
+    use pubky_dispatch_client::testing::Fault;
+    use pubky_dispatch_core::ops::{Entry, OpKind, OpsRequest, SignedOp};
     let mut batch = OpBatch::for_protocol("paykit");
     let mut applied = Vec::new();
     for &(target, delete) in targets {
@@ -289,11 +289,11 @@ async fn recover_competing_writes(
     w: &World,
     wallet: &mut Paykit,
     phone: &mut Paykit,
-    targets: &[(&pubky_switch_client::app::RecordTarget, bool)],
+    targets: &[(&pubky_dispatch_client::app::RecordTarget, bool)],
     writes: CompetingWrites,
 ) -> Arc<ScriptedSwitch> {
-    use pubky_switch_client::client::answers::RecoveryUpload;
-    use pubky_switch_client::client::{Credentials, SwitchClient};
+    use pubky_dispatch_client::client::answers::RecoveryUpload;
+    use pubky_dispatch_client::client::{Credentials, SwitchClient};
     let lost = wallet.app().own_identity().signed().clone();
     let next = declare_loss_of(w, ALICE_ORIGIN, NEXT_SECRET);
     phone.app_mut().refresh_identity().await.unwrap();
@@ -328,7 +328,7 @@ async fn recover_competing_writes(
         let held = wallet.app_mut().read_record(target).await.unwrap().unwrap();
         assert_eq!(held.version, version);
         // An honest lost service: the wallet's proved write stays current, and the other
-        // app's write on the same base is divergent (Pubky Switch wire 7.4.14).
+        // app's write on the same base is divergent (Pubky Dispatch wire 7.4.14).
         assert!(held.divergent && !held.different_write_at_held_version);
         assert_eq!(next.record(&key).unwrap().state.version, held.version);
     }
@@ -535,7 +535,7 @@ async fn disputed_receipt(expires: bool, delete: bool) {
 /// The messages `app` keeps for `record`: over its pause (`dw/`) or as replies before a
 /// record it can't read (`pr/`), each by its key.
 async fn kept_over(app: &Paykit, record: &[u8; 32]) -> Vec<(String, Vec<u8>)> {
-    use pubky_switch_core::enc::b64;
+    use pubky_dispatch_core::enc::b64;
     let mut kept = Vec::new();
     for prefix in [format!("dw/{}/", b64(record)), "pr/".to_string()] {
         for (key, value) in app
@@ -560,7 +560,7 @@ async fn accept_activity_successor(
     w: &World,
     wallet: &mut Paykit,
     phone: &mut Paykit,
-    target: &pubky_switch_client::app::RecordTarget,
+    target: &pubky_dispatch_client::app::RecordTarget,
 ) {
     let current = phone.app_mut().read_record(target).await.unwrap().unwrap();
     assert!(current.divergent && !current.different_write_at_held_version);
@@ -676,7 +676,7 @@ async fn test_provider_loss_restore_first_reads_the_current_activity() {
         .any(|r| r.record == key && r.paused));
     assert_eq!(executions(&w), 0);
     // The user answers the restore's question, confirms the restore's hold and what the
-    // paused record shows (Switch spec 12.4; Paykit spec 6). A payment by hand then still
+    // paused record shows (Dispatch spec 12.4; Paykit spec 6). A payment by hand then still
     // waits on the loss's doubt (Paykit spec 7.3): nothing is paid.
     let (doubt, passed) = pay_until_the_loss_doubt(&mut wallet, &request).await;
     assert_eq!(
@@ -725,7 +725,7 @@ async fn test_provider_loss_disputed_delete_protects_its_cancellation_from_expir
     let held = wallet.app().shared_record(&record).await.unwrap().unwrap();
     assert_eq!(
         held.content,
-        pubky_switch_client::app::RecordContent::Deleted
+        pubky_dispatch_client::app::RecordContent::Deleted
     );
     follow_loss(&mut wallet).await;
     let wallet_id = wallet.app_id();
@@ -752,8 +752,8 @@ async fn test_provider_loss_disputed_delete_protects_its_cancellation_from_expir
     wallet.receive(None).await.unwrap();
     let stop = format!(
         "kc/{}/{}/{:020}",
-        pubky_switch_core::enc::b64(&record),
-        pubky_switch_core::enc::b64(&shop.app().cert().hash()),
+        pubky_dispatch_core::enc::b64(&record),
+        pubky_dispatch_core::enc::b64(&shop.app().cert().hash()),
         wallet.app().own_identity().generation(),
     )
     .into_bytes();
@@ -996,7 +996,7 @@ async fn pay_until_the_loss_doubt(
     app: &mut Paykit,
     request: &paykit_sdk::RequestRef,
 ) -> (PaymentDoubt, Vec<Passed>) {
-    use pubky_switch_client::app::Refusal as ClientRefusal;
+    use pubky_dispatch_client::app::Refusal as ClientRefusal;
     let mut options = PayOptions::default();
     let mut passed = Vec::new();
     for _ in 0..8 {
@@ -1019,7 +1019,7 @@ async fn pay_until_the_loss_doubt(
             }) if doubt.before_loss.is_some() => return ((**doubt).clone(), passed),
             _ if matches!(
                 refused,
-                PaykitError::Client(pubky_switch_client::app::AppError::Refused(
+                PaykitError::Client(pubky_dispatch_client::app::AppError::Refused(
                     ClientRefusal::RestoreQuestionOpen
                 ))
             ) =>
@@ -1044,7 +1044,7 @@ async fn test_provider_loss_disputed_subscription_classifies_replies_by_its_sign
     use crate::periods::{january_details, monthly, period_proof};
     use paykit_lib::collections::Collection;
     use paykit_sdk::AppScopes;
-    use pubky_switch_client::app::AppEvent;
+    use pubky_dispatch_client::app::AppEvent;
 
     for delete_parent in [false, true] {
         let w = World::new();
@@ -1089,7 +1089,7 @@ async fn test_provider_loss_disputed_subscription_classifies_replies_by_its_sign
                 vec![request.request_hash],
                 Default::default(),
             );
-            let id = pubky_switch_core::message::Message::parse(reply.json(), &[])
+            let id = pubky_dispatch_core::message::Message::parse(reply.json(), &[])
                 .unwrap()
                 .msg_id;
             next.send_plaintext(w.carol_id(), guest.app().cert(), &reply, &[shop.app_id()])
@@ -1120,7 +1120,7 @@ async fn test_provider_loss_disputed_subscription_classifies_replies_by_its_sign
                 vec![request.request_hash],
                 body.clone(),
             );
-            let id = pubky_switch_core::message::Message::parse(proof.json(), &[])
+            let id = pubky_dispatch_core::message::Message::parse(proof.json(), &[])
                 .unwrap()
                 .msg_id;
             next.send_plaintext(w.carol_id(), guest.app().cert(), &proof, &[shop.app_id()])
@@ -1524,8 +1524,8 @@ async fn test_provider_loss_restore_reconciles_history_after_an_activity_success
 #[tokio::test]
 async fn test_provider_loss_kept_and_stored_details_wait_for_each_disputed_record() {
     use crate::periods::{january_details, monthly};
-    use pubky_switch_client::testing::Fault;
-    use pubky_switch_core::http::ErrorCode;
+    use pubky_dispatch_client::testing::Fault;
+    use pubky_dispatch_core::http::ErrorCode;
     for (dispute_parent, confirmed) in [(true, false), (false, false), (true, true), (false, true)]
     {
         let w = World::new();
@@ -1582,7 +1582,7 @@ async fn test_provider_loss_kept_and_stored_details_wait_for_each_disputed_recor
             vec![request.request_hash],
             details.to_body().unwrap(),
         );
-        let id = pubky_switch_core::message::Message::parse(message.json(), &[])
+        let id = pubky_dispatch_core::message::Message::parse(message.json(), &[])
             .unwrap()
             .msg_id;
         next.send_plaintext(w.bob_id(), shop.app().cert(), &message, &[wallet.app_id()])
@@ -1699,7 +1699,7 @@ async fn test_provider_loss_another_apps_request_stays_in_custody_during_a_dispu
     w.clock.advance_ms(paykit_sdk::KEPT_MESSAGE_MS);
     let now = w.clock.now_ms();
     next.push_missed(1, now - 1_000, now);
-    next.fail_next(pubky_switch_client::testing::Fault::Unreachable {
+    next.fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
         path: "records?collection".into(),
         after: 3,
     });
@@ -1734,7 +1734,7 @@ async fn test_provider_loss_missing_record_epoch_holds_the_original_request_proo
     use paykit_lib::collections::Collection;
     use paykit_lib::records::{ActivityRecord, ActivitySide};
     use paykit_sdk::AppScopes;
-    use pubky_switch_client::app::{RecordContent, Unopened};
+    use pubky_dispatch_client::app::{RecordContent, Unopened};
 
     let w = World::new();
     let both = AppScopes::new()
@@ -1906,7 +1906,7 @@ async fn test_provider_loss_missing_record_epoch_holds_the_original_request_proo
         vec![bought.request_hash],
         Default::default(),
     );
-    let stop_id = pubky_switch_core::message::Message::parse(stop.json(), &[])
+    let stop_id = pubky_dispatch_core::message::Message::parse(stop.json(), &[])
         .unwrap()
         .msg_id;
     next.send_plaintext(w.bob_id(), seller.app().cert(), &stop, &[observer.app_id()])
@@ -1916,8 +1916,8 @@ async fn test_provider_loss_missing_record_epoch_holds_the_original_request_proo
     assert_eq!(stopped.key_epochs_awaited, [sealed_at]);
     let stop_key = format!(
         "kc/{}/{}/{:020}",
-        pubky_switch_core::enc::b64(&observer.app().record_key(&purchase_target).unwrap()),
-        pubky_switch_core::enc::b64(&seller.app().cert().hash()),
+        pubky_dispatch_core::enc::b64(&observer.app().record_key(&purchase_target).unwrap()),
+        pubky_dispatch_core::enc::b64(&seller.app().cert().hash()),
         observer.app().own_identity().generation(),
     );
     assert!(observer
@@ -2002,7 +2002,7 @@ async fn test_provider_loss_the_final_activity_read_precedes_the_payment_method_
     assert!(
         matches!(
             failed,
-            PaykitError::Client(pubky_switch_client::app::AppError::Store(_))
+            PaykitError::Client(pubky_dispatch_client::app::AppError::Store(_))
         ),
         "{failed:?}"
     );
@@ -2123,7 +2123,7 @@ async fn test_provider_loss_request_paid_at_the_old_service_needs_confirmation_b
         .unwrap()
         .is_none_or(|read| read.view.status != ClaimStatus::Settled));
     // The request was payable before the declaration: paying it by hand needs the user's
-    // confirmation that another app may already have paid it (Switch spec 12.6 step 5).
+    // confirmation that another app may already have paid it (Dispatch spec 12.6 step 5).
     let again = wallet
         .pay_request(&request, PayOptions::default())
         .await
@@ -2179,15 +2179,15 @@ async fn test_provider_loss_automatic_payment_of_an_obligation_from_before_is_re
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
-    let dispatched = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    let handed_off = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
     let held = request_from(&mut shop, w.alice_id(), draft("2", w.clock.now_ms())).await;
     wallet.receive(None).await.unwrap();
-    // A dispatch before the loss whose answer is lost: the method paid it, and the attempt
+    // A handoff before the loss whose answer is lost: the method paid it, and the attempt
     // stays open for a resume to repeat.
     w.rail.set_idempotent(true);
     w.rail.next(Behaviour::LoseAnswer);
     let lost = wallet
-        .pay_request(&dispatched, PayOptions::default())
+        .pay_request(&handed_off, PayOptions::default())
         .await
         .outcome
         .unwrap();
@@ -2196,7 +2196,7 @@ async fn test_provider_loss_automatic_payment_of_an_obligation_from_before_is_re
     w.clock.advance_ms(60_000);
     declare_loss(&w);
     follow_loss(&mut wallet).await;
-    // A resume never repeats the dispatch made before the loss.
+    // A resume never repeats the handoff made before the loss.
     let resumed = wallet.resume_payments().await.unwrap();
     assert!(
         !resumed
@@ -2676,7 +2676,7 @@ async fn test_provider_loss_request_created_inside_the_residual_window_is_paid_o
 }
 
 #[tokio::test]
-async fn test_provider_loss_resume_never_repeats_a_dispatch_from_before_the_loss() {
+async fn test_provider_loss_resume_never_repeats_a_handoff_from_before_the_loss() {
     let w = World::new();
     w.rail.set_declaration(
         RailDeclaration::new(
@@ -2689,7 +2689,7 @@ async fn test_provider_loss_resume_never_repeats_a_dispatch_from_before_the_loss
     let mut shop = w.shop().await;
     let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
     wallet.receive(None).await.unwrap();
-    // Dispatched at the old service, its answer never coming: a resume on this idempotent
+    // Handed off at the old service, its answer never coming: a resume on this idempotent
     // method without a history would repeat it.
     w.rail.next(Behaviour::Hang);
     let PayOutcome::Pending { attempt_id, .. } = wallet
@@ -2714,9 +2714,9 @@ async fn test_provider_loss_resume_never_repeats_a_dispatch_from_before_the_loss
         .unwrap();
     let attempt = read.view.attempt(&attempt_id.to_bytes()).unwrap();
     assert_eq!(attempt.owner, wallet.app_id());
-    assert_eq!(attempt.outcome, pubky_switch_core::claims::Outcome::Open);
+    assert_eq!(attempt.outcome, pubky_dispatch_core::claims::Outcome::Open);
     // The user states it wasn't paid before the loss: the obligation's doubt ends, and
-    // still the dispatch this app made before the loss isn't repeated.
+    // still the handoff this app made before the loss isn't repeated.
     wallet
         .confirm_not_paid_before_loss(&obligation, &kept_loss(&wallet).await, UserConfirmed::new())
         .await
@@ -2989,7 +2989,7 @@ async fn shown_then_newer_loss(
     if step_run {
         follow_loss(wallet).await;
     } else {
-        next.fail_next(pubky_switch_client::testing::Fault::Unreachable {
+        next.fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
             path: "/ops".into(),
             after: 0,
         });
@@ -3126,17 +3126,17 @@ async fn test_provider_loss_statement_about_an_older_loss_refused_before_the_new
 /// A host store that stops exactly the loss callback's local commit.
 #[derive(Default)]
 struct LossCommitStore {
-    inner: pubky_switch_client::store::MemoryStore,
+    inner: pubky_dispatch_client::store::MemoryStore,
     mode: std::sync::atomic::AtomicU8,
     reached: std::sync::atomic::AtomicBool,
 }
 
-impl pubky_switch_client::store::StateStore for LossCommitStore {
+impl pubky_dispatch_client::store::StateStore for LossCommitStore {
     fn get(
         &self,
         ns: &str,
         key: &[u8],
-    ) -> Result<Option<Vec<u8>>, pubky_switch_client::error::StoreError> {
+    ) -> Result<Option<Vec<u8>>, pubky_dispatch_client::error::StoreError> {
         self.inner.get(ns, key)
     }
 
@@ -3146,19 +3146,19 @@ impl pubky_switch_client::store::StateStore for LossCommitStore {
         prefix: &[u8],
         after: Option<&[u8]>,
         limit: u32,
-    ) -> Result<Vec<pubky_switch_client::store::KeyValue>, pubky_switch_client::error::StoreError>
+    ) -> Result<Vec<pubky_dispatch_client::store::KeyValue>, pubky_dispatch_client::error::StoreError>
     {
         self.inner.scan(ns, prefix, after, limit)
     }
 
     fn commit(
         &self,
-        batch: pubky_switch_client::store::WriteBatch,
-    ) -> Result<(), pubky_switch_client::error::StoreError> {
+        batch: pubky_dispatch_client::store::WriteBatch,
+    ) -> Result<(), pubky_dispatch_client::error::StoreError> {
         self.commit_with(batch, |batch| {
             self.inner
                 .commit(batch)
-                .map(|()| pubky_switch_client::store::CommitOutcome::Applied)
+                .map(|()| pubky_dispatch_client::store::CommitOutcome::Applied)
         })
         .map(|_| ())
     }
@@ -3166,18 +3166,20 @@ impl pubky_switch_client::store::StateStore for LossCommitStore {
     fn acquire(
         &self,
         ns: &str,
-        owner: pubky_switch_client::store::StoreOwner,
-    ) -> Result<pubky_switch_client::store::AcquireOutcome, pubky_switch_client::error::StoreError>
-    {
+        owner: pubky_dispatch_client::store::StoreOwner,
+    ) -> Result<
+        pubky_dispatch_client::store::AcquireOutcome,
+        pubky_dispatch_client::error::StoreError,
+    > {
         self.inner.acquire(ns, owner)
     }
 
     fn commit_if(
         &self,
         ns: &str,
-        owner: pubky_switch_client::store::StoreOwner,
-        batch: pubky_switch_client::store::WriteBatch,
-    ) -> Result<pubky_switch_client::store::CommitOutcome, pubky_switch_client::error::StoreError>
+        owner: pubky_dispatch_client::store::StoreOwner,
+        batch: pubky_dispatch_client::store::WriteBatch,
+    ) -> Result<pubky_dispatch_client::store::CommitOutcome, pubky_dispatch_client::error::StoreError>
     {
         self.commit_with(batch, |batch| self.inner.commit_if(ns, owner, batch))
     }
@@ -3185,17 +3187,17 @@ impl pubky_switch_client::store::StateStore for LossCommitStore {
 impl LossCommitStore {
     fn commit_with(
         &self,
-        batch: pubky_switch_client::store::WriteBatch,
+        batch: pubky_dispatch_client::store::WriteBatch,
         apply: impl FnOnce(
-            pubky_switch_client::store::WriteBatch,
+            pubky_dispatch_client::store::WriteBatch,
         ) -> Result<
-            pubky_switch_client::store::CommitOutcome,
-            pubky_switch_client::error::StoreError,
+            pubky_dispatch_client::store::CommitOutcome,
+            pubky_dispatch_client::error::StoreError,
         >,
-    ) -> Result<pubky_switch_client::store::CommitOutcome, pubky_switch_client::error::StoreError>
+    ) -> Result<pubky_dispatch_client::store::CommitOutcome, pubky_dispatch_client::error::StoreError>
     {
-        use pubky_switch_client::error::StoreError;
-        use pubky_switch_client::store::Write;
+        use pubky_dispatch_client::error::StoreError;
+        use pubky_dispatch_client::store::Write;
         use std::sync::atomic::Ordering::SeqCst;
         let loss = batch
             .writes()
@@ -3214,7 +3216,7 @@ impl LossCommitStore {
                 1 => return Err(StoreError::Unavailable),
                 2 => {
                     let applied = apply(batch)?;
-                    if applied != pubky_switch_client::store::CommitOutcome::Applied {
+                    if applied != pubky_dispatch_client::store::CommitOutcome::Applied {
                         return Ok(applied);
                     }
                     return Err(StoreError::Unknown);
@@ -3386,7 +3388,7 @@ async fn test_provider_loss_unknown_current_boundary_refuses_read_and_backup() {
         .app_mut()
         .protocol_commit(
             "paykit",
-            &[pubky_switch_client::app::LocalWrite::Put {
+            &[pubky_dispatch_client::app::LocalWrite::Put {
                 key: b"pl".to_vec(),
                 value: serde_json::to_vec(&value).unwrap(),
             }],
@@ -3544,8 +3546,8 @@ async fn test_provider_loss_keeps_the_floor_divergence_hold() {
     // Paykit wire 5.6, Divergent floor: the hold survives a later provider loss.
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
-    let target = pubky_switch_client::app::RecordTarget::new(
-        pubky_switch_client::app::Collection::new(
+    let target = pubky_dispatch_client::app::RecordTarget::new(
+        pubky_dispatch_client::app::Collection::new(
             "block_floor",
             paykit_lib::collections::Collection::BlockFloor.fixed_policy(),
         ),
@@ -3605,8 +3607,8 @@ async fn test_provider_loss_floor_upload_seen_only_in_a_listing_shows_no_generat
     let mut shop = w.shop().await;
     let before = phone.backup().await.unwrap();
     drop(phone);
-    let target = pubky_switch_client::app::RecordTarget::new(
-        pubky_switch_client::app::Collection::new(
+    let target = pubky_dispatch_client::app::RecordTarget::new(
+        pubky_dispatch_client::app::Collection::new(
             "block_floor",
             paykit_lib::collections::Collection::BlockFloor.fixed_policy(),
         ),
@@ -3639,11 +3641,11 @@ async fn test_provider_loss_floor_upload_seen_only_in_a_listing_shows_no_generat
     // The phone's own reads of the floor fail meanwhile, so only its listing shows the upload.
     let path = format!(
         "/records/{}",
-        pubky_switch_core::enc::b64(&phone.app().record_key(&target).unwrap())
+        pubky_dispatch_core::enc::b64(&phone.app().record_key(&target).unwrap())
     );
     const FAILED_READS: usize = 40;
     for _ in 0..FAILED_READS {
-        next.fail_next(pubky_switch_client::testing::Fault::Unreachable {
+        next.fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
             path: path.clone(),
             after: 0,
         });
@@ -3680,13 +3682,13 @@ async fn test_provider_loss_floor_upload_seen_only_in_a_listing_shows_no_generat
     assert!(w.rail.all_pay_calls().is_empty());
 }
 
-/// Alice's wallet dispatches a payment the method leaves pending, is backed up with it in
+/// Alice's wallet hands off a payment the method leaves pending, is backed up with it in
 /// flight and lost; the signer declares a provider loss, which the laptop follows, so the new
 /// service holds the request's record but no claim for the obligation, and the wallet is
-/// restored from that backup there. `paid` settles the dispatch paid before the restore;
+/// restored from that backup there. `paid` settles the handoff paid before the restore;
 /// otherwise the method's history, which doesn't survive a restore, tells nothing of it.
 /// Returns the world, the restored wallet, the shop, the request and the attempt.
-async fn restored_dispatch_without_a_claim(
+async fn restored_handoff_without_a_claim(
     paid: bool,
 ) -> (World, Paykit, Paykit, RequestRef, paykit_sdk::AttemptId) {
     let w = World::new();
@@ -3750,12 +3752,12 @@ async fn stage_of(app: &Paykit, attempt_id: &paykit_sdk::AttemptId) -> paykit_sd
 }
 
 #[tokio::test]
-async fn test_provider_loss_restored_dispatch_without_a_claim_the_method_shows_paid_keeps_its_proof(
-) {
-    // The method's history shows the restored dispatch paid: it is recorded paid, its proof
+async fn test_provider_loss_restored_handoff_without_a_claim_the_method_shows_paid_keeps_its_proof()
+{
+    // The method's history shows the restored handoff paid: it is recorded paid, its proof
     // reaches the payee, and nothing pays it again, even once the user states it wasn't paid
     // before the loss (Paykit spec 7.2, 8.4).
-    let (w, mut app, mut shop, request, attempt_id) = restored_dispatch_without_a_claim(true).await;
+    let (w, mut app, mut shop, request, attempt_id) = restored_handoff_without_a_claim(true).await;
     app.resume_payments().await.unwrap();
     assert_eq!(
         stage_of(&app, &attempt_id).await,
@@ -3784,12 +3786,12 @@ async fn test_provider_loss_restored_dispatch_without_a_claim_the_method_shows_p
 }
 
 #[tokio::test]
-async fn test_provider_loss_restored_dispatch_without_a_claim_or_history_stays_doubtful() {
-    // Neither the claim nor the method's history can tell: the restored dispatch stays open
+async fn test_provider_loss_restored_handoff_without_a_claim_or_history_stays_doubtful() {
+    // Neither the claim nor the method's history can tell: the restored handoff stays open
     // as potentially paid. The refusal names it as this app's own restored attempt, before
     // and after the user states the request wasn't paid before the loss, and nothing is
     // paid again until the user decides on it (Paykit spec 7.2, 8.4).
-    let (w, mut app, _shop, request, attempt_id) = restored_dispatch_without_a_claim(false).await;
+    let (w, mut app, _shop, request, attempt_id) = restored_handoff_without_a_claim(false).await;
     app.resume_payments().await.unwrap();
     let stage = stage_of(&app, &attempt_id).await;
     assert!(
@@ -3823,12 +3825,12 @@ async fn test_provider_loss_restored_dispatch_without_a_claim_or_history_stays_d
     assert_eq!(executions(&w), 2);
 }
 
-/// The restored dispatch of [`restored_dispatch_without_a_claim`], its method silent,
+/// The restored handoff of [`restored_handoff_without_a_claim`], its method silent,
 /// resolved by the user as `resolution` after a resume left it open.
 async fn resolved_without_a_claim(
     resolution: paykit_sdk::Resolution,
 ) -> (World, Paykit, RequestRef, paykit_sdk::AttemptId) {
-    let (w, mut app, _shop, request, attempt_id) = restored_dispatch_without_a_claim(false).await;
+    let (w, mut app, _shop, request, attempt_id) = restored_handoff_without_a_claim(false).await;
     app.resume_payments().await.unwrap();
     let obligation = app.payments().await.unwrap()[0].obligation;
     app.resolve_attempt(&obligation, attempt_id, resolution, UserConfirmed::new())
@@ -3848,8 +3850,9 @@ async fn journaled_past_the_window(
     app: &mut Paykit,
     attempt_id: &paykit_sdk::AttemptId,
 ) -> bool {
-    w.clock
-        .advance_ms(2 * 24 * crate::common::HOUR_MS + pubky_switch_core::claims::RECONCILIATION_MS);
+    w.clock.advance_ms(
+        2 * 24 * crate::common::HOUR_MS + pubky_dispatch_core::claims::RECONCILIATION_MS,
+    );
     app.receive(None).await.unwrap();
     app.resume_payments().await.unwrap();
     app.payments()
@@ -3860,8 +3863,8 @@ async fn journaled_past_the_window(
 }
 
 #[tokio::test]
-async fn test_provider_loss_restored_dispatch_without_a_claim_the_user_resolves_paid() {
-    // No claim shows the restored dispatch and the method can't tell: the user, seen "may
+async fn test_provider_loss_restored_handoff_without_a_claim_the_user_resolves_paid() {
+    // No claim shows the restored handoff and the method can't tell: the user, seen "may
     // already be paid", resolves it as paid. Its journal entry finishes, the request
     // record's `status` is `paid`, and with no claim to settle the journal keeps the user's
     // word: the request is refused as already paid, also once the user states it wasn't paid
@@ -3889,8 +3892,8 @@ async fn test_provider_loss_restored_dispatch_without_a_claim_the_user_resolves_
 }
 
 #[tokio::test]
-async fn test_provider_loss_restored_dispatch_without_a_claim_the_user_resolves_not_paid() {
-    // The user resolves the same restored dispatch as not paid: its entry finishes, the
+async fn test_provider_loss_restored_handoff_without_a_claim_the_user_resolves_not_paid() {
+    // The user resolves the same restored handoff as not paid: its entry finishes, the
     // doubt no longer names it, and a payment the user then makes over the loss is made;
     // past the claim's window the resolved entry is dropped (Paykit spec 7.2).
     let (w, mut app, request, attempt_id) =
@@ -3910,11 +3913,11 @@ async fn test_provider_loss_restored_dispatch_without_a_claim_the_user_resolves_
 }
 
 #[tokio::test]
-async fn test_provider_loss_restored_dispatch_left_open_beside_a_new_one_restores_again() {
-    // The user pays over the restored dispatch's doubt, and the method leaves the new payment
+async fn test_provider_loss_restored_handoff_left_open_beside_a_new_one_restores_again() {
+    // The user pays over the restored handoff's doubt, and the method leaves the new payment
     // pending: two open entries for the obligation, one restored. A backup of that restores,
     // and both attempts are in the doubt the restored app shows (Paykit spec 7.2, 12.4).
-    let (w, mut app, _shop, request, attempt_id) = restored_dispatch_without_a_claim(false).await;
+    let (w, mut app, _shop, request, attempt_id) = restored_handoff_without_a_claim(false).await;
     app.resume_payments().await.unwrap();
     let options = crate::common::over_hold(&app, &request).await;
     let refused = app.pay_request(&request, options.clone()).await.outcome;
@@ -3952,8 +3955,8 @@ async fn test_provider_loss_restored_dispatch_left_open_beside_a_new_one_restore
 }
 
 #[tokio::test]
-async fn test_provider_loss_restored_dispatch_paid_whose_outcome_isnt_written_is_already_paid() {
-    // As in the restored dispatch the method shows paid, but the outcome's write at the new
+async fn test_provider_loss_restored_handoff_paid_whose_outcome_isnt_written_is_already_paid() {
+    // As in the restored handoff the method shows paid, but the outcome's write at the new
     // service doesn't go through: the entry holds the method's proof, unwritten. It is
     // already paid, never a payment the user may confirm again, and the user's `done`
     // writes its outcome with the proof (Paykit spec 7.2).
@@ -3983,7 +3986,7 @@ async fn test_provider_loss_restored_dispatch_paid_whose_outcome_isnt_written_is
     follow_generation(&mut app).await;
     // The outcome's write at the new service fails during reconciliation.
     for _ in 0..2 {
-        next.fail_next(pubky_switch_client::testing::Fault::Unreachable {
+        next.fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
             path: "/ops".into(),
             after: 0,
         });
@@ -4043,7 +4046,7 @@ async fn test_provider_loss_restored_dispatch_paid_whose_outcome_isnt_written_is
 async fn test_provider_loss_competing_upload_is_divergent_and_the_receipt_waits_for_the_user() {
     // An honest lost service: another app's write, never applied there, built on the same
     // base as the wallet's applied write, is uploaded after the loss. The wallet's proved
-    // write stays current and the other is divergent (Pubky Switch wire 7.4.14). A receipt
+    // write stays current and the other is divergent (Pubky Dispatch wire 7.4.14). A receipt
     // for the paid request then waits for the user's confirmation of the record, nothing is
     // paid again, and once the user confirms what it shows, the receipt is taken.
     let w = World::new();
@@ -4105,12 +4108,12 @@ async fn test_provider_loss_competing_upload_is_divergent_and_the_receipt_waits_
 
 /// The honest case after a provider loss: another app's write on the same base as the
 /// wallet's applied write, never applied at the lost service, uploaded after the loss; the
-/// wallet's proved write stays current and the other is divergent (Pubky Switch wire 7.4.14).
+/// wallet's proved write stays current and the other is divergent (Pubky Dispatch wire 7.4.14).
 async fn recover_with_divergent_phone_write(
     w: &World,
     wallet: &mut Paykit,
     phone: &mut Paykit,
-    target: &pubky_switch_client::app::RecordTarget,
+    target: &pubky_dispatch_client::app::RecordTarget,
 ) -> Arc<ScriptedSwitch> {
     recover_with_divergent_phone_writes(w, wallet, phone, &[(target, false)]).await
 }
@@ -4120,7 +4123,7 @@ async fn recover_with_divergent_phone_writes(
     w: &World,
     wallet: &mut Paykit,
     phone: &mut Paykit,
-    targets: &[(&pubky_switch_client::app::RecordTarget, bool)],
+    targets: &[(&pubky_dispatch_client::app::RecordTarget, bool)],
 ) -> Arc<ScriptedSwitch> {
     let writes = competing_activity_writes(w, wallet, phone, targets).await;
     recover_competing_writes(w, wallet, phone, targets, writes).await
@@ -4283,7 +4286,7 @@ async fn test_provider_loss_competing_upload_is_divergent_and_the_credit_waits_f
 /// Alice's wallet, holding `paykit_pay` and `paykit_manage_contacts`, with bob's request
 /// received and bob blocked; then her provider is lost, and the new service has no room for
 /// bob's deny entry, so the list upload that carries it stays owed: the recovery waits at its
-/// list step, while writes and receiving go on (Switch wire 7.4.14, "Lists"). Alice's phone, holding `paykit_pay` alone, follows the
+/// list step, while writes and receiving go on (Dispatch wire 7.4.14, "Lists"). Alice's phone, holding `paykit_pay` alone, follows the
 /// loss too. Returns the wallet, the phone and the request.
 async fn loss_with_an_owed_deny_entry(w: &World) -> (Paykit, Paykit, RequestRef) {
     loss_with_an_owed_deny_entry_after(w, false).await
@@ -4331,17 +4334,17 @@ async fn loss_with_an_owed_deny_entry_after(
     }
     let next = declare_loss(w);
     if interrupted {
-        next.fail_next(pubky_switch_client::testing::Fault::Unreachable {
+        next.fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
             path: "/recovery/upload".into(),
             after: 0,
         });
     }
     // The new service's deny list has no room for bob's entry: each list upload is refused
-    // for it (Switch wire 7.4.14, `429 quota_exceeded` with `limit` `deny`).
+    // for it (Dispatch wire 7.4.14, `429 quota_exceeded` with `limit` `deny`).
     for _ in 0..64 {
-        next.fail_next(pubky_switch_client::testing::Fault::Error {
+        next.fail_next(pubky_dispatch_client::testing::Fault::Error {
             path: "/recovery/upload".into(),
-            code: pubky_switch_core::http::ErrorCode::QuotaExceeded,
+            code: pubky_dispatch_core::http::ErrorCode::QuotaExceeded,
             current: serde_json::json!({ "limit": "deny", "over": 1 }),
         });
     }
@@ -4363,7 +4366,7 @@ async fn assert_lists_step_owes_bob(w: &World, app: &Paykit) {
     let info = app.app().recovery_info().await.unwrap().unwrap();
     assert_eq!(
         info.step,
-        pubky_switch_client::app::RecoveryStep::Lists,
+        pubky_dispatch_client::app::RecoveryStep::Lists,
         "{info:?}"
     );
     let owed = app.app().recovery_deny_entries().await.unwrap();
@@ -4461,7 +4464,7 @@ async fn test_provider_loss_unblock_with_lists_read_alone_raises_the_floor_first
     assert!(!phone
         .app()
         .cert()
-        .has_permission(pubky_switch_core::scopes::Permission::ListsManage));
+        .has_permission(pubky_dispatch_core::scopes::Permission::ListsManage));
     assert_lists_step_owes_bob(&w, &phone).await;
     assert_eq!(block_floor(&phone).await, None);
     phone.unblock(&w.bob_id()).await.unwrap();
@@ -4512,7 +4515,7 @@ async fn test_provider_loss_list_read_before_the_list_step_isnt_taken_as_fresh()
     // The evidence upload is interrupted once, and a receive reads the lists meanwhile, when
     // the new service holds none of the loss's deny entries and the client owes them all.
     // At the list step, seconds later, that copy isn't taken as fresh: bob stays blocked for
-    // payments (Switch wire 7.4.14, "Lists"; Paykit spec 8.1).
+    // payments (Dispatch wire 7.4.14, "Lists"; Paykit spec 8.1).
     let w = World::new();
     let (mut wallet, _phone, request) = loss_with_an_owed_deny_entry_after(&w, true).await;
     reconcile_and_end(&mut wallet).await;
@@ -4537,7 +4540,7 @@ async fn test_provider_loss_list_read_before_the_list_step_isnt_taken_as_fresh()
 
 /// Alice's app, holding `scopes`, with bob blocked and the lists read; then her provider is
 /// lost, and the app's first evidence upload goes unanswered, so a receive runs while the
-/// recovery is at its upload step, and a second follows (Switch spec 12.6). When `stays`,
+/// recovery is at its upload step, and a second follows (Dispatch spec 12.6). When `stays`,
 /// every later upload goes unanswered too, and the recovery waits at that step.
 async fn loss_interrupted_at_upload(
     w: &World,
@@ -4565,7 +4568,7 @@ async fn loss_interrupted_at_upload(
     app.receive(None).await.unwrap();
     let next = declare_loss(w);
     for _ in 0..if stays { 64 } else { 1 } {
-        next.fail_next(pubky_switch_client::testing::Fault::Unreachable {
+        next.fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
             path: "/recovery/upload".into(),
             after: 0,
         });
@@ -4578,7 +4581,7 @@ async fn loss_interrupted_at_upload(
 }
 
 /// The recovery step `app` is at.
-async fn recovery_step(app: &Paykit) -> pubky_switch_client::app::RecoveryStep {
+async fn recovery_step(app: &Paykit) -> pubky_dispatch_client::app::RecoveryStep {
     app.app().recovery_info().await.unwrap().unwrap().step
 }
 
@@ -4603,7 +4606,7 @@ async fn deny_copy(app: &Paykit) -> (Vec<[u8; 32]>, bool) {
 async fn test_provider_loss_list_read_at_the_upload_step_keeps_the_stored_deny_list() {
     // At the upload step the new service holds none of the loss's deny entries, and the
     // client names none yet: a payer's or a seller's read of the lists then takes nothing,
-    // keeps bob in its copy, raises no floor, and holds no copy fresh (Switch wire 7.4.14).
+    // keeps bob in its copy, raises no floor, and holds no copy fresh (Dispatch wire 7.4.14).
     use paykit_sdk::AppScopes;
     for scopes in [
         AppScopes::new().pay().manage_contacts(),
@@ -4613,7 +4616,7 @@ async fn test_provider_loss_list_read_at_the_upload_step_keeps_the_stored_deny_l
         let (app, _) = loss_interrupted_at_upload(&w, scopes, true).await;
         assert_eq!(
             recovery_step(&app).await,
-            pubky_switch_client::app::RecoveryStep::Upload
+            pubky_dispatch_client::app::RecoveryStep::Upload
         );
         let (copy, fresh) = deny_copy(&app).await;
         assert!(copy.contains(&w.bob_id()), "{copy:?}");
@@ -4632,7 +4635,7 @@ async fn test_provider_loss_upload_finished_in_a_receive_keeps_its_peer_blocked(
         loss_interrupted_at_upload(&w, AppScopes::new().pay().manage_contacts(), false).await;
     let request = request.unwrap();
     assert!(
-        recovery_step(&wallet).await > pubky_switch_client::app::RecoveryStep::Lists,
+        recovery_step(&wallet).await > pubky_dispatch_client::app::RecoveryStep::Lists,
         "{:?}",
         recovery_step(&wallet).await
     );
@@ -4661,17 +4664,17 @@ async fn test_provider_loss_upload_finished_in_a_receive_keeps_its_peer_blocked(
 async fn test_provider_loss_send_to_a_blocked_peer_waits_after_a_read_at_the_upload_step() {
     // A seller's read of the lists at the upload step, in the receive that then finishes the
     // recovery's steps, takes nothing: a payment request to bob, blocked, isn't sent on a
-    // copy read before them (Switch wire 7.4.14; Paykit spec 8.1).
+    // copy read before them (Dispatch wire 7.4.14; Paykit spec 8.1).
     use paykit_sdk::AppScopes;
     let w = World::new();
-    // Bob's switch admits alice: only alice's block of him can stop the send.
+    // Bob's Dispatch admits alice: only alice's block of him can stop the send.
     let mut buyer = w
         .join(&w.bob, "buyer", AppScopes::new().pay().build().unwrap())
         .await;
     buyer.app_mut().invite(&w.alice_id()).await.unwrap();
     let (mut shop, _) =
         loss_interrupted_at_upload(&w, AppScopes::new().request().manage_contacts(), false).await;
-    assert!(recovery_step(&shop).await > pubky_switch_client::app::RecoveryStep::Lists);
+    assert!(recovery_step(&shop).await > pubky_dispatch_client::app::RecoveryStep::Lists);
     let entries = w.bob.switch().entries_from(&w.alice_id());
     let _ = shop
         .send_request(w.bob_id(), draft("2", w.clock.now_ms()))
@@ -4702,7 +4705,7 @@ async fn test_provider_loss_unblock_at_the_upload_step_waits_for_the_list_step()
 async fn test_provider_loss_list_read_at_the_list_step_is_fresh_and_holds_the_owed_entry() {
     // At the list step a read of the lists holds the loss's owed deny entries, and is right
     // once they land: the copy is fresh, so a deny list that stays full holds nothing else
-    // back (Switch wire 7.4.14, "Lists").
+    // back (Dispatch wire 7.4.14, "Lists").
     let w = World::new();
     let (mut wallet, _phone, _request) = loss_with_an_owed_deny_entry(&w).await;
     w.clock.advance_ms(paykit_sdk::LISTS_REFRESH_MS);
@@ -4745,13 +4748,13 @@ async fn test_provider_loss_upload_goes_on_with_no_deny_list_copy() {
     // An app that keeps no copy of the deny list, its recovery stopped at the evidence
     // upload: its reads of the lists leave the copy unknown rather than stop the receive, so
     // the next receive uploads once the service answers, and the recovery goes on.
-    use pubky_switch_client::store::WriteBatch;
+    use pubky_dispatch_client::store::WriteBatch;
     let w = World::new();
     let base = store();
     let mut wallet = w.wallet_on("wallet", Arc::clone(&base)).await;
     wallet.receive(None).await.unwrap();
     let next = declare_loss(&w);
-    next.fail_next(pubky_switch_client::testing::Fault::Unreachable {
+    next.fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
         path: "/recovery/upload".into(),
         after: 0,
     });
@@ -4759,10 +4762,10 @@ async fn test_provider_loss_upload_goes_on_with_no_deny_list_copy() {
     let _ = wallet.receive(None).await;
     assert_eq!(
         recovery_step(&wallet).await,
-        pubky_switch_client::app::RecoveryStep::Upload
+        pubky_dispatch_client::app::RecoveryStep::Upload
     );
     // Paykit's copy of the deny list goes, as for an app that never kept one.
-    let ns = pubky_switch_client::store::client_namespace(&wallet.app_id());
+    let ns = pubky_dispatch_client::store::client_namespace(&wallet.app_id());
     let copy = base
         .scan(&ns, b"p/paykit", None, 10_000)
         .unwrap()
@@ -4780,7 +4783,7 @@ async fn test_provider_loss_upload_goes_on_with_no_deny_list_copy() {
         .unwrap()
         .is_none());
     wallet.receive(None).await.unwrap();
-    assert!(recovery_step(&wallet).await > pubky_switch_client::app::RecoveryStep::Upload);
+    assert!(recovery_step(&wallet).await > pubky_dispatch_client::app::RecoveryStep::Upload);
 }
 
 #[tokio::test]
@@ -4788,7 +4791,7 @@ async fn test_provider_loss_read_before_the_loss_isnt_fresh_at_the_list_step() {
     // The shop's lists were read before the loss, minutes before; then its client blocked
     // carol, which the shop's copy doesn't hold yet. The first receive after the loss stops
     // at the list step, carol's entry not fitting the new service's deny list. That read from
-    // before the loss doesn't count as fresh: a request to carol isn't sent (Switch wire
+    // before the loss doesn't count as fresh: a request to carol isn't sent (Dispatch wire
     // 7.4.14, "Lists"; Paykit spec 8.1).
     use paykit_sdk::AppScopes;
     let w = World::new();
@@ -4819,9 +4822,9 @@ async fn test_provider_loss_read_before_the_loss_isnt_fresh_at_the_list_step() {
         .contains(&carol_id));
     let next = declare_loss(&w);
     for _ in 0..64 {
-        next.fail_next(pubky_switch_client::testing::Fault::Error {
+        next.fail_next(pubky_dispatch_client::testing::Fault::Error {
             path: "/recovery/upload".into(),
-            code: pubky_switch_core::http::ErrorCode::QuotaExceeded,
+            code: pubky_dispatch_core::http::ErrorCode::QuotaExceeded,
             current: serde_json::json!({ "limit": "deny", "over": 1 }),
         });
     }
@@ -4829,7 +4832,7 @@ async fn test_provider_loss_read_before_the_loss_isnt_fresh_at_the_list_step() {
     let _ = shop.receive(None).await;
     assert_eq!(
         recovery_step(&shop).await,
-        pubky_switch_client::app::RecoveryStep::Lists
+        pubky_dispatch_client::app::RecoveryStep::Lists
     );
     let entries = w.carol.switch().entries_from(&w.alice_id());
     let _ = shop

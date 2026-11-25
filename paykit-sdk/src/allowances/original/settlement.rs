@@ -1,8 +1,8 @@
 //! The original payer's individually signed withdrawal and the seller's matching return.
 use super::*;
 use crate::allowances::{end_names_acceptance, pending, replies, EndCause, EndOrigin};
-use pubky_switch_core::records::IdentityDoc;
-use pubky_switch_core::sig::SignedDoc;
+use pubky_dispatch_core::records::IdentityDoc;
+use pubky_dispatch_core::sig::SignedDoc;
 
 pub(in crate::allowances) struct LiveOriginal {
     pub(super) condition: Condition,
@@ -12,7 +12,7 @@ pub(in crate::allowances) struct LiveOriginal {
 
 /// Recovery uploads use the exact proved version or the lower bound of the signed
 /// create. Only the lost generation's proof establishes a version at the new service
-/// (Switch wire 7.4.14). The authenticated current read selects between them.
+/// (Dispatch wire 7.4.14). The authenticated current read selects between them.
 pub(super) fn valid_uploaded_create(
     installed: RecordVersion,
     original: RecordVersion,
@@ -406,11 +406,11 @@ impl Paykit {
             .await?;
         if !retired.is_some_and(|r| {
             r.withdrawal_after(retirement, self.app.own_identity().body().recovery_from)
-                == pubky_switch_client::app::AppendDecision::Send
+                == pubky_dispatch_client::app::AppendDecision::Send
         }) {
             return Ok(false);
         }
-        if matches!(&p,pubky_switch_client::app::RecordRead::Fresh(held) if held.version != retirement.record_version())
+        if matches!(&p,pubky_dispatch_client::app::RecordRead::Fresh(held) if held.version != retirement.record_version())
         {
             return Ok(false);
         }

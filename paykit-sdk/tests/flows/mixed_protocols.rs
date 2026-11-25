@@ -5,14 +5,14 @@ use std::sync::Arc;
 use paykit_sdk::{
     AppScopes, Paykit, PaykitBackup, PaykitConfig, PaykitProtocol, Rail, RequestedScopes,
 };
-use pubky_switch_client::app::{
+use pubky_dispatch_client::app::{
     App, AppBackup, AppError, Effect, LocalWrite, MissedEntries, Outcome, Protocol, ProtocolSet,
     ReceiveContext, ReceivedMessage, Refusal, ResendNeeded, StoreFailure, UserConfirmed,
 };
-use pubky_switch_client::store::{Fault, FaultStore, StateStore};
-use pubky_switch_client::testing::{AppSpec, Seeds, TestIdentity, TestSigner};
-use pubky_switch_core::message::Message;
-use pubky_switch_core::records::AppCert;
+use pubky_dispatch_client::store::{Fault, FaultStore, StateStore};
+use pubky_dispatch_client::testing::{AppSpec, Seeds, TestIdentity, TestSigner};
+use pubky_dispatch_core::message::Message;
+use pubky_dispatch_core::records::AppCert;
 
 use crate::common::{store, World, ALICE_ORIGIN};
 
@@ -304,7 +304,7 @@ async fn test_mixed_protocols_own_restore() {
 }
 
 /// Chat, also naming many kinds whose roots chat doesn't own. The client keeps none of them
-/// in the app's record (Switch wire 3.1, 5.1), so they make it no larger.
+/// in the app's record (Dispatch wire 3.1, 5.1), so they make it no larger.
 struct ChatNamingForeignKinds;
 
 impl Protocol for ChatNamingForeignKinds {
@@ -365,7 +365,7 @@ async fn test_mixed_protocols_join_counts_only_owned_kinds() {
         .app(&app.app_id())
         .record
         .expect("the joined app's record");
-    let record = pubky_switch_core::records::AppRecord::verify(&record, &w.alice_id()).unwrap();
+    let record = pubky_dispatch_core::records::AppRecord::verify(&record, &w.alice_id()).unwrap();
     let accepts = &record.body().accepts;
     assert!(accepts.iter().any(|k| k == "chat.item"), "{accepts:?}");
     assert!(
@@ -379,7 +379,7 @@ async fn test_mixed_protocols_join_counts_only_owned_kinds() {
 #[tokio::test]
 async fn test_mixed_protocols_expired_public_offer_and_chat_resume_after_reopen(
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use pubky_switch_harness::{Backend, World};
+    use pubky_dispatch_harness::{Backend, World};
 
     for backend in [Backend::Scripted, Backend::Service] {
         for (paykit_first, withdraw_early) in [(true, false), (false, false), (true, true)] {
@@ -396,17 +396,17 @@ async fn test_mixed_protocols_expired_public_offer_and_chat_resume_after_reopen(
 }
 
 async fn withdraw_public_offer(
-    world: &pubky_switch_harness::World,
+    world: &pubky_dispatch_harness::World,
     paykit_first: bool,
     withdraw_early: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use paykit_lib::{app_record::PaykitMember, PaymentEndpointPayload};
     use paykit_sdk::{rail::FakeRail, PaykitError};
-    use pubky_switch_client::app::{AppConfig, Publication, RecordExpiry};
-    use pubky_switch_core::records::{app_record_path, AppRecord};
-    use pubky_switch_core::sig::SignedDoc;
-    use pubky_switch_harness::parties::{Asking, Sample, CHAT};
-    use pubky_switch_signer::{Protocols, Signer};
+    use pubky_dispatch_client::app::{AppConfig, Publication, RecordExpiry};
+    use pubky_dispatch_core::records::{app_record_path, AppRecord};
+    use pubky_dispatch_core::sig::SignedDoc;
+    use pubky_dispatch_harness::parties::{Asking, Sample, CHAT};
+    use pubky_dispatch_signer::{Protocols, Signer};
 
     let seller = world.identity("seller")?;
     let origin = "https://seller.public-endpoints.test";
@@ -425,7 +425,7 @@ async fn withdraw_public_offer(
         world.app_keys(&seller, "shop")?,
         &scopes,
         &[],
-        pubky_switch_core::enc::hash(b"shop"),
+        pubky_dispatch_core::enc::hash(b"shop"),
     )?;
     let approval = signer.review(asking.request.signed(), &asking.auth)?;
     let approved = Box::pin(signer.approve(approval)).await?;
@@ -565,9 +565,9 @@ async fn withdraw_public_offer(
 #[tokio::test]
 async fn test_mixed_protocols_full_null_record_keeps_the_unchanged_payer_capabilities() {
     use paykit_sdk::PaykitError;
-    use pubky_switch_client::app::AppConfig;
-    use pubky_switch_core::ops::{sign_batch, OpKind, MAX_OP_BYTES};
-    use pubky_switch_core::records::AppRecord;
+    use pubky_dispatch_client::app::AppConfig;
+    use pubky_dispatch_core::ops::{sign_batch, OpKind, MAX_OP_BYTES};
+    use pubky_dispatch_core::records::AppRecord;
     use serde_json::{Map, Value};
 
     let w = world();
@@ -663,9 +663,9 @@ async fn publishing_mixed(w: &World) -> Paykit {
     scopes.scopes.push("chat".into());
     Paykit::join_with_protocols(
         w.env(&w.alice, store()),
-        PaykitConfig::default().with_app(pubky_switch_client::app::AppConfig {
+        PaykitConfig::default().with_app(pubky_dispatch_client::app::AppConfig {
             publishes_record: true,
-            ..pubky_switch_client::app::AppConfig::default()
+            ..pubky_dispatch_client::app::AppConfig::default()
         }),
         w.approve(&w.alice, "mixed", &scopes),
         Arc::clone(&w.rail) as Arc<dyn Rail>,
@@ -679,8 +679,8 @@ async fn publishing_mixed(w: &World) -> Paykit {
 #[tokio::test]
 async fn test_mixed_protocols_member_expiry_repair_survives_reload_and_final_withdrawal() {
     use paykit_lib::PaymentEndpointPayload;
-    use pubky_switch_client::app::{AppConfig, AppEvent};
-    use pubky_switch_core::records::AppRecord;
+    use pubky_dispatch_client::app::{AppConfig, AppEvent};
+    use pubky_dispatch_core::records::AppRecord;
 
     let w = world();
     let config = PaykitConfig::default().with_app(AppConfig {
@@ -816,7 +816,7 @@ async fn test_mixed_protocols_unread_paykit_member_kept_beside_chat_expiry() {
         .set_protocol_member_with_lifetime("paykit", Some(member), None)
         .await
         .unwrap();
-    let deadline = pubky_switch_client::clock::Clock::now_ms(w.clock.as_ref()) + 3_600_000;
+    let deadline = pubky_dispatch_client::clock::Clock::now_ms(w.clock.as_ref()) + 3_600_000;
     app.app_mut()
         .set_protocol_member("chat", chat_member(), Some(deadline))
         .await
@@ -831,12 +831,12 @@ async fn test_mixed_protocols_unread_paykit_member_kept_beside_chat_expiry() {
 
 #[tokio::test]
 async fn test_mixed_protocols_update_beside_chat_expiry_checks_the_homeserver() {
-    use pubky_switch_client::app::Publication;
+    use pubky_dispatch_client::app::Publication;
     let w = world();
     let mut app = publishing_mixed(&w).await;
     // No Paykit member, and chat's expiry: nothing of Paykit's is owed, so the update is
     // the explicit check of the Homeserver copy, which can't be read now.
-    let deadline = pubky_switch_client::clock::Clock::now_ms(w.clock.as_ref()) + 3_600_000;
+    let deadline = pubky_dispatch_client::clock::Clock::now_ms(w.clock.as_ref()) + 3_600_000;
     app.app_mut()
         .set_protocol_member("chat", chat_member(), Some(deadline))
         .await
@@ -1135,8 +1135,8 @@ async fn test_mixed_protocols_callbacks_and_layers_survive_load_and_restore() {
 
 #[tokio::test]
 async fn test_mixed_protocols_foreign_drop_stays_with_its_owner() {
-    use pubky_switch_client::app::{AppEvent, WaitingReason, MAX_UNVERIFIED_AGE_MS};
-    use pubky_switch_client::clock::Clock;
+    use pubky_dispatch_client::app::{AppEvent, WaitingReason, MAX_UNVERIFIED_AGE_MS};
+    use pubky_dispatch_client::clock::Clock;
     let w = world();
     let storage = store();
     let mut app = Paykit::join_with_protocols(
@@ -1169,7 +1169,7 @@ async fn test_mixed_protocols_foreign_drop_stays_with_its_owner() {
     assert!(report.events.iter().any(|e| matches!(
         e,
         AppEvent::Parked {
-            reason: pubky_switch_client::app::ParkReason::AwaitingKey { data_epoch: 2 },
+            reason: pubky_dispatch_client::app::ParkReason::AwaitingKey { data_epoch: 2 },
             ..
         }
     )));
@@ -1247,12 +1247,12 @@ async fn test_mixed_protocols_foreign_drop_stays_with_its_owner() {
 
 #[tokio::test]
 async fn test_mixed_protocols_message_acknowledgement_keeps_the_stopped_record_for_its_owner() {
-    use pubky_switch_client::app::{
+    use pubky_dispatch_client::app::{
         AppEvent, Collection, OutgoingMessage, RecordJob, RecordTarget,
     };
-    use pubky_switch_client::testing::{ProtocolSpec, TestProtocol};
-    use pubky_switch_core::ident::Policy;
-    use pubky_switch_core::ops::SignedOp;
+    use pubky_dispatch_client::testing::{ProtocolSpec, TestProtocol};
+    use pubky_dispatch_core::ident::Policy;
+    use pubky_dispatch_core::ops::SignedOp;
 
     let w = world();
     let news = ProtocolSpec {

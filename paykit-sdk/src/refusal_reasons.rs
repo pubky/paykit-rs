@@ -8,36 +8,36 @@
 #[non_exhaustive]
 pub enum NotNowReason {
     /// The shared records aren't listed yet; calling `retry` again continues the listing
-    /// (Switch spec 8.2, 8.3, 12.4).
+    /// (Dispatch spec 8.2, 8.3, 12.4).
     #[error("the shared records aren't listed yet. {} to continue the listing", retry.call())]
     RecordsUnlisted {
         /// The call that continues the listing.
         retry: ListingRetry,
     },
     /// The shared records aren't listed since the restore, the missed item or under the
-    /// certificate held now; a receive or a write lists them (Switch spec 8.2, 8.3, 12.4
+    /// certificate held now; a receive or a write lists them (Dispatch spec 8.2, 8.3, 12.4
     /// step 2.1).
     #[error(
-        "Switch spec 8.2, 8.3, 12.4 step 2.1: the shared records aren't listed since the \
+        "Dispatch spec 8.2, 8.3, 12.4 step 2.1: the shared records aren't listed since the \
          restore, the missed item or under the certificate held now"
     )]
     RecordsNotListed,
     /// The scope keys of the certificate taken aren't stored yet; the signer stores them when
-    /// it is next online (Switch spec 3.5).
+    /// it is next online (Dispatch spec 3.5).
     #[error(
-        "Switch spec 3.5: waiting for the scope keys of the certificate taken, which the \
+        "Dispatch spec 3.5: waiting for the scope keys of the certificate taken, which the \
          signer stores when it is next online"
     )]
     ScopeKeysAwaited,
     /// A record's value is sealed under scope keys not stored yet; the signer stores them
-    /// when it is next online (Switch spec 3.5).
+    /// when it is next online (Dispatch spec 3.5).
     #[error(
-        "Switch spec 3.5: waiting for the scope keys the record's value is sealed under, which \
+        "Dispatch spec 3.5: waiting for the scope keys the record's value is sealed under, which \
          the signer stores when it is next online"
     )]
     ValueAwaitsKey,
     /// The block floor can't be read now: the payer's records not listed yet, a scope key
-    /// awaited, a kept floor write, a read or a write the switch didn't answer, or a delete
+    /// awaited, a kept floor write, a read or a write the Dispatch didn't answer, or a delete
     /// nothing authenticates. A later receive clears each of them with no one acting
     /// (Paykit wire 5.6). A floor record that doesn't read is
     /// [`HeldForUserReason::FloorRecordUnreadable`], and one deleted or unlawfully absent is
@@ -48,8 +48,8 @@ pub enum NotNowReason {
     /// call once the wait has passed clears this (Paykit wire 5.6).
     #[error("Paykit wire 5.6: a block floor raise left unwritten waits before it is tried again")]
     FloorRaiseWaiting,
-    /// No service time is verified yet; a read of the switch that verifies one clears this
-    /// (Switch spec 10.1). The text names the call's rule.
+    /// No service time is verified yet; a read of the Dispatch that verifies one clears this
+    /// (Dispatch spec 10.1). The text names the call's rule.
     #[error("{0}")]
     NoServiceTime(&'static str),
     /// What the call relies on isn't verified, isn't current or changed during the read; a
@@ -115,9 +115,9 @@ pub enum HeldForUserReason {
     /// hand (Paykit spec 8.1, Paykit wire 5.6).
     #[error("this request is held from automatic payment")]
     HeldFromAutomatic,
-    /// After a provider loss the switch shows another write at the held activity record's
-    /// version; a write the app takes replaces it (Switch spec 12.6).
-    #[error("the switch shows another write at the held activity record's version")]
+    /// After a provider loss the Dispatch shows another write at the held activity record's
+    /// version; a write the app takes replaces it (Dispatch spec 12.6).
+    #[error("the Dispatch shows another write at the held activity record's version")]
     ActivityBaseChanged,
     /// The order of the request's cancellations is unknown after a provider loss; the loss
     /// steps decide it (Paykit spec 7.3).
@@ -181,9 +181,9 @@ pub enum HeldForUserReason {
          the app again (Paykit::load) before editing its record"
     )]
     ReloadRequired,
-    /// The Switch client holds the attempt back, named in its text: reconcile mode, which the
+    /// The Dispatch client holds the attempt back, named in its text: reconcile mode, which the
     /// user ends, the clocks apart, which the user may have to correct, or a display read the
-    /// host owes (Switch spec 10.1, 12.4). The text alone tells them apart, so it is shown.
+    /// host owes (Dispatch spec 10.1, 12.4). The text alone tells them apart, so it is shown.
     #[error("{0}")]
     SwitchClient(String),
     /// A hold on one request, publication or delivery that no wait clears as far as this

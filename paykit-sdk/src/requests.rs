@@ -26,14 +26,14 @@ use paykit_lib::scopes::{PaykitScope, ScopeName};
 use paykit_lib::{
     AttemptId, Body, Label, PaymentAmount, PaymentEndpointIdentifier, PaymentReference,
 };
-use pubky_switch_client::app::{
+use pubky_dispatch_client::app::{
     claim_conflict, AppError, Delivery, FeedPosition, KeptReason, OpBatch, OutgoingMessage,
     RecordContent, RecordRead, UndeliverableReason,
 };
-use pubky_switch_client::error::ClientError;
-use pubky_switch_core::claims::{ClaimStatus, Outcome};
-use pubky_switch_core::http::ErrorCode;
-use pubky_switch_core::ops::Condition;
+use pubky_dispatch_client::error::ClientError;
+use pubky_dispatch_core::claims::{ClaimStatus, Outcome};
+use pubky_dispatch_core::http::ErrorCode;
+use pubky_dispatch_core::ops::Condition;
 use serde_json::{Map, Value};
 
 use crate::activity::{self, ActivityTarget, KeptSide, Role, SideTag};
@@ -54,7 +54,7 @@ use crate::state::{key, Tx};
 /// How many times a payee's write is built again after its record changed meanwhile.
 const WRITE_TRIES: usize = 3;
 
-/// The proof and occurrence the payment method verified, with the signed Switch
+/// The proof and occurrence the payment method verified, with the signed Dispatch
 /// revisions a receipt must still find when it is recorded and queued.
 struct VerifiedCredit {
     paid_at: u64,
@@ -108,8 +108,8 @@ pub struct RequestDraft {
     pub conversion: Option<Conversion>,
     /// Opaque metadata.
     pub metadata: Option<Map<String, Value>>,
-    /// An invitation to present when delivering this request to the payer's Switch
-    /// (Switch spec 7). It is transport data, outside the signed payment request body,
+    /// An invitation to present when delivering this request to the payer's Dispatch
+    /// (Dispatch spec 7). It is transport data, outside the signed payment request body,
     /// and grants no payment approval. `None` uses ordinary admission.
     pub invite_code: Option<String>,
 }
@@ -233,8 +233,8 @@ impl RequestDraft {
         self
     }
 
-    /// Present `code` when the Switch delivers this request. Queuing and retrying keep
-    /// the same signed request; the code is not payment consent (Switch spec 7, 11).
+    /// Present `code` when the Dispatch delivers this request. Queuing and retrying keep
+    /// the same signed request; the code is not payment consent (Dispatch spec 7, 11).
     #[must_use]
     pub fn with_invite_code(mut self, code: String) -> Self {
         self.invite_code = Some(code);
@@ -243,13 +243,13 @@ impl RequestDraft {
 }
 
 /// Where a message this app sent is, such as a request, a proof or an acceptance, as the
-/// user sees it (Switch spec 11).
+/// user sees it (Dispatch spec 11).
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum MessageDelivery {
-    /// The batch that records and queues it was signed and kept, the switch not answering
+    /// The batch that records and queues it was signed and kept, the Dispatch not answering
     /// now: it is sent again, the same bytes, at the app's next write or read, and the
-    /// message is queued once it is answered (Switch wire 6.4 step 5). Calling again would
+    /// message is queued once it is answered (Dispatch wire 6.4 step 5). Calling again would
     /// send a second message.
     Kept {
         /// The kept batch's ID.
@@ -262,11 +262,11 @@ pub enum MessageDelivery {
         /// The last failure, without content.
         last_error: Option<String>,
     },
-    /// "Waiting for them to admit you": the recipient's switch answered `403 not_admitted`,
+    /// "Waiting for them to admit you": the recipient's Dispatch answered `403 not_admitted`,
     /// first at `since_ms` (app clock), as a payee's does to a payer it doesn't admit yet,
     /// or a payer's to a payee it hasn't invited. The message stays queued, and goes once
-    /// the recipient keeps this identity as a peer or invites it (Switch spec 7), or is
-    /// given up after [`pubky_switch_client::app::UNDELIVERABLE_MS`] (Switch spec 11).
+    /// the recipient keeps this identity as a peer or invites it (Dispatch spec 7), or is
+    /// given up after [`pubky_dispatch_client::app::UNDELIVERABLE_MS`] (Dispatch spec 11).
     WaitingForAdmission {
         /// The first such answer, app clock, in Unix milliseconds.
         since_ms: u64,
@@ -275,8 +275,8 @@ pub enum MessageDelivery {
     },
     /// This app's own certificate isn't current: a delivery was answered `403 not_current`,
     /// first at `since_ms` (app clock). Nothing about the recipient: the message stays
-    /// queued until a renewal makes the certificate current again (Switch wire 3.8), or is given up
-    /// after [`pubky_switch_client::app::UNDELIVERABLE_MS`] (Switch spec 11).
+    /// queued until a renewal makes the certificate current again (Dispatch wire 3.8), or is given up
+    /// after [`pubky_dispatch_client::app::UNDELIVERABLE_MS`] (Dispatch spec 11).
     CertificateNotCurrent {
         /// The first such answer, app clock, in Unix milliseconds.
         since_ms: u64,
@@ -291,7 +291,7 @@ pub enum MessageDelivery {
     /// Refused for good, given up, or never queued: the kept batch that would have queued
     /// it was dropped. A batch dropped after a send whose answer can't tell whether it was
     /// applied may have been applied all the same: the request's record may then be at the
-    /// switch although the message was never sent, and the host reads the request's state
+    /// Dispatch although the message was never sent, and the host reads the request's state
     /// ([`Paykit::payee_activity`]) before it sends it again.
     Failed {
         /// Why, without content.
@@ -427,8 +427,8 @@ pub enum RequestStatus {
     /// has seen that (Paykit spec 7.2, [`crate::PayOptions::possibly_cancelled_confirmed`],
     /// [`crate::Paykit::confirm_possibly_cancelled`]).
     Held,
-    /// Received, but its record couldn't be written: the switch refused the write for good,
-    /// such as over a quota (Switch spec 8.2). It is shown from the app's own copy and
+    /// Received, but its record couldn't be written: the Dispatch refused the write for good,
+    /// such as over a quota (Dispatch spec 8.2). It is shown from the app's own copy and
     /// written into its record by a later write as room frees; it can't be paid, rejected or
     /// cancelled until then ([`Refusal::NotFound`]).
     Unrecorded,
@@ -482,7 +482,7 @@ pub struct RequestView {
     pub divergent: bool,
     /// The payee's receipt the record holds, if any (Paykit wire 4.11), as this app's copy
     /// shows it: for display. While the records aren't listed, after a restore or a
-    /// certificate that reads more, the copy may lack a receipt the switch holds;
+    /// certificate that reads more, the copy may lack a receipt the Dispatch holds;
     /// [`Paykit::receipts`] is refused as not now meanwhile.
     pub receipt: Option<ReceivedReceipt>,
     /// The request is paid only by hand: its record holds `manual_only` (Paykit wire 5.3),
@@ -850,7 +850,7 @@ impl Paykit {
     /// them to admit you" ([`MessageDelivery::WaitingForAdmission`]), as the client answers
     /// it. A request whose batch the client still keeps is [`MessageDelivery::Kept`]; one
     /// whose kept batch it dropped is [`MessageDelivery::Failed`], with the drop's time,
-    /// for [`pubky_switch_client::app::SENT_RETENTION_MS`] from that time, whether or not
+    /// for [`pubky_dispatch_client::app::SENT_RETENTION_MS`] from that time, whether or not
     /// the host acknowledged the client's event about it.
     ///
     /// `None` is a message the client keeps nothing of: one accepted or ended longer ago
@@ -881,7 +881,7 @@ impl Paykit {
     /// the immutable recipient of a request even when its mutable activity is disputed.
     pub(crate) fn bound_payee_record(
         &self,
-        held: &pubky_switch_client::app::SharedRecord,
+        held: &pubky_dispatch_client::app::SharedRecord,
     ) -> Result<(ActivityTarget, ActivityRecord)> {
         let label = Collection::PayeeActivity
             .policy_label(&held.policy)
@@ -924,7 +924,7 @@ impl Paykit {
             let label = collection.policy_label(&held.policy)?;
             Some((held.key, label, record.clone()))
         }))?;
-        let shared: std::collections::HashMap<[u8; 32], &pubky_switch_client::app::SharedRecord> =
+        let shared: std::collections::HashMap<[u8; 32], &pubky_dispatch_client::app::SharedRecord> =
             bound.iter().map(|(held, _)| (held.key, held)).collect();
         let mut out = Vec::new();
         for (held, record) in &bound {
@@ -1010,7 +1010,7 @@ impl Paykit {
     pub(crate) async fn credit_input(
         &self,
         key: &[u8; 32],
-    ) -> Result<Option<pubky_switch_client::app::SharedRecord>> {
+    ) -> Result<Option<pubky_dispatch_client::app::SharedRecord>> {
         let held = self.activity_write_base(key).await?;
         if held.as_ref().is_some_and(|r| r.flagged || r.not_taken) {
             return Err(
@@ -1161,7 +1161,7 @@ impl Paykit {
                     request_ref,
                     proof.billing_period,
                     request.conversion.as_ref(),
-                    pubky_switch_client::app::Initiator::User,
+                    pubky_dispatch_client::app::Initiator::User,
                 );
                 if let (Some(Conversion::PerPeriod), Some((stored, _))) =
                     (request.conversion.as_ref(), named_details)
@@ -1584,7 +1584,7 @@ impl Paykit {
                 .then(|| key::receipt_batch(record, &signed.plaintext().hash(), &msg_id, false));
             if let Some(marker) = &delivery_marker {
                 batch = batch.keep_id_at(marker.as_bytes().to_vec()).local(
-                    pubky_switch_client::app::LocalWrite::Delete {
+                    pubky_dispatch_client::app::LocalWrite::Delete {
                         key: marker.as_bytes().to_vec(),
                     },
                 );
@@ -1717,7 +1717,7 @@ impl Paykit {
     // ---------------------------------------------------------------------------------
     // The payer
 
-    /// The payer's request record of `request`, read from the switch when not held. A
+    /// The payer's request record of `request`, read from the Dispatch when not held. A
     /// cancellation this app kept for it (`receive.rs`) is placed in the record first, if it
     /// can be: another own app may have written the record from a copy of the request it got
     /// without the cancellation (Paykit spec 8.1). A placement that fails changes nothing
@@ -1980,7 +1980,7 @@ impl Paykit {
     /// brings it up to date. A request kept to write into its record later shows as
     /// [`RequestStatus::Unrecorded`]. It is for display: while the records aren't listed,
     /// after a restore or a certificate that reads more, the copy may lack records the
-    /// switch holds; a payment of a request reads its record again first.
+    /// Dispatch holds; a payment of a request reads its record again first.
     ///
     /// # Errors
     ///
@@ -2079,7 +2079,7 @@ impl Paykit {
         record_key: [u8; 32],
         record: &ActivityRecord,
         periods: Vec<([u8; 32], ActivityRecord)>,
-        held: Option<&pubky_switch_client::app::SharedRecord>,
+        held: Option<&pubky_dispatch_client::app::SharedRecord>,
         reads: &mut ListReads,
     ) -> Result<Option<RequestView>> {
         let Some((stored, request)) = request_of(record) else {
@@ -2207,25 +2207,25 @@ impl Paykit {
         }
     }
 
-    /// The request record at `target` as the switch holds it now, read again (Switch wire
+    /// The request record at `target` as the Dispatch holds it now, read again (Dispatch wire
     /// 7.4.9): only a write the read shows current is evidence, never a copy the app keeps
     /// from before. A value is held only when it reads and is bound to the key it was read
     /// at, whose natural key the request derives, so it holds that same request (Paykit wire
-    /// 5.3). The switch holding none (`404`) is [`Fresh::Missing`]; a newer write the app
+    /// 5.3). The Dispatch holding none (`404`) is [`Fresh::Missing`]; a newer write the app
     /// refused, or one no newer than what it holds, is [`Fresh::Unreadable`]: the copy kept
     /// then shows nothing of the request now.
     ///
     /// # Errors
     ///
-    /// A read that fails: [`Refusal::SwitchUnavailable`] for a switch that couldn't be read
-    /// now, the switch's refusal for one it refused; never taken as the record unchanged.
+    /// A read that fails: [`Refusal::DispatchUnavailable`] for a Dispatch that couldn't be read
+    /// now, the Dispatch's refusal for one it refused; never taken as the record unchanged.
     pub(crate) async fn fresh_request(&mut self, target: &ActivityTarget) -> Result<Fresh> {
         Ok(self.fresh_request_stamped(target).await?.0)
     }
 
     /// [`Paykit::fresh_request`], with the stamp of the write the read shows current
     /// ([`WriteStamp`]) when it is [`Fresh::Held`], for a check that reads the record again
-    /// and fails closed when the write changed ([`Paykit::automatic_dispatch_held`]).
+    /// and fails closed when the write changed ([`Paykit::automatic_handoff_held`]).
     ///
     /// # Errors
     ///
@@ -2237,7 +2237,7 @@ impl Paykit {
         let record = match self.app.read_record_fresh(&target.record_target()).await? {
             RecordRead::Fresh(record) => record,
             RecordRead::Kept { reason, .. } => return Ok((fresh_kept(reason)?, None)),
-            // A read a later client names: nothing shows the switch's write held now.
+            // A read a later client names: nothing shows the Dispatch's write held now.
             _ => return Ok((Fresh::Unreadable, None)),
         };
         let stamp = WriteStamp::of(&record);
@@ -2500,7 +2500,7 @@ impl Paykit {
     ///
     /// # Errors
     ///
-    /// [`Refusal::SwitchUnavailable`], or the client's error, when the deny list has to be
+    /// [`Refusal::DispatchUnavailable`], or the client's error, when the deny list has to be
     /// read and can't be; [`Refusal::NotFound`]; [`Refusal::Usage`] for a one-time request,
     /// which is accepted by paying it; [`Refusal::Subscribed`] when it is accepted already,
     /// here or by another own app, also when the record changed meanwhile to show that
@@ -2636,7 +2636,7 @@ impl Paykit {
         let expiry = expiry_deadline(&record, body);
         // Past its proposal expiry, a recurring request can't be accepted or rejected: the
         // batch's time condition would refuse it on every try. The copy held may be stale, so
-        // the record the switch holds decides. Its cancellation carries no time condition.
+        // the record the Dispatch holds decides. Its cancellation carries no time condition.
         let timed = recurring && answer != Answer::Cancel;
         if timed && self.reached(expiry) {
             return Err(self.expired_answer(&target, answer, None).await?);
@@ -2925,13 +2925,13 @@ enum OtherCredit {
     CantTell,
 }
 
-/// The request record the switch holds, read again ([`Paykit::fresh_request`]).
+/// The request record the Dispatch holds, read again ([`Paykit::fresh_request`]).
 pub(crate) enum Fresh {
     /// It is there, reads, is bound to its key and holds the request.
     Held(Box<ActivityRecord>),
     /// There is none, or it was deleted.
     Missing,
-    /// It doesn't read, isn't bound to its key, or holds another request; or the switch's
+    /// It doesn't read, isn't bound to its key, or holds another request; or the Dispatch's
     /// write was refused, or is no newer than the one held, so nothing read now shows it.
     Unreadable,
 }
@@ -2941,12 +2941,12 @@ pub(crate) enum Fresh {
 fn fresh_kept(reason: KeptReason) -> Result<Fresh> {
     match reason {
         KeptReason::NotFound => Ok(Fresh::Missing),
-        KeptReason::Unreachable(why) => Err(Refusal::SwitchUnavailable(why).into()),
+        KeptReason::Unreachable(why) => Err(Refusal::DispatchUnavailable(why).into()),
         KeptReason::SwitchRefused { code } => {
             Err(PaykitError::Client(AppError::Switch(ClientError::Switch {
                 status: code.status(),
                 code,
-                message: "the switch refused the record's read".into(),
+                message: "the Dispatch refused the record's read".into(),
                 current: serde_json::Value::Null,
                 known_version: None,
                 retry_after: None,
@@ -2959,7 +2959,9 @@ fn fresh_kept(reason: KeptReason) -> Result<Fresh> {
 
 /// The refusal of a request record that doesn't read as the request it should hold.
 pub(crate) fn unreadable_request() -> PaykitError {
-    PaykitError::Conflict("the request record the switch holds doesn't read as this request".into())
+    PaykitError::Conflict(
+        "the request record the Dispatch holds doesn't read as this request".into(),
+    )
 }
 
 fn conflict_changed() -> PaykitError {
@@ -2984,7 +2986,7 @@ pub(crate) fn expiry_deadline(record: &ActivityRecord, request: &PaymentRequest)
 
 /// A rejection or cancellation is refused while the claim has an open or paid attempt
 /// (Paykit spec 8.1).
-fn refuse_on_claim(view: &pubky_switch_core::claims::ClaimView) -> Result<()> {
+fn refuse_on_claim(view: &pubky_dispatch_core::claims::ClaimView) -> Result<()> {
     match view.status {
         ClaimStatus::Settled => Err(Refusal::AlreadyPaid.into()),
         ClaimStatus::Attempting => Err(Refusal::PaymentInProgress.into()),
@@ -3051,7 +3053,7 @@ fn payee_view(
 
 #[cfg(test)]
 mod tests {
-    use pubky_switch_core::claims::ClaimView;
+    use pubky_dispatch_core::claims::ClaimView;
     use serde_json::json;
 
     use super::*;
@@ -3188,17 +3190,17 @@ mod stop_tests {
     use paykit_lib::{
         Asset, Decimal, PaymentAmount, PaymentEndpointIdentifier, PaymentEndpointPayload,
     };
-    use pubky_switch_client::clock::Clock;
+    use pubky_dispatch_client::clock::Clock;
 
     use super::*;
-    use crate::testkit::Switches;
+    use crate::testkit::Dispatches;
 
     /// A cancellation kept as the stop of a request record that reads, as the receive step
     /// keeps it before the later write judges it: the request's view counts it only when its
     /// sender may cancel that request (Paykit spec 3.4).
     #[tokio::test]
     async fn test_requests_view_counts_no_stop_from_another_label() {
-        let w = Switches::new();
+        let w = Dispatches::new();
         let alice = w.alice.identity().public();
         let bob = w.bob.identity().public();
         let mut wallet = w
@@ -3252,7 +3254,7 @@ mod stop_tests {
                 )
                 .unwrap();
             // As alice's inbox took it: the stored copy of the received message.
-            let message = pubky_switch_core::message::Message::parse(
+            let message = pubky_dispatch_core::message::Message::parse(
                 signed.plaintext().json(),
                 paykit_lib::kinds::OPAQUE_MEMBERS,
             )
@@ -3295,10 +3297,10 @@ mod stop_order_tests {
     use paykit_lib::{
         Asset, Decimal, PaymentAmount, PaymentEndpointIdentifier, PaymentEndpointPayload,
     };
-    use pubky_switch_client::clock::Clock;
+    use pubky_dispatch_client::clock::Clock;
 
     use super::*;
-    use crate::testkit::Switches;
+    use crate::testkit::Dispatches;
 
     /// `canceller`'s cancellation of bob's request `request` to alice, as alice's inbox took it
     /// at `accepted_at`.
@@ -3318,7 +3320,7 @@ mod stop_order_tests {
         let signed = canceller
             .sign(alice, Kind::PaymentRequestCancellation, vec![request], body)
             .unwrap();
-        let message = pubky_switch_core::message::Message::parse(
+        let message = pubky_dispatch_core::message::Message::parse(
             signed.plaintext().json(),
             paykit_lib::kinds::OPAQUE_MEMBERS,
         )
@@ -3338,7 +3340,7 @@ mod stop_order_tests {
     /// app's key sorts first (Paykit spec 8.1: kept messages in inbox acceptance order).
     #[tokio::test]
     async fn test_requests_stops_in_one_millisecond_placed_in_intake_order() {
-        let w = Switches::new();
+        let w = Dispatches::new();
         let alice = w.alice.identity().public();
         let bob = w.bob.identity().public();
         let mut wallet = w

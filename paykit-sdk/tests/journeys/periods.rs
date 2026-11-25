@@ -9,7 +9,7 @@ use paykit_sdk::{
     PayOptions, PayOutcome, PayeeStatus, Paykit, PaykitConfig, PeriodPrice, ReceiptsOf, Refusal,
     RequestDraft, RequestRef, RequestStatus, Stage,
 };
-use pubky_switch_harness::World;
+use pubky_dispatch_harness::World;
 
 use super::{btc, checkout, endpoint, on_both_backends, payload, Checkout, TestResult};
 

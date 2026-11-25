@@ -10,11 +10,11 @@ use paykit_lib::collections::Collection;
 use paykit_lib::kinds::Kind;
 use paykit_lib::records::{PendingAllowanceRecord, StoredMessage};
 use paykit_lib::AllowanceId;
-use pubky_switch_client::app::{
+use pubky_dispatch_client::app::{
     AppendDecision, DeliveryView, KeptReason, RecordContent, RecordRead, RecordTarget, StoreFailure,
 };
-use pubky_switch_client::error::StoreError;
-use pubky_switch_core::{enc::serde_b64, message::Message, ops::RecordVersion};
+use pubky_dispatch_client::error::StoreError;
+use pubky_dispatch_core::{enc::serde_b64, message::Message, ops::RecordVersion};
 use serde::{Deserialize, Serialize};
 
 /// The authenticated deletion that retired the exact proposal this signed reply names.
@@ -257,7 +257,7 @@ pub(crate) fn judge_append(
 impl crate::Paykit {
     pub(crate) async fn held_allowance_end(
         &mut self,
-        q: &pubky_switch_client::app::QueuedMessage,
+        q: &pubky_dispatch_client::app::QueuedMessage,
         msg: &Message,
         id: &AllowanceId,
     ) -> crate::Result<crate::restore_held::StopEvidence> {

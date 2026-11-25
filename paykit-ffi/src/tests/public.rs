@@ -1,4 +1,4 @@
-//! Public Payment Endpoints (Paykit spec 4) and outbox delivery (Switch spec 11).
+//! Public Payment Endpoints (Paykit spec 4) and outbox delivery (Dispatch spec 11).
 
 use super::{
     method::Account,
@@ -15,8 +15,8 @@ use paykit_lib::{
     PaymentReference,
 };
 use paykit_sdk::{AppScopes, Paykit, RequestDestination, RequestDraft};
-use pubky_switch_client::{app::Publication, store::MemoryStore, transport::TransportError};
-use pubky_switch_harness::{parties::Asking, Backend, World};
+use pubky_dispatch_client::{app::Publication, store::MemoryStore, transport::TransportError};
+use pubky_dispatch_harness::{parties::Asking, Backend, World};
 use std::{collections::BTreeMap, error::Error, sync::Arc};
 
 const IDENTIFIER: &str = "btc-lightning-bolt11";
@@ -203,7 +203,7 @@ async fn cancel_received_request(
     .await?;
     issuer.claim_delivered(&approval.request).await?;
     let buyer = world.identity("buyer")?.public();
-    // The payer invites the shop, as a host does for a seller it chose (Switch spec 7).
+    // The payer invites the shop, as a host does for a seller it chose (Dispatch spec 7).
     let invitation = payer
         .lend(async |app| -> Result<_, Box<dyn Error>> {
             while Box::pin(app.receive(None)).await?.report.more {}
@@ -386,7 +386,7 @@ fn test_message_delivery_preserves_fields_without_failure_text() {
             },
         ),
         (
-            D::Other(pubky_switch_client::app::Delivery::Accepted { accepted_at_ms: 20 }),
+            D::Other(pubky_dispatch_client::app::Delivery::Accepted { accepted_at_ms: 20 }),
             M::Other,
         ),
     ] {

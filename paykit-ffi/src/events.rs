@@ -1,6 +1,6 @@
-//! Reports from the Switch client. Duty IDs retain their original store epoch.
+//! Reports from the Dispatch client. Duty IDs retain their original store epoch.
 use crate::Version;
-use pubky_switch_client::app;
+use pubky_dispatch_client::app;
 /// A key bundle part's epoch range.
 #[derive(uniffi::Record)]
 pub struct EpochRange {
@@ -17,7 +17,7 @@ impl From<(u64, u64)> for EpochRange {
         }
     }
 }
-/// A protected-store failure encountered while processing a Switch event.
+/// A protected-store failure encountered while processing a Dispatch event.
 #[derive(uniffi::Record)]
 pub struct EventStoreFailure {
     /// The typed error that prevented storage.
@@ -33,7 +33,7 @@ impl From<app::StoreFailure> for EventStoreFailure {
         }
     }
 }
-/// An `attempt` on a claim (Switch wire 6.8), named by its claim key and attempt ID.
+/// An `attempt` on a claim (Dispatch wire 6.8), named by its claim key and attempt ID.
 #[derive(uniffi::Record)]
 pub struct ClaimAttempt {
     /// The claim key.
@@ -49,7 +49,7 @@ impl From<app::ClaimAttempt> for ClaimAttempt {
         }
     }
 }
-/// The original observation of an inbox input in a verified feed response (Switch spec 8.2).
+/// The original observation of an inbox input in a verified feed response (Dispatch spec 8.2).
 #[derive(uniffi::Record)]
 pub struct EntryReceipt {
     /// The inbox entry's ID.
@@ -96,7 +96,7 @@ impl From<app::StoredMessageIdentity> for StoredMessageIdentity {
         }
     }
 }
-/// A write the switch showed that the app didn't take for being older than the one it holds
+/// A write the Dispatch showed that the app didn't take for being older than the one it holds
 /// (`KeptReason::Older`, `KeptReason::Overtaken`).
 #[derive(uniffi::Record)]
 pub struct ShownWrite {
@@ -104,7 +104,7 @@ pub struct ShownWrite {
     /// record view's.
     pub version: Version,
     /// Whether a transition proof naming the write, or its verified chain stub, gives `version`
-    /// (Switch spec 10.3).
+    /// (Dispatch spec 10.3).
     pub authenticated: bool,
     /// Its item hash, which its writer signed.
     pub item_hash: Vec<u8>,
@@ -121,7 +121,7 @@ impl From<app::ShownWrite> for ShownWrite {
         }
     }
 }
-/// Entries the service deleted while the app was lagging (Switch spec 8.2): the protocol asks
+/// Entries the service deleted while the app was lagging (Dispatch spec 8.2): the protocol asks
 /// the counterparties of its unfinished activity to re-send what their inboxes accepted from
 /// `accepted_from_ms`, through `accepted_until_ms` if it bounds its re-sends, and lists its
 /// collections again.
@@ -137,7 +137,7 @@ pub struct MissedEntries {
     /// The time to ask from: the later of the item's first acceptance time and the cursor's time,
     /// less the clock tolerance.
     pub accepted_from_ms: u64,
-    /// The item's last acceptance time, `accepted_until` (Switch wire 7.5), raised to
+    /// The item's last acceptance time, `accepted_until` (Dispatch wire 7.5), raised to
     /// `accepted_from_ms` when it is earlier.
     pub accepted_until_ms: u64,
 }
@@ -153,7 +153,7 @@ impl From<app::MissedEntries> for MissedEntries {
     }
 }
 /// A change to the identity's deny list, as the feed shows it to an app holding `lists.read`
-/// (Switch spec 8.3): a `deny.put` or a `deny.delete` whose signature the app verified, made
+/// (Dispatch spec 8.3): a `deny.put` or a `deny.delete` whose signature the app verified, made
 /// by an app of the identity whose certificate holds `lists.manage`, this one included.
 #[derive(uniffi::Record)]
 pub struct DenyListChange {
@@ -179,7 +179,7 @@ impl From<app::DenyListChange> for DenyListChange {
         }
     }
 }
-/// A provider loss as the protocol sees it (Switch spec 12.6).
+/// A provider loss as the protocol sees it (Dispatch spec 12.6).
 #[derive(uniffi::Record)]
 pub struct ProviderLoss {
     /// The generation lost.
@@ -189,7 +189,7 @@ pub struct ProviderLoss {
     /// When the loss was declared: the recovery record's service time, in Unix milliseconds.
     pub declared_at_ms: u64,
     /// The acceptance time to ask re-sends from: the time of the cursor at the old service
-    /// (Switch spec 12.6 step 4).
+    /// (Dispatch spec 12.6 step 4).
     pub accepted_from_ms: u64,
     /// Until when an attempt could have been authorized at the old service: the declaration plus
     /// the residual window and the offset between the services' clocks.
@@ -206,7 +206,7 @@ impl From<app::ProviderLoss> for ProviderLoss {
         }
     }
 }
-/// Entries the app can't read and whose senders it asks to send again (Switch spec 8.2): the
+/// Entries the app can't read and whose senders it asks to send again (Dispatch spec 8.2): the
 /// acceptance times to ask for.
 #[derive(uniffi::Record)]
 pub struct ResendWindow {
@@ -245,7 +245,7 @@ macro_rules! project_events {
         #[derive(uniffi::Enum)]
         pub enum $name {
             $( $(#[$variant_doc])* $variant $( { $( $(#[$field_doc])* $field: $ty ),* } )?, )*
-            /// A case introduced by a newer Switch client.
+            /// A case introduced by a newer Dispatch client.
             Other,
         }
         impl From<$native> for $name {
@@ -267,37 +267,37 @@ macro_rules! project_events {
 }
 
 project_events! {
-/// Evidence of misbehaviour, or of a compromise, that stops the app (Switch spec 3.6, 4.3,
+/// Evidence of misbehaviour, or of a compromise, that stops the app (Dispatch spec 3.6, 4.3,
 /// 10.1).
-SwitchAlarm from app::Alarm {
+DispatchAlarm from app::Alarm {
     /// The service rolled back or forked its chain, or signed an answer that contradicts itself
-    /// (Switch spec 10.1).
+    /// (Dispatch spec 10.1).
     Rollback {
         /// The rule the chain broke.
         reason: String,
     },
     /// A protocol on top found, in what the service signed about its own data, that the service
     /// went back on its state or contradicts itself, and raised the alarm (`App::raise_rollback`,
-    /// Switch spec 10.1).
+    /// Dispatch spec 10.1).
     ProtocolRollback {
         /// The protocol that raised it.
         protocol: String,
         /// The rule the service broke, without content.
         reason: String,
     },
-    /// Two `identity.json` bodies of the own identity at one version (Switch spec 4.3).
+    /// Two `identity.json` bodies of the own identity at one version (Dispatch spec 4.3).
     Equivocation {
         /// The version.
         version: u64,
     },
     /// An own `identity.json` that goes back, or lists again an App ID an earlier version listed
-    /// in `removed` (Switch spec 4.3).
+    /// in `removed` (Dispatch spec 4.3).
     IdentityRollback {
         /// The rule the document broke.
         reason: String,
     },
     /// A registration of this app that neither it nor one of its devices made: a copy of its
-    /// signing key is in someone else's hands (Switch spec 3.6).
+    /// signing key is in someone else's hands (Dispatch spec 3.6).
     Compromise {
         /// The registration's `n`.
         n: u64,
@@ -305,7 +305,7 @@ SwitchAlarm from app::Alarm {
         /// registration was accepted, from its chain item.
         distrust_from: Option<u64>,
     },
-    /// A time signed by the service key that is earlier than one the app verified before (Switch
+    /// A time signed by the service key that is earlier than one the app verified before (Dispatch
     /// spec 10.1).
     ServiceTimeBackwards {
         /// The highest time verified before, in Unix milliseconds.
@@ -317,7 +317,7 @@ SwitchAlarm from app::Alarm {
 }
 
 project_events! {
-/// Why an entry was stored locally (Switch spec 8.2).
+/// Why an entry was stored locally (Dispatch spec 8.2).
 ParkReason from app::ParkReason {
     /// Its sender couldn't be checked within the bounded wait.
     Unverifiable,
@@ -325,17 +325,17 @@ ParkReason from app::ParkReason {
     AwaitingAdmission,
     /// Its shared record write hit a per-kind limit, the storage quota or the value size.
     Quota,
-    /// Its effect's batch was refused for good (Switch spec 6.4): it is kept, not applied, and
+    /// Its effect's batch was refused for good (Dispatch spec 6.4): it is kept, not applied, and
     /// not tried again.
     Refused,
-    /// Its effect has more operations than one batch takes with the cursor move (Switch wire
+    /// Its effect has more operations than one batch takes with the cursor move (Dispatch wire
     /// 6.4): it is kept, not applied, and not tried again.
     TooManyOperations,
     /// Its effect is too large for the app to keep before it sends it, or to commit with its
     /// outcome: the kept effect over the store's value size (`store::MAX_VALUE_BYTES`), or its
-    /// local writes over what one commit takes (`store::MAX_BATCH_BYTES`) (Switch spec 8.2).
+    /// local writes over what one commit takes (`store::MAX_BATCH_BYTES`) (Dispatch spec 8.2).
     EffectTooLarge,
-    /// Its receive step asked for more reads from the switch than one entry gets
+    /// Its receive step asked for more reads from the Dispatch than one entry gets
     /// (`MAX_CLAIM_READS`), or again for what it was given: it is kept, not applied, and not
     /// tried again.
     TooManyReads,
@@ -354,14 +354,14 @@ ParkReason from app::ParkReason {
     /// The protocol needs data before it can apply the input.
     ProtocolDeferred,
     /// Its effect was kept unanswered longer than a resend's answer can tell whether it was
-    /// applied (Switch spec 12.5 "Kept batches"): it is kept, and not tried again
+    /// applied (Dispatch spec 12.5 "Kept batches"): it is kept, and not tried again
     /// (`AppEvent::EffectUncertain`).
     Uncertain,
     /// It was stored as `ParkReason::Uncertain`, and the host released it
     /// (`App::release_parked`): its processed pair is gone, and a later read tries it again as a
     /// fresh receive, with `ReceivedMessage::released` set.
     Released,
-    /// Its receive step needs a scope key of `data_epoch` that the app doesn't hold yet (Switch
+    /// Its receive step needs a scope key of `data_epoch` that the app doesn't hold yet (Dispatch
     /// spec 3.5, 8.2): the step answered `Outcome::AwaitKey`, or applied an effect with a write
     /// the context couldn't seal for want of the current data epoch's key, after the key bundle
     /// was fetched once.
@@ -374,7 +374,7 @@ ParkReason from app::ParkReason {
 
 project_events! {
 /// Why an entry waiting for sender standing, a key or admission left custody without being
-/// processed (Switch spec 8.2, `AppEvent::StoredEntryDropped`): one of the shared bounds it
+/// processed (Dispatch spec 8.2, `AppEvent::StoredEntryDropped`): one of the shared bounds it
 /// was past, or a recipient check it failed when tried again.
 DropReason from app::DropReason {
     /// It was kept longer than `MAX_UNVERIFIED_AGE_MS` from its acceptance, judged on the highest
@@ -386,7 +386,7 @@ DropReason from app::DropReason {
     /// More than `MAX_UNVERIFIED_TOTAL` such entries, of both reasons, were stored, and it was
     /// the one accepted earliest of the sender identity that held the most.
     Total,
-    /// Tried again, it failed recipient check `check` (Switch wire 5.1) under the rules current
+    /// Tried again, it failed recipient check `check` (Dispatch wire 5.1) under the rules current
     /// then, such as a body its protocol's opaque members no longer allow.
     Rules {
         /// The check that failed, 2 to 8.
@@ -395,7 +395,7 @@ DropReason from app::DropReason {
 }
 }
 
-/// What a locally retained input waits for (Switch spec 8.2).
+/// What a locally retained input waits for (Dispatch spec 8.2).
 #[derive(uniffi::Enum)]
 pub enum WaitingReason {
     /// Its sender's standing could not be checked.
@@ -421,7 +421,7 @@ project_events! {
 /// Why a renewed certificate wasn't taken (`AppEvent::CertificateRefused`).
 CertificateRefusal from app::CertificateRefusal {
     /// It holds a scope of this root, which no registered protocol owns: an app with it would
-    /// never load with its protocols (Switch wire 3.1 "Scope roots").
+    /// never load with its protocols (Dispatch wire 3.1 "Scope roots").
     UnownedRoot {
         /// The permission root that no registered protocol owns.
         value: String,
@@ -500,7 +500,7 @@ BackupRefusal from app::BackupRefusal {
 }
 
 /// What a restored backup left out of its lists because they didn't fit beside the rest
-/// (Switch spec 7): its kept peers and reply grants first, and its deny entries only if
+/// (Dispatch spec 7): its kept peers and reply grants first, and its deny entries only if
 /// those don't fit either.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum ListsLeftOut {
@@ -521,7 +521,7 @@ impl From<app::ListsLeftOut> for ListsLeftOut {
     }
 }
 
-/// Why a verified Switch notice holds the installation (Switch spec 12.6).
+/// Why a verified Dispatch notice holds the installation (Dispatch spec 12.6).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum RecoveryReason {
     /// Account state is behind its signed service head or generation.
@@ -532,7 +532,7 @@ pub enum RecoveryReason {
     MarkLost,
 }
 
-/// The current installation's verified recovery notice, retained by Switch through reopen.
+/// The current installation's verified recovery notice, retained by Dispatch through reopen.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct WalletRecoveryNotice {
     /// Generation of the affected installation.
@@ -548,7 +548,7 @@ pub struct WalletRecoveryNotice {
 }
 impl From<app::RecoveryNotice> for WalletRecoveryNotice {
     fn from(value: app::RecoveryNotice) -> Self {
-        use pubky_switch_core::http::NoticeReason;
+        use pubky_dispatch_core::http::NoticeReason;
         Self {
             generation: value.generation,
             reason: value.reason.map(|r| match r {
@@ -566,12 +566,12 @@ impl From<app::RecoveryNotice> for WalletRecoveryNotice {
 project_events! {
 /// One thing that happened, for the host to show or act on.
 WalletEventData from app::AppEvent {
-    /// Switch has verified that the installation needs recovery.
+    /// Dispatch has verified that the installation needs recovery.
     RecoveryRequired {
         /// The complete notice that produced this duty.
         notice: WalletRecoveryNotice => notice.into(),
     },
-    /// Switch verified that the notice cleared, including when a later generation was followed.
+    /// Dispatch verified that the notice cleared, including when a later generation was followed.
     RecoveryNoticeCleared {
         /// Generation of the notice that cleared.
         generation: u64,
@@ -579,7 +579,7 @@ WalletEventData from app::AppEvent {
     /// A verified alarm stopped the app.
     Alarm {
         /// The original alarm that stopped the app.
-        value: SwitchAlarm => value.into(),
+        value: DispatchAlarm => value.into(),
     } as (Source::Alarm(value)),
     /// The message and its effects were committed.
     MessageReceived {
@@ -598,7 +598,7 @@ WalletEventData from app::AppEvent {
     MessageDropped {
         /// The entry's `seq`.
         seq: u64,
-        /// The check of Switch wire 5.1 that failed, 1 to 10.
+        /// The check of Dispatch wire 5.1 that failed, 1 to 10.
         check: u8,
         /// The rule, without content.
         reason: String,
@@ -931,7 +931,7 @@ WalletEventData from app::AppEvent {
         current: u64,
     },
     /// A restore, or a provider loss whose upload contributed them, left kept peers or reply
-    /// grants unverified, or the restored backup left part of its lists out (Switch spec 7,
+    /// grants unverified, or the restored backup left part of its lists out (Dispatch spec 7,
     /// 12.4, 12.6): they don't admit until a list read or a change to that peer confirms
     /// them. Show the user, who may look over the kept peers, then acknowledge it.
     ListsUnverified {
@@ -967,7 +967,7 @@ WalletEventData from app::AppEvent {
     },
     /// After a provider loss, `over` of the app's deny entries don't fit the replacement's
     /// deny list and nothing of the list was merged: the user unblocks that many peers, and
-    /// the recovery is followed again (Switch docs/app-host-guide.md).
+    /// the recovery is followed again (Dispatch docs/app-host-guide.md).
     RecoveryDenyListFull {
         /// The generation being recovered.
         generation: u64,
@@ -990,14 +990,14 @@ WalletEventData from app::AppEvent {
     KeptBatchSignedAgain {
         /// The batch ID it is kept under, which doesn't change.
         batch_id: Vec<u8> => batch_id.into(),
-        /// The batch ID its signed bytes carry now, on the wire (Switch wire 6.4).
+        /// The batch ID its signed bytes carry now, on the wire (Dispatch wire 6.4).
         wire_batch_id: Vec<u8> => wire_batch_id.into(),
     },
     /// Retained batches still await an outcome.
     KeptBatchesWaiting {
         /// How many batches are kept now.
         kept: u64,
-        /// The switch's error code; `None` for the network or an answer that didn't verify.
+        /// The Dispatch's error code; `None` for the network or an answer that didn't verify.
         code: Option<String>,
     },
     /// A retained batch was dropped.
@@ -1066,7 +1066,7 @@ WalletEventData from app::AppEvent {
         generation: u64,
         /// The delete's version.
         version: u64,
-        /// The item hash of the signed delete operation (Switch wire 6.3).
+        /// The item hash of the signed delete operation (Dispatch wire 6.3).
         item_hash: Vec<u8> => item_hash.into(),
         /// The batch an earlier try left kept that may have applied, if one did.
         batch_id: Option<Vec<u8>> => batch_id.map(Vec::from),
@@ -1154,7 +1154,7 @@ WalletEventData from app::AppEvent {
         /// The size of the mark that wasn't kept.
         mark_bytes: u64,
     },
-    /// A restore's seen marks were incomplete (Switch spec 12.4 "Seen marks"): from then on
+    /// A restore's seen marks were incomplete (Dispatch spec 12.4 "Seen marks"): from then on
     /// a record without a mark is checked as new. Raised once, at that restore, for each
     /// registered protocol; not kept, and nothing to acknowledge. A notice: show it, or log it.
     SeenMarksIncomplete {
@@ -1190,7 +1190,7 @@ WalletEventData from app::AppEvent {
         /// The attempt.
         attempt_id: Vec<u8> => attempt_id.into(),
     },
-    /// The restore held original deliveries for the protocol to check (Switch spec 12.4).
+    /// The restore held original deliveries for the protocol to check (Dispatch spec 12.4).
     MessagesHeldAtRestore {
         /// How many messages this restore newly held.
         held: u64,

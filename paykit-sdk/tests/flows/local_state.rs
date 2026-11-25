@@ -11,14 +11,14 @@ use paykit_lib::AttemptId;
 use paykit_sdk::rail::Behaviour;
 use paykit_sdk::UnrequestedPayment;
 use paykit_sdk::{PayOptions, PayOutcome, Paykit, PaykitError, RequestRef, Resolution};
-use pubky_switch_client::app::{
-    AppError, Collection as SwitchCollection, LocalWrite, OpBatch, RecordTarget, UserConfirmed,
+use pubky_dispatch_client::app::{
+    AppError, Collection as DispatchCollection, LocalWrite, OpBatch, RecordTarget, UserConfirmed,
 };
-use pubky_switch_client::clock::Clock;
-use pubky_switch_client::error::StoreError;
-use pubky_switch_client::store::{KeyValue, MemoryStore, StateStore};
-use pubky_switch_core::claims::Outcome;
-use pubky_switch_core::enc::b64;
+use pubky_dispatch_client::clock::Clock;
+use pubky_dispatch_client::error::StoreError;
+use pubky_dispatch_client::store::{KeyValue, MemoryStore, StateStore};
+use pubky_dispatch_core::claims::Outcome;
+use pubky_dispatch_core::enc::b64;
 use serde_json::{json, Value};
 
 use crate::common::refuse_writes;
@@ -92,7 +92,7 @@ fn journal(attempt: &AttemptId) -> String {
     format!("j/{}", attempt.to_text())
 }
 
-/// The outcome of `attempt` on the claim of `obligation`, as the switch holds it.
+/// The outcome of `attempt` on the claim of `obligation`, as the Dispatch holds it.
 async fn outcome(wallet: &mut Paykit, obligation: &[u8; 32], attempt: &AttemptId) -> Outcome {
     let read = wallet
         .app_mut()
@@ -140,12 +140,12 @@ impl StateStore for SwappedReads {
 
     fn commit(
         &self,
-        batch: pubky_switch_client::store::WriteBatch,
-    ) -> Result<(), pubky_switch_client::error::StoreError> {
+        batch: pubky_dispatch_client::store::WriteBatch,
+    ) -> Result<(), pubky_dispatch_client::error::StoreError> {
         self.commit_with(batch, |batch| {
             self.inner
                 .commit(batch)
-                .map(|()| pubky_switch_client::store::CommitOutcome::Applied)
+                .map(|()| pubky_dispatch_client::store::CommitOutcome::Applied)
         })
         .map(|_| ())
     }
@@ -153,18 +153,20 @@ impl StateStore for SwappedReads {
     fn acquire(
         &self,
         ns: &str,
-        owner: pubky_switch_client::store::StoreOwner,
-    ) -> Result<pubky_switch_client::store::AcquireOutcome, pubky_switch_client::error::StoreError>
-    {
+        owner: pubky_dispatch_client::store::StoreOwner,
+    ) -> Result<
+        pubky_dispatch_client::store::AcquireOutcome,
+        pubky_dispatch_client::error::StoreError,
+    > {
         self.inner.acquire(ns, owner)
     }
 
     fn commit_if(
         &self,
         ns: &str,
-        owner: pubky_switch_client::store::StoreOwner,
-        batch: pubky_switch_client::store::WriteBatch,
-    ) -> Result<pubky_switch_client::store::CommitOutcome, pubky_switch_client::error::StoreError>
+        owner: pubky_dispatch_client::store::StoreOwner,
+        batch: pubky_dispatch_client::store::WriteBatch,
+    ) -> Result<pubky_dispatch_client::store::CommitOutcome, pubky_dispatch_client::error::StoreError>
     {
         self.commit_with(batch, |batch| self.inner.commit_if(ns, owner, batch))
     }
@@ -172,14 +174,14 @@ impl StateStore for SwappedReads {
 impl SwappedReads {
     fn commit_with(
         &self,
-        batch: pubky_switch_client::store::WriteBatch,
+        batch: pubky_dispatch_client::store::WriteBatch,
         apply: impl FnOnce(
-            pubky_switch_client::store::WriteBatch,
+            pubky_dispatch_client::store::WriteBatch,
         ) -> Result<
-            pubky_switch_client::store::CommitOutcome,
-            pubky_switch_client::error::StoreError,
+            pubky_dispatch_client::store::CommitOutcome,
+            pubky_dispatch_client::error::StoreError,
         >,
-    ) -> Result<pubky_switch_client::store::CommitOutcome, pubky_switch_client::error::StoreError>
+    ) -> Result<pubky_dispatch_client::store::CommitOutcome, pubky_dispatch_client::error::StoreError>
     {
         apply(batch)
     }
@@ -345,8 +347,8 @@ fn assert_corrupt(resumed: &paykit_sdk::Result<Vec<PayOutcome>>) {
         matches!(
             resumed,
             Err(paykit_sdk::PaykitError::Client(
-                pubky_switch_client::app::AppError::Store(
-                    pubky_switch_client::error::StoreError::Corrupt
+                pubky_dispatch_client::app::AppError::Store(
+                    pubky_dispatch_client::error::StoreError::Corrupt
                 )
             ))
         ),
@@ -758,7 +760,7 @@ async fn test_local_state_cancellation_under_another_requests_key_parks_the_real
 fn lists_of(w: &World, app_id: &[u8; 16]) -> RecordTarget {
     let collection = Collection::PaymentLists;
     RecordTarget::new(
-        SwitchCollection::new(collection.name(), collection.policy(None)),
+        DispatchCollection::new(collection.name(), collection.policy(None)),
         &natural_key::payment_list(&w.bob_id(), app_id),
     )
 }
@@ -1021,7 +1023,7 @@ async fn recorded_list(wallet: &Paykit, record: &[u8; 32]) -> String {
     let message = &value["list"]["plaintext"]["json"];
     let message: Value = match message.as_str() {
         Some(text) => {
-            serde_json::from_slice(&pubky_switch_core::enc::unb64(text).unwrap()).unwrap()
+            serde_json::from_slice(&pubky_dispatch_core::enc::unb64(text).unwrap()).unwrap()
         }
         None => message.clone(),
     };
@@ -1034,7 +1036,7 @@ async fn test_local_state_late_held_list_placement_keeps_a_newer_held_list() {
     // held over the record in its place, as the receive step holds one. The kept placement
     // carries no delete of the hold, so when it lands v4 stays held, and is placed after it,
     // never lost.
-    use pubky_switch_client::testing::Fault;
+    use pubky_dispatch_client::testing::Fault;
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
@@ -1178,7 +1180,7 @@ async fn test_local_state_held_withdrawal_survives_an_older_in_place_restore() {
     wallet.receive(None).await.unwrap();
     wallet.reconcile().await.unwrap();
     wallet
-        .end_reconcile(pubky_switch_client::app::UserConfirmed::new())
+        .end_reconcile(pubky_dispatch_client::app::UserConfirmed::new())
         .await
         .unwrap();
     // The record reads again, with the older list.
@@ -1803,7 +1805,7 @@ async fn test_local_state_paused_held_list_of_a_removed_app_stops_no_request() {
     w.bob
         .next_doc(|body| {
             body.apps.retain(|a| a.app_id != shop.app_id());
-            body.removed.push(pubky_switch_core::records::RemovedApp {
+            body.removed.push(pubky_dispatch_core::records::RemovedApp {
                 app_id: shop.app_id(),
                 distrust_from: now,
             });

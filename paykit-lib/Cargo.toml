@@ -1,6 +1,6 @@
 [package]
 name = "paykit-lib"
-description = "Paykit v0.2 formats and rules on the Pubky Switch: scopes, message kinds, collections and payment rules"
+description = "Paykit v0.2 formats and rules on the Pubky Dispatch: scopes, message kinds, collections and payment rules"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -16,17 +16,17 @@ publish = false
 # Test-only: writers without their rules, for the rejection cases of the vector tests. No
 # production build enables it; the crate's own tests do, through its dev-dependency on itself.
 test-vectors = []
-# Paykit's protocol for the signer (`pubky-switch-signer`): what a host that signs certificates
+# Paykit's protocol for the signer (`pubky-dispatch-signer`): what a host that signs certificates
 # registers so they can hold Paykit's scopes. Apps and the SDK don't need it.
-signer = ["dep:pubky-switch-signer"]
+signer = ["dep:pubky-dispatch-signer"]
 
 [dependencies]
-pubky-switch-core.workspace = true
-pubky-switch-signer = { workspace = true, optional = true }
+pubky-dispatch-core.workspace = true
+pubky-dispatch-signer = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
 paykit-lib = { path = ".", features = ["test-vectors"] }
-pubky-switch-core = { workspace = true, features = ["test-vectors"] }
+pubky-dispatch-core = { workspace = true, features = ["test-vectors"] }

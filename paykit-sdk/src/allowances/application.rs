@@ -2,13 +2,13 @@
 
 use crate::error::{PaykitError, Result};
 use paykit_lib::collections::Collection;
-use pubky_switch_client::app::{App, KeptOp};
-use pubky_switch_core::chain::TransitionProof;
-use pubky_switch_core::enc::hash;
-use pubky_switch_core::ops::RecordVersion;
-use pubky_switch_core::ops::{BatchRef, Condition, OpBody, OpKind, SignedOp};
-use pubky_switch_core::records::IdentityDoc;
-use pubky_switch_core::sealed::SealedValue;
+use pubky_dispatch_client::app::{App, KeptOp};
+use pubky_dispatch_core::chain::TransitionProof;
+use pubky_dispatch_core::enc::hash;
+use pubky_dispatch_core::ops::RecordVersion;
+use pubky_dispatch_core::ops::{BatchRef, Condition, OpBody, OpKind, SignedOp};
+use pubky_dispatch_core::records::IdentityDoc;
+use pubky_dispatch_core::sealed::SealedValue;
 use std::collections::BTreeMap;
 
 pub(super) type RecordWrite = (Vec<Condition>, OpKind);
@@ -27,7 +27,7 @@ pub(super) fn prepared_member(
     // kept deletion keeps its source's generation. A batch of several writes, the
     // acceptance, commits to its ordered writes and every signed guard, not to the
     // generation it is signed in: that is checked apart, in the grant's history after the
-    // last provider loss (`applied_applications`; Pubky Switch spec, Section 12.5).
+    // last provider loss (`applied_applications`; Pubky Dispatch spec, Section 12.5).
     let generation = match kind {
         OpKind::RecordPut(put) if count == 1 && put.value_sealed.looks_like_delete() => {
             put.expected_version.generation
@@ -135,7 +135,7 @@ pub(super) struct ConfirmedReply {
 pub(super) struct AppliedApplications {
     pub(super) replies: BTreeMap<([u8; 32], [u8; 32]), ConfirmedReply>,
     pub(super) pending_creates:
-        BTreeMap<([u8; 32], [u8; 32]), (RecordVersion, pubky_switch_core::sig::SignedDoc)>,
+        BTreeMap<([u8; 32], [u8; 32]), (RecordVersion, pubky_dispatch_core::sig::SignedDoc)>,
     /// Signed original creates whose service key is presently missing. These can
     /// preserve an obligation across a deletion, but cannot authorize its delivery.
     pub(super) undated_creates: BTreeMap<([u8; 32], [u8; 32]), KeptOp>,
@@ -168,7 +168,7 @@ pub(super) fn applied_applications(
         };
         if !(1..=3).contains(&body.batch.count)
             // A batch applied in an earlier generation of the same history, after the last
-            // provider loss, is still its own evidence (Paykit spec 8.3; Pubky Switch spec,
+            // provider loss, is still its own evidence (Paykit spec 8.3; Pubky Dispatch spec,
             // Section 12.5).
             || (body.batch.count > 1
                 && !crate::executor::in_grant_history(

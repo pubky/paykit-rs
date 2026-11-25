@@ -8,7 +8,7 @@ use paykit_sdk::rail::Behaviour;
 use paykit_sdk::{
     PayOptions, PayOutcome, Paykit, PricedPayment, RateSource, Refusal, RequestDraft, RequestRef,
 };
-use pubky_switch_client::clock::Clock;
+use pubky_dispatch_client::clock::Clock;
 
 use crate::common::{btc, endpoint, list_version, request_from, World, HOUR_MS};
 
@@ -387,7 +387,7 @@ async fn test_conversion_payee_credits_no_priced_payment_of_another_amount() {
     assert_eq!(shop.confirm_payment(&sales[0].record).await.unwrap(), None);
 }
 
-/// The world's rail declared idempotent, so a resume repeats a dispatch left in flight.
+/// The world's rail declared idempotent, so a resume repeats a handoff left in flight.
 fn idempotent(w: &World) {
     w.rail.set_declaration(
         paykit_sdk::RailDeclaration::new(
@@ -402,7 +402,7 @@ fn idempotent(w: &World) {
 /// bob's request for 10 usd to one invoice priced in btc, paid by hand and left in flight.
 async fn priced_in_flight(
     w: &World,
-    store: std::sync::Arc<dyn pubky_switch_client::store::StateStore>,
+    store: std::sync::Arc<dyn pubky_dispatch_client::store::StateStore>,
 ) -> (Paykit, paykit_lib::AttemptId) {
     idempotent(w);
     let mut wallet = w
@@ -445,7 +445,7 @@ async fn edit_entry(wallet: &mut Paykit, edit: impl FnOnce(&mut serde_json::Valu
         .app_mut()
         .protocol_commit(
             "paykit",
-            &[pubky_switch_client::app::LocalWrite::Put {
+            &[pubky_dispatch_client::app::LocalWrite::Put {
                 key: held[0].0.clone(),
                 value: serde_json::to_vec(&value).unwrap(),
             }],
@@ -887,7 +887,7 @@ async fn test_conversion_blocked_confirmation_uses_the_rounded_amount() {
 }
 
 #[tokio::test]
-async fn test_conversion_dispatchable_payment_requires_its_transfer_bound() {
+async fn test_conversion_handoffable_payment_requires_its_transfer_bound() {
     let w = World::new();
     let (mut wallet, attempt_id) = priced_in_flight(&w, crate::common::store()).await;
     edit_entry(&mut wallet, |entry| {

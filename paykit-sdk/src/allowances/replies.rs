@@ -12,10 +12,10 @@ use paykit_lib::bodies::ProposerRole;
 use paykit_lib::collections::Collection;
 use paykit_lib::records::{PendingAllowanceRecord, StoredMessage};
 use paykit_lib::Body;
-use pubky_switch_client::app::{
+use pubky_dispatch_client::app::{
     FeedPosition, LocalWrite, ReceiveContext, RecordMarkContext, SharedRecord, StoreFailure,
 };
-use pubky_switch_core::ops::RecordVersion;
+use pubky_dispatch_core::ops::RecordVersion;
 use serde::{Deserialize, Serialize};
 use std::{cmp::Ordering, collections::BTreeMap};
 
@@ -26,7 +26,7 @@ pub(crate) struct PendingConflict {
     source: SeenVersion,
     /// The latest proven live application of this same original in its observed lifetime.
     current: SeenVersion,
-    #[serde(with = "pubky_switch_core::enc::serde_b64_vec")]
+    #[serde(with = "pubky_dispatch_core::enc::serde_b64_vec")]
     pending: Vec<u8>,
     second: Option<KeptMessage>,
     replies: Option<OpposedReplies>,
@@ -44,9 +44,9 @@ struct OpposedReplies {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct PendingRetirement {
-    #[serde(with = "pubky_switch_core::enc::serde_b64")]
+    #[serde(with = "pubky_dispatch_core::enc::serde_b64")]
     account: [u8; 32],
-    #[serde(with = "pubky_switch_core::enc::serde_b64")]
+    #[serde(with = "pubky_dispatch_core::enc::serde_b64")]
     key: [u8; 32],
     version: SeenVersion,
     reopened: Option<ReopenedProposal>,
@@ -56,7 +56,7 @@ pub(crate) struct PendingRetirement {
 #[serde(deny_unknown_fields)]
 struct ReopenedProposal {
     version: SeenVersion,
-    #[serde(with = "pubky_switch_core::enc::serde_b64")]
+    #[serde(with = "pubky_dispatch_core::enc::serde_b64")]
     proposal: [u8; 32],
 }
 
@@ -66,8 +66,8 @@ impl PendingRetirement {
         &self,
         original: SeenVersion,
         recovery_from: Option<u64>,
-    ) -> pubky_switch_client::app::AppendDecision {
-        use pubky_switch_client::app::AppendDecision::{Hold, Send, Withdraw};
+    ) -> pubky_dispatch_client::app::AppendDecision {
+        use pubky_dispatch_client::app::AppendDecision::{Hold, Send, Withdraw};
         match self.version.cmp(&original) {
             Ordering::Less => Hold,
             Ordering::Equal if self.reopened.is_none() => {
@@ -134,7 +134,7 @@ enum Opposed {
 /// A qualified, unresolved conflict at this proposal lifetime stops its outgoing
 /// proposal, rejection or withdrawal even on a cold retry (Paykit spec 8.3.1).
 pub(crate) fn holds_delivery(
-    delivery: &pubky_switch_client::app::DeliveryView<'_>,
+    delivery: &pubky_dispatch_client::app::DeliveryView<'_>,
 ) -> Result<bool> {
     let message = delivery.message();
     let body = paykit_lib::bodies::check_body(message, delivery.plaintext().json())?;
@@ -384,7 +384,7 @@ impl PendingConflict {
     /// Their original inbox receipt and pending source survive alongside the stop.
     fn restore_acceptances(
         &self,
-        restoring: &pubky_switch_client::app::RestoreContext<'_>,
+        restoring: &pubky_dispatch_client::app::RestoreContext<'_>,
         binder: &Binder<'_>,
         replies: &mut BTreeMap<String, KeptMessage>,
     ) -> Result<()> {
@@ -488,7 +488,7 @@ impl PendingConflict {
 /// survives an uncertain or unreadable current record.
 pub(super) fn qualified_at(
     held: &SharedRecord,
-    target: &pubky_switch_client::app::RecordTarget,
+    target: &pubky_dispatch_client::app::RecordTarget,
     key: &[u8; 32],
 ) -> bool {
     held.authenticated && qualified_unless_unauthenticated(held, target, key)
@@ -498,7 +498,7 @@ pub(super) fn qualified_at(
 /// authentication of its version, or the write's own proof (`OwnWrite::stands_for`).
 pub(super) fn qualified_as(
     held: &SharedRecord,
-    target: &pubky_switch_client::app::RecordTarget,
+    target: &pubky_dispatch_client::app::RecordTarget,
     key: &[u8; 32],
     own: &crate::executor::OwnWrite,
 ) -> bool {
@@ -507,7 +507,7 @@ pub(super) fn qualified_as(
 
 fn qualified_unless_unauthenticated(
     held: &SharedRecord,
-    target: &pubky_switch_client::app::RecordTarget,
+    target: &pubky_dispatch_client::app::RecordTarget,
     key: &[u8; 32],
 ) -> bool {
     held.key == *key
@@ -524,7 +524,7 @@ fn qualified_unless_unauthenticated(
 /// or not (Paykit spec 6, 8.1 Blocked counterparties).
 pub(super) fn qualified_confirmed(
     held: &SharedRecord,
-    target: &pubky_switch_client::app::RecordTarget,
+    target: &pubky_dispatch_client::app::RecordTarget,
     key: &[u8; 32],
 ) -> bool {
     held.authenticated
@@ -539,7 +539,7 @@ pub(super) fn qualified_confirmed(
 
 pub(super) fn qualified(
     held: &SharedRecord,
-    target: &pubky_switch_client::app::RecordTarget,
+    target: &pubky_dispatch_client::app::RecordTarget,
     key: &[u8; 32],
     own: &[u8; 32],
 ) -> Option<PendingAllowanceRecord> {
@@ -551,7 +551,7 @@ pub(super) fn qualified(
 
 pub(super) fn original_for(
     held: &SharedRecord,
-    target: &pubky_switch_client::app::RecordTarget,
+    target: &pubky_dispatch_client::app::RecordTarget,
     key: &[u8; 32],
     own: &[u8; 32],
     answer: &StoredMessage,
@@ -565,7 +565,7 @@ pub(super) fn original_for(
 /// Compare the actual inbox position with the selected deletion in the account feed.
 pub(super) fn before_retirement(
     cx: &ReceiveContext<'_>,
-    target: &pubky_switch_client::app::RecordTarget,
+    target: &pubky_dispatch_client::app::RecordTarget,
     position: FeedPosition,
 ) -> std::result::Result<bool, Fail> {
     let key = cx.record_key(target)?;
@@ -590,7 +590,7 @@ pub(super) enum SecondProposal {
 pub(super) fn second_proposal(
     own: &[u8; 32],
     held: &SharedRecord,
-    target: &pubky_switch_client::app::RecordTarget,
+    target: &pubky_dispatch_client::app::RecordTarget,
     record: &[u8; 32],
     previous: Option<PendingConflict>,
     message: &StoredMessage,
@@ -628,10 +628,10 @@ pub(super) fn second_proposal(
 /// Keep the competing envelope in the same commit as its inbox disposition.
 pub(super) fn observe_second(
     cx: &mut ReceiveContext<'_>,
-    target: &pubky_switch_client::app::RecordTarget,
+    target: &pubky_dispatch_client::app::RecordTarget,
     held: &SharedRecord,
     message: &StoredMessage,
-    position: pubky_switch_client::app::FeedPosition,
+    position: pubky_dispatch_client::app::FeedPosition,
 ) -> std::result::Result<(), Fail> {
     let record = cx.record_key(target)?;
     let at = key::pending_conflict(&record);
@@ -733,7 +733,7 @@ pub(super) fn observe(
 /// Reopen delivery only from a covering observation of this account's live proposal after
 /// a verified deletion. Keep the deletion itself to order replies carried by older backups.
 pub(crate) fn observe_reopened(
-    observation: &pubky_switch_client::app::RecordObservation<'_>,
+    observation: &pubky_dispatch_client::app::RecordObservation<'_>,
     cx: &ReceiveContext<'_>,
 ) -> std::result::Result<Vec<LocalWrite>, StoreFailure> {
     let held = observation.record;
@@ -883,7 +883,7 @@ impl Paykit {
         stored_id: Option<u64>,
     ) -> Result<Option<crate::stored::Placed>> {
         use crate::stored::Placed;
-        use pubky_switch_client::app::RecordContent;
+        use pubky_dispatch_client::app::RecordContent;
         let position = evidence.position().ok_or_else(PaykitError::corrupt)?;
         let Some(id) = named_allowance(message.body()) else {
             return Err(PaykitError::corrupt());
@@ -980,8 +980,8 @@ impl Paykit {
     }
 
     pub(super) async fn place_pending_seconds(&mut self) -> Result<()> {
-        use pubky_switch_client::app::{KeptReason, OpBatch, RecordRead};
-        use pubky_switch_core::ops::Condition;
+        use pubky_dispatch_client::app::{KeptReason, OpBatch, RecordRead};
+        use pubky_dispatch_core::ops::Condition;
         let own = self.identity();
         for (_, stop) in self
             .local_scan::<PendingConflict>(key::PENDING_CONFLICTS)
@@ -1070,16 +1070,16 @@ impl Paykit {
     /// copy with the same signed proposal also occurs after deletion and recreation.
     pub(super) async fn pending_predecessor(
         &self,
-        target: &pubky_switch_client::app::RecordTarget,
+        target: &pubky_dispatch_client::app::RecordTarget,
         held: &SharedRecord,
     ) -> Result<Option<RecordVersion>> {
         let app = &self.app;
         if held.version.generation != app.own_identity().generation() {
             return Ok(None);
         }
-        let expected = |kept: &pubky_switch_client::app::KeptOp| {
+        let expected = |kept: &pubky_dispatch_client::app::KeptOp| {
             use paykit_lib::scopes::verify_certificate;
-            use pubky_switch_core::{
+            use pubky_dispatch_core::{
                 chain::TransitionProof,
                 ops::{OpKind, SignedOp},
                 sealed::RecordValue,
@@ -1164,14 +1164,14 @@ impl Paykit {
     /// that proposal. An acceptance also opens the permanent pair and the payer’s ledger.
     async fn apply_pending_reply(
         &mut self,
-        target: &pubky_switch_client::app::RecordTarget,
+        target: &pubky_dispatch_client::app::RecordTarget,
         selected: &SharedRecord,
         proposal: &StoredMessage,
         reply: &StoredMessage,
         evidence: &KeptMessage,
     ) -> Result<PendingReply> {
-        use pubky_switch_client::app::{KeptReason, OpBatch, RecordRead};
-        use pubky_switch_core::ops::Condition;
+        use pubky_dispatch_client::app::{KeptReason, OpBatch, RecordRead};
+        use pubky_dispatch_core::ops::Condition;
         let peer = reply.sender();
         let id = named_allowance(reply.body()).ok_or_else(PaykitError::corrupt)?;
         let permanent = super::allowance_target(&peer, id);
@@ -1510,7 +1510,7 @@ impl Paykit {
 /// Install the later live stop from an in-place restore and retain the original Q if
 /// its placement was still owed. A fresh installation has no destination state to merge.
 pub(crate) fn restore_conflicts(
-    restoring: &pubky_switch_client::app::RestoreContext<'_>,
+    restoring: &pubky_dispatch_client::app::RestoreContext<'_>,
     binder: &Binder<'_>,
     (mut imported, mut unresolved): (
         BTreeMap<[u8; 32], PendingConflict>,
@@ -1691,7 +1691,7 @@ pub(crate) fn restore_conflicts(
 #[cfg(test)]
 mod withdrawal_tests {
     use super::*;
-    use pubky_switch_client::app::AppendDecision::{Hold, Send, Withdraw};
+    use pubky_dispatch_client::app::AppendDecision::{Hold, Send, Withdraw};
 
     #[test]
     fn test_withdrawal_checks_the_generation_lost_by_the_followed_identity() {

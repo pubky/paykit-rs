@@ -21,12 +21,12 @@ use paykit_lib::{
     Body, Collection, Label,
 };
 use paykit_sdk::{self as sdk, AppScopes, Paykit, RequestRef};
-use pubky_switch_client::{
-    app::{Collection as SwitchCollection, LocalWrite, RecordTarget},
+use pubky_dispatch_client::{
+    app::{Collection as DispatchCollection, LocalWrite, RecordTarget},
     store::MemoryStore,
 };
-use pubky_switch_core::{json::check_uuid_v4, message::MessagePlaintext, sig::SignedDoc};
-use pubky_switch_harness::{parties::Asking, Backend, World};
+use pubky_dispatch_core::{json::check_uuid_v4, message::MessagePlaintext, sig::SignedDoc};
+use pubky_dispatch_harness::{parties::Asking, Backend, World};
 use std::{
     error::Error,
     sync::{atomic::Ordering, Arc},
@@ -330,7 +330,7 @@ fn test_payee_inputs_preserve_choices_and_reject_malformed_fields() -> TestResul
 
 async fn join(
     world: &World,
-    signer: &mut pubky_switch_signer::Signer,
+    signer: &mut pubky_dispatch_signer::Signer,
     identity: &str,
     app_name: &str,
     scopes: sdk::RequestedScopes,
@@ -528,7 +528,7 @@ async fn requests_and_receipts(world: &World) -> TestResult {
     Box::pin(receive(&mut sibling)).await?;
     let collection = Collection::PayeeActivity;
     let target = RecordTarget::new(
-        SwitchCollection::new(
+        DispatchCollection::new(
             collection.name(),
             collection.policy(Some(&Label::new(label)?)),
         ),

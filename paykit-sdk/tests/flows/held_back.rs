@@ -1,16 +1,16 @@
-//! A payment the Switch client holds back (Switch spec 3.6, 12.3): an alarm or an app that
+//! A payment the Dispatch client holds back (Dispatch spec 3.6, 12.3): an alarm or an app that
 //! left. The client's own refusal reaches the caller, so the host can tell a recovery from
 //! a wait, from a payment and from a resume (Paykit spec 7.2). The pay gate's own handling
 //! of each refusal is tested beside it in `pay.rs`.
 
 use paykit_sdk::rail::{Behaviour, RailDeclaration};
 use paykit_sdk::{PayOptions, PayOutcome, Paykit, PaykitError, Refusal};
-use pubky_switch_client::app::{AppError, LeaveMode, Refusal as ClientRefusal, UserConfirmed};
-use pubky_switch_client::clock::Clock;
+use pubky_dispatch_client::app::{AppError, LeaveMode, Refusal as ClientRefusal, UserConfirmed};
+use pubky_dispatch_client::clock::Clock;
 
 use crate::common::{draft, request_from, World};
 
-/// An idempotent rail, so a resume repeats the dispatch through the pay gate.
+/// An idempotent rail, so a resume repeats the handoff through the pay gate.
 fn repeatable(w: &World) {
     w.rail.set_declaration(
         RailDeclaration::new(

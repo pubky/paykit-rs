@@ -12,9 +12,9 @@ use paykit_sdk::rail::FakeRail;
 use paykit_sdk::{
     PayOptions, PayeeStatus, Paykit, PaykitBackup, PaykitConfig, Refusal, RequestRef, RequestStatus,
 };
-use pubky_switch_client::app::{HeldCursor, UserConfirmed};
-use pubky_switch_client::store::MemoryStore;
-use pubky_switch_harness::World;
+use pubky_dispatch_client::app::{HeldCursor, UserConfirmed};
+use pubky_dispatch_client::store::MemoryStore;
+use pubky_dispatch_harness::World;
 
 use super::{
     app_env, btc, checkout, endpoint, invoice, on_both_backends, paid_and_receipted, Checkout,

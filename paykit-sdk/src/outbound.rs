@@ -1,7 +1,7 @@
-//! Outgoing writes and messages wait for a restore's first read (Switch spec 12.4).
+//! Outgoing writes and messages wait for a restore's first read (Dispatch spec 12.4).
 
-use pubky_switch_client::app::{AppError, Delivery, OpBatch, OutboxReport, Refusal};
-use pubky_switch_client::client::Submitted;
+use pubky_dispatch_client::app::{AppError, Delivery, OpBatch, OutboxReport, Refusal};
+use pubky_dispatch_client::client::Submitted;
 
 use crate::error::Result;
 use crate::paykit::Paykit;
@@ -16,7 +16,7 @@ impl Paykit {
             .any(|name| name == crate::protocol::BACKUP_NAME)
         {
             return Err(crate::error::Refusal::Usage(
-                "Switch spec 11: delivery ownership is not established".into(),
+                "Dispatch spec 11: delivery ownership is not established".into(),
             )
             .into());
         }
@@ -44,12 +44,12 @@ impl Paykit {
     }
 
     /// Allow this payee to start a conversation, including a pending connection request
-    /// (Switch spec 7). A restored wallet completes its required first read first, and
-    /// its next receive reports those effects (Switch spec 12.4).
+    /// (Dispatch spec 7). A restored wallet completes its required first read first, and
+    /// its next receive reports those effects (Dispatch spec 12.4).
     ///
     /// # Errors
     ///
-    /// The first read's failure, or the Switch client's refusal without `reply.add`.
+    /// The first read's failure, or the Dispatch client's refusal without `reply.add`.
     pub async fn allow_connect(&mut self, payee: &[u8; 32]) -> Result<()> {
         // A delivery operation for the whole call (Paykit spec 8.1).
         let _delivery = self.delivery_operation();
@@ -60,7 +60,7 @@ impl Paykit {
     }
 
     /// Confirm that the user recognizes these post-backup registrations as this device's
-    /// own (Switch spec 12.4). Pass the numbers from the current restore question.
+    /// own (Dispatch spec 12.4). Pass the numbers from the current restore question.
     ///
     /// # Errors
     ///
@@ -76,7 +76,7 @@ impl Paykit {
         Ok(self.app.confirm_restored_registrations(confirmed).await?)
     }
 
-    /// Report that the user cannot account for these post-backup registrations (Switch
+    /// Report that the user cannot account for these post-backup registrations (Dispatch
     /// spec 12.4). The client raises its compromise alarm and requests revocation.
     ///
     /// # Errors
@@ -105,7 +105,7 @@ impl Paykit {
     }
 
     /// Read before preparing a public operation's effects. The host receives the summary
-    /// with its next receive; durable duty events remain the client's (Switch spec 12.4).
+    /// with its next receive; durable duty events remain the client's (Dispatch spec 12.4).
     pub(crate) async fn first_read_before_writing(&mut self) -> Result<()> {
         if self.first_read_pending() {
             // Allow one listing page per registered Paykit collection. A larger listing
@@ -113,7 +113,7 @@ impl Paykit {
             let reads = crate::hold::RecordSide::All
                 .collections()
                 .len()
-                .div_ceil(pubky_switch_client::app::LISTING_PAGES_PER_READ as usize);
+                .div_ceil(pubky_dispatch_client::app::LISTING_PAGES_PER_READ as usize);
             for _ in 0..reads {
                 let summary = Box::pin(self.receive(None)).await?;
                 let more = summary.report.more && !summary.report.stopped;
@@ -134,7 +134,7 @@ impl Paykit {
     pub(crate) fn require_first_read(&self) -> std::result::Result<(), AppError> {
         if self.first_read_pending() {
             return Err(AppError::Refused(Refusal::NotNow(
-                "Switch spec 12.4: outgoing work awaits the restore's first read".into(),
+                "Dispatch spec 12.4: outgoing work awaits the restore's first read".into(),
             )));
         }
         Ok(())
@@ -173,7 +173,7 @@ impl Paykit {
         };
         kept.await.map_err(|error| match error {
             crate::error::PaykitError::Client(error) => error,
-            _ => AppError::Store(pubky_switch_client::store::StoreError::Corrupt),
+            _ => AppError::Store(pubky_dispatch_client::store::StoreError::Corrupt),
         })
     }
 
@@ -197,7 +197,7 @@ impl Paykit {
         Box::pin(self.app.resend(msg_id)).await
     }
 
-    pub(crate) async fn deny_at_switch(
+    pub(crate) async fn deny_at_dispatch(
         &mut self,
         pubky: &[u8; 32],
     ) -> std::result::Result<(), AppError> {
@@ -205,7 +205,7 @@ impl Paykit {
         Box::pin(self.app.deny(pubky)).await
     }
 
-    pub(crate) async fn undeny_at_switch(
+    pub(crate) async fn undeny_at_dispatch(
         &mut self,
         pubky: &[u8; 32],
     ) -> std::result::Result<(), AppError> {

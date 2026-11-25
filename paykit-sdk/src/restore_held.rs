@@ -1,4 +1,4 @@
-//! Disposition of messages the Switch held at restore (Paykit spec 7.2, 9; Switch spec 12.4).
+//! Disposition of messages the Dispatch held at restore (Paykit spec 7.2, 9; Dispatch spec 12.4).
 
 use std::collections::BTreeMap;
 use std::sync::{Mutex, MutexGuard};
@@ -7,8 +7,8 @@ use paykit_lib::derive::natural_key;
 use paykit_lib::kinds::{Kind, MessageKind};
 use paykit_lib::records::StoredMessage;
 use paykit_lib::{Body, Collection, Label};
-use pubky_switch_client::app::{DeliveryView, QueuedMessage, ReceiveReport, ReplyGrantOnRelease};
-use pubky_switch_core::message::Message;
+use pubky_dispatch_client::app::{DeliveryView, QueuedMessage, ReceiveReport, ReplyGrantOnRelease};
+use pubky_dispatch_core::message::Message;
 
 use crate::activity::{family, ActivityTarget, KeptSide, SideTag};
 use crate::notices::{GivenUpFrom, GivenUpOrigin, KeptNotice};
@@ -160,10 +160,10 @@ enum Outcome {
 /// registered protocol owns.
 fn paykit_kind(kind: &str) -> bool {
     let root = kind.split_once('.').map_or(kind, |(root, _)| root);
-    pubky_switch_core::scopes::owns_root(BACKUP_NAME, root)
+    pubky_dispatch_core::scopes::owns_root(BACKUP_NAME, root)
 }
 
-// What each held message writes, and in which order (Paykit spec 7.2, Switch spec 12.4).
+// What each held message writes, and in which order (Paykit spec 7.2, Dispatch spec 12.4).
 // Paykit's own notes and the client's release or withdrawal are separate commits, so each
 // step is written so that a crash or an error before the next leaves a state the next
 // receive takes to the same end, telling each thing once:
@@ -198,7 +198,7 @@ fn paykit_kind(kind: &str) -> bool {
 impl Paykit {
     /// The one gate for deciding held messages: Paykit's own first read is complete, its
     /// records are listed and their scope keys held, and nothing stops the app (Paykit
-    /// spec 7.2, Switch spec 12.4). It is asked only after a read Paykit made, once that
+    /// spec 7.2, Dispatch spec 12.4). It is asked only after a read Paykit made, once that
     /// read's stops were placed, so another protocol's read never decides a Paykit message;
     /// what that read can't yet show waits: more pages, a listing owed by Paykit's marks, a
     /// scope key not held. The client reports more work while it owes a listing by its own
@@ -682,7 +682,7 @@ impl Paykit {
             let replies = format!(
                 "{}{}/",
                 key::kept_replies_of(counterparty),
-                pubky_switch_core::enc::b64(record)
+                pubky_dispatch_core::enc::b64(record)
             );
             if !self.local_scan::<KeptMessage>(&replies).await?.is_empty()
                 || !self

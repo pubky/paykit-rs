@@ -68,7 +68,7 @@ async fn marked_request(_world: &World, sale: IssuedSale) -> TestResult {
     let consent = PayOptions::default().with_blocked_confirmed((**payment).clone());
     let collection = Collection::PayerActivity;
     let target = RecordTarget::new(
-        SwitchCollection::new(collection.name(), collection.fixed_policy()),
+        DispatchCollection::new(collection.name(), collection.fixed_policy()),
         &natural_key::request_record(&request.payee, &request.request_hash),
     );
     let original = buyer

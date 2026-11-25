@@ -1,4 +1,4 @@
-//! A store that fails while a message is received (Switch spec 8.2): a valid message is
+//! A store that fails while a message is received (Dispatch spec 8.2): a valid message is
 //! never consumed by a store failure. Its entry is held, and applied once the store heals.
 //!
 //! Each case fails one read of a held record at a time, the first, then the second, and on,
@@ -9,8 +9,8 @@ use std::sync::Arc;
 use paykit_sdk::{
     AppScopes, PayOptions, PayOutcome, PayeeStatus, Paykit, PaykitConfig, RequestStatus,
 };
-use pubky_switch_client::clock::Clock;
-use pubky_switch_client::store::StateStore;
+use pubky_dispatch_client::clock::Clock;
+use pubky_dispatch_client::store::StateStore;
 
 use crate::common::{draft, list_version, request_from, FailingRecordReads, World};
 
@@ -162,7 +162,7 @@ async fn test_receive_faults_receipt_parked_on_a_corrupt_journal_then_settles() 
     let obligation = wallet.payments().await.unwrap()[0].obligation;
     // Bob's receipt for the attempt arrives while the payment's journal entry, which holds
     // its deadline, doesn't read: the entry is parked at once, never consumed without
-    // settling the claim (Switch spec 8.2).
+    // settling the claim (Dispatch spec 8.2).
     let body = paykit_lib::bodies::PaymentReceipt {
         attempt_id,
         billing_period: None,
@@ -193,6 +193,6 @@ async fn test_receive_faults_receipt_parked_on_a_corrupt_journal_then_settles() 
         .unwrap();
     assert_eq!(
         claim.view.status,
-        pubky_switch_core::claims::ClaimStatus::Settled
+        pubky_dispatch_core::claims::ClaimStatus::Settled
     );
 }

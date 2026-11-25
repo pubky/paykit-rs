@@ -12,11 +12,11 @@ use paykit_lib::scopes::{
     check_certificate, holds_other_protocol, paykit_scopes, permissions_for, verify_certificate,
     PaykitScope, CONTACTS, SETTLEMENTS,
 };
-use pubky_switch_core::labels;
-use pubky_switch_core::ops::RecordVersion;
-use pubky_switch_core::records::{AppCert, AppRecord};
-use pubky_switch_core::scopes::{permission_names, Permission};
-use pubky_switch_core::sig::SignedDoc;
+use pubky_dispatch_core::labels;
+use pubky_dispatch_core::ops::RecordVersion;
+use pubky_dispatch_core::records::{AppCert, AppRecord};
+use pubky_dispatch_core::scopes::{permission_names, Permission};
+use pubky_dispatch_core::sig::SignedDoc;
 use serde_json::{json, Value};
 
 use crate::common::{
@@ -138,7 +138,7 @@ fn strings(v: &Value) -> Vec<String> {
 }
 
 /// `certificate_rejections` (Paykit wire 3.1): the wallet's certificate with `scopes` and
-/// `permissions` changed and signed again; the switch takes each, Paykit refuses each for its
+/// `permissions` changed and signed again; the Dispatch takes each, Paykit refuses each for its
 /// permissions.
 fn check_certificate_rejections(keys: &Keys, d: &Value) {
     let alice = pubky(ALICE);
@@ -156,9 +156,13 @@ fn check_certificate_rejections(keys: &Keys, d: &Value) {
         // Signed again by alice's identity key, byte for byte.
         let again = identity.sign_doc(labels::sig::APP_CERT, &[], doc.body_bytes().unwrap());
         assert_eq!(again, doc, "{name}");
-        let at_switch = AppCert::verify(&doc, &alice);
-        assert_eq!(at_switch.is_ok(), case["switch_accepts"] == true, "{name}");
-        let c = at_switch.unwrap();
+        let at_dispatch = AppCert::verify(&doc, &alice);
+        assert_eq!(
+            at_dispatch.is_ok(),
+            case["switch_accepts"] == true,
+            "{name}"
+        );
+        let c = at_dispatch.unwrap();
         assert_eq!(c.scopes(), strings(&case["scopes"]).as_slice());
         assert_eq!(
             permission_names(c.permissions()),
@@ -177,8 +181,8 @@ fn check_certificate_rejections(keys: &Keys, d: &Value) {
     }
 }
 
-/// `labelled_scope_rejections` (Paykit wire 3.1, Switch wire 3.1): the hosted certificate
-/// with its scopes changed; every verifier refuses them, the switch all but the nine labels.
+/// `labelled_scope_rejections` (Paykit wire 3.1, Dispatch wire 3.1): the hosted certificate
+/// with its scopes changed; every verifier refuses them, the Dispatch all but the nine labels.
 fn check_labelled_scope_rejections(keys: &Keys, d: &Value) {
     let bob = pubky(BOB);
     let identity = keys.identity(&bob);
@@ -194,8 +198,12 @@ fn check_labelled_scope_rejections(keys: &Keys, d: &Value) {
         );
         let again = identity.sign_doc(labels::sig::APP_CERT, &[], doc.body_bytes().unwrap());
         assert_eq!(again, doc, "{name}");
-        let at_switch = AppCert::verify(&doc, &bob);
-        assert_eq!(at_switch.is_ok(), case["switch_accepts"] == true, "{name}");
+        let at_dispatch = AppCert::verify(&doc, &bob);
+        assert_eq!(
+            at_dispatch.is_ok(),
+            case["switch_accepts"] == true,
+            "{name}"
+        );
         let error = verify_certificate(&doc, &bob).unwrap_err().to_string();
         let rule = match name {
             "a label of 33 characters"
@@ -206,7 +214,7 @@ fn check_labelled_scope_rejections(keys: &Keys, d: &Value) {
             other => panic!("unknown labelled scope rejection {other}"),
         };
         assert!(error.contains(rule), "{name}: {error}");
-        if let Ok(c) = at_switch {
+        if let Ok(c) = at_dispatch {
             // The derived permissions are right: only the label bound refuses it.
             assert_eq!(c.permissions(), permissions_for(c.scopes()).as_slice());
         }
@@ -373,12 +381,12 @@ fn app_record_wire_1_4_cases() -> Vec<(&'static str, Value)> {
 }
 
 /// One `multi_protocol_certificates` case, built from an app's certificate and
-/// checked as it is built: the switch takes it, and Paykit's verifier gives `accepted`.
+/// checked as it is built: the Dispatch takes it, and Paykit's verifier gives `accepted`.
 fn cert_case(keys: &Keys, (name, app, scopes, permissions): CertCase, accepted: bool) -> Value {
     certificate_case(&reissued(keys, app, scopes, permissions), name, accepted)
 }
 
-/// One certificate case, checked as it is built: the switch takes it, and Paykit's verifier
+/// One certificate case, checked as it is built: the Dispatch takes it, and Paykit's verifier
 /// gives `accepted`.
 fn certificate_case(c: &AppCert, name: &str, accepted: bool) -> Value {
     assert!(
@@ -451,7 +459,7 @@ fn executor_certificates(keys: &Keys) -> Value {
     })
 }
 
-/// `executor_certificates`: each verifies at the switch, signed by alice's identity key;
+/// `executor_certificates`: each verifies at the Dispatch, signed by alice's identity key;
 /// Paykit's verifiers take Paykit's, the grant's certificate, and refuse the base one for
 /// the scope rule of Paykit spec 3.1.
 fn check_executor_certificates(keys: &Keys, d: &Value) {
@@ -521,7 +529,7 @@ fn payer_certificates(keys: &Keys) -> Value {
     })
 }
 
-/// `payer_certificates`: each verifies at the switch, signed by alice's identity key;
+/// `payer_certificates`: each verifies at the Dispatch, signed by alice's identity key;
 /// Paykit's verifiers take Paykit's phone certificate and refuse each holding `paykit_pay` without
 /// `paykit_contacts` for the scope rule of Paykit spec 3.1.
 fn check_payer_certificates(keys: &Keys, d: &Value) {
@@ -649,7 +657,7 @@ fn payee_certificates(keys: &Keys) -> Value {
     })
 }
 
-/// `payee_certificates`: each verifies at the switch, signed by bob's identity key with the
+/// `payee_certificates`: each verifies at the Dispatch, signed by bob's identity key with the
 /// permissions its scopes need; Paykit's verifiers take the shop's and the hosted app's
 /// certificates and refuse each without `paykit_settlements` or `paykit_contacts` for the
 /// scope rule of Paykit spec 3.1.
@@ -930,7 +938,7 @@ const LABELLED_SCOPE_REJECTIONS: [(&str, &[&str], &str); 5] = [
 ];
 
 /// A certificate of `app` with `scopes` and `permissions`, signed by its identity key without
-/// the switch's checks, which some of these certificates fail.
+/// the Dispatch's checks, which some of these certificates fail.
 fn signed_with(keys: &Keys, app: &str, scopes: &[&str], permissions: &[Permission]) -> SignedDoc {
     let app = keys.app(app);
     let mut body = base_cert(keys, &app.name).body().clone();
@@ -1043,8 +1051,8 @@ fn app_record_cases(keys: &Keys, file: &Value) -> [(Place<'static>, Value); 2] {
     ]
 }
 
-/// `multi_protocol_certificates` (Paykit wire 3.1, Switch wire 3.1 "Several protocols"):
-/// each certificate verifies at the switch, and Paykit's verifiers take the accepted ones and
+/// `multi_protocol_certificates` (Paykit wire 3.1, Dispatch wire 3.1 "Several protocols"):
+/// each certificate verifies at the Dispatch, and Paykit's verifiers take the accepted ones and
 /// refuse the others, for their permissions or their scopes.
 fn check_multi_protocol_certificates(d: &Value) {
     let bob = pubky(BOB);
@@ -1103,7 +1111,7 @@ fn check_multi_protocol_certificates(d: &Value) {
 }
 
 /// `app_records` (Paykit wire 3.2): each record is the shop's with its Paykit member, and
-/// for one its `expires_at`, changed, signed again by the shop byte for byte; the switch takes
+/// for one its `expires_at`, changed, signed again by the shop byte for byte; the Dispatch takes
 /// every one; a Paykit reader reads the accepted ones as `reads` says, and refuses the others.
 fn check_app_records(keys: &Keys, d: &Value) {
     let (shop, bob) = (keys.app("shop"), pubky(BOB));

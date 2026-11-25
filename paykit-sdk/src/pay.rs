@@ -43,18 +43,18 @@ use paykit_lib::{
     AttemptId, Body, ListVersion, PaymentAmount, PaymentEndpointIdentifier, PaymentEndpointPayload,
     Rate,
 };
-use pubky_switch_client::app::{
+use pubky_dispatch_client::app::{
     claim_conflict, AppError, ClaimAttempt, ClaimOp, Initiator, KeptBatch, KeptBatchStatus,
     LocalWrite, ObligationDeadline, OpBatch, PeerIdentity, RecordContent, Refusal as ClientRefusal,
     SharedRecord, SignedMessage, SwitchCopy, UserConfirmed, REVALIDATION_MS,
 };
-use pubky_switch_core::chain::TransitionProof;
-use pubky_switch_core::claims::{
+use pubky_dispatch_core::chain::TransitionProof;
+use pubky_dispatch_core::claims::{
     Basis, ClaimStatus, ClaimView, Outcome, MAX_CLAIM_AGE_MS, RECONCILIATION_MS,
 };
-use pubky_switch_core::http::ErrorCode;
-use pubky_switch_core::ops::{Condition, OpKind, RecordVersion};
-use pubky_switch_core::records::{CLOCK_TOLERANCE_MS, DAY_MS};
+use pubky_dispatch_core::http::ErrorCode;
+use pubky_dispatch_core::ops::{Condition, OpKind, RecordVersion};
+use pubky_dispatch_core::records::{CLOCK_TOLERANCE_MS, DAY_MS};
 
 use crate::activity::{self, ActivityTarget, Role};
 use crate::app_records::PublicAppFailure;
@@ -130,8 +130,8 @@ pub struct PayOptions {
     /// The signed rate details to use for a Billing Period, identified by their message ID.
     /// By default the latest usable details that price the chosen endpoint are used.
     pub period_details: Option<String>,
-    /// The user has seen that the payee's switch couldn't confirm the payee's apps, and pays
-    /// anyway ([`Refusal::IdentityUnconfirmed`]; Switch spec 4.3, Paykit spec 7.2).
+    /// The user has seen that the payee's Dispatch couldn't confirm the payee's apps, and pays
+    /// anyway ([`Refusal::IdentityUnconfirmed`]; Dispatch spec 4.3, Paykit spec 7.2).
     pub unconfirmed_identity_confirmed: Option<UserConfirmed>,
     /// The user has seen that the payee may have cancelled this request since the backup the
     /// app was restored from, or a `missed` item, and pays it anyway
@@ -213,8 +213,8 @@ impl PayOptions {
             })
     }
 
-    /// The user has seen that the payee's switch couldn't confirm the payee's apps, and pays
-    /// anyway ([`Refusal::IdentityUnconfirmed`]; Switch spec 4.3, Paykit spec 7.2).
+    /// The user has seen that the payee's Dispatch couldn't confirm the payee's apps, and pays
+    /// anyway ([`Refusal::IdentityUnconfirmed`]; Dispatch spec 4.3, Paykit spec 7.2).
     #[must_use]
     pub fn with_unconfirmed_identity_confirmed(mut self, confirmed: UserConfirmed) -> Self {
         self.unconfirmed_identity_confirmed = Some(confirmed);
@@ -298,7 +298,7 @@ pub struct PaymentDoubt {
     pub obligation: [u8; 32],
     /// The claim's step read; `None` for no claim.
     pub step: Option<u64>,
-    /// This app's attempts a restore left unresolved (Switch spec 12.4).
+    /// This app's attempts a restore left unresolved (Dispatch spec 12.4).
     pub restored: Vec<AttemptId>,
     /// Attempts marked `unknown`.
     pub unknown: Vec<AttemptId>,
@@ -373,7 +373,7 @@ pub struct TransferQuote {
 /// and [`Paykit::pay_without_request`].
 ///
 /// The failures come with every outcome and every error alike, so the host can tell the user
-/// of each failed app, as it must of records that conflict (Switch wire 3.2), whatever the
+/// of each failed app, as it must of records that conflict (Dispatch wire 3.2), whatever the
 /// payment did. A failure doesn't mean the payment went to another app: an app whose records
 /// conflict is listed and can still be paid from the earlier record it holds (module docs of
 /// [`crate::app_records`]). A payment resumed or repaired later ([`Paykit::resume_payments`],
@@ -433,7 +433,7 @@ pub enum PayOutcome {
         /// The attempt.
         attempt_id: AttemptId,
     },
-    /// Paid by the method, but the outcome's batch didn't go through (the switch didn't
+    /// Paid by the method, but the outcome's batch didn't go through (the Dispatch didn't
     /// answer, or the write failed otherwise). The journal keeps the proof and the attempt
     /// stays open, so nothing pays again; a resume ([`Paykit::resume_payments`]) writes the
     /// outcome and sends the proof (Paykit spec 7.2 steps 3 and 4).
@@ -515,7 +515,7 @@ impl UnrequestedPayment {
 
 /// What held a payment back at [`Paykit::pay_gate`].
 pub(crate) enum Held {
-    /// The Switch client holds attempts back (check 1): an alarm, an app that left, a
+    /// The Dispatch client holds attempts back (check 1): an alarm, an app that left, a
     /// recovery notice, a restore question, reconcile mode or the clocks disagreeing.
     Client(ClientRefusal),
     /// The own `identity.json` isn't confirmed in the last 60 s (check 4).
@@ -558,9 +558,9 @@ pub(crate) struct Plan {
     /// Condition the attempt on the version of the request record read.
     pub(crate) on_record: bool,
     pub(crate) allowance: Option<crate::executor::AllowanceReservation>,
-    /// Who starts the payment: the user, or an executor (Switch spec 4.3).
+    /// Who starts the payment: the user, or an executor (Dispatch spec 4.3).
     pub(crate) by: Initiator,
-    /// The user's confirmation of a payee identity its switch couldn't confirm.
+    /// The user's confirmation of a payee identity its Dispatch couldn't confirm.
     pub(crate) unconfirmed: Option<UserConfirmed>,
     /// The blocked payment the user confirmed, checked against the selected payment.
     pub(crate) blocked_confirmed: Option<BlockedPayment>,
@@ -778,7 +778,7 @@ fn rates_usable(
 
 /// The amount a payment of a request that no rate prices pays now, `priced` without rates,
 /// at the final payment check (Paykit spec 7.2 step 1), and whether it is made only by hand.
-/// A payment made only by hand is never a first dispatch of an automatic payment
+/// A payment made only by hand is never a first handoff of an automatic payment
 /// (`automatic_first`): planning refuses it, and this check refuses it again just before
 /// the call. `Err` inside holds the refusal of an endpoint unusable now.
 ///
@@ -810,7 +810,7 @@ fn unsupported(what: &str) -> PaykitError {
 
 impl Paykit {
     /// Refuse a payment at its start for what no read of the payment clears: an alarm, an
-    /// app that left or a restore question (Switch spec 3.6, 12.3, 12.4), before the reads a
+    /// app that left or a restore question (Dispatch spec 3.6, 12.3, 12.4), before the reads a
     /// payment makes first. A recovery notice, which those reads may clear, reconcile mode
     /// and the clocks are judged with the rest of `may_attempt` just before the attempt.
     pub(crate) fn refuse_held_back(&self) -> Result<()> {
@@ -821,7 +821,7 @@ impl Paykit {
     }
 }
 
-/// Whether the Switch client refuses attempts until the user or a recovery acts: an alarm, an
+/// Whether the Dispatch client refuses attempts until the user or a recovery acts: an alarm, an
 /// app that left or a restore question. A recovery notice may clear on the next own request,
 /// and its `NotNow` on a wait.
 fn refused_for_good(refusal: &ClientRefusal) -> bool {
@@ -873,7 +873,7 @@ impl AutomaticHold {
     }
 }
 
-/// What a first dispatch does with what held it at the pay gate.
+/// What a first handoff does with what held it at the pay gate.
 enum FirstHold {
     /// Returned as it is: nothing is paid and the attempt stays `Attempted`, known
     /// unsubmitted, for a resume to write it `failed` once the client lets it write.
@@ -882,7 +882,7 @@ enum FirstHold {
     Fail(Refusal),
 }
 
-fn first_dispatch_hold(held: Held) -> FirstHold {
+fn first_handoff_hold(held: Held) -> FirstHold {
     match held {
         // Writes still go on in reconcile mode and with the clocks apart: the attempt is
         // closed, so a later payment of the obligation isn't held behind it.
@@ -895,7 +895,7 @@ fn first_dispatch_hold(held: Held) -> FirstHold {
     }
 }
 
-/// The outcome of a repeat the pay gate held, its first dispatch made: never paid now.
+/// The outcome of a repeat the pay gate held, its first handoff made: never paid now.
 fn repeat_hold(held: Held, attempt_id: AttemptId) -> Result<PayOutcome> {
     match held {
         // No payment of this app goes on without its own identity.json confirmed.
@@ -920,14 +920,14 @@ fn repeat_hold(held: Held, attempt_id: AttemptId) -> Result<PayOutcome> {
 }
 
 /// Whether `error` stops the wallet as a whole: an alarm, the local store failing, the
-/// Switch client's word that the app stopped, left or is gone, holds a recovery notice, or
-/// has a restore question open, or the switch's answer that the app is no longer current, that
-/// its certificate expired, or that the account awaits a recovery (Switch spec 3.6, 8.2, 12.2,
-/// 12.3, 12.4, Switch wire 7.6).
+/// Dispatch client's word that the app stopped, left or is gone, holds a recovery notice, or
+/// has a restore question open, or the Dispatch's answer that the app is no longer current, that
+/// its certificate expired, or that the account awaits a recovery (Dispatch spec 3.6, 8.2, 12.2,
+/// 12.3, 12.4, Dispatch wire 7.6).
 /// A resume ends at it at once and returns it: nothing more is written, looked up or
 /// pruned.
 pub(crate) fn stops_resume(error: &PaykitError) -> bool {
-    use pubky_switch_core::http::ErrorCode as E;
+    use pubky_dispatch_core::http::ErrorCode as E;
     let PaykitError::Client(client) = error else {
         return false;
     };
@@ -964,9 +964,9 @@ pub(crate) fn unless_stop(error: impl Into<PaykitError>) -> Result<()> {
     Ok(())
 }
 
-/// [`unless_stop`] for a failure that may come from another identity's switch, such as a
+/// [`unless_stop`] for a failure that may come from another identity's Dispatch, such as a
 /// lookup of a payee: only a stop of this app's own state counts there, an alarm, a store
-/// failure or the Switch client's refusal. A service answer in it may be about the other
+/// failure or the Dispatch client's refusal. A service answer in it may be about the other
 /// identity's account, never this wallet's.
 pub(crate) fn unless_local_stop(error: impl Into<PaykitError>) -> Result<()> {
     let error = error.into();
@@ -977,8 +977,8 @@ pub(crate) fn unless_local_stop(error: impl Into<PaykitError>) -> Result<()> {
 }
 
 /// Whether a failure of one entry's step leaves only that entry for the next resume, reported
-/// as its outcome: a refusal of the Switch client for that step, kept or not, a wait
-/// included, or the wallet waiting for its own identity.json to be confirmed again (Switch
+/// as its outcome: a refusal of the Dispatch client for that step, kept or not, a wait
+/// included, or the wallet waiting for its own identity.json to be confirmed again (Dispatch
 /// spec 12.4, Paykit spec 4). A wallet-wide stop is never one ([`stops_resume`]).
 pub(crate) fn left_to_entry(error: &PaykitError) -> bool {
     if stops_resume(error) {
@@ -992,17 +992,19 @@ pub(crate) fn left_to_entry(error: &PaykitError) -> bool {
 }
 
 /// The wallet-wide stop a read of this app's own record carries in the reason it kept the
-/// earlier copy: the switch refusing the read with an answer [`stops_resume`] counts, which
+/// earlier copy: the Dispatch refusing the read with an answer [`stops_resume`] counts, which
 /// the read keeps as its code. `None` for any other reason.
-pub(crate) fn kept_read_stop(reason: &pubky_switch_client::app::KeptReason) -> Option<PaykitError> {
-    let pubky_switch_client::app::KeptReason::SwitchRefused { code } = reason else {
+pub(crate) fn kept_read_stop(
+    reason: &pubky_dispatch_client::app::KeptReason,
+) -> Option<PaykitError> {
+    let pubky_dispatch_client::app::KeptReason::SwitchRefused { code } = reason else {
         return None;
     };
     let error = PaykitError::Client(AppError::Switch(
-        pubky_switch_client::error::ClientError::Switch {
+        pubky_dispatch_client::error::ClientError::Switch {
             status: code.status(),
             code: *code,
-            message: "the switch refused the record's read".into(),
+            message: "the Dispatch refused the record's read".into(),
             current: serde_json::Value::Null,
             known_version: None,
             retry_after: None,
@@ -1011,7 +1013,7 @@ pub(crate) fn kept_read_stop(reason: &pubky_switch_client::app::KeptReason) -> O
     stops_resume(&error).then_some(error)
 }
 
-/// The Switch client's refusal of an attempt (Switch spec 3.6, 10.1, 12.3, 12.4), carried as
+/// The Dispatch client's refusal of an attempt (Dispatch spec 3.6, 10.1, 12.3, 12.4), carried as
 /// the client reports it: an alarm, an app that left or a recovery notice is not a wait, and
 /// the caller tells them apart by the refusal.
 pub(crate) fn held_back(refusal: ClientRefusal) -> PaykitError {
@@ -1019,7 +1021,7 @@ pub(crate) fn held_back(refusal: ClientRefusal) -> PaykitError {
 }
 
 /// How old, on the device clock, the highest service time verified may be and still be
-/// taken as the latest seen for a payment's deadline (Paykit spec 8.4): older, the switch is
+/// taken as the latest seen for a payment's deadline (Paykit spec 8.4): older, the Dispatch is
 /// read first.
 const SERVICE_TIME_RECENT_MS: u64 = 60_000;
 
@@ -1090,7 +1092,7 @@ enum OutcomeRecord {
     Divergent([u8; 32]),
 }
 
-/// When a first dispatch's attempt was answered: its service time, and the device's wall
+/// When a first handoff's attempt was answered: its service time, and the device's wall
 /// and monotonic clocks just before it was sent, for its age at the final payment check and
 /// the fence.
 #[derive(Clone, Copy, Debug)]
@@ -1114,9 +1116,9 @@ impl Answered {
     }
 }
 
-/// Which dispatch [`Paykit::final_payment_check`] judges.
+/// Which handoff [`Paykit::final_payment_check`] judges.
 #[derive(Clone, Copy, Debug)]
-pub(crate) enum Dispatch {
+pub(crate) enum Handoff {
     /// The first: nothing was submitted before.
     First {
         /// When its attempt was answered.
@@ -1154,13 +1156,13 @@ pub(crate) enum FinalCheck {
     /// attempt is orphaned, or one under an Allowance that has expired: never made, and the
     /// attempt stays "may be paid".
     Lapsed,
-    /// The client refused the payee's late switch answer, such as an equivocation (Switch
+    /// The client refused the payee's late Dispatch answer, such as an equivocation (Dispatch
     /// wire 3.3): nothing is paid, and the refusal is the caller's.
     Refused(Refusal),
 }
 
 /// Whether the payment method still keeps what it keeps for `retention` (`None` for good)
-/// of a dispatch journaled at `journaled_at_ms`, at the device clock `now` (Paykit spec 7.2,
+/// of a handoff journaled at `journaled_at_ms`, at the device clock `now` (Paykit spec 7.2,
 /// "What a payment method declares"): its age counts from the journaling, and the retention
 /// is half-open, so at `journaled_at_ms + retention` the history or the idempotency key may
 /// be gone already. A clock now behind the journaling can't tell the age, which is outside
@@ -1185,14 +1187,14 @@ fn allowance_expired(entry: &JournalEntry, now: u64, service_time: Option<u64>) 
 /// none has.
 pub(crate) fn bound_passed(bound: u64, service: Option<u64>, now: u64) -> bool {
     service.is_some_and(|service| {
-        bound < service.min(now.saturating_add(pubky_switch_core::records::DAY_MS))
+        bound < service.min(now.saturating_add(pubky_dispatch_core::records::DAY_MS))
     })
 }
 
 /// How many times the outcome's batch is built again after `409 conflict`.
 const OUTCOME_TRIES: usize = 3;
 
-/// The deadline the app computes itself for an obligation (Switch wire 6.8): the attempt's,
+/// The deadline the app computes itself for an obligation (Dispatch wire 6.8): the attempt's,
 /// or none.
 pub(crate) fn own_deadline(deadline: Option<u64>) -> ObligationDeadline {
     match deadline {
@@ -1207,7 +1209,7 @@ pub(crate) fn own_deadline(deadline: Option<u64>) -> ObligationDeadline {
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ListAsk {
-    #[serde(with = "pubky_switch_core::enc::serde_b64")]
+    #[serde(with = "pubky_dispatch_core::enc::serde_b64")]
     pub(crate) payee: [u8; 32],
     #[serde(deserialize_with = "Option::deserialize")]
     pub(crate) app_id: Option<[u8; 16]>,
@@ -1220,10 +1222,10 @@ pub(crate) struct ListAsk {
 /// final payment check decided on ([`Paykit::payment_fence`]).
 #[derive(Debug, PartialEq, Eq)]
 enum FenceNews {
-    /// The switch's copy confirms the document the check decided on: the payment goes on
+    /// The Dispatch's copy confirms the document the check decided on: the payment goes on
     /// with the answer.
     Confirms,
-    /// No news, for a payment by hand: the same document, and no more known of the switch's
+    /// No news, for a payment by hand: the same document, and no more known of the Dispatch's
     /// copy than the check had. The payment goes on on its basis.
     None,
     /// News, or an automatic payment's unconfirmed answer: the payment holds.
@@ -1234,24 +1236,24 @@ enum FenceNews {
 /// check ([`fence_news`]).
 #[derive(Clone, Copy, Debug)]
 struct Answer {
-    /// The switch copy state of the identity the answer finished with.
+    /// The Dispatch copy state of the identity the answer finished with.
     copy: SwitchCopy,
-    /// Whether the switch's answer learned nothing from any service: no verified copy, and so
-    /// no freeze or version ([`pubky_switch_client::app::SwitchAnswer::learned_nothing`]),
+    /// Whether the Dispatch's answer learned nothing from any service: no verified copy, and so
+    /// no freeze or version ([`pubky_dispatch_client::app::SwitchAnswer::learned_nothing`]),
     /// whatever state the finished identity carries. A failed lookup can still carry a copy
     /// or a freeze a service gave before it failed.
     learned_nothing: bool,
-    /// Whether the switch's answer confirms the document the check decided on
-    /// ([`pubky_switch_client::app::SwitchAnswer::confirms`]).
+    /// Whether the Dispatch's answer confirms the document the check decided on
+    /// ([`pubky_dispatch_client::app::SwitchAnswer::confirms`]).
     confirmed: bool,
 }
 
 /// The fence catches news since the final payment check (Paykit spec 7.2, "check the
-/// destination"; Pubky Switch spec, Section 4.3). `same_document` says whether the answer
+/// destination"; Pubky Dispatch spec, Section 4.3). `same_document` says whether the answer
 /// carries the signed document the check decided on, and `basis` what the check knew of the
-/// switch's copy. An answer with another document, or one that learned anything from a
+/// Dispatch's copy. An answer with another document, or one that learned anything from a
 /// service (a copy, read or not, or a freeze), is news. One with the same document whose
-/// lookup learned nothing, against a basis with no switch copy either, is none for a payment
+/// lookup learned nothing, against a basis with no Dispatch copy either, is none for a payment
 /// by hand. An automatic payment holds on
 /// anything but a confirming answer, as it always has.
 fn fence_news(same_document: bool, basis: SwitchCopy, answer: Answer, by: Initiator) -> FenceNews {
@@ -1269,7 +1271,7 @@ fn fence_news(same_document: bool, basis: SwitchCopy, answer: Answer, by: Initia
     }
 }
 
-/// Whether `copy` is a switch copy state known to carry no read copy. A state this crate
+/// Whether `copy` is a Dispatch copy state known to carry no read copy. A state this crate
 /// doesn't know reads as one that may: the fence holds on it.
 fn unread(copy: SwitchCopy) -> bool {
     matches!(
@@ -1336,7 +1338,7 @@ impl Paykit {
     }
 
     /// [`Paykit::pay_request`] started as an automatic payment ([`Initiator::Automatic`]), for
-    /// tests only (feature `test-support`). This exercises a first dispatch after the attempt
+    /// tests only (feature `test-support`). This exercises a first handoff after the attempt
     /// is journaled. Wallet callers use [`Paykit::pay_under_allowance`] to check and reserve
     /// the payment under the executor grant.
     ///
@@ -1368,13 +1370,13 @@ impl Paykit {
     }
 
     /// Pay an eligible one-time request under this app's accepted Allowance. The
-    /// signed opening claim, reservation and request association are one Switch batch.
+    /// signed opening claim, reservation and request association are one Dispatch batch.
     /// Before each new payment, the wallet must account for its complete payment-method
     /// history and the authenticated current ledger (Paykit spec 8.3).
     ///
     /// The returned outcome reports a refusal when the grant, ledger, payment history
     /// or current request cannot authorize the transfer, including when the payment
-    /// would exceed a limit. Method, Switch and storage failures follow the ordinary
+    /// would exceed a limit. Method, Dispatch and storage failures follow the ordinary
     /// payment request flow.
     ///
     /// Where the Allowance itself stops it, the refusal says whether that is for good:
@@ -1603,7 +1605,7 @@ impl Paykit {
             allowance: None,
             obligation,
             payee: request.payee,
-            request_hash: Some(pubky_switch_core::enc::b64(&request.request_hash)),
+            request_hash: Some(pubky_dispatch_core::enc::b64(&request.request_hash)),
             natural_key: target.natural_key.clone(),
             amount: KeptAmount::of(&body.amount),
             payment_amount: KeptAmount::of(&payment_amount),
@@ -1756,7 +1758,7 @@ impl Paykit {
     /// Pay without a request (Paykit spec 8.4): to the payee's Private Payment List, or its
     /// public endpoints when the user chose them. The attempt, its `payer_activity` record and
     /// a single-use endpoint's mark go in one batch, so two own apps can't both pay one
-    /// single-use endpoint. When the payer's switch is unavailable, the user can still
+    /// single-use endpoint. When the payer's Dispatch is unavailable, the user can still
     /// pay an explicitly selected reusable public endpoint with current identity and
     /// deny-list evidence. A successful transfer stays in the journal until the
     /// original attempt and its payer activity can be recorded (Paykit spec 8.4).
@@ -1835,14 +1837,14 @@ impl Paykit {
                     .await?
                     .saturating_add(UNREQUESTED_DEADLINE_MS),
             ),
-            Err(error) if switch_unavailable(&error) => {
+            Err(error) if dispatch_unavailable(&error) => {
                 if !matches!(options.mode, PaymentMode::Public(_))
                     || options.endpoint.as_ref() != Some(&destination.endpoint_id()?)
                     || destination.source()? != DestinationSource::Public
                     || destination.single_use
                     || reserve.is_some()
                 {
-                    return Err(Refusal::SwitchUnavailable(error.to_string()).into());
+                    return Err(Refusal::DispatchUnavailable(error.to_string()).into());
                 }
                 None
             }
@@ -2066,7 +2068,7 @@ impl Paykit {
 
     /// The attempts a restore left unresolved for the obligation, which make it "may be
     /// paid" (Paykit spec 7.2); an open entry of this app's otherwise is a payment in
-    /// progress. A restored dispatch the user resolved as paid with no claim to write it on,
+    /// progress. A restored handoff the user resolved as paid with no claim to write it on,
     /// and one the method reported paid whose outcome isn't written yet, are
     /// [`Refusal::AlreadyPaid`].
     pub(crate) async fn restored_attempts(&self, obligation: &[u8; 32]) -> Result<Vec<AttemptId>> {
@@ -2075,7 +2077,7 @@ impl Paykit {
             if &entry.obligation != obligation {
                 continue;
             }
-            // The user said a restored dispatch no claim showed was paid: its obligation is
+            // The user said a restored handoff no claim showed was paid: its obligation is
             // paid, as a `done` on its claim would show (Paykit spec 7.2, 8.4).
             if entry.user_paid {
                 return Err(Refusal::AlreadyPaid.into());
@@ -2083,7 +2085,7 @@ impl Paykit {
             if !entry.open() {
                 continue;
             }
-            // A restored dispatch the method reported paid holds its proof: paid, whether or
+            // A restored handoff the method reported paid holds its proof: paid, whether or
             // not its outcome is written yet (Paykit spec 7.2).
             if entry.restored && entry.rail_proof.is_some() {
                 return Err(Refusal::AlreadyPaid.into());
@@ -2168,7 +2170,7 @@ impl Paykit {
             || doubt.doubtful() && options.may_be_paid_confirmed.as_ref() != Some(&doubt)
         {
             let reason = if !doubt.restored.is_empty() {
-                "Switch spec 12.4: a restored attempt is unresolved"
+                "Dispatch spec 12.4: a restored attempt is unresolved"
             } else if before_loss.is_some() {
                 crate::loss::LOSS_DOUBT
             } else {
@@ -2188,7 +2190,7 @@ impl Paykit {
     /// `identity.json` read fresh, as for a request's endpoint: a request carrying
     /// endpoints, as the destination check refuses it, when the app that sent it, whose
     /// endpoints they are, isn't current; a request requiring an app, when the payee has
-    /// removed that app, which is never listed again (Switch spec 4.3). An app not listed yet
+    /// removed that app, which is never listed again (Dispatch spec 4.3). An app not listed yet
     /// isn't removed. A request whose destination any current app may give is not judged,
     /// and no copy is read for it. A read that fails is the refusal: no app is taken as
     /// current nor as removed without it.
@@ -2307,7 +2309,7 @@ impl Paykit {
                 .collect();
             // An app whose record served now failed gave no endpoints (`public_records`), so
             // a request requiring it has no public destination (Paykit spec 4, 8.1), unless
-            // its records conflict and it keeps an earlier one (Switch spec 4.2). Each failure
+            // its records conflict and it keeps an earlier one (Dispatch spec 4.2). Each failure
             // is in the refusal, and in the call's `PayResult` with any outcome.
             if gathered.is_empty() {
                 let mut text =
@@ -2325,7 +2327,7 @@ impl Paykit {
         // spec 6; wire 5, "Incomplete protected-record contract"; `records::list_key_open`).
         let read = self.lists_read_of(payee).await?;
         // The version of each record's write selected from: every attempt on a list endpoint
-        // is conditioned on it, never on a write the app refused (Switch spec 8.2).
+        // is conditioned on it, never on a write the app refused (Dispatch spec 8.2).
         let versions: Vec<([u8; 16], RecordVersion)> =
             read.iter().map(|(l, v)| (l.app_id, *v)).collect();
         let mut lists: Vec<PaymentListRecord> = read.into_iter().map(|(l, _)| l).collect();
@@ -2935,7 +2937,7 @@ impl Paykit {
             rate_source_hash: details.map_or(request.request_hash, StoredMessage::hash),
             app_id: destination.app_id,
             endpoint_id,
-            payload_hash: pubky_switch_core::enc::hash(payload.as_str().as_bytes()),
+            payload_hash: pubky_dispatch_core::enc::hash(payload.as_str().as_bytes()),
             requested: pricing.requested.clone(),
             source,
             rate,
@@ -2956,12 +2958,12 @@ impl Paykit {
     }
 
     /// The refusal of a payment of the request whose record is at `target`,
-    /// once its deadline has passed (Paykit spec 7.1), decided on the record the switch holds,
+    /// once its deadline has passed (Paykit spec 7.1), decided on the record the Dispatch holds,
     /// read again, never on a copy held: another own app may have rejected or cancelled the
     /// request, or the payee cancelled it, as the request's status shows before its expiry.
     /// [`Refusal::DeadlinePassed`] only for a record that is there, reads, is bound to this
-    /// request's key, holds this request, and leaves it open, as the switch's current write
-    /// ([`Paykit::fresh_request`]); a closed one gives what closed it. The switch holding none
+    /// request's key, holds this request, and leaves it open, as the Dispatch's current write
+    /// ([`Paykit::fresh_request`]); a closed one gives what closed it. The Dispatch holding none
     /// (`404`), or a newer write this app refused, is no evidence the request is open: it
     /// gives `otherwise`, as any other record does: the error the attempt met, or, without one,
     /// [`Refusal::NotFound`] for none and [`PaykitError::Conflict`] for one that doesn't read
@@ -3110,7 +3112,7 @@ impl Paykit {
             payee: *payee,
             app_id: destination.app_id,
             endpoint_id,
-            payload_hash: pubky_switch_core::enc::hash(payload.as_str().as_bytes()),
+            payload_hash: pubky_dispatch_core::enc::hash(payload.as_str().as_bytes()),
             amount: amount.clone(),
             transfer,
         };
@@ -3181,7 +3183,7 @@ impl Paykit {
                 payee: entry.payee,
                 app_id: entry.destination.app_id,
                 endpoint_id,
-                payload_hash: pubky_switch_core::enc::hash(payload.as_str().as_bytes()),
+                payload_hash: pubky_dispatch_core::enc::hash(payload.as_str().as_bytes()),
                 amount,
                 transfer,
             }),
@@ -3195,7 +3197,7 @@ impl Paykit {
     /// payment priced by a rate, the authorized rate must still be usable
     /// ([`rates_usable`]) and give exactly the originally authorized amount; for another payment of a request, the amount the selection gives without
     /// a rate must be the kept one, and one made only by hand ([`Priced::ByHand`]) is never
-    /// a first dispatch of an automatic payment; a payment without a request pays its own
+    /// a first handoff of an automatic payment; a payment without a request pays its own
     /// amount, which [`JournalEntry::check`] holds. `Ok` inside says whether the payment is
     /// made only by hand, which [`Paykit::transfer_holds`] then holds to its user's
     /// confirmation; `Err` inside holds the refusal, with what the payment would be now.
@@ -3236,7 +3238,7 @@ impl Paykit {
                         app_id: entry.destination.app_id,
                         transfer,
                         endpoint_id,
-                        payload_hash: pubky_switch_core::enc::hash(payload.as_str().as_bytes()),
+                        payload_hash: pubky_dispatch_core::enc::hash(payload.as_str().as_bytes()),
                         amount: now,
                     }
                 }),
@@ -3313,18 +3315,18 @@ impl Paykit {
         let blocked_confirmed = selected
             .as_ref()
             .is_some_and(|selected| blocked_confirmed.as_ref() == Some(selected));
-        // The attempt's `orphan_after` covers the rail's longest time and the pre-dispatch
-        // budget, as the rail declares it now (Switch spec 10.2).
+        // The attempt's `orphan_after` covers the rail's longest time and the pre-handoff
+        // budget, as the rail declares it now (Dispatch spec 10.2).
         crate::paykit::check_orphan_window(&self.config, self.rail.as_ref())?;
         // The carrier is journaled with the entry, for the checks before any repeat.
         entry.keep_carrier(&carrier);
         entry.selected_period_details(&self.identity())?;
         // The own identity.json, read again and confirmed, before any write: no attempt
-        // without a copy revalidated in the last 60 s (Paykit spec 4, Switch spec 12.6).
+        // without a copy revalidated in the last 60 s (Paykit spec 4, Dispatch spec 12.6).
         self.own_identity_confirmed(true).await??;
         // The payee's identity.json, before any write: a payment the user started whose
-        // payee's switch couldn't confirm it needs the user's confirmation first, and an
-        // automatic one isn't made (Paykit spec 7.2 step 1, Switch spec 4.3).
+        // payee's Dispatch couldn't confirm it needs the user's confirmation first, and an
+        // automatic one isn't made (Paykit spec 7.2 step 1, Dispatch spec 4.3).
         let request_hash = entry.request_hash()?;
         let identity = self
             .check_destination(
@@ -3445,13 +3447,13 @@ impl Paykit {
         // The attempt ID is journaled before the write (Paykit spec 7.2), once the batch is
         // built: a batch that can't be built leaves no open entry behind it.
         self.save(&entry).await?;
-        // The attempt's age before its dispatch (the pre-dispatch budget,
-        // [`crate::PRE_DISPATCH_BUDGET_MS`]) counts from before it is sent, on both device
+        // The attempt's age before its handoff (the pre-handoff budget,
+        // [`crate::PRE_HANDOFF_BUDGET_MS`]) counts from before it is sent, on both device
         // clocks: the request, the answer and the answer's local commit are all in it, so
         // the age is never less than the time since the service accepted the attempt.
         let (answered_wall_ms, answered_at) = (self.now(), std::time::Instant::now());
         // The client checks the attempt's proof: only one that shows this app's own open
-        // attempt lets money move (Paykit spec 7.2; Switch wire 6.5 "Binding").
+        // attempt lets money move (Paykit spec 7.2; Dispatch wire 6.5 "Binding").
         let submitted = self.submit(batch).await;
         let submitted = match submitted {
             Ok(submitted) => submitted,
@@ -3459,7 +3461,7 @@ impl Paykit {
                 self.set_stage(&mut entry, Stage::Abandoned).await?;
                 // What the answer carries decides first: the claim it shows, with the open
                 // attempt of another wallet, or the payment made (Paykit spec 7.1). Then the
-                // request record the switch holds, read again, which another own app may
+                // request record the Dispatch holds, read again, which another own app may
                 // have rejected or cancelled meanwhile, or the payee cancelled; a read that
                 // fails is the error, never taken as the record unchanged. Only then the
                 // deadline, at the answer's service time.
@@ -3506,7 +3508,7 @@ impl Paykit {
         let proof = submitted.proofs.first();
         entry.step = proof.and_then(|proof| proof.body().step);
         entry.attempt_proof = proof.map(|proof| proof.signed().clone());
-        // The view the attempt's checked proof shows (Switch wire 6.5 "Binding").
+        // The view the attempt's checked proof shows (Dispatch wire 6.5 "Binding").
         let claim = proof
             .map(|proof| ClaimView::from_value(&proof.body().state))
             .transpose()?;
@@ -3521,11 +3523,11 @@ impl Paykit {
                 )
                 .await;
         }
-        // Before any money moves, the gate every dispatch passes (Paykit spec 4, 7.2 step 1).
+        // Before any money moves, the gate every handoff passes (Paykit spec 4, 7.2 step 1).
         // The copies checked before the write are still fresh: this reads no network unless
-        // they aged meanwhile (Switch spec 4.3). A failure writes `failed` instead of paying,
+        // they aged meanwhile (Dispatch spec 4.3). A failure writes `failed` instead of paying,
         // but for an attempt at a service the identity no longer names, which the move rules
-        // resolve (Switch spec 12.5, 12.6): nothing is written there.
+        // resolve (Dispatch spec 12.5, 12.6): nothing is written there.
         let Some(claim) = claim else {
             return self
                 .fail_attempt(
@@ -3560,7 +3562,7 @@ impl Paykit {
         {
             Ok(doc) => doc,
             Err(held) => {
-                return match first_dispatch_hold(held) {
+                return match first_handoff_hold(held) {
                     FirstHold::Return(error) => Err(error),
                     FirstHold::Fail(refusal) => self.fail_attempt(&mut entry, refusal).await,
                 }
@@ -3568,16 +3570,16 @@ impl Paykit {
         };
         // The entry stays `Attempted`, known unsubmitted, through the acceptance's journaling
         // and the final payment check: either can stop the payment, and a resume then writes
-        // the attempt `failed` rather than taking it as possibly dispatched. `Paying` is
-        // journaled just before the payment method's call ([`Paykit::dispatch`]). The
+        // the attempt `failed` rather than taking it as possibly handed off. `Paying` is
+        // journaled just before the payment method's call ([`Paykit::handoff`]). The
         // acceptance is signed and journaled now, and sendable only once that call is made.
         let acceptance = self.journal_acceptance(&mut entry).await?;
-        Box::pin(self.dispatch(
+        Box::pin(self.handoff(
             entry,
             doc,
             by,
             unconfirmed,
-            Dispatch::First {
+            Handoff::First {
                 answered,
                 blocked_confirmed,
             },
@@ -3587,7 +3589,7 @@ impl Paykit {
     }
 
     /// The own `identity.json` revalidated in the last [`REVALIDATION_MS`] (Paykit spec 4,
-    /// "Fresh before paying"; Switch spec 12.6 "Residual risk"): with `refresh`, it is read
+    /// "Fresh before paying"; Dispatch spec 12.6 "Residual risk"): with `refresh`, it is read
     /// again first, and without it only once its last confirmation is that old. A read that
     /// confirms the copy held, or a confirmation under 60 s old, lets the payment go on;
     /// `Missing`, `Older` and `Unavailable` confirm nothing, and an error refuses.
@@ -3599,7 +3601,7 @@ impl Paykit {
             // A Homeserver that can't be read now confirms nothing (`Unavailable`), and the
             // confirmation held still counts if it is fresh once the read is over. An error
             // is more: a copy that doesn't verify, a store that fails, or an alarm, such as
-            // the own identity.json equivocating (Switch wire 3.3), and it stops the payment.
+            // the own identity.json equivocating (Dispatch wire 3.3), and it stops the payment.
             let refreshed = self.app.refresh_identity().await;
             // The refresh can take a renewal into the own record.
             self.note_own_record_write(&refreshed);
@@ -3631,7 +3633,7 @@ impl Paykit {
             .is_some_and(|age| age < REVALIDATION_MS)
     }
 
-    /// The latest service time the app has seen (Switch spec 10.1), for the deadline of a
+    /// The latest service time the app has seen (Dispatch spec 10.1), for the deadline of a
     /// payment without a request (Paykit spec 8.4): the highest it verified when that is
     /// recent on the device clock, else the one a read of the payment's own claim, which a
     /// new attempt ID leaves empty, answers with. Deadlines run on the service's clock,
@@ -3640,7 +3642,7 @@ impl Paykit {
     ///
     /// # Errors
     ///
-    /// The client's errors when the switch can't be read now: no attempt could be written
+    /// The client's errors when the Dispatch can't be read now: no attempt could be written
     /// then either.
     async fn recent_service_time(&mut self, obligation: &[u8; 32]) -> Result<u64> {
         let recent = |seen: Option<u64>, now: u64| {
@@ -3655,7 +3657,7 @@ impl Paykit {
         self.app.read_claim(obligation).await?;
         self.service_time().ok_or_else(|| {
             Refusal::NotNow(crate::NotNowReason::NoServiceTime(
-                "Switch spec 10.1: no service time verified",
+                "Dispatch spec 10.1: no service time verified",
             ))
             .into()
         })
@@ -3690,9 +3692,9 @@ impl Paykit {
         Ok(Some(signed))
     }
 
-    /// A released payment acceptance has no Switch record job. Withdrawing its held
+    /// A released payment acceptance has no Dispatch record job. Withdrawing its held
     /// delivery removes the outbox and batch entries. The give-up mark prevents replay
-    /// of that ID and is not a delivery (Switch spec 11). Resume signs again only while
+    /// of that ID and is not a delivery (Dispatch spec 11). Resume signs again only while
     /// the payer record still lacks the acceptance (Paykit spec 7.2).
     async fn restored_acceptance_lost(&self, entry: &JournalEntry) -> Result<bool> {
         if !entry.restored {
@@ -3741,7 +3743,7 @@ impl Paykit {
     /// while the payment runs. Called only once the payment method's call was made, or once
     /// a resume finds the payment in the method's history, never before: a payee never sees
     /// an acceptance of a payment the payer knows never ran. `signed` is the acceptance
-    /// journaled for this dispatch; without it (a resume, a repeat) the journaled one is
+    /// journaled for this handoff; without it (a resume, a repeat) the journaled one is
     /// used if the outbox holds it already, and otherwise a new one is signed, the journaled
     /// one never having left this app.
     pub(crate) async fn release_acceptance(
@@ -3783,14 +3785,14 @@ impl Paykit {
             };
             // Journaled, queued, then marked: a crash before the mark leaves it journaled and
             // queued, and the outbox shows it at the next release, so it is never signed
-            // twice once it can be sent. It reports a dispatched payment, so it goes while
+            // twice once it can be sent. It reports a handed off payment, so it goes while
             // sends to the payee are held; that evidence is kept with the journal entry,
             // before the message can be queued (Paykit spec 8.1).
             entry.check()?;
             let mut tx = state::Tx::default();
             tx.put(&key::journal(&entry.attempt()?), entry)?.put(
                 &key::send_exemption(signed.msg_id()),
-                &crate::send_holds::SendExemption::dispatched(signed.msg_id()),
+                &crate::send_holds::SendExemption::handed_off(signed.msg_id()),
             )?;
             self.local_commit(tx).await?;
             self.app.queue_signed(signed).await?;
@@ -3824,7 +3826,7 @@ impl Paykit {
         // placed, while the request record is paused, by the one gate of the outcome
         // (Paykit spec 6); the entry stays owed, for a resume after the user's confirmation,
         // which sends it also over a view still divergent.
-        if Box::pin(self.dispatched_write_waits(&key)).await? {
+        if Box::pin(self.handed_off_write_waits(&key)).await? {
             return Ok(());
         }
         // An acceptance a restore holds isn't decided yet: the entry stays owed until the
@@ -3881,13 +3883,13 @@ impl Paykit {
     }
 
     /// Step 2: pay through the rail with the attempt ID as the idempotency key.
-    async fn dispatch(
+    async fn handoff(
         &mut self,
         mut entry: JournalEntry,
         payee: PeerIdentity,
         by: Initiator,
         confirmed: Option<UserConfirmed>,
-        kind: Dispatch,
+        kind: Handoff,
         acceptance: Option<SignedMessage>,
     ) -> Result<PayOutcome> {
         let attempt_id = entry.attempt()?;
@@ -3899,7 +3901,7 @@ impl Paykit {
             payment_reference: entry.payment_reference.clone(),
         };
         // Nothing is submitted unless the final payment check passes. Held, the attempt
-        // stays open for a resume to decide: a first dispatch is still `Attempted` then,
+        // stays open for a resume to decide: a first handoff is still `Attempted` then,
         // known unsubmitted, and the resume writes it `failed`.
         let (check, payee) = self
             .final_payment_check(&entry, payee, by, confirmed, kind)
@@ -3911,19 +3913,19 @@ impl Paykit {
             // its Allowance has expired: the repeat isn't made, and the attempt stays "may be
             // paid" (Paykit spec 7.2, 8.3).
             FinalCheck::Lapsed => return Ok(PayOutcome::Uncertain { attempt_id }),
-            // A refused answer stops the payment. A first dispatch submitted nothing, so it
+            // A refused answer stops the payment. A first handoff submitted nothing, so it
             // is written `failed` and refused with the answer's refusal; a repeat may follow
-            // a dispatch that paid, so it stays "may be paid", for a receipt or the user.
+            // a handoff that paid, so it stays "may be paid", for a receipt or the user.
             FinalCheck::Refused(refusal) => {
                 return match kind {
-                    Dispatch::First { .. } => self.fail_attempt(&mut entry, refusal).await,
-                    Dispatch::Repeat { .. } => Ok(PayOutcome::Uncertain { attempt_id }),
+                    Handoff::First { .. } => self.fail_attempt(&mut entry, refusal).await,
+                    Handoff::Repeat { .. } => Ok(PayOutcome::Uncertain { attempt_id }),
                 }
             }
         }
         // Starting to pay is journaled just before the payment begins (Paykit spec 7.2): from
         // here on it may be paid. A repeat's entry is `Paying` already.
-        if matches!(kind, Dispatch::First { .. }) {
+        if matches!(kind, Handoff::First { .. }) {
             self.set_stage(&mut entry, Stage::Paying).await?;
         }
         match Box::pin(self.payment_fence(&entry, payee, by, confirmed, kind)).await {
@@ -3952,10 +3954,10 @@ impl Paykit {
         match outcome {
             Ok(outcome) => self.take_outcome(&mut entry, outcome, acceptance).await,
             // A refusal is authoritative: nothing was and nothing will be submitted, so a
-            // first dispatch is definitively not paid, written `failed`, and may be replaced
-            // (Paykit spec 7.2). A repeat's refusal says nothing of the dispatch before it,
+            // first handoff is definitively not paid, written `failed`, and may be replaced
+            // (Paykit spec 7.2). A repeat's refusal says nothing of the handoff before it,
             // which may have paid: the attempt stays open.
-            Err(RailError::Refused(why)) if matches!(kind, Dispatch::First { .. }) => {
+            Err(RailError::Refused(why)) if matches!(kind, Handoff::First { .. }) => {
                 self.set_stage(&mut entry, Stage::RailFailed).await?;
                 self.report(&mut entry).await.map(|outcome| match outcome {
                     PayOutcome::Failed { attempt_id, .. } => PayOutcome::Failed {
@@ -3971,50 +3973,50 @@ impl Paykit {
         }
     }
 
-    /// A dispatch stopped after its final payment check, before the payment method's call:
-    /// a first dispatch as [`Paykit::stopped_at_the_fence`] leaves it; a repeat stays open,
+    /// A handoff stopped after its final payment check, before the payment method's call:
+    /// a first handoff as [`Paykit::stopped_at_the_fence`] leaves it; a repeat stays open,
     /// as the final payment check leaves it: [`PayOutcome::Pending`] for a hold, and
-    /// "may be paid" otherwise, as the dispatch before it may have paid.
+    /// "may be paid" otherwise, as the handoff before it may have paid.
     async fn stopped_before_the_call(
         &mut self,
         entry: JournalEntry,
-        kind: Dispatch,
+        kind: Handoff,
         stopped: FinalCheck,
     ) -> Result<PayOutcome> {
         let attempt_id = entry.attempt()?;
         match (kind, stopped) {
-            (Dispatch::First { .. }, stopped) => self.stopped_at_the_fence(entry, stopped).await,
-            (Dispatch::Repeat { .. }, FinalCheck::Hold) => Ok(PayOutcome::Pending { attempt_id }),
-            (Dispatch::Repeat { .. }, _) => Ok(PayOutcome::Uncertain { attempt_id }),
+            (Handoff::First { .. }, stopped) => self.stopped_at_the_fence(entry, stopped).await,
+            (Handoff::Repeat { .. }, FinalCheck::Hold) => Ok(PayOutcome::Pending { attempt_id }),
+            (Handoff::Repeat { .. }, _) => Ok(PayOutcome::Uncertain { attempt_id }),
         }
     }
 
-    /// A dispatch whose fence failed, before the payment method's call: a read of the switch,
+    /// A handoff whose fence failed, before the payment method's call: a read of the Dispatch,
     /// the store or the client failed, so nothing shows whether the payment may go now. The
     /// failure is the caller's to see, never a pending payment. A repeat's entry stays
-    /// `Paying`, as the dispatch before it may have paid, and the error is returned.
+    /// `Paying`, as the handoff before it may have paid, and the error is returned.
     ///
-    /// A first dispatch submitted nothing: it is written back to `Attempted`, known
+    /// A first handoff submitted nothing: it is written back to `Attempted`, known
     /// unsubmitted, then written `failed`, as a refusal at the fence writes it (Paykit spec
     /// 7.2 step 1), so a new payment may be made at once. A refusal is returned as the
-    /// failed attempt's cause; any other error as it is. The failed write needs the switch too: when it
+    /// failed attempt's cause; any other error as it is. The failed write needs the Dispatch too: when it
     /// can't be made, the entry stays `Attempted` and the fence's error is returned; a
     /// resume writes the attempt `failed` later, and until then a new payment of the same
     /// obligation is refused as in progress.
     async fn unread_at_the_fence(
         &mut self,
         mut entry: JournalEntry,
-        kind: Dispatch,
+        kind: Handoff,
         error: PaykitError,
     ) -> Result<PayOutcome> {
         // A wallet-wide stop is returned as it is: nothing more is written.
-        if !matches!(kind, Dispatch::First { .. }) || stops_resume(&error) {
+        if !matches!(kind, Handoff::First { .. }) || stops_resume(&error) {
             return Err(error);
         }
         self.set_stage(&mut entry, Stage::Attempted).await?;
         match self.write_outcome(&mut entry, false, false).await {
             // Written failed: a refusal is the failed attempt's cause; any other error, such
-            // as the switch's own answer with its code and retry time, or a store failure, is
+            // as the Dispatch's own answer with its code and retry time, or a store failure, is
             // returned as it is.
             Ok(_) => match error.refusal() {
                 Some(why) => Err(Refusal::AttemptFailed(Box::new(why.clone())).into()),
@@ -4028,16 +4030,16 @@ impl Paykit {
         }
     }
 
-    /// A first dispatch the fence stopped after `Paying` was journaled: nothing was
+    /// A first handoff the fence stopped after `Paying` was journaled: nothing was
     /// submitted, so the entry is written back to `Attempted`, known unsubmitted, as a held
     /// final check leaves it. Then, with nothing paying, a lookup answer the fence saw come
-    /// is taken: one the client refuses, such as an equivocation (Switch wire 3.3), writes
+    /// is taken: one the client refuses, such as an equivocation (Dispatch wire 3.3), writes
     /// the attempt `failed`, as a refused answer before `Paying` does. `Attempted` rather
     /// than `failed` at once: it is one local commit, the state a held check leaves, and a
     /// resume writes the open attempt `failed` from it ("no payment started").
     ///
     /// The write-back can be lost, to a crash or a store failure: the entry then stays
-    /// `Paying`, which a restart reads as possibly dispatched, resolved by the method's
+    /// `Paying`, which a restart reads as possibly handed off, resolved by the method's
     /// history or else "may be paid". That is the safe direction: a payment not made can be
     /// taken for one that may have been, never the other way.
     async fn stopped_at_the_fence(
@@ -4057,8 +4059,8 @@ impl Paykit {
         }
     }
 
-    /// The method's outcome of `entry`'s dispatch, journaled and reported. `acceptance` is
-    /// the one this dispatch signed, released once a payment made is journaled.
+    /// The method's outcome of `entry`'s handoff, journaled and reported. `acceptance` is
+    /// the one this handoff signed, released once a payment made is journaled.
     async fn take_outcome(
         &mut self,
         entry: &mut JournalEntry,
@@ -4071,7 +4073,7 @@ impl Paykit {
                 proof, paid_at_ms, ..
             }) => {
                 // The proof is journaled first: nothing after it can lose the payment. Then
-                // the acceptance goes, the one signed for this dispatch (Paykit spec 7.2
+                // the acceptance goes, the one signed for this handoff (Paykit spec 7.2
                 // step 2); one that can't be queued now is left to the report.
                 entry.rail_proof = Some(proof);
                 entry.paid_at_ms = paid_at_ms;
@@ -4086,7 +4088,7 @@ impl Paykit {
             }
             RailOutcome::Pending => {
                 // The method shows the payment running, so its acceptance may go (Paykit spec
-                // 7.2 step 2); one the dispatch couldn't queue is queued now, best effort, at
+                // 7.2 step 2); one the handoff couldn't queue is queued now, best effort, at
                 // every resume that finds it still pending.
                 if let Err(error) = self.release_acceptance(entry, acceptance).await {
                     unless_stop(error)?;
@@ -4120,7 +4122,7 @@ impl Paykit {
             }
         }
         // Recording an Allowance outcome also authenticates the current ledger. Keep
-        // that future off the wallet stack when resuming an interrupted dispatch.
+        // that future off the wallet stack when resuming an interrupted handoff.
         match Box::pin(self.write_outcome(entry, paid, false)).await {
             Ok(Written::Done) => {}
             Ok(Written::Held) => return Ok(PayOutcome::RecordHeld { attempt_id }),
@@ -4134,7 +4136,7 @@ impl Paykit {
                 if error.kept_batch().is_none() && error.code() == Some(ErrorCode::NotCurrent) =>
             {
                 // An app that isn't current can write nothing (Paykit spec 7.3), and the
-                // switch's answer stops the wallet as a whole ([`stops_resume`]): it is
+                // Dispatch's answer stops the wallet as a whole ([`stops_resume`]): it is
                 // returned, the entry left as it is, with the payment made in the journal.
                 return Err(error);
             }
@@ -4185,7 +4187,7 @@ impl Paykit {
             // before its acceptance is released: nothing of it goes over that record until
             // then, and then also over a view still divergent (Paykit spec 6).
             let record = self.activity_key(&ActivityTarget::payer(entry.natural_key.clone()))?;
-            if Box::pin(self.dispatched_write_waits(&record)).await? {
+            if Box::pin(self.handed_off_write_waits(&record)).await? {
                 return Ok(Written::Divergent(record));
             }
             // Every path that writes a payment made goes through here: its acceptance is
@@ -4339,7 +4341,7 @@ impl Paykit {
     ///
     /// - **absent or deleted:** the record is rebuilt from the journal, the request kept
     ///   with the entry, or a payment without a request's own members, with the acceptance
-    ///   and the proof, and written as a create (`{0, 0}`, which the switch refuses if a
+    ///   and the proof, and written as a create (`{0, 0}`, which the Dispatch refuses if a
     ///   record is there by then). A delete isn't a write that drops a role (Paykit wire
     ///   5.3, "Seen roles"); a reader that saw a role the rebuilt record lacks, such as a
     ///   receipt, ignores and flags it, and keeps what it saw.
@@ -4383,14 +4385,14 @@ impl Paykit {
             return Err(crate::hold::value_awaits_key());
         }
         // A payment made waits while the record is paused, by the one gate of the outcome
-        // ([`crate::divergent::Pause::dispatched_write_waits`]), `done` never going without
+        // ([`crate::divergent::Pause::handed_off_write_waits`]), `done` never going without
         // the record's update; a divergent record the user hasn't confirmed, or one whose
         // kept messages wait to be written, takes no other own write but a stop
         // ([`crate::divergent::Pause::adds_no_stop_waits`]), so a failure's `failed` goes
         // alone, its record left as it is (Paykit spec 6).
         if let Some(current) = &held {
             let pause = Box::pin(self.pause_of(current)).await?;
-            if paid && pause.dispatched_write_waits() {
+            if paid && pause.handed_off_write_waits() {
                 return Ok(OutcomeRecord::Divergent(key));
             }
             if !paid && pause.adds_no_stop_waits() {
@@ -4538,7 +4540,7 @@ impl Paykit {
         Ok(record)
     }
 
-    /// The claim's step and this attempt's outcome, read from the switch; `None` when the
+    /// The claim's step and this attempt's outcome, read from the Dispatch; `None` when the
     /// claim doesn't hold the attempt.
     async fn attempt_state(&mut self, entry: &JournalEntry) -> Result<Option<(u64, Outcome)>> {
         let attempt = entry.attempt()?.to_bytes();
@@ -4658,27 +4660,27 @@ impl Paykit {
 
     /// Finish the payments a crash, a lost answer or a pending payment method left in the
     /// journal (Paykit spec 7.2): before money could move, an own attempt still open is
-    /// written `failed`; once paying, the method's history decides, and a dispatch is never
+    /// written `failed`; once paying, the method's history decides, and a handoff is never
     /// carried out again unless the method is idempotent on the attempt ID; a restored entry
     /// is resolved only from a history that survives a restore. A repeat on an idempotent
-    /// method passes every check a first dispatch does.
+    /// method passes every check a first handoff does.
     ///
-    /// **Journal pruning** (Paykit spec 7.1, 7.2; Switch spec 6.3). After every payment's own
+    /// **Journal pruning** (Paykit spec 7.1, 7.2; Dispatch spec 6.3). After every payment's own
     /// work, a resume drops the `Finished` and `Abandoned` entries past their claim's window:
     /// one with a deadline from that deadline plus 30 days ([`RECONCILIATION_MS`]), the time
-    /// the switch keeps the claim's tombstone, and one without from 400 days after it was
+    /// the Dispatch keeps the claim's tombstone, and one without from 400 days after it was
     /// journaled ([`MAX_CLAIM_AGE_MS`]). A bound passes only once it lies before the earlier
     /// of the highest service time verified and the device clock plus 24 hours, so no
     /// far-future signed time passes one early, and without a verified service time nothing
     /// is dropped. What a later reconcile, a restore's included, needs is never dropped: an
-    /// entry still open or [`Stage::AcceptanceOwed`], one whose dispatch the payment method
+    /// entry still open or [`Stage::AcceptanceOwed`], one whose handoff the payment method
     /// reported failed while its history may still show it paid, and one paid after `failed`
     /// was written, waiting for its receipt. A dropped payment leaves [`Paykit::payments`],
     /// and its acknowledged notices go with it; the payer's activity record, not the
     /// journal, shows it and stops a second one (Paykit spec 6, 7.2, "The record shows it
     /// paid").
     ///
-    /// A refusal of the Switch client for one entry's step, or [`Refusal::IdentityUnavailable`]
+    /// A refusal of the Dispatch client for one entry's step, or [`Refusal::IdentityUnavailable`]
     /// when a repeat is due and the own `identity.json` isn't confirmed in the last 60 s,
     /// leaves that entry for the next resume and is reported as its outcome:
     /// [`PayOutcome::PaidOutcomeUnwritten`] when the method reported it paid,
@@ -4688,8 +4690,8 @@ impl Paykit {
     /// # Errors
     ///
     /// A wallet-wide stop, at which the resume ends at once: an alarm, a store failure, the
-    /// Switch client's word that the app stopped, left or is gone, holds a recovery notice
-    /// or has a restore question open, or the switch's answer that the app is no longer
+    /// Dispatch client's word that the app stopped, left or is gone, holds a recovery notice
+    /// or has a restore question open, or the Dispatch's answer that the app is no longer
     /// current, that its certificate expired, or that the account awaits a recovery. Any
     /// other failure of an entry's step, such as the network or a method that can't tell
     /// now, and the client's and the rail's errors from the work before and after the
@@ -4710,7 +4712,7 @@ impl Paykit {
         // payer's side it can read: with the `paykit_pay` key held and the payer's records and
         // claims read as before, its writes are built on versions it holds. Otherwise it
         // asks the method's history only, journals what it says, and writes nothing to the
-        // switch, as without `paykit_pay`, until the keys come.
+        // Dispatch, as without `paykit_pay`, until the keys come.
         // A restore's copy not listed yet lacks every record: while keys wait, which leaves it
         // unlisted, the payer's side waits too.
         let keys = self.scope_keys_awaited().await?;
@@ -4734,7 +4736,7 @@ impl Paykit {
         }
         let mut out = Vec::new();
         // Each entry's work stands alone. A wallet-wide stop ([`stops_resume`]) ends the
-        // resume and is returned. A refusal of the Switch client for one entry, or the wait
+        // resume and is returned. A refusal of the Dispatch client for one entry, or the wait
         // for the own identity.json ([`left_to_entry`]), leaves that entry for the next resume
         // and is reported for it, so every outcome reached stays in the result and a payment
         // the method reports made is still journaled behind it. Any other failure, such as
@@ -4787,8 +4789,8 @@ impl Paykit {
         Ok(out)
     }
 
-    /// The wallet-wide stop the Switch client holds now, if any: a recovery notice, an alarm,
-    /// an app that left, or an open restore question (Switch spec 3.6, 12.3, 12.4).
+    /// The wallet-wide stop the Dispatch client holds now, if any: a recovery notice, an alarm,
+    /// an app that left, or an open restore question (Dispatch spec 3.6, 12.3, 12.4).
     fn held_stop(&self) -> Option<PaykitError> {
         if let Some(notice) = self.app.recovery_required() {
             return Some(held_back(ClientRefusal::RecoveryRequired {
@@ -4857,28 +4859,28 @@ impl Paykit {
                 }
             }
             Stage::Recorded | Stage::Attempted | Stage::Paying if entry.restored => {
-                // Restored, it may have been dispatched (Paykit spec 7.2): the backup
+                // Restored, it may have been handed off (Paykit spec 7.2): the backup
                 // can't tell.
                 match self.attempt_state(&entry).await? {
                     Some((step, Outcome::Open | Outcome::Unknown)) => {
                         entry.step = Some(step);
                         entry.stage = Stage::Paying;
-                        out.extend(self.resolve_dispatched(entry).await?);
+                        out.extend(self.resolve_handed_off(entry).await?);
                     }
                     Some((_, outcome)) => self.finish_resolved(&mut entry, outcome).await?,
                     // A claim without the attempt, or no claim at all, proves nothing
                     // either: after a provider loss, once the claim is gone past its
                     // window, or when the backup was taken before its batch reached the
-                    // switch, "absence remains insufficient" (Paykit spec 8.4, Late
+                    // Dispatch, "absence remains insufficient" (Paykit spec 8.4, Late
                     // recording). The attempt is open, its outcome unknown, and the
-                    // method's history decides; without it, "the dispatch stays open as
+                    // method's history decides; without it, "the handoff stays open as
                     // potentially paid. Only a receipt or the user can resolve it"
                     // (Paykit spec 7.2): it stays in the doubt the user sees, and the
                     // user resolves it ([`Paykit::resolve_attempt`]).
                     None => {
                         entry.step = None;
                         entry.stage = Stage::Paying;
-                        out.extend(self.resolve_dispatched(entry).await?);
+                        out.extend(self.resolve_handed_off(entry).await?);
                     }
                 }
             }
@@ -4898,7 +4900,7 @@ impl Paykit {
                 None => self.set_stage(&mut entry, Stage::Abandoned).await?,
             },
             Stage::Paying => {
-                out.extend(self.resolve_dispatched(entry).await?);
+                out.extend(self.resolve_handed_off(entry).await?);
             }
             Stage::RailPaid | Stage::RailFailed => {
                 out.push(self.report(&mut entry).await?);
@@ -4909,15 +4911,15 @@ impl Paykit {
     }
 
     /// An own attempt the claim shows resolved already, by the user in another app or by
-    /// evidence. The acceptance goes only for a payment this app may have dispatched
-    /// ([`JournalEntry::may_have_dispatched`]): `done` then says it was made, the user's word
+    /// evidence. The acceptance goes only for a payment this app may have handed off
+    /// ([`JournalEntry::may_have_handed_off`]): `done` then says it was made, the user's word
     /// standing where the method's history would, so an acceptance owed is queued and placed
     /// ([`Paykit::finish_owed_acceptance`], Paykit spec 7.2 step 2), one queued earlier and
     /// not yet placed included; one that can't be now leaves the entry for the next resume.
     /// An entry known unsubmitted, or `failed`, finishes with none: a payee never sees an
     /// acceptance of a payment that never ran.
     async fn finish_resolved(&mut self, entry: &mut JournalEntry, outcome: Outcome) -> Result<()> {
-        if entry.may_have_dispatched()
+        if entry.may_have_handed_off()
             && outcome == Outcome::Done
             && entry.may_place_acceptance()?
         {
@@ -4934,14 +4936,14 @@ impl Paykit {
     }
 
     /// An open entry under a certificate without `paykit_pay`, which reads and writes no claim and
-    /// no payer record: a dispatch that may have been made asks the method's history alone,
+    /// no payer record: a handoff that may have been made asks the method's history alone,
     /// so a payment made is journaled with its proof (`RailPaid`) and one that failed as such
     /// (`RailFailed`), each for an app holding `paykit_pay` to report; nothing else is touched. The
     /// host is told why the payment waits ([`NoticeKind::HeldWithoutPay`]).
     async fn held_without_pay(&mut self, entry: &mut JournalEntry) -> Result<PayOutcome> {
         let attempt_id = entry.attempt()?;
         self.raise_notice(NoticeKind::HeldWithoutPay, entry).await?;
-        if entry.stage == Stage::Paying || entry.restored && entry.may_have_dispatched() {
+        if entry.stage == Stage::Paying || entry.restored && entry.may_have_handed_off() {
             match self.rail.payment(attempt_id).await? {
                 Some(RailOutcome::Paid(RailPaid {
                     proof, paid_at_ms, ..
@@ -4965,8 +4967,8 @@ impl Paykit {
     }
 
     /// Drop the journal entries past their claim's reconciliation window (Paykit spec 7.1,
-    /// 7.2; Switch spec 6.3): `Finished` and `Abandoned` ones, from their deadline plus the
-    /// 30 days the switch keeps the claim's tombstone after it ([`RECONCILIATION_MS`]),
+    /// 7.2; Dispatch spec 6.3): `Finished` and `Abandoned` ones, from their deadline plus the
+    /// 30 days the Dispatch keeps the claim's tombstone after it ([`RECONCILIATION_MS`]),
     /// or, without a deadline, from 400 days after they were journaled
     /// ([`MAX_CLAIM_AGE_MS`]). A claim pinned to none is kept 400 days after its last entry,
     /// which comes after the journaling, so it may outlive the entry: a finished entry
@@ -4974,15 +4976,15 @@ impl Paykit {
     /// payment and stops a second one (Paykit spec 6, 7.2, "The record shows it paid").
     ///
     /// What a later reconcile, a restore's included, needs stays: every entry still open
-    /// or owing its acceptance, one whose dispatch the payment method reported failed while
+    /// or owing its acceptance, one whose handoff the payment method reported failed while
     /// its history may still show it paid, and one paid after `failed` was written, whose
     /// receipt the user is told about. A bound passes as [`bound_passed`] says. An entry's
     /// acknowledged notices go with it.
     ///
     /// Three of those have no bound of their own: a payment made after `failed` was written
-    /// waits for its receipt for as long as no receipt comes, a dispatch the method
+    /// waits for its receipt for as long as no receipt comes, a handoff the method
     /// reported failed is asked about for as long as the method's history keeps it, without
-    /// end for a method whose history is kept for good, and a restored dispatch the user
+    /// end for a method whose history is kept for good, and a restored handoff the user
     /// resolved as paid with no claim to settle, whose obligation has no deadline, is the
     /// only thing that stops it being paid again (Paykit spec 7.2, 8.4). Each is one small
     /// entry.
@@ -5027,11 +5029,11 @@ impl Paykit {
         self.local_commit(tx).await
     }
 
-    /// Ask the payment method's history again about the dispatches it reported failed, while
+    /// Ask the payment method's history again about the hands off it reported failed, while
     /// that history keeps them (Paykit spec 7.2, "What a payment method declares"): an owner
     /// that finds a payment it reported failed completed after all sends its proof, and the
     /// payee's receipt corrects the claim. Such a payment is reported as any other, its
-    /// activity record and its proof in one batch; a dispatch the history no longer keeps
+    /// activity record and its proof in one batch; a handoff the history no longer keeps
     /// isn't asked about again.
     async fn recheck_failed(&mut self) -> Result<Vec<PayOutcome>> {
         let declaration = self.rail.declaration();
@@ -5059,7 +5061,7 @@ impl Paykit {
             };
             entry.failed_by_method = false;
             // The attempt is `failed` on the claim: no claim entry is written, and the
-            // payee's receipt settles it by evidence (Switch spec 10.2 row 3), or, once the
+            // payee's receipt settles it by evidence (Dispatch spec 10.2 row 3), or, once the
             // claim is gone, tells the user it was paid.
             entry.failed_on_claim = entry.offline.is_none() || entry.step.is_some();
             entry.step = None;
@@ -5072,14 +5074,14 @@ impl Paykit {
         Ok(out)
     }
 
-    /// Resolve an attempt whose payment may have been dispatched (Paykit spec 7.2, "What a
+    /// Resolve an attempt whose payment may have been handed off (Paykit spec 7.2, "What a
     /// payment method declares"): any history record resolves it; an empty history means it
     /// never started only within the history's retention, and for a restored entry only if
     /// the history survives a restore; otherwise an idempotent method is asked again within
     /// its retention, while the claim still shows this app's attempt open, and anything else
     /// stays "may be paid". `None` when the claim shows the attempt resolved already, by the
     /// user or by evidence: the entry is finished, with no outcome of its own.
-    pub(crate) async fn resolve_dispatched(
+    pub(crate) async fn resolve_handed_off(
         &mut self,
         mut entry: JournalEntry,
     ) -> Result<Option<PayOutcome>> {
@@ -5118,7 +5120,7 @@ impl Paykit {
             let held = claim
                 .attempt(&attempt_id.to_bytes())
                 .filter(|a| a.owner == me);
-            // The attempt's age and orphan window, for the bound on a repeat (Switch spec
+            // The attempt's age and orphan window, for the bound on a repeat (Dispatch spec
             // 10.2); unused unless the attempt is open.
             let (opened_at_ms, orphan_after_s) =
                 held.map_or((0, 0), |a| (a.opened_at, a.orphan_after));
@@ -5132,9 +5134,9 @@ impl Paykit {
                     return Ok(Some(PayOutcome::Uncertain { attempt_id }))
                 }
             }
-            // The user decided to pay at the first dispatch: a request the payee cancelled
+            // The user decided to pay at the first handoff: a request the payee cancelled
             // since, or one this app keeps a stop for, isn't paid again. The repeat is
-            // withheld and nothing is written: the first dispatch may have paid, so the
+            // withheld and nothing is written: the first handoff may have paid, so the
             // attempt stays open and "may be paid", never `failed`, until the method's
             // history or a receipt tells (Paykit spec 7.2, 8.1).
             if self.repeat_withheld(&entry).await? {
@@ -5146,7 +5148,7 @@ impl Paykit {
             };
             // The retention is judged again by the final payment check and the fence, after
             // the last await and just before the call: the checks awaited the network meanwhile.
-            let repeat = Dispatch::Repeat {
+            let repeat = Handoff::Repeat {
                 idempotency_retention_ms: declaration.idempotency_retention_ms,
                 opened_at_ms,
                 orphan_after_s,
@@ -5154,16 +5156,16 @@ impl Paykit {
                 read_at,
             };
             return self
-                .dispatch(entry, doc, Initiator::Automatic, None, repeat, None)
+                .handoff(entry, doc, Initiator::Automatic, None, repeat, None)
                 .await
                 .map(Some);
         }
         Ok(Some(PayOutcome::Uncertain { attempt_id }))
     }
 
-    /// Whether a repeat of `entry`'s dispatch is withheld because its request may no longer
+    /// Whether a repeat of `entry`'s handoff is withheld because its request may no longer
     /// be paid (Paykit spec 8.1): this app keeps a stop for it, or the request record the
-    /// switch holds, read again, shows it cancelled or rejected, or isn't there (a `404`
+    /// Dispatch holds, read again, shows it cancelled or rejected, or isn't there (a `404`
     /// included, whatever copy this app keeps) or doesn't read as the request, a newer write
     /// this app refused included, so nothing shows it still open; or the request is held
     /// after a restore or a `missed` item until the user confirms it (Paykit spec 7.2,
@@ -5175,7 +5177,7 @@ impl Paykit {
     /// payment (Paykit spec 8.1, 8.3), so the attempt stays open and the user's payment
     /// method's history or a receipt settles it. A payment without a request has nothing a payee cancels.
     async fn repeat_withheld(&mut self, entry: &JournalEntry) -> Result<bool> {
-        // The user said an earlier restored dispatch of the obligation was paid: no attempt
+        // The user said an earlier restored handoff of the obligation was paid: no attempt
         // of it is carried out again (Paykit spec 7.2, 8.4).
         if self
             .journal()
@@ -5185,9 +5187,9 @@ impl Paykit {
         {
             return Ok(true);
         }
-        // An earlier-generation dispatch is never repeated after a provider loss
+        // An earlier-generation handoff is never repeated after a provider loss
         // (Paykit spec 7.3).
-        if self.dispatched_before_loss(entry).await? {
+        if self.handed_off_before_loss(entry).await? {
             return Ok(true);
         }
         // A repeat is an automatic payment: none while its request record or its list's
@@ -5232,10 +5234,10 @@ impl Paykit {
         })
     }
 
-    /// Whether `fresh`, `entry`'s request record as the switch holds it now, read again
+    /// Whether `fresh`, `entry`'s request record as the Dispatch holds it now, read again
     /// ([`Paykit::fresh_request`]), withholds an automatic payment of it, at a repeat's
     /// withheld check and at the last check before any automatic call
-    /// ([`Paykit::automatic_dispatch_held`]): the record shows the request cancelled or
+    /// ([`Paykit::automatic_handoff_held`]): the record shows the request cancelled or
     /// rejected, or holds `manual_only` for an attempt the user did not start; the request
     /// is held after a restore or a `missed` item until the user confirms it (Paykit
     /// spec 7.2); or the record, or the list's
@@ -5291,32 +5293,32 @@ impl Paykit {
     }
 
     /// The final payment check, on every path that reaches the payment method's call, a first
-    /// dispatch and a repeat at a resume or a recovery, judged again by the fence just before
+    /// handoff and a repeat at a resume or a recovery, judged again by the fence just before
     /// the call (Paykit spec 4, 7.2). In order:
     ///
-    /// 0. for an automatic first dispatch, the deny list, the request record and the block
+    /// 0. for an automatic first handoff, the deny list, the request record and the block
     ///    floor, each read again and confirmed by a second read
-    ///    ([`Paykit::automatic_dispatch_held`]): a blocked payee, a record that withholds it
+    ///    ([`Paykit::automatic_handoff_held`]): a blocked payee, a record that withholds it
     ///    ([`Paykit::fresh_record_withholds`]: cancelled, rejected, `manual_only`, held after
     ///    a restore, divergent), isn't there or can't be read, a one-time request dated before
     ///    the floor, a read that fails, or a second read that shows another write, holds it
     ///    ([`FinalCheck::Hold`], Paykit spec 8.1, 8.3, `crate::floor`); an automatic repeat
     ///    makes that check after this one;
-    /// 1. a switch lookup kept for the payee whose answer has come is taken, so a late
-    ///    answer that removes the destination's app is acted on (Switch spec 4.3), and one
+    /// 1. a Dispatch lookup kept for the payee whose answer has come is taken, so a late
+    ///    answer that removes the destination's app is acted on (Dispatch spec 4.3), and one
     ///    the client refuses, such as an equivocation, stops the payment
-    ///    ([`FinalCheck::Refused`], Switch wire 3.3);
+    ///    ([`FinalCheck::Refused`], Dispatch wire 3.3);
     /// 2. the destination, against the payee's `identity.json` that gives: its carrier
     ///    carries it and hasn't expired, and its app is current, not removed, with the
     ///    certificate the carrier came with;
     /// 3. the payee's copy may still be acted on: read in the last 10 minutes for a
-    ///    request's or a list's endpoint, by the switch's rules for a public endpoint;
+    ///    request's or a list's endpoint, by the Dispatch's rules for a public endpoint;
     /// 4. the own `identity.json` is confirmed in the last 60 s, and lists this app at the
     ///    attempt's service and generation;
     /// 5. for a repeat, the method's idempotency retention hasn't ended, the Allowance it
     ///    was reserved under hasn't expired, and the repeat can complete before its attempt
-    ///    is orphaned ([`FinalCheck::Lapsed`]); for a first dispatch, the attempt is within
-    ///    its pre-dispatch budget and the Allowance it was reserved under hasn't expired;
+    ///    is orphaned ([`FinalCheck::Lapsed`]); for a first handoff, the attempt is within
+    ///    its pre-handoff budget and the Allowance it was reserved under hasn't expired;
     /// 6. the app may still make the attempt: no alarm or restore question raised meanwhile,
     ///    for an automatic payment the clocks within the tolerance, and its certificate
     ///    holds `paykit_pay`, so an app a renewal reduced moves no money on any path, a repeat at a
@@ -5324,9 +5326,9 @@ impl Paykit {
     ///    stays open for an app that holds it).
     ///
     /// Checks 2 to 6 run on the clock after the one await ([`Paykit::final_gates`]). A first
-    /// dispatch's call follows the journal write of `Paying`; after it, and for a repeat
+    /// handoff's call follows the journal write of `Paying`; after it, and for a repeat
     /// after this check, an automatic payment makes the check of 0 again
-    /// ([`Paykit::automatic_dispatch_held`]), and the fence ([`Paykit::payment_fence`]) runs
+    /// ([`Paykit::automatic_handoff_held`]), and the fence ([`Paykit::payment_fence`]) runs
     /// 1 to 6 again, with no await after them before the call. Anything but
     /// [`FinalCheck::Pay`]: nothing is paid; a copy past its age is looked up again by the
     /// next check, at a resume. Returns the payee's copy the checks judged, for the fence.
@@ -5336,18 +5338,18 @@ impl Paykit {
         payee: PeerIdentity,
         by: Initiator,
         confirmed: Option<UserConfirmed>,
-        kind: Dispatch,
+        kind: Handoff,
     ) -> Result<(FinalCheck, PeerIdentity)> {
         // No automatic payment to a blocked payee (Paykit spec 8.1), nor of a request its
         // record withholds ([`Paykit::fresh_record_withholds`]: cancelled, rejected,
         // `manual_only`, held after a restore, divergent; Paykit spec 8.1, 8.3), or a one-time
         // request dated before the block floor (`crate::floor`), each read now and confirmed by
-        // a second read ([`Paykit::automatic_dispatch_held`]), a read that fails holding it
-        // too. A first dispatch judges them before its attempt's `Paying` commit,
-        // so that a held one is known unsubmitted, and again after it ([`Paykit::dispatch`]);
+        // a second read ([`Paykit::automatic_handoff_held`]), a read that fails holding it
+        // too. A first handoff judges them before its attempt's `Paying` commit,
+        // so that a held one is known unsubmitted, and again after it ([`Paykit::handoff`]);
         // a repeat, whose entry is `Paying` already, judges them once, after every other
         // await before its call.
-        if matches!(kind, Dispatch::First { .. }) && self.dispatch_held(entry, by, kind).await? {
+        if matches!(kind, Handoff::First { .. }) && self.handoff_held(entry, by, kind).await? {
             return Ok((FinalCheck::Hold, payee));
         }
         let answered = match self.take_kept_lookup(&entry.payee).await? {
@@ -5390,18 +5392,18 @@ impl Paykit {
         Ok((check, payee))
     }
 
-    /// Judge every dispatch's local pauses and the shared deny list by its initiator's
-    /// rules (Paykit spec 6, 8.1). User consent authorizes only the selected first dispatch.
-    async fn dispatch_held(
+    /// Judge every handoff's local pauses and the shared deny list by its initiator's
+    /// rules (Paykit spec 6, 8.1). User consent authorizes only the selected first handoff.
+    async fn handoff_held(
         &mut self,
         entry: &JournalEntry,
         by: Initiator,
-        kind: Dispatch,
+        kind: Handoff,
     ) -> Result<bool> {
         if self.payment_base_changed(entry).await? {
             return Ok(true);
         }
-        // A saved list destination over a record seen deleted is never dispatched, a resumed
+        // A saved list destination over a record seen deleted is never handed off, a resumed
         // attempt's included; the method's history and a receipt still settle it (Paykit
         // spec 6; wire 5, "Incomplete protected-record contract").
         if self
@@ -5411,7 +5413,7 @@ impl Paykit {
             return Ok(true);
         }
         let crossing_payee = (entry.billing_period.is_some()
-            && matches!(kind, Dispatch::First { .. }))
+            && matches!(kind, Handoff::First { .. }))
         .then_some(entry.payee);
         if entry.billing_period.is_some() {
             let parent =
@@ -5427,7 +5429,7 @@ impl Paykit {
         }
         if by == Initiator::Automatic {
             return self
-                .automatic_dispatch_held(entry, kind, crossing_payee)
+                .automatic_handoff_held(entry, kind, crossing_payee)
                 .await;
         }
         // An already accepted first attempt may finish across the seller's cancellation.
@@ -5445,7 +5447,7 @@ impl Paykit {
         Ok(self.denied_for_user(&entry.payee).await?
             && !matches!(
                 kind,
-                Dispatch::First {
+                Handoff::First {
                     blocked_confirmed: true,
                     ..
                 }
@@ -5459,12 +5461,12 @@ impl Paykit {
             .await
     }
 
-    /// Whether `entry` is held from an automatic dispatch, a first dispatch or a repeat, as
-    /// the switch holds the identity's state now. Every automatic dispatch makes this check,
+    /// Whether `entry` is held from an automatic handoff, a first handoff or a repeat, as
+    /// the Dispatch holds the identity's state now. Every automatic handoff makes this check,
     /// including after taking a late seller lookup. The final local checks follow the
     /// last read without waiting ([`Paykit::payment_fence`]).
     ///
-    /// It reads three things from the switch, one after the other ([`Paykit::shared_collect`]):
+    /// It reads three things from the Dispatch, one after the other ([`Paykit::shared_collect`]):
     /// the deny list, the request record ([`Paykit::fresh_request_stamped`]) and the block
     /// floor ([`Paykit::floor_read_now`], for a one-time request only), and judges them: the
     /// deny list holds the payee (Paykit spec 8.1); the record withholds the request
@@ -5474,13 +5476,13 @@ impl Paykit {
     /// in the same order, and holds unless each shows what its first read did (the deny list
     /// the same entries, each record the same write, [`WriteStamp`]), or the deny list now
     /// holds the payee, or the record isn't there, doesn't read or holds no request. Each read
-    /// shows the switch's current state, never a copy this app keeps: the deny list from
+    /// shows the Dispatch's current state, never a copy this app keeps: the deny list from
     /// `GET /allow`, which the client always fetches, with this app's own block or unblock
     /// that the list doesn't show yet counting at once (Paykit spec 8.1, `judged_deny`): an
     /// unblock whose batch the client still keeps takes the payee out even while
     /// `GET /allow` lists them; the record and the floor from
-    /// `read_record_fresh`, a read that shows anything but the switch's current write holding
-    /// the dispatch.
+    /// `read_record_fresh`, a read that shows anything but the Dispatch's current write holding
+    /// the handoff.
     ///
     /// For a period started under the host's policy, each pass instead reads the deny list,
     /// subscription and occurrence. Compare the exact applications of both permitted records,
@@ -5492,17 +5494,17 @@ impl Paykit {
     /// unchanged version is the same write; the deny list carries no version and is compared
     /// whole. Both reads of the record and of the floor bracket the second read of the deny
     /// list, so each value judged held at that instant. A read that fails, or a record not
-    /// there or not readable at either read, holds the dispatch. A write that lands after its
+    /// there or not readable at either read, holds the handoff. A write that lands after its
     /// own second read is too late for this call: the payment method's call can't be made
-    /// conditional on the switch's state, so no read before it sees a write after that read.
-    /// After the second collect's last switch read, only this app's own store is awaited
+    /// conditional on the Dispatch's state, so no read before it sees a write after that read.
+    /// After the second collect's last Dispatch read, only this app's own store is awaited
     /// (for a recurring request, the copy of the record just taken; for a payment without a
     /// request, the commit of the deny list read and the widenings it applies), and then
     /// only code with no await runs before the call.
-    async fn automatic_dispatch_held(
+    async fn automatic_handoff_held(
         &mut self,
         entry: &JournalEntry,
-        kind: Dispatch,
+        kind: Handoff,
         crossing_payee: Option<[u8; 32]>,
     ) -> Result<bool> {
         let Some(judged) = Box::pin(self.shared_collect(entry, kind, true, crossing_payee)).await?
@@ -5572,21 +5574,21 @@ impl Paykit {
         Ok(Some(Box::new([parent, current])))
     }
 
-    /// One read of the identity's state an automatic dispatch of `entry` is judged by
-    /// ([`Paykit::automatic_dispatch_held`]): the deny list, then the request record, then the
-    /// block floor for a one-time request, each from the switch now. `None` when a read fails,
+    /// One read of the identity's state an automatic handoff of `entry` is judged by
+    /// ([`Paykit::automatic_handoff_held`]): the deny list, then the request record, then the
+    /// block floor for a one-time request, each from the Dispatch now. `None` when a read fails,
     /// the deny list holds the payee, the record isn't there, doesn't read or holds no
     /// request, or, when `judge`, the record withholds the request or the floor holds it.
-    /// Without `judge`, nothing more is read from the switch after the last read; only the
+    /// Without `judge`, nothing more is read from the Dispatch after the last read; only the
     /// app's own store is.
     async fn shared_collect(
         &mut self,
         entry: &JournalEntry,
-        kind: Dispatch,
+        kind: Handoff,
         judge: bool,
         crossing_payee: Option<[u8; 32]>,
     ) -> Result<Option<SharedState>> {
-        if Box::pin(self.executor_dispatch_held(entry, kind)).await? {
+        if Box::pin(self.executor_handoff_held(entry, kind)).await? {
             return Ok(None);
         }
         let deny = match self.deny_list_now().await {
@@ -5636,7 +5638,7 @@ impl Paykit {
             .map(crate::executor::JournalAllowance::id)
             .transpose()?;
         let hand_repeat =
-            entry.user_started && allowance.is_none() && matches!(kind, Dispatch::Repeat { .. });
+            entry.user_started && allowance.is_none() && matches!(kind, Handoff::Repeat { .. });
         if !hand_repeat && record.allowance_id != allowance {
             return Ok(None);
         }
@@ -5656,7 +5658,7 @@ impl Paykit {
         }
         let stored = stored.clone();
         // The shared post-loss hold, judged at both collects by the newest own `identity.json`
-        // verified, holds every automatic dispatch of a one-time request, a repeat included
+        // verified, holds every automatic handoff of a one-time request, a repeat included
         // (Paykit spec 8.1).
         if self.shared_loss_hold().await? {
             return Ok(None);
@@ -5676,8 +5678,8 @@ impl Paykit {
     }
 
     /// Recheck the payer's shared state after journaling `Paying` and immediately before
-    /// dispatch (Paykit spec 7.2, 8.1, 8.3). A first payment to a message-carried
-    /// destination can use a late switch confirmation of the exact signed seller identity
+    /// handoff (Paykit spec 7.2, 8.1, 8.3). A first payment to a message-carried
+    /// destination can use a late Dispatch confirmation of the exact signed seller identity
     /// already checked. Taking it awaits storage, so read the payer's state again. A
     /// public endpoint needs its app record checked too, and a repeat may already have paid.
     async fn payment_fence(
@@ -5686,22 +5688,22 @@ impl Paykit {
         mut payee: PeerIdentity,
         by: Initiator,
         confirmed: Option<UserConfirmed>,
-        kind: Dispatch,
+        kind: Handoff,
     ) -> Result<FinalCheck> {
-        let mut may_take_answer = matches!(kind, Dispatch::First { .. });
+        let mut may_take_answer = matches!(kind, Handoff::First { .. });
         loop {
             // A check that fails here, a payment by hand's fresh reads or the store, is the
             // caller's error, not a hold ([`Paykit::unread_at_the_fence`]). An automatic
             // payment's checks take a read that fails as a hold themselves.
-            if self.dispatch_held(entry, by, kind).await?
+            if self.handoff_held(entry, by, kind).await?
                 || Box::pin(self.period_recovery_held(entry)).await?
             {
                 return Ok(FinalCheck::Hold);
             }
-            // Whether the switch's answer confirms the document checked, and whether it learned
+            // Whether the Dispatch's answer confirms the document checked, and whether it learned
             // anything at all: once finished, the answer carries the status of the newest
             // lookup, which can hide a copy this one read, and a lookup that failed can still
-            // carry a copy or a freeze (Pubky Switch spec, Section 4.3).
+            // carry a copy or a freeze (Pubky Dispatch spec, Section 4.3).
             let ready = self.inspect_ready_lookup(&entry.payee, |answer| {
                 (answer.confirms(&payee.doc), answer.learned_nothing())
             });
@@ -5737,7 +5739,7 @@ impl Paykit {
     }
 
     /// Whether a repeat made now completes, at the method's longest, before its attempt is
-    /// orphaned (Switch spec 10.2): `now + longest_completion_ms < opened_at + orphan_after`,
+    /// orphaned (Dispatch spec 10.2): `now + longest_completion_ms < opened_at + orphan_after`,
     /// on the service clock. Service time now is taken late: the latest of the highest
     /// service time verified, the device clock plus the clock tolerance, and the service
     /// time verified at the claim read plus the monotonic time since (`read_at`), which a
@@ -5767,14 +5769,14 @@ impl Paykit {
         service_now.saturating_add(longest_completion_ms) < orphaned_at
     }
 
-    /// A first dispatch's attempt is still within the pre-dispatch budget
-    /// ([`crate::PRE_DISPATCH_BUDGET_MS`]): its age since just before it was sent, by the
+    /// A first handoff's attempt is still within the pre-handoff budget
+    /// ([`crate::PRE_HANDOFF_BUDGET_MS`]): its age since just before it was sent, by the
     /// device's wall and monotonic clocks, with the clock tolerance added, is under the
     /// budget, and the
     /// own certificate hasn't expired by the service time that makes. `orphan_after` is at
     /// least the rail's longest time plus the budget ([`crate::orphan_floor_s`]), so within
     /// it no other own app can resolve the attempt as orphaned before its payment has run
-    /// (Switch spec 10.2 rows 5 and 6). Past it nothing is submitted: the attempt is written
+    /// (Dispatch spec 10.2 rows 5 and 6). Past it nothing is submitted: the attempt is written
     /// `failed`, and a payment made after is a new decision.
     ///
     /// Residual: without a read, nothing here can see the owner's own revocation within the
@@ -5784,10 +5786,10 @@ impl Paykit {
     /// an app that owns open attempts.
     fn within_budget(&self, answered: &Answered, now: u64) -> std::result::Result<(), Refusal> {
         let age = answered.age_ms(now).saturating_add(CLOCK_TOLERANCE_MS);
-        if age >= crate::PRE_DISPATCH_BUDGET_MS {
+        if age >= crate::PRE_HANDOFF_BUDGET_MS {
             return Err(Refusal::HeldForUser(
                 crate::HeldForUserReason::AttemptCheck(
-                    "Switch spec 10.2: the attempt is past its pre-dispatch budget",
+                    "Dispatch spec 10.2: the attempt is past its pre-handoff budget",
                 ),
             ));
         }
@@ -5798,7 +5800,7 @@ impl Paykit {
         {
             return Err(Refusal::HeldForUser(
                 crate::HeldForUserReason::AttemptCheck(
-                    "Switch spec 3.2: the app's certificate expires within the pre-dispatch budget",
+                    "Dispatch spec 3.2: the app's certificate expires within the pre-handoff budget",
                 ),
             ));
         }
@@ -5807,7 +5809,7 @@ impl Paykit {
 
     /// The last clock sample before calling the rail, and whether that sample
     /// still authorizes the currently held own identity (Paykit spec 4).
-    fn dispatch_time(&self) -> (u64, bool) {
+    fn handoff_time(&self) -> (u64, bool) {
         self.app
             .identity_confirmed_at()
             .zip(self.app.identity_confirmation_age_ms())
@@ -5852,7 +5854,7 @@ impl Paykit {
     }
 
     /// Checks 2 to 6 of the final payment check, with no await, on the clock now and the
-    /// payee's copy `payee`, and for a first dispatch the pre-dispatch budget
+    /// payee's copy `payee`, and for a first handoff the pre-handoff budget
     /// ([`Paykit::within_budget`]).
     fn final_gates(
         &self,
@@ -5860,14 +5862,14 @@ impl Paykit {
         payee: &PeerIdentity,
         by: Initiator,
         confirmed: Option<UserConfirmed>,
-        kind: Dispatch,
+        kind: Handoff,
     ) -> Result<FinalCheck> {
         if !self.holds("paykit_pay")
             || entry.allowance.is_some() && !self.holds("paykit_allowance_execute")
         {
             return Ok(FinalCheck::Hold);
         }
-        let automatic_first = by == Initiator::Automatic && matches!(kind, Dispatch::First { .. });
+        let automatic_first = by == Initiator::Automatic && matches!(kind, Handoff::First { .. });
         if let Err(refusal) = self.transfer_holds(entry, payee, automatic_first)? {
             return Ok(FinalCheck::Refused(refusal));
         }
@@ -5880,9 +5882,9 @@ impl Paykit {
                 false
             }
         };
-        let (now, own_fresh) = self.dispatch_time();
+        let (now, own_fresh) = self.handoff_time();
         match kind {
-            Dispatch::Repeat {
+            Handoff::Repeat {
                 idempotency_retention_ms,
                 opened_at_ms,
                 orphan_after_s,
@@ -5893,7 +5895,7 @@ impl Paykit {
                     return Ok(FinalCheck::Lapsed);
                 }
                 // An expired Allowance pays nothing more (Paykit spec 8.3): no repeat of a
-                // dispatch that may have gone, and the attempt stays open as possibly paid,
+                // handoff that may have gone, and the attempt stays open as possibly paid,
                 // for the method's history or a receipt to settle, never written failed.
                 if allowance_expired(entry, now, self.service_time()) {
                     return Ok(FinalCheck::Lapsed);
@@ -5908,17 +5910,17 @@ impl Paykit {
                     return Ok(FinalCheck::Lapsed);
                 }
             }
-            Dispatch::First { answered, .. } => {
+            Handoff::First { answered, .. } => {
                 if let Err(refusal) = self.within_budget(&answered, now) {
                     return Ok(FinalCheck::Refused(refusal));
                 }
                 // An expired Allowance pays nothing more (Paykit spec 8.3): the reservation's
-                // window bounds when the attempt was written, this when its first dispatch
+                // window bounds when the attempt was written, this when its first handoff
                 // goes. Nothing was submitted, so the attempt is written `failed`; a repeat is
                 // stopped above instead, as `Lapsed`, since the first call may have paid.
                 if allowance_expired(entry, now, self.service_time()) {
                     return Ok(FinalCheck::Refused(Refusal::NotAutomatic(
-                        "the Allowance expired before dispatch".into(),
+                        "the Allowance expired before handoff".into(),
                     )));
                 }
                 if automatic_first
@@ -5931,7 +5933,7 @@ impl Paykit {
                     })
                 {
                     return Ok(FinalCheck::Refused(Refusal::NotAutomatic(
-                        "the Billing Period's automatic window ended before dispatch".into(),
+                        "the Billing Period's automatic window ended before handoff".into(),
                     )));
                 }
             }
@@ -5948,7 +5950,7 @@ impl Paykit {
             )
             .is_ok();
         // An alarm or a restore question raised during any await holds the payment back
-        // (Switch spec 10.1, 12.4).
+        // (Dispatch spec 10.1, 12.4).
         let clear = may_attempt
             && destination
             && self.payee_source_current(&carrier, payee, by, confirmed, now)
@@ -5961,7 +5963,7 @@ impl Paykit {
         })
     }
 
-    /// The checks before a repeat, the same as before a first dispatch (Paykit spec 7.2 step
+    /// The checks before a repeat, the same as before a first handoff (Paykit spec 7.2 step
     /// 1): a repeat may execute money, so an idempotency guarantee alone doesn't let it go.
     /// The app may make an automatic attempt now (no alarm, not in reconcile mode, the clocks
     /// within the tolerance), its own `identity.json` is confirmed within the last 60 s, and
@@ -5990,24 +5992,24 @@ impl Paykit {
         }
     }
 
-    /// The gate before money moves, the same for a first dispatch and a repeat (Paykit spec
+    /// The gate before money moves, the same for a first handoff and a repeat (Paykit spec
     /// 4, 7.2 step 1). In order:
     ///
     /// 1. the app may make an attempt now: no alarm, not left, no restore question, not in
     ///    reconcile mode, no payer pass owed since a restore ([`Paykit::payer_pass_owed`])
-    ///    and, for an automatic payment, the clocks within the tolerance (Switch spec 10.1,
+    ///    and, for an automatic payment, the clocks within the tolerance (Dispatch spec 10.1,
     ///    12.4; Paykit spec 7.3);
     /// 2. `claim`, the view of a checked proof or of a claim read, shows the attempt open,
     ///    this app's and current (Paykit spec 7.2, "Only a verified answer lets money move");
     /// 3. the destination passes its checks against its carrier and the payee's
-    ///    `identity.json`, for the initiator (Paykit spec 4, 7.2; Switch spec 4.3);
+    ///    `identity.json`, for the initiator (Paykit spec 4, 7.2; Dispatch spec 4.3);
     /// 4. the own `identity.json` is confirmed in the last 60 s, read again first with
     ///    `refresh`, judged on the clock after the read (Paykit spec 4);
     /// 5. that copy lists this app, not removed, with the certificate it holds counting now
-    ///    (Paykit spec 4, Switch spec 3.2);
+    ///    (Paykit spec 4, Dispatch spec 3.2);
     /// 6. that copy names the generation the attempt was written at, and the service whose
     ///    key signed the attempt's transition proof (Paykit spec 4, "Fresh before paying";
-    ///    Switch spec 12.5, 12.6).
+    ///    Dispatch spec 12.5, 12.6).
     ///
     /// `Err` inside holds the first refusal, as [`Held::Client`] for 1, [`Held::OwnIdentity`]
     /// for 4, and [`Refusal::NotCurrent`] for 5 and 6.
@@ -6112,7 +6114,8 @@ impl Paykit {
             .generation;
         if generation != doc.generation() {
             return Err(
-                "Switch spec 12.5: the identity names another generation than the attempt's".into(),
+                "Dispatch spec 12.5: the identity names another generation than the attempt's"
+                    .into(),
             );
         }
         let verified = doc
@@ -6129,16 +6132,16 @@ impl Paykit {
     }
 }
 
-/// Whether `error` says the own switch doesn't answer now: the request or its answer was
-/// lost, the switch answered `503` (`unavailable`, or `staged` while its account is set
+/// Whether `error` says the own Dispatch doesn't answer now: the request or its answer was
+/// lost, the Dispatch answered `503` (`unavailable`, or `staged` while its account is set
 /// up), or an answer with a `5xx` status came without the service's signature, as from a
 /// proxy in front of it; or the account may have been erased, and the app's wait before it
-/// takes it as gone goes on (Switch spec 12.7).
-pub(crate) fn switch_unavailable(error: &AppError) -> bool {
+/// takes it as gone goes on (Dispatch spec 12.7).
+pub(crate) fn dispatch_unavailable(error: &AppError) -> bool {
     match error.unkept() {
         AppError::Transport(_) | AppError::NotAnsweringAsAccount { .. } => true,
-        AppError::Switch(pubky_switch_client::error::ClientError::Transport(_)) => true,
-        AppError::Switch(pubky_switch_client::error::ClientError::BadServiceSignature {
+        AppError::Switch(pubky_dispatch_client::error::ClientError::Transport(_)) => true,
+        AppError::Switch(pubky_dispatch_client::error::ClientError::BadServiceSignature {
             status,
         }) => *status >= 500,
         other => matches!(
@@ -6192,7 +6195,7 @@ impl WriteStamp {
     }
 }
 
-/// What one read of the identity's state for an automatic dispatch showed
+/// What one read of the identity's state for an automatic handoff showed
 /// ([`Paykit::shared_collect`]): the deny list, the request record's write, and the floor
 /// record's (`None` inside for no record), each `None` when not read.
 #[derive(Debug, PartialEq, Eq)]
@@ -6205,7 +6208,7 @@ struct SharedState {
 
 #[cfg(test)]
 mod tests {
-    use pubky_switch_client::error::{ClientError, StoreError, TransportError};
+    use pubky_dispatch_client::error::{ClientError, StoreError, TransportError};
 
     use super::*;
 
@@ -6214,15 +6217,14 @@ mod tests {
     }
 
     #[test]
-    fn test_pay_gate_client_refusal_is_returned_from_a_first_dispatch() {
+    fn test_pay_gate_client_refusal_is_returned_from_a_first_handoff() {
         for refusal in [
             ClientRefusal::Stopped,
             ClientRefusal::Left,
             ClientRefusal::RestoreQuestionOpen,
             ClientRefusal::RecoveryRequired { generation: 3 },
         ] {
-            let FirstHold::Return(error) = first_dispatch_hold(Held::Client(refusal.clone()))
-            else {
+            let FirstHold::Return(error) = first_handoff_hold(Held::Client(refusal.clone())) else {
                 panic!("{refusal:?} wrote the attempt failed");
             };
             assert!(is_client(&error, &refusal), "{error:?}");
@@ -6230,7 +6232,7 @@ mod tests {
         // Writes go on: the attempt is closed, as before the client's refusal was typed.
         let wait = ClientRefusal::NotNow("reconcile mode".into());
         let FirstHold::Fail(Refusal::HeldForUser(crate::HeldForUserReason::SwitchClient(why))) =
-            first_dispatch_hold(Held::Client(wait.clone()))
+            first_handoff_hold(Held::Client(wait.clone()))
         else {
             panic!("reconcile mode left the attempt open");
         };
@@ -6338,14 +6340,14 @@ mod tests {
             assert!(stops_resume(&held_back(stop.clone())), "{stop:?}");
             assert!(stops_resume(&kept(stop)));
         }
-        let alarm = AppError::Alarm(pubky_switch_client::app::Alarm::Rollback {
+        let alarm = AppError::Alarm(pubky_dispatch_client::app::Alarm::Rollback {
             reason: "seen".into(),
         });
         assert!(stops_resume(&PaykitError::Client(alarm)));
         assert!(stops_resume(&PaykitError::Client(AppError::Store(
             StoreError::Unavailable
         ))));
-        let answer = |code: pubky_switch_core::http::ErrorCode| {
+        let answer = |code: pubky_dispatch_core::http::ErrorCode| {
             PaykitError::Client(AppError::Switch(ClientError::Switch {
                 status: code.status(),
                 code,
@@ -6355,13 +6357,13 @@ mod tests {
                 retry_after: None,
             }))
         };
-        use pubky_switch_core::http::ErrorCode as E;
-        // So does the switch's answer that the app is no longer current, or that the account
+        use pubky_dispatch_core::http::ErrorCode as E;
+        // So does the Dispatch's answer that the app is no longer current, or that the account
         // awaits a recovery.
         assert!(stops_resume(&answer(E::NotCurrent)));
         assert!(stops_resume(&answer(E::CertExpired)));
         assert!(stops_resume(&answer(E::RecoveryRequired)));
-        // The Switch client's refusal of one entry, kept or not, and the wait for the own
+        // The Dispatch client's refusal of one entry, kept or not, and the wait for the own
         // identity.json leave only that entry.
         for left in [
             held_back(ClientRefusal::NotNow("kept batches".into())),
@@ -6371,14 +6373,14 @@ mod tests {
             assert!(!stops_resume(&left), "{left:?}");
             assert!(left_to_entry(&left), "{left:?}");
         }
-        // Anything else ends the call with its error, as it is: a conflict, the switch or
+        // Anything else ends the call with its error, as it is: a conflict, the Dispatch or
         // the network down, the method that can't tell, or a refusal of the SDK.
         for ends in [
             answer(E::Conflict),
             answer(E::Unavailable),
             answer(E::StaleEpoch),
             PaykitError::Rail(crate::RailError::Unavailable("busy".into())),
-            PaykitError::Refused(Refusal::SwitchUnavailable("down".into())),
+            PaykitError::Refused(Refusal::DispatchUnavailable("down".into())),
             PaykitError::Refused(Refusal::NotFound),
             lost().into(),
         ] {
@@ -6528,7 +6530,7 @@ mod tests {
                         }
                     }
                 }
-                // A read switch copy of the same document that doesn't confirm it is news.
+                // A read Dispatch copy of the same document that doesn't confirm it is news.
                 assert_eq!(
                     fence_news(true, basis, answer(SwitchCopy::Read, false, false), by),
                     FenceNews::Holds,
@@ -6547,7 +6549,7 @@ mod tests {
         let value: serde_json::Value =
             serde_json::from_str(period["value"].as_str().unwrap()).unwrap();
         let payee =
-            pubky_switch_core::enc::pubky_key(value["counterparty"].as_str().unwrap()).unwrap();
+            pubky_dispatch_core::enc::pubky_key(value["counterparty"].as_str().unwrap()).unwrap();
         let signed = StoredMessage::read(&value["proof"], &payee).unwrap();
         let Body::PaymentProof(proof) = signed.body() else {
             panic!("expected a payment proof")
@@ -6616,7 +6618,7 @@ mod tests {
     }
 
     #[test]
-    fn test_unpriced_now_refuses_by_hand_on_an_automatic_first_dispatch() {
+    fn test_unpriced_now_refuses_by_hand_on_an_automatic_first_handoff() {
         let rail = crate::rail::FakeRail::new();
         let usd = PaymentAmount {
             value: paykit_lib::Decimal::new("10").unwrap(),
@@ -6626,7 +6628,7 @@ mod tests {
             let endpoint = PaymentEndpointIdentifier::new(endpoint).unwrap();
             conversion::price(&rail, &usd, None, &endpoint)
         };
-        // A payment made only by hand: refused on an automatic first dispatch, and held to
+        // A payment made only by hand: refused on an automatic first handoff, and held to
         // its user's confirmation otherwise.
         let refused = unpriced_now(price("eur-sepa-iban"), true).unwrap();
         assert!(
@@ -6656,7 +6658,7 @@ mod tests {
     }
 
     #[test]
-    fn test_dispatch_period_rates_require_the_signed_source() {
+    fn test_handoff_period_rates_require_the_signed_source() {
         assert!(rates_usable(&RateSource::Request, None, 0, None));
         let details = RateSource::PeriodDetails {
             msg_id: "details".into(),
@@ -6672,7 +6674,7 @@ mod tests {
 
     #[test]
     fn test_prune_bound_not_passed_by_a_far_service_time_or_without_one() {
-        let day = pubky_switch_core::records::DAY_MS;
+        let day = pubky_dispatch_core::records::DAY_MS;
         // A service time far ahead of the device clock passes only up to a day after it.
         assert!(!super::bound_passed(5 * day, Some(100 * day), day));
         assert!(super::bound_passed(5 * day, Some(100 * day), 5 * day));
@@ -6708,26 +6710,26 @@ mod tests {
     }
 
     #[test]
-    fn test_switch_unavailable_through_a_kept_batch_and_the_erasure_wait() {
-        assert!(switch_unavailable(&lost()));
-        assert!(switch_unavailable(&AppError::Kept {
+    fn test_dispatch_unavailable_through_a_kept_batch_and_the_erasure_wait() {
+        assert!(dispatch_unavailable(&lost()));
+        assert!(dispatch_unavailable(&AppError::Kept {
             batch_id: [1; 16],
             error: Box::new(lost()),
         }));
-        assert!(switch_unavailable(&AppError::NotAnsweringAsAccount {
+        assert!(dispatch_unavailable(&AppError::NotAnsweringAsAccount {
             since_ms: 1
         }));
-        assert!(switch_unavailable(&AppError::Switch(
+        assert!(dispatch_unavailable(&AppError::Switch(
             ClientError::BadServiceSignature { status: 503 }
         )));
     }
 
     #[test]
-    fn test_switch_unavailable_not_for_an_answer_it_signed() {
-        assert!(!switch_unavailable(&AppError::Switch(
+    fn test_dispatch_unavailable_not_for_an_answer_it_signed() {
+        assert!(!dispatch_unavailable(&AppError::Switch(
             ClientError::BadServiceSignature { status: 404 }
         )));
-        assert!(!switch_unavailable(&AppError::Kept {
+        assert!(!dispatch_unavailable(&AppError::Kept {
             batch_id: [1; 16],
             error: Box::new(AppError::Switch(ClientError::BadServiceSignature {
                 status: 404

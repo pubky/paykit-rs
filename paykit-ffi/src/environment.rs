@@ -3,11 +3,11 @@ use crate::{
     WalletStore,
 };
 use paykit_sdk::{PaykitConfig, PaymentEndpointIdentifier, Timer};
-use pubky_switch_client::app::{HomeserverReader, HomeserverWriter};
-use pubky_switch_client::clock::{Clock, SystemClock};
+use pubky_dispatch_client::app::{HomeserverReader, HomeserverWriter};
+use pubky_dispatch_client::clock::{Clock, SystemClock};
 
 use crate::runtime::HOST_CALL_LIMIT;
-use pubky_switch_client::transport::{
+use pubky_dispatch_client::transport::{
     BoxFuture, HttpConfig, HttpTransport, Transport, TransportError,
 };
 use std::{sync::Arc, time::Duration};
@@ -122,7 +122,7 @@ impl WalletHost {
     /// Use this protected store, Pubky session and payment method for wallet operations. The
     /// method's declaration and the endpoints it supports are given here, once: a method whose
     /// guarantees change is given to a new `WalletHost`. Omit the config for the SDK defaults
-    /// (Paykit spec 3.3, 7.2, 9, Switch spec 4.2).
+    /// (Paykit spec 3.3, 7.2, 9, Dispatch spec 4.2).
     #[uniffi::constructor(default(config = None))]
     pub fn new(
         store: Arc<dyn WalletStore>,

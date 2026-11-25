@@ -5,11 +5,11 @@ use paykit_lib::{
     PaymentReference,
 };
 use paykit_sdk::{rail::FakeRail, AppScopes, Paykit, RequestDestination, RequestDraft, Timer};
-use pubky_switch_client::{
+use pubky_dispatch_client::{
     store::{client_namespace, MemoryStore, StateStore},
     transport::BoxFuture,
 };
-use pubky_switch_harness::{parties::Asking, World};
+use pubky_dispatch_harness::{parties::Asking, World};
 use std::{
     collections::BTreeMap,
     error::Error,
@@ -32,7 +32,7 @@ async fn enrolled(
     scopes: AppScopes,
     rail: Arc<FakeRail>,
     store: Arc<MemoryStore>,
-) -> Result<(Paykit, pubky_switch_signer::Signer)> {
+) -> Result<(Paykit, pubky_dispatch_signer::Signer)> {
     let identity = world.identity(name)?;
     let mut signer = super::signer::serving(world, name).await?;
     let scopes = scopes.build()?;
@@ -61,7 +61,7 @@ async fn receive(wallet: &mut Paykit) -> Result<()> {
     Err("wallet did not complete its feed".into())
 }
 
-/// An installed wallet whose next resume must report the original Paykit or Switch refusal.
+/// An installed wallet whose next resume must report the original Paykit or Dispatch refusal.
 pub(super) async fn print_resume_refusal(left: bool) -> Result<()> {
     let world = super::service::start()?;
     let rail = Arc::new(FakeRail::with_clock(world.clock().clone()));
@@ -80,7 +80,7 @@ pub(super) async fn print_resume_refusal(left: bool) -> Result<()> {
         Box::pin(
             payer
                 .app_mut()
-                .leave(pubky_switch_client::app::LeaveMode::TwoStep),
+                .leave(pubky_dispatch_client::app::LeaveMode::TwoStep),
         )
         .await?;
         drop(payer);
@@ -213,7 +213,7 @@ fn write_store(output: &mut impl Write, app: [u8; 16], store: &MemoryStore) -> R
 
 /// Hand over the protected state with one genuine Paykit duty after the native wallet closes.
 pub(super) async fn print_notice(cleared: bool) -> Result<()> {
-    use pubky_switch_client::app::AppEvent;
+    use pubky_dispatch_client::app::AppEvent;
 
     let world = super::service::start()?;
     let store = Arc::new(MemoryStore::new());
@@ -249,7 +249,7 @@ pub(super) async fn print_notice(cleared: bool) -> Result<()> {
         world.add_switch(successor, &[&owner]).await?;
         let current = Box::pin(signer.declare_provider_loss(
             successor,
-            pubky_switch_signer::UserConfirmed::shown_and_confirmed(),
+            pubky_dispatch_signer::UserConfirmed::shown_and_confirmed(),
         ))
         .await?;
         let mut clearance = None;

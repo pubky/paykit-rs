@@ -1,7 +1,7 @@
-//! Paykit as the signer knows it (Paykit spec 3.1, 3.2, 3.4, 3.5; Switch spec 1, 3.2).
+//! Paykit as the signer knows it (Paykit spec 3.1, 3.2, 3.4, 3.5; Dispatch spec 1, 3.2).
 //!
 //! A signer issues an app's certificate only for scopes a protocol it registered owns, with
-//! the switch permissions that protocol's table gives them, and keys for the scopes the
+//! the Dispatch permissions that protocol's table gives them, and keys for the scopes the
 //! protocol says have them. [`PaykitProtocol`] is Paykit's answer to each of those, from the
 //! same rules Paykit's verifiers apply ([`crate::scopes`]), so a certificate the signer issues
 //! for Paykit's scopes is one Paykit's verifiers take. A host registers it once, in the
@@ -10,7 +10,7 @@
 //! ```
 //! use std::sync::Arc;
 //! use paykit_lib::signer::PaykitProtocol;
-//! use pubky_switch_signer::Protocols;
+//! use pubky_dispatch_signer::Protocols;
 //!
 //! let protocols = Protocols::new(vec![Arc::new(PaykitProtocol)]).unwrap();
 //! let terms = protocols.terms(&["paykit_pay".into(), "paykit_contacts".into()]).unwrap();
@@ -24,12 +24,12 @@
 //! pure and deterministic, as the signer requires: a signer that receives the identity in a
 //! hand-over judges the same certificates the same way.
 
-use pubky_switch_core::scopes::Permission;
-use pubky_switch_signer::{Protocol, ScopeDef};
+use pubky_dispatch_core::scopes::Permission;
+use pubky_dispatch_signer::{Protocol, ScopeDef};
 
 use crate::scopes::{check_requested_scopes, permissions_for, PAYKIT_PREFIX, PAYKIT_SCOPE_NAMES};
 
-/// Paykit's protocol on the Switch, for the signer's `Protocols` set.
+/// Paykit's protocol on the Dispatch, for the signer's `Protocols` set.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PaykitProtocol;
 
@@ -43,7 +43,7 @@ fn owned(scopes: &[&str]) -> Vec<String> {
 
 impl Protocol for PaykitProtocol {
     /// `paykit`, Paykit's protocol name: the signer takes it to own the roots `paykit` and
-    /// `paykit` followed by `_` or `-` and more characters (Switch wire 3.1 "Scope roots").
+    /// `paykit` followed by `_` or `-` and more characters (Dispatch wire 3.1 "Scope roots").
     fn name(&self) -> &str {
         PAYKIT_PREFIX
     }
@@ -68,7 +68,7 @@ impl Protocol for PaykitProtocol {
 
     /// Paykit's rules on an app request (Paykit spec 3.1): no malformed extension or labelled
     /// selling scope, at most 8 of each, every scope with the scopes it requires, and no name
-    /// Paykit gives no meaning, such as `paykit_pay:x` or a plain `paykit_ext`. The Switch's scope
+    /// Paykit gives no meaning, such as `paykit_pay:x` or a plain `paykit_ext`. The Dispatch's scope
     /// rule, which refuses `paykit_request` beside a label, has already held for the whole
     /// request.
     ///
@@ -79,7 +79,7 @@ impl Protocol for PaykitProtocol {
         check_requested_scopes(&owned(scopes)).map_err(|error| error.to_string())
     }
 
-    /// The switch permissions Paykit's table gives `scopes` (Paykit spec 3.2), the list
+    /// The Dispatch permissions Paykit's table gives `scopes` (Paykit spec 3.2), the list
     /// Paykit's verifiers derive again.
     fn permissions(&self, scopes: &[&str]) -> Vec<Permission> {
         permissions_for(&owned(scopes))
@@ -90,9 +90,9 @@ impl Protocol for PaykitProtocol {
 mod tests {
     use std::sync::Arc;
 
-    use pubky_switch_core::keys::{AppKeys, IdentityKey};
-    use pubky_switch_core::records::{AppCert, AppCertBody};
-    use pubky_switch_signer::{GrantPath, Protocols, Refusal, ScopeTerms, SignerError};
+    use pubky_dispatch_core::keys::{AppKeys, IdentityKey};
+    use pubky_dispatch_core::records::{AppCert, AppCertBody};
+    use pubky_dispatch_signer::{GrantPath, Protocols, Refusal, ScopeTerms, SignerError};
 
     use super::*;
     use crate::scopes::{check_certificate, keyed_scopes};
@@ -335,7 +335,7 @@ mod tests {
 
     #[test]
     fn test_signer_protocol_accepts_the_apps_record_and_backup_and_protects_the_signers_paths() {
-        use pubky_switch_core::records::{
+        use pubky_dispatch_core::records::{
             app_backup_path, app_record_path, check_caps, IDENTITY_PATH, SIGNER_BACKUP_PATH,
         };
 
@@ -410,7 +410,7 @@ mod tests {
     #[test]
     fn test_signer_protocol_executor_renewal_keeps_its_terms() {
         // An automatic renewal keeps the certificate's scopes, and the signer renews it only
-        // while the terms those scopes get now are the ones it holds (Switch spec 3.2):
+        // while the terms those scopes get now are the ones it holds (Dispatch spec 3.2):
         // an executor's are, so it is renewed with `paykit_allowance_execute` and every scope it
         // requires.
         let protocols = paykit();
@@ -425,7 +425,7 @@ mod tests {
     #[test]
     fn test_signer_protocol_executor_with_other_terms_isnt_renewed_as_it_is() {
         // An executor's certificate holding other permissions than Paykit's table gives its
-        // scopes now: the signer leaves its renewal to the user (Switch spec 3.2).
+        // scopes now: the signer leaves its renewal to the user (Dispatch spec 3.2).
         let protocols = paykit();
         let mut fewer = terms(&protocols, &EXECUTOR);
         fewer.permissions.retain(|p| *p != Permission::ClaimsWrite);

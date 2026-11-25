@@ -12,12 +12,12 @@ use paykit_sdk::{
     Paykit, PaykitBackup, PaykitConfig, Rail, RailOutcome, ReceiptsOf, Refusal, RequestRef,
     RequestStatus,
 };
-use pubky_switch_client::app::{AppError, AppEvent, OutgoingMessage, SENT_RETENTION_MS};
-use pubky_switch_client::clock::Clock;
-use pubky_switch_client::error::StoreError;
-use pubky_switch_client::store::{Fault as StoreFault, FaultStore, StateStore};
-use pubky_switch_client::testing::{Fault, Router, ScriptedSwitch, TestSigner};
-use pubky_switch_client::transport::{BoxFuture, Request, Response, Transport};
+use pubky_dispatch_client::app::{AppError, AppEvent, OutgoingMessage, SENT_RETENTION_MS};
+use pubky_dispatch_client::clock::Clock;
+use pubky_dispatch_client::error::StoreError;
+use pubky_dispatch_client::store::{Fault as StoreFault, FaultStore, StateStore};
+use pubky_dispatch_client::testing::{Fault, Router, ScriptedSwitch, TestSigner};
+use pubky_dispatch_client::transport::{BoxFuture, Request, Response, Transport};
 
 use crate::common::{draft, endpoint, receive_message, request_from, store, World};
 use crate::{allowances, outcome_record, periods, publishing};
@@ -148,7 +148,7 @@ async fn test_restore_held_payee_cancellation_delivered_once() {
 
 #[tokio::test]
 async fn test_restore_held_waits_for_the_rest_of_the_feed() {
-    use pubky_switch_client::app::{AppConfig, FEED_PAGES_PER_READ};
+    use pubky_dispatch_client::app::{AppConfig, FEED_PAGES_PER_READ};
 
     let w = World::new();
     let (mut wallet, request, stop, backup) = Box::pin(cancellation_backup(&w)).await;
@@ -250,7 +250,7 @@ async fn test_restore_held_unreadable_stop_waits_then_releases() {
         .record_key(&crate::restore::payee_record(&request))
         .unwrap();
     w.bob.switch().fail_next(Fault::Unreachable {
-        path: format!("records/{}", pubky_switch_core::enc::b64(&key)),
+        path: format!("records/{}", pubky_dispatch_core::enc::b64(&key)),
         after: 0,
     });
     let counts = shop.receive(None).await.unwrap().held_messages;
@@ -292,7 +292,7 @@ async fn test_restore_held_open_request_keeps_stop_notice_across_reload() {
 }
 
 #[tokio::test]
-async fn test_restore_held_past_deadline_is_given_up_by_switch() {
+async fn test_restore_held_past_deadline_is_given_up_by_dispatch() {
     let w = World::new();
     let (mut wallet, _, stop, mut shop) = Box::pin(cancellation(&w)).await;
     assert!(held(&shop, &stop).await);
@@ -363,7 +363,7 @@ async fn test_restore_held_store_only_stop_without_a_readable_record_ends_after_
     let mut wallet = Box::pin(restore(&w, &w.alice, storage, &backup)).await;
     let fail_read = || {
         w.alice.switch().fail_next(Fault::Unreachable {
-            path: format!("records/{}", pubky_switch_core::enc::b64(&key)),
+            path: format!("records/{}", pubky_dispatch_core::enc::b64(&key)),
             after: 0,
         })
     };
@@ -446,7 +446,7 @@ async fn test_restore_held_permanent_allowance_end_reaches_counterparty() {
     shop.app_mut()
         .protocol_commit(
             "paykit",
-            &[pubky_switch_client::app::LocalWrite::Delete {
+            &[pubky_dispatch_client::app::LocalWrite::Delete {
                 key: format!("end/{stop}").into_bytes(),
             }],
         )
@@ -569,7 +569,7 @@ async fn sent_list(shop: &Paykit, to: &[u8; 32]) -> (String, PrivatePaymentList)
     let [empty] = lists.as_slice() else {
         panic!("expected one fresh withdrawal")
     };
-    let msg = pubky_switch_core::message::Message::parse(
+    let msg = pubky_dispatch_core::message::Message::parse(
         empty.plaintext.json(),
         paykit_lib::kinds::OPAQUE_MEMBERS,
     )
@@ -687,7 +687,10 @@ async fn test_restore_held_proof_waits_for_a_stored_receipt_not_placed() {
     receive_message(&mut shop, &proof).await;
     let sale = shop.payee_activity().await.unwrap()[0].record;
     let receipt = shop.confirm_payment(&sale).await.unwrap().unwrap();
-    let note = format!("se/{}/{receipt}", pubky_switch_core::enc::b64(&w.bob_id()));
+    let note = format!(
+        "se/{}/{receipt}",
+        pubky_dispatch_core::enc::b64(&w.bob_id())
+    );
     w.alice.switch().keep_passed_entries();
     crate::common::refuse_writes(&w.alice, 2);
     wallet.receive(None).await.unwrap();
@@ -791,7 +794,7 @@ async fn test_restore_held_paid_proof_withdrawn_then_credited_once() {
 #[tokio::test]
 async fn test_restore_held_acceptance_keeps_its_payment_owed_until_decided() {
     use paykit_sdk::{Resolution, Stage};
-    use pubky_switch_client::app::UserConfirmed;
+    use pubky_dispatch_client::app::UserConfirmed;
 
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
@@ -862,8 +865,9 @@ async fn test_restore_held_acceptance_resend_withdrawn_keeps_the_sent_original()
         .sent_to(&w.bob_id(), 0, u64::MAX)
         .await
         .unwrap();
-    let acceptance =
-        |m: &&pubky_switch_client::app::SentMessage| m.kind == "paykit.payment_request_acceptance";
+    let acceptance = |m: &&pubky_dispatch_client::app::SentMessage| {
+        m.kind == "paykit.payment_request_acceptance"
+    };
     let original = &sent.iter().find(acceptance).unwrap().msg_id;
     receive_message(&mut shop, original).await;
     let backup = wallet.backup().await.unwrap();
@@ -875,10 +879,10 @@ async fn test_restore_held_acceptance_resend_withdrawn_keeps_the_sent_original()
     assert!(held(&wallet, original).await);
     withdrawn(&mut wallet).await;
     // Restored in place, the store keeps its sent copy: the payee holds the original, so
-    // the resume signs no replacement (Switch spec 12.4, Paykit spec 7.2).
+    // the resume signs no replacement (Dispatch spec 12.4, Paykit spec 7.2).
     assert!(matches!(
         wallet.app().delivery(original).await.unwrap(),
-        Some(pubky_switch_client::app::Delivery::Accepted { .. })
+        Some(pubky_dispatch_client::app::Delivery::Accepted { .. })
     ));
     wallet.reconcile().await.unwrap();
     wallet.resume_payments().await.unwrap();
@@ -1003,10 +1007,10 @@ async fn test_restore_held_rejection_waits_while_its_record_is_paused() {
     Box::pin(released(&mut wallet, &id)).await;
 }
 
-/// The reply grants for `peer` written at `who`'s switch.
+/// The reply grants for `peer` written at `who`'s dispatch.
 fn reply_grants(who: &TestSigner, peer: [u8; 32]) -> usize {
-    use pubky_switch_core::admission::PeerReason;
-    use pubky_switch_core::ops::OpKind;
+    use pubky_dispatch_core::admission::PeerReason;
+    use pubky_dispatch_core::ops::OpKind;
     who.switch()
         .applied()
         .iter()
@@ -1338,8 +1342,8 @@ async fn allowance_record(app: &Paykit, key: &[u8; 32]) -> AllowanceRecord {
 // its exact signed end can be released (Paykit spec 7.2).
 #[tokio::test]
 async fn test_restore_held_allowance_end_waits_for_the_key_its_record_needs() {
-    use pubky_switch_client::app::{RecordContent, Unopened};
-    use pubky_switch_core::ops::{KeyBundlePut, OpKind};
+    use pubky_dispatch_client::app::{RecordContent, Unopened};
+    use pubky_dispatch_core::ops::{KeyBundlePut, OpKind};
 
     let w = World::new();
     let (mut shop, _wallet, key, end) = Box::pin(queued_shop_end(&w)).await;
@@ -1369,7 +1373,7 @@ async fn test_restore_held_allowance_end_waits_for_the_key_its_record_needs() {
 
     // The shop can finish its listing at the current epoch while the preceding epoch is missing.
     let current = w.bob.next_doc(|b| b.data_epoch += 1).unwrap().data_epoch();
-    for part in pubky_switch_core::records::seal_bundle_parts(
+    for part in pubky_dispatch_core::records::seal_bundle_parts(
         w.bob.identity().key(),
         &cert,
         current,
@@ -1660,7 +1664,7 @@ async fn queue_list_request(wallet: &mut Paykit, to: [u8; 32]) -> String {
         .unwrap()
 }
 
-/// Fail the Switch commit that records this specific delivery as given up.
+/// Fail the Dispatch commit that records this specific delivery as given up.
 async fn fail_withdrawal(app: &mut Paykit, storage: &FaultStore, id: &str) {
     storage.fail_put_once(format!("outgone/{id}").as_bytes());
     for _ in 0..8 {
@@ -1682,14 +1686,14 @@ async fn fail_withdrawal(app: &mut Paykit, storage: &FaultStore, id: &str) {
 }
 
 /// Signed writes from the generation about to be lost, enough for one recovery upload
-/// to make the client list its collections (Switch wire 7.4.14).
+/// to make the client list its collections (Dispatch wire 7.4.14).
 async fn recovery_upload_for_listing(
     w: &World,
     wallet: &mut Paykit,
-) -> pubky_switch_client::client::answers::RecoveryUpload {
-    use pubky_switch_client::app::{Collection, RecordTarget, MAX_RECORD_MARKS};
-    use pubky_switch_client::client::answers::{RecoveryUpload, UploadedOp};
-    use pubky_switch_core::ops::sign_batch;
+) -> pubky_dispatch_client::client::answers::RecoveryUpload {
+    use pubky_dispatch_client::app::{Collection, RecordTarget, MAX_RECORD_MARKS};
+    use pubky_dispatch_client::client::answers::{RecoveryUpload, UploadedOp};
+    use pubky_dispatch_core::ops::sign_batch;
 
     let keys = w.alice.identity().app_keys("wallet");
     // These records trigger the listing without changing the request the stop refers to.
@@ -1726,11 +1730,11 @@ async fn recovery_upload_for_listing(
 }
 
 // A carried stop waits for the client's listing even when the certificate and its
-// scope keys are unchanged (Paykit spec 7.2, Switch spec 12.4).
+// scope keys are unchanged (Paykit spec 7.2, Dispatch spec 12.4).
 #[tokio::test]
 async fn test_restore_held_waits_for_a_listing_the_client_owes() {
-    use pubky_switch_client::client::{Credentials, SwitchClient};
-    use pubky_switch_client::testing::SWITCH_ORIGIN;
+    use pubky_dispatch_client::client::{Credentials, SwitchClient};
+    use pubky_dispatch_client::testing::SWITCH_ORIGIN;
 
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
@@ -2024,9 +2028,9 @@ async fn test_restore_held_expiry_leaves_a_wallet_stop_typed() {
         matches!(
             &error,
             paykit_sdk::PaykitError::Client(
-                pubky_switch_client::app::AppError::Alarm(_)
-                    | pubky_switch_client::app::AppError::Refused(
-                        pubky_switch_client::app::Refusal::Stopped
+                pubky_dispatch_client::app::AppError::Alarm(_)
+                    | pubky_dispatch_client::app::AppError::Refused(
+                        pubky_dispatch_client::app::Refusal::Stopped
                     )
             )
         ),
@@ -2035,7 +2039,7 @@ async fn test_restore_held_expiry_leaves_a_wallet_stop_typed() {
     assert!(held(&wallet, &stop).await);
 }
 
-/// Let the Switch finish its restore read while Paykit still owes its first held-message pass.
+/// Let the Dispatch finish its restore read while Paykit still owes its first held-message pass.
 async fn read_restored_client(app: &mut Paykit) {
     app.app_mut().refresh_identity().await.unwrap();
     for _ in 0..8 {
@@ -2046,7 +2050,7 @@ async fn read_restored_client(app: &mut Paykit) {
             return;
         }
     }
-    panic!("the Switch did not finish the restore read");
+    panic!("the Dispatch did not finish the restore read");
 }
 
 /// Refuse just the placement write. The restore can still read the same record afresh.
@@ -2061,8 +2065,8 @@ impl Transport for RefusePlacement {
     fn send(
         &self,
         request: Request,
-    ) -> BoxFuture<'_, Result<Response, pubky_switch_client::TransportError>> {
-        use pubky_switch_core::ops::{Entry, OpBody, OpKind, OpsRequest};
+    ) -> BoxFuture<'_, Result<Response, pubky_dispatch_client::TransportError>> {
+        use pubky_dispatch_core::ops::{Entry, OpBody, OpKind, OpsRequest};
 
         if self.refusing.load(Ordering::Relaxed)
             && request.method == "POST"
@@ -2081,7 +2085,7 @@ impl Transport for RefusePlacement {
         {
             self.service.fail_next(Fault::Error {
                 path: "/ops".into(),
-                code: pubky_switch_core::http::ErrorCode::PermissionMissing,
+                code: pubky_dispatch_core::http::ErrorCode::PermissionMissing,
                 current: serde_json::Value::Null,
             });
         }
@@ -2212,7 +2216,7 @@ async fn test_restore_held_kept_allowance_end_holds_ours() {
     let counterparty_end = wallet.end_allowance(&mine).await.unwrap();
     let kept = format!(
         "ae/{}/{counterparty_end}",
-        pubky_switch_core::enc::b64(&key)
+        pubky_dispatch_core::enc::b64(&key)
     );
     assert_held_for_placement(&mut shop, &stop, kept.as_bytes()).await;
     assert_eq!(
@@ -2274,7 +2278,7 @@ async fn test_restore_held_malformed_held_body_is_withdrawn() {
 // allowances/delivery.rs:276 treats NotFound with no retained record as absent.
 #[tokio::test]
 async fn test_restore_held_allowance_end_with_no_record_is_withdrawn() {
-    use pubky_switch_client::app::{KeptReason, RecordRead};
+    use pubky_dispatch_client::app::{KeptReason, RecordRead};
 
     let w = World::new();
     let mut wallet = w
@@ -2344,7 +2348,7 @@ async fn test_restore_held_unheld_carried_list_owes_its_withdrawal_before_flush(
         .unwrap()
         .iter()
         .any(|q| q.msg_id == original && !q.held));
-    let recipient = format!("lrec/{}", pubky_switch_core::enc::b64(&to));
+    let recipient = format!("lrec/{}", pubky_dispatch_core::enc::b64(&to));
     assert!(shop
         .app()
         .protocol_get("paykit", recipient.as_bytes())
@@ -2374,12 +2378,12 @@ async fn test_restore_held_unheld_carried_list_owes_its_withdrawal_before_flush(
 // restore_held.rs give_up_expired_held: past its 30 days, while more of the feed keeps the gate closed.
 #[tokio::test]
 async fn test_restore_held_past_thirty_days_withdrawn_while_the_feed_has_more() {
-    use pubky_switch_client::app::{AppConfig, FEED_PAGES_PER_READ};
+    use pubky_dispatch_client::app::{AppConfig, FEED_PAGES_PER_READ};
 
     let w = World::new();
     let (mut wallet, request, stop, _shop, _) = Box::pin(carried_rejection(&w, store())).await;
     let signed_at = w.clock.now_ms();
-    // A later verified backup time separates the Switch replay deadline from the
+    // A later verified backup time separates the Dispatch replay deadline from the
     // ordinary stop's deadline, which runs from the signed message's created_at.
     w.clock.advance_ms(crate::common::HOUR_MS);
     wallet
@@ -2413,10 +2417,10 @@ async fn test_restore_held_past_thirty_days_withdrawn_while_the_feed_has_more() 
         .unwrap()
         .is_some());
 
-    let cutoff = signed_at + SENT_RETENTION_MS - pubky_switch_core::records::CLOCK_TOLERANCE_MS;
+    let cutoff = signed_at + SENT_RETENTION_MS - pubky_dispatch_core::records::CLOCK_TOLERANCE_MS;
     w.clock.set_ms(cutoff + 1);
     // The records are listed, so ordinary stop expiry runs too. The rest of the feed
-    // keeps the restore's decisions closed; the Switch deadline is an hour later.
+    // keeps the restore's decisions closed; the Dispatch deadline is an hour later.
     for _ in 0..=FEED_PAGES_PER_READ {
         w.inject(
             &w.bob,
@@ -2516,7 +2520,7 @@ async fn test_restore_held_resent_accepted_list_gets_no_unknown_notice() {
         .find(|q| q.msg_id == original)
         .unwrap();
     assert!(resend.resend && resend.held);
-    let at = format!("lres/{}", pubky_switch_core::enc::b64(&to));
+    let at = format!("lres/{}", pubky_dispatch_core::enc::b64(&to));
     let reservation = shop
         .app()
         .protocol_get("paykit", at.as_bytes())

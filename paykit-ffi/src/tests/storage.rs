@@ -1,5 +1,5 @@
 use crate::{StorageError, StoreEntry, StoreWrite, WalletStore};
-use pubky_switch_core::enc::{b64, hash};
+use pubky_dispatch_core::enc::{b64, hash};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::{
     collections::BTreeMap,
