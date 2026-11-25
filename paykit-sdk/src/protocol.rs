@@ -643,6 +643,21 @@ pub(crate) fn restore_paykit_layer(
     }
     // A repeated import on this installation preserves notices the host has already seen,
     // and unresolved ones first observed since the backup (Paykit spec 7.2).
+    // An endpoint change not published, and what the user's call asked, can't be told again
+    // once the held change is cleared: the installation's are kept over the backup's (Paykit
+    // spec 4, "Changes saved and not yet signed").
+    let mut endpoint_rows = std::collections::BTreeMap::new();
+    for prefix in [
+        key::identity_notice(crate::notices::NoticeKind::PublicEndpointChangeNotPublished),
+        key::ENDPOINT_CHANGE.to_owned(),
+    ] {
+        for (key, value) in restoring
+            .previous_local_scan(prefix.as_bytes())
+            .map_err(|_| "the endpoint change cannot be read")?
+        {
+            endpoint_rows.insert(key, value);
+        }
+    }
     let mut delivery_notices = std::collections::BTreeMap::new();
     let mut unresolved = std::collections::BTreeMap::new();
     let mut pending_conflicts = std::collections::BTreeMap::new();
@@ -1360,6 +1375,19 @@ pub(crate) fn restore_paykit_layer(
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
+            StateKey::IdentityNotice(
+                crate::notices::NoticeKind::PublicEndpointChangeNotPublished,
+            ) => {
+                state::restored::<KeptNotice>(&key, &value, &binder).map_err(|_| unread())?;
+                endpoint_rows.entry(key).or_insert(value);
+                continue;
+            }
+            StateKey::EndpointChange => {
+                state::restored::<crate::own_record::EndpointChange>(&key, &value, &binder)
+                    .map_err(|_| unread())?;
+                endpoint_rows.entry(key).or_insert(value);
+                continue;
+            }
             // Not restored: the restored app tells its host again at its load.
             StateKey::IdentityNotice(_) => {
                 state::restored::<KeptNotice>(&key, &value, &binder).map_err(|_| unread())?;
@@ -1595,6 +1623,9 @@ pub(crate) fn restore_paykit_layer(
     }
     for (key, notice) in delivery_notices {
         let value = state::encode(&notice).map_err(|_| "a delivery notice cannot be written")?;
+        writes.push(LocalWrite::Put { key, value });
+    }
+    for (key, value) in endpoint_rows {
         writes.push(LocalWrite::Put { key, value });
     }
     for (key, stop) in previous_stops {

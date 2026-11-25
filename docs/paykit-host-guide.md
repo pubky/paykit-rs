@@ -130,13 +130,40 @@ client retained the requested edit. Show the withdrawal as pending until the
 client signs the updated record and reports its publication.
 
 The client saves an endpoint edit before it reads the service time to sign it.
-So an edit whose time read failed may already be saved, and the next `receive`
+So an edit whose time read failed may already be saved, though the call returned
+that error and never `Publication::Published`, and the same run's next `receive`
 signs and publishes it. That read fails on a `transport` error, and on an error
 answer of the service such as `dispatch_unavailable`. Call `receive` and read
 `own_public_endpoints` before trying again: sending the same map again changes
 nothing, while a different map replaces the saved edit.
 
-After restoring a backup, drive the wallet's first receive. When publication
+A reload or a restore before that holds the saved edit aside, and the wallet
+never signs it, a withdrawal included (Paykit spec 4, "Changes saved and not yet
+signed"). After its first read, the next `receive` clears it and raises
+`NoticeKind::PublicEndpointChangeNotPublished`, naming each endpoint the change
+named by its class: to withdraw (`endpoints_withdrawn`), to offer
+(`endpoints_offered`) and to give a new payload (`endpoints_changed`). On that
+notice the host must:
+
+- withdraw again each endpoint in `endpoints_withdrawn` with
+  `remove_public_endpoint`, without asking the user again: the user already asked,
+  and the call reads first and only removes under the current record. If another
+  device offered that endpoint again since, the user offers it again;
+- show the user `endpoints_offered`, `endpoints_changed` and the current
+  `own_public_endpoints`, and make those offers and payload changes again only
+  when the user asks;
+- with all three lists empty, show the user that a change of the public
+  endpoints wasn't published, with the current endpoints;
+- acknowledge the notice. It can be told again for the same change, and
+  acknowledging it again is no error.
+
+Until then a withdrawn endpoint stays published, and the upkeep keeps renewing
+the record that holds it.
+
+After restoring a backup, drive the wallet's first receive: until it has read,
+the record isn't changed or published. A change asked before it is refused with
+`Refusal::NotNow`, and the client's own publication reports
+`Publication::AwaitingRead`. When publication
 returns `Publication::AwaitingRecord`, the wallet still has a newer record
 choice to settle. Keep the change pending and continue normal receives.
 A restore carrying only the accepted offer can repair its missing public copy.
@@ -219,13 +246,10 @@ restore reads nothing of the old installation.
 
 Every restore, in place or into a new store, installs the seen marks the backup
 carries in place of the store's own (Dispatch spec 12.4 "Seen marks"). When some
-were left out, the wallet reports `AppEvent::SeenMarksIncomplete` once for each
-registered protocol (`WalletEventData::SeenMarksIncomplete` in the bindings). The
-restore call itself returns only the wallet: the notice comes in the events of
-the first successful `receive` after it. A restart before then, or a receive
-that fails, can lose it. It is a notice, with nothing to acknowledge: from then on a record
-without a mark is checked as new. A backup made before backups carried seen marks
-is refused.
+were left out, the restore reports `AppEvent::SeenMarksIncomplete` once for each
+registered protocol (`WalletEventData::SeenMarksIncomplete` in the bindings). It
+is a notice, with nothing to acknowledge: from then on a record without a mark
+is checked as new. A backup made before backups carried seen marks is refused.
 
 Register the extension kinds your app handles with `PaykitConfig::with_extension_kinds`.
 After a receive, read `Paykit::extension_messages` and acknowledge each message by
@@ -535,6 +559,8 @@ A selling app that publishes a Private Payment List keeps a counter for each rec
 
 These three are not kept after the call returns. A crash before the host handles them, or a Paykit error after the read, can lose them; `SeenMarksIncomplete` is held in memory from the restore until the first `receive`, so a crash before that first `receive` loses it too. Duty events are kept until acknowledged and can be read again with `unacknowledged_events`.
 
+`AppEvent::RecordEditsHeld` is a duty event the wallet takes for Paykit: it decides Paykit's held record change as above and acknowledges the event for `"paykit"`. A held change of another protocol named in it is that protocol's to read and clear.
+
 ### Withdrawing public endpoints and paying offline
 
 To stop offering public endpoints, call `set_public_endpoints` with an empty set while publication is on, and check the result. `Published` means the Homeserver holds the record without them. For any other result, check that the withdrawal is visible before going further. Turn `publishes_record` off only if the app should stop publishing its record on the Homeserver altogether; it still gives its app record to the Dispatch. Until the withdrawal is visible, the old endpoints expire, or the app is revoked, a payer can still pay the endpoints it read before.
@@ -596,7 +622,8 @@ backup, keeps, kind by kind:
 
 A notice the host acknowledged after the backup, which acknowledging deleted, can be
 listed again after the restore: the same occurrence comes back with the same `id` and
-`raised_at_ms`, and the host may skip one it recorded acknowledging with both. A notice
+`raised_at_ms`, and the host may skip one it recorded acknowledging with both.
+`NoticeKind::PublicEndpointChangeNotPublished` can be told again for the same change. A notice
 raised again is a new occurrence with the same `id` and a later `raised_at_ms`, such as a
 `HeldWithoutPay` whose hold started again, or an identity notice told again while its
 hold stands: show it as the table below says. Handle Dispatch
@@ -654,6 +681,7 @@ the new cursor to the service. Acknowledging the deletion notice leaves the cred
 | `NoticeKind::BlockFloorHeld` | Tell the user that the wallet saw the identity's block floor diverge after a provider loss and holds it for good: no one-time request is paid automatically, each can still be paid by hand, and an unblock or a widening that needs the floor raised waits, with the unblocked sender's one-time requests and, after a restore that isn't clean or a missed item, every re-send request, unless the shared post-loss hold stands too (`NoticeKind::AutomaticPaymentsHeld`), when they go without the raise. Billing Periods and payments without a request go on. Shown once, and again after each reopen while the hold stands; acknowledge it after showing it. |
 | `NoticeKind::FloorRaiseWaiting` | Tell the user that the wallet owes a block floor raise it can't write now, because the floor doesn't read or the Dispatch refuses the write for now: until it is written, an unblocked sender's one-time requests wait and it is asked nothing, and while the raise of a restore that isn't clean or of a missed item waits, no one is asked to re-send. Payments by hand, Billing Periods and payments without a request go on. The wallet tries again at the next receive, and from its second unwritten try in a row after a wait of one minute, doubling to ten; the wait ends early when the floor record changes, the floor becomes readable or a new raise is owed. Shown once per load while it stands, and again after a reopen while the raise stays unwritten; the notice goes when the raise is written, or when the divergence hold stands (`NoticeKind::BlockFloorHeld`). Acknowledge it after showing it. |
 | `NoticeKind::AutomaticPaymentsHeld` | Tell the user that, after a provider loss, no one-time request of the identity is paid automatically any more, on any of its wallets, and no payment of one is repeated at a resume, one the user started included; each can still be paid by hand. Billing Periods and payments without a request go on. Shown once, and again after each reopen; acknowledge it after showing it. |
+| `NoticeKind::PublicEndpointChangeNotPublished` | A change of the wallet's public endpoints saved while the Dispatch couldn't sign it wasn't published after a restart or a restore. Withdraw again each endpoint in `endpoints_withdrawn` with `remove_public_endpoint`; show `endpoints_offered`, `endpoints_changed` and the current endpoints, and make those offers and payload changes again only when the user asks; with all three lists empty, show the current endpoints. Acknowledge it; acknowledging it again is no error. |
 | `PaykitError::Client` | Handle the enclosed Dispatch outcome. Preserve any kept batch and its ID. |
 | `PaykitError::Lib` | Use the rule error to distinguish invalid input from invalid network or shared data. |
 | `PaykitError::Rail` | Preserve any unresolved attempt unless the method established definitive refusal. |

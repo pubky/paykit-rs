@@ -18,10 +18,10 @@ thiserror = "2"
 
 # The Pubky Dispatch crates, as git dependencies pinned to one commit of pubky/pubky-dispatch.
 # Moving the pin is its own change, which says what changed in the crates Paykit uses.
-pubky-dispatch-core = { package = "pubky-switch-core", git = "https://github.com/pubky/pubky-dispatch", rev = "ab1bf006d85c194147d887afa7f7d68fed3088f6" }
-pubky-dispatch-client = { package = "pubky-switch-client", git = "https://github.com/pubky/pubky-dispatch", rev = "ab1bf006d85c194147d887afa7f7d68fed3088f6" }
-pubky-dispatch-signer = { package = "pubky-switch-signer", git = "https://github.com/pubky/pubky-dispatch", rev = "ab1bf006d85c194147d887afa7f7d68fed3088f6" }
-pubky-dispatch-harness = { package = "pubky-switch-harness", git = "https://github.com/pubky/pubky-dispatch", rev = "ab1bf006d85c194147d887afa7f7d68fed3088f6" }
+pubky-dispatch-core = { package = "pubky-switch-core", git = "https://github.com/pubky/pubky-dispatch", rev = "b3b6270e3c8ac0fd4b6a6117c175458d878df3d3" }
+pubky-dispatch-client = { package = "pubky-switch-client", git = "https://github.com/pubky/pubky-dispatch", rev = "b3b6270e3c8ac0fd4b6a6117c175458d878df3d3" }
+pubky-dispatch-signer = { package = "pubky-switch-signer", git = "https://github.com/pubky/pubky-dispatch", rev = "b3b6270e3c8ac0fd4b6a6117c175458d878df3d3" }
+pubky-dispatch-harness = { package = "pubky-switch-harness", git = "https://github.com/pubky/pubky-dispatch", rev = "b3b6270e3c8ac0fd4b6a6117c175458d878df3d3" }
 
 [patch.crates-io]
 rustls-platform-verifier-android = { path = "vendor/rustls-platform-verifier-android" }

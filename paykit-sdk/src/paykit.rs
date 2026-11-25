@@ -575,10 +575,8 @@ impl Paykit {
     /// Once the client's join has returned the app, nothing else fails the join: the app is
     /// joined and kept, and its handle is returned. The record update that follows remains
     /// owed if it fails. After a delivery error the client keeps the new record and sends
-    /// it again. The client saves the edit before it reads the service time to sign it, so
-    /// after a failure of that read the edit stays saved and the next receive signs it. After
-    /// a definite failure before the client saved it, the held record still lacks the
-    /// capabilities, so the next receive or [`Paykit::update_own_record`] retries.
+    /// it again; after a definite failure before the client kept it, the held record still
+    /// lacks the capabilities, so the next receive or [`Paykit::update_own_record`] retries.
     /// If the store cannot tell whether its write applied, own-record edits return
     /// [`Refusal::NotNow`] and upkeep waits until [`Paykit::load`] reloads the stored state.
     /// A receive or update can then retry the pending work.
@@ -1153,12 +1151,9 @@ impl Paykit {
         if self.certificate_refused().is_none() {
             Box::pin(self.drop_unblocks_not_kept()).await?;
         }
-        // A saved record edit with public endpoints this app no longer publishes is replaced
-        // first, so neither step below nor the read signs them (`crate::own_record`). Then
-        // the record accepts the kinds this app handles now, extension kinds included
+        // The record accepts the kinds this app handles now, extension kinds included
         // (`crate::extensions`), before the feed is read.
         if self.certificate_refused().is_none() {
-            Box::pin(self.withhold_saved_endpoints()).await?;
             Box::pin(self.align_accepts()).await?;
         }
         // An app holding `paykit_contacts` reads the flagged senders again first, at most every 10

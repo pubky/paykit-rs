@@ -596,6 +596,19 @@ impl Stored for crate::floor::FloorKept {
     }
 }
 
+impl sealed::Sealed for crate::own_record::EndpointChange {}
+
+impl Stored for crate::own_record::EndpointChange {
+    fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
+        // No writer keeps an empty one: a call that changes nothing deletes the key.
+        if matches!(family, StateKey::EndpointChange) && !self.is_empty() {
+            Ok(())
+        } else {
+            corrupt()
+        }
+    }
+}
+
 impl sealed::Sealed for crate::floor::RaiseRetry {}
 
 impl Stored for crate::floor::RaiseRetry {
@@ -2023,6 +2036,9 @@ pub(crate) mod key {
     pub(crate) const LOSS_RECORDED: &str = "rl";
     /// A floor raise tried and left unwritten (`crate::floor::RaiseRetry`).
     pub(crate) const RAISE_RETRY: &str = "rr";
+    /// The public endpoint change the user's last call asked that may not be signed yet
+    /// (`crate::own_record::EndpointChange`).
+    pub(crate) const ENDPOINT_CHANGE: &str = "ec";
     pub(crate) const NOT_PAID_BEFORE_LOSS: &str = "pn/";
     /// A `missed` item's hold whose end isn't known yet (`Paykit::bound_missed_hold`).
     pub(crate) const MISSED_END_UNKNOWN: &str = "mu";
@@ -2755,6 +2771,7 @@ pub(crate) enum StateKey {
     LossRecorded,
     /// `rr`: a floor raise tried and left unwritten.
     RaiseRetry,
+    EndpointChange,
     /// The local identifier of an unanswered floor write.
     FloorBatch,
     /// `fo/<record key>`: a request record a read opened without `manual_only`, to check
@@ -2912,6 +2929,7 @@ impl StateKey {
             "pl" => Self::LossBoundary,
             "rl" => Self::LossRecorded,
             "rr" => Self::RaiseRetry,
+            "ec" => Self::EndpointChange,
             "mu" => Self::MissedEndUnknown,
             "nl" => Self::RecordsUnlisted,
             "ml" => Self::MissedUnlisted,
@@ -4391,6 +4409,13 @@ mod tests {
                 key::identity_notice(crate::notices::NoticeKind::AutomaticPaymentsHeld),
                 StateKey::IdentityNotice(crate::notices::NoticeKind::AutomaticPaymentsHeld),
             ),
+            (
+                key::identity_notice(crate::notices::NoticeKind::PublicEndpointChangeNotPublished),
+                StateKey::IdentityNotice(
+                    crate::notices::NoticeKind::PublicEndpointChangeNotPublished,
+                ),
+            ),
+            (key::ENDPOINT_CHANGE.into(), StateKey::EndpointChange),
             (key::LOSS_RECORDED.into(), StateKey::LossRecorded),
             (key::RAISE_RETRY.into(), StateKey::RaiseRetry),
             (key::BLOCK_FLOOR.into(), StateKey::BlockFloor),

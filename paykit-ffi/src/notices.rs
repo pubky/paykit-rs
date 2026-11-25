@@ -65,6 +65,10 @@ pub enum WalletNoticeKind {
     /// The record no longer shows this stop, and the request or Allowance is still open
     /// (Paykit spec 7.2).
     StopNotRecorded,
+    /// A change of the app's public endpoints saved and not signed wasn't published after a
+    /// restart or a restore (Paykit spec 4): withdraw again the endpoints it names to withdraw;
+    /// ask the user before making its offers and payload changes again.
+    PublicEndpointChangeNotPublished,
     /// A native case that this binding does not recognize.
     Other,
 }
@@ -90,6 +94,7 @@ impl From<paykit_sdk::NoticeKind> for WalletNoticeKind {
             K::BlockFloorHeld => Self::BlockFloorHeld,
             K::FloorRaiseWaiting => Self::FloorRaiseWaiting,
             K::AutomaticPaymentsHeld => Self::AutomaticPaymentsHeld,
+            K::PublicEndpointChangeNotPublished => Self::PublicEndpointChangeNotPublished,
             _ => Self::Other,
         }
     }
@@ -211,6 +216,14 @@ pub struct WalletNotice {
     /// For `NoticeKind::BlockedMessagesLost` or `NoticeKind::DroppedMessagesLost`: the latest
     /// such time.
     pub lost_until_ms: Option<u64>,
+    /// For `NoticeKind::PublicEndpointChangeNotPublished`: the endpoints to withdraw again.
+    pub endpoints_withdrawn: Vec<String>,
+    /// For `NoticeKind::PublicEndpointChangeNotPublished`: the endpoints to offer again, when
+    /// the user asks.
+    pub endpoints_offered: Vec<String>,
+    /// For `NoticeKind::PublicEndpointChangeNotPublished`: the endpoints whose new payload to
+    /// set again, when the user asks.
+    pub endpoints_changed: Vec<String>,
 }
 /// The original retained deletion notice that the host can acknowledge.
 #[derive(uniffi::Object)]
@@ -277,6 +290,21 @@ impl NativeWallet {
                         raised_at_ms: n.raised_at_ms,
                         lost_from_ms: n.lost_from_ms,
                         lost_until_ms: n.lost_until_ms,
+                        endpoints_withdrawn: n
+                            .endpoints_withdrawn
+                            .iter()
+                            .map(|id| id.as_str().to_owned())
+                            .collect(),
+                        endpoints_offered: n
+                            .endpoints_offered
+                            .iter()
+                            .map(|id| id.as_str().to_owned())
+                            .collect(),
+                        endpoints_changed: n
+                            .endpoints_changed
+                            .iter()
+                            .map(|id| id.as_str().to_owned())
+                            .collect(),
                     })
                     .collect())
             })

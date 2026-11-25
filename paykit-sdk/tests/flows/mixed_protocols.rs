@@ -512,6 +512,24 @@ async fn withdraw_public_offer(
     ))
     .await?;
     let publication = if paykit_first {
+        // The reload held the withdrawal aside and never signs it; the receive tells it, and
+        // the host withdraws it again, which waits for the chat (Paykit spec 4, "Changes saved
+        // and not yet signed").
+        wallet.receive(None).await?;
+        let notice = wallet
+            .notices()
+            .await?
+            .into_iter()
+            .find(|n| n.kind == paykit_sdk::NoticeKind::PublicEndpointChangeNotPublished)
+            .ok_or("the withdrawal is told")?;
+        assert_eq!(notice.endpoints_withdrawn, vec![id.clone()]);
+        if let Err(waiting) = wallet.remove_public_endpoint(&id).await {
+            assert!(
+                matches!(waiting, PaykitError::PublicEndpointChangePending(_)),
+                "{waiting:?}"
+            );
+        }
+        wallet.acknowledge_notice(&notice.id).await?;
         assert!(wallet.app_mut().protocol_record("paykit").await?.pending);
         if withdraw_early {
             world.lose_answer("POST", "/ops");
@@ -536,7 +554,27 @@ async fn withdraw_public_offer(
             sent?
         }
     } else {
-        wallet.update_own_record().await?
+        // The reload held the chat's change aside, so the record's signed policies are both
+        // past: Paykit's upkeep saves the withdrawal of its endpoints at their cutoff, which
+        // waits for the chat. The chat then asks its change again, which signs both, and
+        // clears it (Dispatch spec 4.2).
+        let waiting = wallet.update_own_record().await.unwrap_err();
+        assert!(
+            matches!(waiting, PaykitError::PublicEndpointChangePending(_)),
+            "{waiting:?}"
+        );
+        let held = wallet
+            .app_mut()
+            .held_record_edit(CHAT)
+            .await?
+            .ok_or("the chat's change is held aside")?;
+        assert_eq!(held.member.as_ref(), Some(&chat));
+        let published = wallet
+            .app_mut()
+            .set_protocol_member_with_expiry(CHAT, held.member, held.expiry)
+            .await?;
+        wallet.app_mut().clear_held_record_edit(CHAT).await?;
+        published
     };
     assert_eq!(publication, Publication::Published);
     let current = AppRecord::verify(wallet.app().record(), &seller.public())?;
