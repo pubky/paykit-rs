@@ -250,7 +250,7 @@ completion, expiry, or abandonment.
 When bindings create the Pubky client internally, they should expose FFI-safe
 client configuration for platform-owned network policy such as request
 timeouts. The default configuration uses the public network; setting a local
-testnet host switches to standard testnet ports so emulators and other isolated
+testnet host Dispatches to standard testnet ports so emulators and other isolated
 runtimes can reach local services.
 `PubkyLocalSecretKey` exposes domain-separated key derivation and
 public-key-from-secret helpers. Platform bindings should wrap those helpers
