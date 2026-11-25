@@ -570,6 +570,10 @@ These three are not kept after the call returns. A crash before the host handles
 
 `AppEvent::RecordEditsHeld` is a duty event the wallet takes for Paykit: it decides Paykit's held record change as above and acknowledges the event for `"paykit"`. A held change of another protocol named in it is that protocol's to read and clear.
 
+`AppEvent::MessagesHeldAtRestore` (`WalletEventData::MessagesHeldAtRestore { held }` in the bindings) is a duty event the wallet takes for Paykit: `held` counts the messages this restore newly held, and Paykit decides each as "Messages held at restore" says, acknowledging the event for `"paykit"`. The host acts on the receive summary's `held_messages` and on the deliveries it is told of, not on this event.
+
+`AppEvent::RestoreLeftBehind` counts, in `record_edits` (also in the bindings), the unsigned changes of the app's record the restore couldn't hand to a protocol: they didn't read, or belong to no protocol this app registers. They are gone and never signed. Show the user that a change of the app's record made before the restore wasn't kept, with the record as it stands, so the user can make it again, then acknowledge the event.
+
 ### Withdrawing public endpoints and paying offline
 
 To stop offering public endpoints, call `set_public_endpoints` with an empty set while publication is on, and check the result. `Published` means the Homeserver holds the record without them. For any other result, check that the withdrawal is visible before going further. Turn `publishes_record` off only if the app should stop publishing its record on the Homeserver altogether; it still gives its app record to the Dispatch. Until the withdrawal is visible, the old endpoints expire, or the app is revoked, a payer can still pay the endpoints it read before.
