@@ -1606,3 +1606,42 @@ pub async fn kept_key_of(app: &Paykit, prefix: &str, msg_id: &str) -> Vec<u8> {
         .find(|key| key.ends_with(tail.as_bytes()))
         .expect("kept")
 }
+
+/// The stack the send-path guards run their flow on.
+///
+/// The paths that end in the Dispatch client's send (an Allowance acceptance: answer,
+/// recover the pending reply, deliver; a period paid by hand: plan, execute, hand off,
+/// report, deliver) are the deepest a wallet runs, and a debug build's frames on them are
+/// what a host thread must hold. Most of that depth is the client's own send frames; the
+/// rest is Paykit's, which builds its larger futures on the heap (`paykit-sdk`'s `heap`
+/// module) so they take no room there. A guard that overflows here means a frame on those
+/// paths grew: find it rather than raise this.
+pub const SEND_PATH_STACK_BYTES: usize = 1_536 * 1024;
+
+/// Run `flow` on a thread of `stack_bytes`, on a current-thread runtime and a local set as
+/// `#[tokio::test]` gives the other flows. An overflow aborts the test binary.
+pub fn on_stack<F, Fut>(stack_bytes: usize, flow: F) -> Result<(), Box<dyn std::error::Error>>
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = Result<(), Box<dyn std::error::Error>>> + 'static,
+{
+    let stack_bytes = std::env::var("PAYKIT_GUARD_STACK")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(stack_bytes);
+    let thread = std::thread::Builder::new()
+        .stack_size(stack_bytes)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| error.to_string())?;
+            tokio::task::LocalSet::new()
+                .block_on(&runtime, flow())
+                .map_err(|error| error.to_string())
+        })?;
+    match thread.join() {
+        Ok(result) => result.map_err(Into::into),
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+}

@@ -129,3 +129,17 @@ async fn test_enrolled_allowance_confirmation_after_a_restore_that_isnt_clean() 
         })
         .await
 }
+
+/// An Allowance's acceptance, which ends in the Dispatch client's send, fits the stack the
+/// send-path guards state ([`crate::common::SEND_PATH_STACK_BYTES`]).
+#[test]
+fn test_enrolled_allowance_acceptance_fits_the_send_path_stack() -> TestResult {
+    crate::common::on_stack(crate::common::SEND_PATH_STACK_BYTES, || async {
+        let Some(world) = World::start(Backend::Scripted)? else {
+            return Ok(());
+        };
+        Box::pin(granted(&world)).await?;
+        world.close().await?;
+        Ok(())
+    })
+}
