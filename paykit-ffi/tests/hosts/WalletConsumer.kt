@@ -133,10 +133,10 @@ internal open class ReceiptReader : WalletHomeserver, PaymentMethod {
     override fun transfer(endpoint: String, payload: String, amount: Amount) = MethodTransfer(amount)
     override suspend fun pay(payment: MethodPayment): MethodOutcome {
         transfers += 1
-        error("a receipted payment cannot be dispatched again")
+        error("a receipted payment cannot be handed off again")
     }
     override suspend fun payment(attemptId: String): MethodOutcome? = null
-    override suspend fun allowanceHistory(payer: ByteArray): List<MethodDispatch>? = null
+    override suspend fun allowanceHistory(payer: ByteArray): List<MethodHandoff>? = null
     override suspend fun verify(proof: MethodProof): ULong? = null
     override fun settlementId(endpoint: String, proofJson: ByteArray): ByteArray? = null
 }
@@ -174,7 +174,7 @@ private suspend fun resumeRefusal(issuer: String, left: Boolean, request: Reques
                 }
             } catch (error: WalletException.Recovery) {
                 check(left && error.failure.code() == "left")
-                checkNotNull(error.failure.switchRefusal()).use { check(it.kind() is SwitchRefusalKind.Left) }
+                checkNotNull(error.failure.dispatchRefusal()).use { check(it.kind() is DispatchRefusalKind.Left) }
             }
             check(method.transfers == 0)
             wallet.shutdown()
@@ -213,7 +213,7 @@ private suspend fun recoverReceipt(issuer: String): RequestId {
                 entry to "PaymentEntry", receipt to "Receipt", request to "RequestId", entry.amount to "Amount",
                 BillingPeriod(1uL, 2uL) to "BillingPeriod",
                 PaymentOutcome.Paid(entry.attemptId, null) to "PaymentOutcome",
-                MethodDispatch(entry.attemptId, entry.amount, MethodOutcome.Pending) to "MethodDispatch",
+                MethodHandoff(entry.attemptId, entry.amount, MethodOutcome.Pending) to "MethodHandoff",
                 periodUsage to "AllowancePeriodUsage",
                 AllowanceUsage(entry.amount.value, listOf(periodUsage), 0uL, 1uL, 0uL) to "AllowanceUsage",
                 selection to "SelectedEndpoints", failure to "EndpointFailure", unavailable to "MethodException",

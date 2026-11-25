@@ -59,7 +59,7 @@ async fn recovery(world: &World) -> TestResult {
     world.add_switch(successor, &[&owner]).await?;
     let recovered = Box::pin(signer.declare_provider_loss(
         successor,
-        pubky_switch_signer::UserConfirmed::shown_and_confirmed(),
+        pubky_dispatch_signer::UserConfirmed::shown_and_confirmed(),
     ))
     .await?;
     assert!(recovered.generation() > generation);

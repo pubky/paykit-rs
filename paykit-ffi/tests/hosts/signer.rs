@@ -1,6 +1,6 @@
-use pubky_switch_client::store::MemoryStore;
-use pubky_switch_harness::World;
-use pubky_switch_signer::{Protocols, Signer};
+use pubky_dispatch_client::store::MemoryStore;
+use pubky_dispatch_harness::World;
+use pubky_dispatch_signer::{Protocols, Signer};
 use std::{error::Error, sync::Arc};
 
 pub(super) async fn serving(world: &World, name: &str) -> Result<Signer, Box<dyn Error>> {

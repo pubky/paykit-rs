@@ -1,6 +1,6 @@
 use crate::{Divergence, NativeWallet, PaymentRefusal, WalletError, WalletEventData};
 use paykit_sdk::Paykit;
-use pubky_switch_client::app::{AppEvent, EventId, HeldCursor, Woken};
+use pubky_dispatch_client::app::{AppEvent, EventId, HeldCursor, Woken};
 use std::sync::Arc;
 
 /// One event in a receive report, with its durable duty identity when applicable.
@@ -25,7 +25,7 @@ fn event(app: &Paykit, e: AppEvent) -> WalletEvent {
     }
 }
 
-/// What the cursor the service holds says beside the app's own position (Switch spec 8.3).
+/// What the cursor the service holds says beside the app's own position (Dispatch spec 8.3).
 #[derive(uniffi::Enum)]
 pub enum CursorStatus {
     /// At or behind the app's position: no device of the app passed an entry after it, so every
@@ -69,10 +69,10 @@ pub struct WalletReceiveReport {
     pub more: bool,
     /// The authenticated status of the restored cursor, when being reconciled.
     pub held_cursor: Option<CursorStatus>,
-    /// Switch events in their reported order.
+    /// Dispatch events in their reported order.
     pub events: Vec<WalletEvent>,
     /// The `msg_id`s of the messages received, each with its effect committed with the cursor
-    /// move (Switch spec 8.2).
+    /// move (Dispatch spec 8.2).
     pub applied: Vec<String>,
     /// The `resend_request`s answered and asked.
     pub resends: u64,
@@ -86,15 +86,15 @@ pub struct WalletReceiveReport {
     /// incomplete.
     pub records_unlisted: Option<String>,
     /// A certificate taken is another than the one the records were last listed under, and the
-    /// app waits for its scope keys, which the signer stores when it is next online (Switch spec
+    /// app waits for its scope keys, which the signer stores when it is next online (Dispatch spec
     /// 3.5).
     pub scope_keys_awaited: bool,
     /// The data epochs whose scope keys entries stored by the client wait for, ascending, as the
     /// read's `AppEvent::AwaitingKeys` names them: such an entry's record holds a value sealed at
     /// that epoch, which the app can't open yet, or its write needs the current epoch's key.
     pub key_epochs_awaited: Vec<u64>,
-    /// The account is gone at this switch: the client took it as erased (Switch spec 12.7), a
-    /// provider loss (Switch spec 12.6).
+    /// The account is gone at this dispatch: the client took it as erased (Dispatch spec 12.7), a
+    /// provider loss (Dispatch spec 12.6).
     pub account_gone: bool,
     /// The records this receive paused: a view showed them divergent after a provider loss
     /// (Paykit spec 6).
@@ -112,9 +112,9 @@ pub enum FeedWake {
     Ready,
     /// The wait passed with nothing to show: the host takes a fresh handle and waits again.
     Quiet,
-    /// The app should read now: the switch refused the wait or couldn't be reached, an answer
+    /// The app should read now: the Dispatch refused the wait or couldn't be reached, an answer
     /// didn't verify with the key the app pinned (a recovery in place answers a held read so,
-    /// Switch wire 7.4.4), the account is frozen, or a failed call left state only a read loads
+    /// Dispatch wire 7.4.4), the account is frozen, or a failed call left state only a read loads
     /// again.
     ReadNow,
     /// Reads stop where the last one did, for something no wait on the feed shows, and the handle
@@ -176,7 +176,7 @@ impl NativeWallet {
         .await
     }
     /// Read the verified notice currently holding this installation, independently of
-    /// whether the host has already acknowledged its delivery (Switch spec 12.6).
+    /// whether the host has already acknowledged its delivery (Dispatch spec 12.6).
     pub async fn recovery_required(
         &self,
     ) -> Result<Option<crate::WalletRecoveryNotice>, WalletError> {

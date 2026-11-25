@@ -2,15 +2,15 @@
 use super::*;
 use crate::allowances::{delivery, replies, AllowanceReply, AppliedReply, EndCause, EndOrigin};
 use paykit_lib::kinds::Kind;
-use pubky_switch_client::app::{AppendDecision, RecordApplication};
-use pubky_switch_core::records::IdentityDoc;
+use pubky_dispatch_client::app::{AppendDecision, RecordApplication};
+use pubky_dispatch_core::records::IdentityDoc;
 
 /// Evidence observed at the service that applied the proposer's original write.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct OriginalCreate {
-    authority: pubky_switch_core::sig::SignedDoc,
-    pub(super) proof: pubky_switch_core::sig::SignedDoc,
+    authority: pubky_dispatch_core::sig::SignedDoc,
+    pub(super) proof: pubky_dispatch_core::sig::SignedDoc,
 }
 
 impl OriginalCreate {
@@ -34,7 +34,7 @@ impl OriginalCreate {
             .record_revision()
             .map_err(|_| PaykitError::corrupt())?;
         if revision.generation != generation
-            || proof.body().object != pubky_switch_core::enc::b64(key)
+            || proof.body().object != pubky_dispatch_core::enc::b64(key)
             || proof
                 .body()
                 .state
@@ -309,7 +309,7 @@ impl Paykit {
     pub(in crate::allowances) async fn report_fenced_acceptance(
         &mut self,
         record: &[u8; 32],
-        target: &pubky_switch_client::app::RecordTarget,
+        target: &pubky_dispatch_client::app::RecordTarget,
         reply: &StoredMessage,
         evidence: &KeptMessage,
     ) -> Result<()> {
@@ -331,7 +331,7 @@ impl Paykit {
         } else {
             // The live signed P identifies the permanent refusal even if this backup
             // predates the app's create. Retain the reported disposition on every copy of Q.
-            let pubky_switch_client::app::RecordRead::Fresh(live) =
+            let pubky_dispatch_client::app::RecordRead::Fresh(live) =
                 self.app.read_record_fresh(target).await?
             else {
                 return Ok(());
@@ -574,7 +574,7 @@ impl Paykit {
         &'a mut self,
         at: &'a str,
         mut approval: OriginalAllowance,
-    ) -> pubky_switch_client::transport::BoxFuture<'a, Result<()>> {
+    ) -> pubky_dispatch_client::transport::BoxFuture<'a, Result<()>> {
         Box::pin(async move {
             let Some(rejected) = &mut approval.rejected else {
                 return Ok(());

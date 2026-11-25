@@ -9,11 +9,11 @@ use paykit_sdk::{
     PayOptions, PayOutcome, Paykit, PaykitBackup, PaykitConfig, Rail, Refusal, RequestRef,
     RequestStatus,
 };
-use pubky_switch_client::app::UserConfirmed;
-use pubky_switch_client::clock::Clock;
+use pubky_dispatch_client::app::UserConfirmed;
+use pubky_dispatch_client::clock::Clock;
 
 use crate::common::{draft, list_version, request_from, store, World, HOUR_MS};
-use pubky_switch_core::records::CLOCK_TOLERANCE_MS;
+use pubky_dispatch_core::records::CLOCK_TOLERANCE_MS;
 
 /// Restore with an unknown held cursor to exercise the confirmation paths.
 async fn restored(w: &World, backup: &PaykitBackup) -> Paykit {
@@ -64,9 +64,9 @@ async fn test_restore_hold_cancellation_resent_after_the_restore_stops_for_good(
     for _ in 0..1 {
         w.alice
             .switch()
-            .fail_next(pubky_switch_client::testing::Fault::Error {
+            .fail_next(pubky_dispatch_client::testing::Fault::Error {
                 path: "/ops".into(),
-                code: pubky_switch_core::http::ErrorCode::PermissionMissing,
+                code: pubky_dispatch_core::http::ErrorCode::PermissionMissing,
                 current: serde_json::Value::Null,
             });
     }
@@ -337,14 +337,14 @@ async fn test_restore_hold_keeps_a_request_created_before_and_resent_after() {
     assert_eq!(requests[0].status, RequestStatus::Held);
 }
 
-/// The next `n` batches at alice's switch are refused for good.
+/// The next `n` batches at alice's Dispatch are refused for good.
 fn refuse_writes(w: &World, n: usize) {
     for _ in 0..n {
         w.alice
             .switch()
-            .fail_next(pubky_switch_client::testing::Fault::Error {
+            .fail_next(pubky_dispatch_client::testing::Fault::Error {
                 path: "/ops".into(),
-                code: pubky_switch_core::http::ErrorCode::PermissionMissing,
+                code: pubky_dispatch_core::http::ErrorCode::PermissionMissing,
                 current: serde_json::Value::Null,
             });
     }
@@ -453,7 +453,7 @@ async fn test_restore_hold_rejected_request_stays_rejected_after_it_is_sent_agai
 #[tokio::test]
 async fn test_restore_hold_resolved_attempt_never_dispatched_again() {
     // The user resolved the attempt `failed` before the backup: a resume after the restore
-    // dispatches nothing again, and the claim keeps the resolution.
+    // hands off nothing again, and the claim keeps the resolution.
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
@@ -493,7 +493,7 @@ async fn test_restore_hold_resolved_attempt_never_dispatched_again() {
         .unwrap();
     assert_eq!(
         read.view.attempt(&attempt_id.to_bytes()).unwrap().outcome,
-        pubky_switch_core::claims::Outcome::Failed
+        pubky_dispatch_core::claims::Outcome::Failed
     );
 }
 
@@ -526,8 +526,8 @@ async fn test_restore_hold_confirmation_is_asked_again_after_another_restore() {
     );
 }
 
-/// A `missed` item at alice's switch: entries accepted in the last second were deleted before
-/// the wallet read them (Switch spec 8.2).
+/// A `missed` item at alice's dispatch: entries accepted in the last second were deleted before
+/// the wallet read them (Dispatch spec 8.2).
 fn missed(w: &World) {
     let now = w.clock.now_ms();
     w.alice.switch().push_missed(1, now - 1_000, now);
@@ -539,7 +539,7 @@ fn missed(w: &World) {
 fn fail_paykit_listing(w: &World) {
     w.alice
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+        .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
             path: "records?collection".into(),
             after: 3,
         });
@@ -789,7 +789,7 @@ async fn test_restore_hold_missed_item_keeps_a_stop_past_30_days_until_paykit_li
     wallet.receive(None).await.unwrap();
     assert_eq!(stops(&wallet).await, 1);
     w.clock
-        .advance_ms(paykit_sdk::KEPT_MESSAGE_MS + pubky_switch_core::records::DAY_MS);
+        .advance_ms(paykit_sdk::KEPT_MESSAGE_MS + pubky_dispatch_core::records::DAY_MS);
     missed(&w);
     fail_paykit_listing(&w);
     let got = wallet.receive(None).await.unwrap();
@@ -800,7 +800,7 @@ async fn test_restore_hold_missed_item_keeps_a_stop_past_30_days_until_paykit_li
 }
 
 /// Bob's request of `reference`, signed now by his shop for alice, not sent yet.
-fn signed_request(w: &World, reference: &str) -> pubky_switch_core::message::MessagePlaintext {
+fn signed_request(w: &World, reference: &str) -> pubky_dispatch_core::message::MessagePlaintext {
     let body = serde_json::json!({
         "amount": { "asset": "btc", "value": "1" },
         "payment_reference": reference,
@@ -824,7 +824,7 @@ fn signed_request(w: &World, reference: &str) -> pubky_switch_core::message::Mes
 async fn status_of(
     w: &World,
     wallet: &Paykit,
-    plaintext: &pubky_switch_core::message::MessagePlaintext,
+    plaintext: &pubky_dispatch_core::message::MessagePlaintext,
 ) -> RequestStatus {
     let request = RequestRef {
         payee: w.bob_id(),
@@ -928,7 +928,7 @@ async fn test_restore_hold_missed_item_holds_a_request_held_at_it_whatever_its_c
     let mut wallet = w.wallet("wallet").await;
     let _shop = w.shop().await;
     let now = w.clock.now_ms();
-    w.clock.set_ms(now + pubky_switch_core::records::DAY_MS);
+    w.clock.set_ms(now + pubky_dispatch_core::records::DAY_MS);
     let ahead = signed_request(&w, "order-1");
     w.clock.set_ms(now);
     w.deliver(&w.bob, "shop", &w.alice, &[wallet.app_id()], &ahead);
@@ -949,7 +949,7 @@ async fn test_restore_hold_missed_item_asks_the_payee_of_an_open_request_another
     // Bob's request reaches only alice's phone, which records it; the wallet holds the
     // record but never received the request itself. After a `missed` item the wallet asks
     // bob to send again: he is the counterparty of an open request it holds (Paykit spec 9).
-    // Bob shares his list with the phone first, so his switch admits alice's messages.
+    // Bob shares his list with the phone first, so his Dispatch admits alice's messages.
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut phone = w.wallet("phone").await;
@@ -1004,7 +1004,7 @@ async fn test_restore_hold_missed_item_asks_no_counterparty_of_a_closed_request(
 #[tokio::test]
 async fn test_restore_hold_missed_item_at_the_payee_asks_the_payer_of_an_open_request() {
     // The wallet paid bob's request; his shop holds its record, the proof received and no
-    // receipt sent. A `missed` item at bob's switch asks alice to send again.
+    // receipt sent. A `missed` item at bob's Dispatch asks alice to send again.
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
@@ -1112,7 +1112,7 @@ async fn test_restore_hold_missed_item_mark_naming_another_time_refused_as_corru
         .app_mut()
         .protocol_commit(
             "paykit",
-            &[pubky_switch_client::app::LocalWrite::Put {
+            &[pubky_dispatch_client::app::LocalWrite::Put {
                 key: key.clone().into_bytes(),
                 value,
             }],
@@ -1209,7 +1209,7 @@ async fn test_restore_hold_missed_item_asks_sent_not_sent_again_by_a_restore() {
 #[tokio::test]
 async fn test_restore_hold_missed_item_listing_failing_in_the_read_fails_the_receive() {
     // The client lists right after a `missed` item, inside its read, before it hands over
-    // any later entry (Switch spec 8.2): a listing that fails there fails the read, and the
+    // any later entry (Dispatch spec 8.2): a listing that fails there fails the read, and the
     // receive returns its error, the request after the item not taken. The next receive
     // lists first and takes it.
     let w = World::new();
@@ -1220,9 +1220,9 @@ async fn test_restore_hold_missed_item_listing_failing_in_the_read_fails_the_rec
     let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
     w.alice
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::Error {
+        .fail_next(pubky_dispatch_client::testing::Fault::Error {
             path: "records?collection".into(),
-            code: pubky_switch_core::http::ErrorCode::Unavailable,
+            code: pubky_dispatch_core::http::ErrorCode::Unavailable,
             current: serde_json::Value::Null,
         });
     assert!(wallet.receive(None).await.is_err());
@@ -1312,8 +1312,8 @@ async fn assert_bounded_by_the_read(w: &World, wallet: &mut Paykit, read_ms: u64
 
 #[tokio::test]
 async fn test_restore_hold_held_cursor_gap_bounded_by_the_verified_service_time() {
-    // The cursor the switch holds is ahead of the wallet's position: the client hands the
-    // gap as a `missed` item with no end, `u64::MAX` (Switch spec 8.3 "Ahead"). That is no
+    // The cursor the Dispatch holds is ahead of the wallet's position: the client hands the
+    // gap as a `missed` item with no end, `u64::MAX` (Dispatch spec 8.3 "Ahead"). That is no
     // time: the hold's end is set as not known, and the receive bounds it by the service
     // time verified once its read completed, so a request created an hour later isn't held.
     let w = World::new();
@@ -1335,7 +1335,7 @@ async fn test_restore_hold_held_cursor_gap_bounded_by_the_verified_service_time(
     assert!(
         matches!(
             report.report.held_cursor,
-            Some(pubky_switch_client::app::HeldCursor::Ahead { .. })
+            Some(pubky_dispatch_client::app::HeldCursor::Ahead { .. })
         ),
         "{:?}",
         report.report.held_cursor
@@ -1359,7 +1359,7 @@ async fn test_restore_hold_owed_missed_call_with_no_end_bounded_by_the_verified_
     wallet.receive(None).await.unwrap();
     let cursor = wallet.app().cursor();
     let owed = serde_json::json!({
-        "v": pubky_switch_client::app::SCHEMA_VERSION,
+        "v": pubky_dispatch_client::app::SCHEMA_VERSION,
         "d": { "to": ["paykit"], "call": { "Missed": {
             "read_at_ms": w.clock.now_ms(),
             "seq": cursor.seq,
@@ -1368,10 +1368,10 @@ async fn test_restore_hold_owed_missed_call_with_no_end_bounded_by_the_verified_
             "accepted_until_ms": u64::MAX,
         } } },
     });
-    let mut batch = pubky_switch_client::store::WriteBatch::new();
+    let mut batch = pubky_dispatch_client::store::WriteBatch::new();
     batch
         .put(
-            &pubky_switch_client::store::client_namespace(&wallet.app_id()),
+            &pubky_dispatch_client::store::client_namespace(&wallet.app_id()),
             format!("owed/{:020}/{:020}", cursor.generation, cursor.seq),
             serde_json::to_vec(&owed).unwrap(),
         )
@@ -1442,17 +1442,17 @@ async fn test_restore_hold_missed_end_not_known_holds_every_open_request_until_b
         .protocol_commit(
             "paykit",
             &[
-                pubky_switch_client::app::LocalWrite::Put {
+                pubky_dispatch_client::app::LocalWrite::Put {
                     key: b"he".to_vec(),
-                    value: kept(serde_json::json!(pubky_switch_core::enc::b64(
-                        &pubky_switch_core::enc::random_bytes::<16>().unwrap()
+                    value: kept(serde_json::json!(pubky_dispatch_core::enc::b64(
+                        &pubky_dispatch_core::enc::random_bytes::<16>().unwrap()
                     ))),
                 },
-                pubky_switch_client::app::LocalWrite::Put {
+                pubky_dispatch_client::app::LocalWrite::Put {
                     key: b"mh".to_vec(),
                     value: kept(serde_json::json!({ "bound_ms": 0 })),
                 },
-                pubky_switch_client::app::LocalWrite::Put {
+                pubky_dispatch_client::app::LocalWrite::Put {
                     key: b"mu".to_vec(),
                     value: kept(serde_json::json!(true)),
                 },
@@ -1482,8 +1482,8 @@ async fn test_restore_hold_request_sent_again_over_its_seen_deleted_record_chang
     wallet.receive(None).await.unwrap();
     assert_eq!(status_of(&w, &wallet, &request).await, RequestStatus::Open);
     phone.receive(None).await.unwrap();
-    let target = pubky_switch_client::app::RecordTarget::new(
-        pubky_switch_client::app::Collection::new(
+    let target = pubky_dispatch_client::app::RecordTarget::new(
+        pubky_dispatch_client::app::Collection::new(
             paykit_lib::collections::Collection::PayerActivity.name(),
             paykit_lib::collections::Collection::PayerActivity.policy(None),
         ),
@@ -1496,7 +1496,8 @@ async fn test_restore_hold_request_sent_again_over_its_seen_deleted_record_chang
         .unwrap();
     wallet.receive(None).await.unwrap();
     let key = wallet.app().record_key(&target).unwrap();
-    w.clock.advance_ms(31 * pubky_switch_core::records::DAY_MS);
+    w.clock
+        .advance_ms(31 * pubky_dispatch_core::records::DAY_MS);
     wallet.receive(None).await.unwrap();
     let written = w.record_writes(&w.alice, &key);
     w.deliver(&w.bob, "shop", &w.alice, &[wallet.app_id()], &request);
@@ -1506,18 +1507,18 @@ async fn test_restore_hold_request_sent_again_over_its_seen_deleted_record_chang
     let held = wallet.app().shared_record(&key).await.unwrap().unwrap();
     assert_eq!(
         held.content,
-        pubky_switch_client::app::RecordContent::Deleted
+        pubky_dispatch_client::app::RecordContent::Deleted
     );
 }
 
-use pubky_switch_client::app::HeldCursor;
+use pubky_dispatch_client::app::HeldCursor;
 
 /// `backup` restored on `store`, as a host lets the held cursor judge the restore: the
 /// newest identity.json confirmed and a first feed page read before anything else.
 async fn restored_read_first(
     w: &World,
     backup: &PaykitBackup,
-    store: Arc<dyn pubky_switch_client::store::StateStore>,
+    store: Arc<dyn pubky_dispatch_client::store::StateStore>,
 ) -> Paykit {
     let mut app = Paykit::restore(
         w.env(&w.alice, store),
@@ -1743,14 +1744,14 @@ async fn test_restore_clean_lift_lost_to_a_crash_leaves_the_hold() {
     let w = World::new();
     let (_shop, [first, _], backup, id, _) = backed_up_with_requests(&w).await;
     let base = store();
-    let faulty = Arc::new(pubky_switch_client::store::FaultStore::new(
+    let faulty = Arc::new(pubky_dispatch_client::store::FaultStore::new(
         Arc::clone(&base),
-        pubky_switch_client::store::Fault::None,
+        pubky_dispatch_client::store::Fault::None,
     ));
     let mut app = Paykit::restore(
         w.env(
             &w.alice,
-            Arc::clone(&faulty) as Arc<dyn pubky_switch_client::store::StateStore>,
+            Arc::clone(&faulty) as Arc<dyn pubky_dispatch_client::store::StateStore>,
         ),
         PaykitConfig::default(),
         &backup,

@@ -1,4 +1,4 @@
-//! The spam rule (Paykit wire 4.1, Switch spec 7): at an app holding `paykit_contacts`, a message
+//! The spam rule (Paykit wire 4.1, Dispatch spec 7): at an app holding `paykit_contacts`, a message
 //! that would create state from a sender the user blocked or the service flagged is only
 //! counted, and one from a sender whose standing the app can't tell waits until the lists
 //! are read; a message that updates a record the app holds is applied whoever sent it. An
@@ -11,10 +11,10 @@ use paykit_sdk::{
     AppScopes, PayOptions, PayOutcome, Paykit, PaykitConfig, RequestStatus, ResendSelection,
     UnrequestedPayment, LISTS_REFRESH_MS,
 };
-use pubky_switch_client::clock::Clock;
-use pubky_switch_client::store::StateStore;
-use pubky_switch_client::testing::Router;
-use pubky_switch_client::transport::Transport;
+use pubky_dispatch_client::clock::Clock;
+use pubky_dispatch_client::store::StateStore;
+use pubky_dispatch_client::testing::Router;
+use pubky_dispatch_client::transport::Transport;
 
 use crate::common::{btc, draft, endpoint, list_version, request_from, store, ListsStore, World};
 
@@ -23,7 +23,7 @@ use crate::common::{btc, draft, endpoint, list_version, request_from, store, Lis
 enum Standing {
     /// Alice blocked him.
     Blocked,
-    /// Her switch flagged him.
+    /// Her Dispatch flagged him.
     Flagged,
     /// Her wallet's copy of the lists isn't known to be complete.
     Unknown,
@@ -225,12 +225,12 @@ async fn test_spam_blocked_sender_list_cancellation_and_resend_only_counted() {
     assert!(w.rail.all_executions().is_empty());
 }
 
-/// The next `n` calls to alice's switch's `/ops` don't connect: a batch is kept unanswered.
+/// The next `n` calls to alice's Dispatch's `/ops` don't connect: a batch is kept unanswered.
 fn keep_ops(w: &World, n: usize) {
     for _ in 0..n {
         w.alice
             .switch()
-            .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+            .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
                 path: "/ops".into(),
                 after: 0,
             });
@@ -242,7 +242,7 @@ fn keep_unblock_ops(w: &World, n: usize) {
     assert!(n > 0);
     w.alice
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+        .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
             path: "/ops".into(),
             after: 1,
         });
@@ -251,7 +251,7 @@ fn keep_unblock_ops(w: &World, n: usize) {
 
 #[tokio::test]
 async fn test_spam_own_block_kept_unanswered_counts_new_state_at_once() {
-    // The wallet blocks bob while its switch doesn't answer: the `deny.put` is kept, and the
+    // The wallet blocks bob while its Dispatch doesn't answer: the `deny.put` is kept, and the
     // lists the client holds don't show bob yet. Bob's request, list and `resend_request`
     // that come after are only counted all the same (Paykit wire 4.1; Paykit spec 8.1, a
     // block the app wrote counts at once).
@@ -281,7 +281,7 @@ async fn test_spam_own_block_kept_unanswered_counts_new_state_at_once() {
 #[tokio::test]
 async fn test_spam_own_unblock_kept_unanswered_leaves_the_copy_to_decide() {
     // Bob's `resend_request` reaches alice's inbox before she blocks him; the wallet then
-    // unblocks him while its switch doesn't answer: the `deny.delete` is kept, and the lists
+    // unblocks him while its Dispatch doesn't answer: the `deny.delete` is kept, and the lists
     // the client holds still show bob. The unblock doesn't override them in the spam rule:
     // the request is only counted (Paykit wire 4.1).
     let w = World::new();
@@ -308,7 +308,7 @@ async fn test_spam_own_unblock_kept_unanswered_leaves_the_copy_to_decide() {
 async fn test_spam_own_unblock_refused_before_the_feed_leaves_new_state_counted() {
     // Bob's request reaches alice's inbox before she blocks him; the wallet's unblock of him
     // is then kept unanswered. The next read sends the kept batch again before its feed, and
-    // the switch refuses it for good, so the deny list still holds bob when his request comes
+    // the Dispatch refuses it for good, so the deny list still holds bob when his request comes
     // in that same read: no activity record, only the count (Paykit wire 4.1).
     let w = World::new();
     let mut wallet = contacts_wallet(&w, store()).await;
@@ -328,9 +328,9 @@ async fn test_spam_own_unblock_refused_before_the_feed_leaves_new_state_counted(
     );
     w.alice
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::Error {
+        .fail_next(pubky_dispatch_client::testing::Fault::Error {
             path: "/ops".into(),
-            code: pubky_switch_core::http::ErrorCode::Conflict,
+            code: pubky_dispatch_core::http::ErrorCode::Conflict,
             current: serde_json::Value::Null,
         });
 
@@ -343,7 +343,7 @@ async fn test_spam_own_unblock_refused_before_the_feed_leaves_new_state_counted(
 
 #[tokio::test]
 async fn test_spam_own_unblock_applied_lets_new_state_through() {
-    // The switch applies the wallet's unblock of bob: his request sent after it opens its
+    // The Dispatch applies the wallet's unblock of bob: his request sent after it opens its
     // record (Paykit wire 4.1).
     let w = World::new();
     let mut wallet = contacts_wallet(&w, store()).await;
@@ -362,11 +362,11 @@ async fn test_spam_own_unblock_applied_lets_new_state_through() {
 
 #[tokio::test]
 async fn test_spam_own_unblock_applied_with_its_answer_lost_lets_new_state_through() {
-    // The switch applies the wallet's unblock of bob but its answer is lost, so the client
+    // The Dispatch applies the wallet's unblock of bob but its answer is lost, so the client
     // keeps the batch and its copy of the lists still shows bob. Bob's request sent after it
     // comes in a read whose send of the kept batch again can't connect: the feed's
     // `deny.delete` item comes before the request and drops bob from the copy, so the request
-    // opens its record (Paykit wire 4.1, Switch spec 8.3).
+    // opens its record (Paykit wire 4.1, Dispatch spec 8.3).
     let w = World::new();
     let mut wallet = contacts_wallet(&w, store()).await;
     let mut shop = w.shop().await;
@@ -374,7 +374,7 @@ async fn test_spam_own_unblock_applied_with_its_answer_lost_lets_new_state_throu
     wallet.block(&w.bob_id()).await.unwrap();
     w.alice
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::LoseAnswerAfter {
+        .fail_next(pubky_dispatch_client::testing::Fault::LoseAnswerAfter {
             path: "/ops".into(),
             after: 1,
         });
@@ -485,19 +485,19 @@ impl CountingAllow {
 impl Transport for CountingAllow {
     fn send(
         &self,
-        request: pubky_switch_client::transport::Request,
-    ) -> pubky_switch_client::transport::BoxFuture<
+        request: pubky_dispatch_client::transport::Request,
+    ) -> pubky_dispatch_client::transport::BoxFuture<
         '_,
         Result<
-            pubky_switch_client::transport::Response,
-            pubky_switch_client::error::TransportError,
+            pubky_dispatch_client::transport::Response,
+            pubky_dispatch_client::error::TransportError,
         >,
     > {
         if request.method == "GET" && request.path_and_query.ends_with("/allow") {
             self.reads.fetch_add(1, Ordering::SeqCst);
             if self.fail.load(Ordering::SeqCst) {
                 return Box::pin(async {
-                    Err(pubky_switch_client::error::TransportError::Connect(
+                    Err(pubky_dispatch_client::error::TransportError::Connect(
                         "the lists can't be read now".into(),
                     ))
                 });
@@ -537,7 +537,7 @@ async fn test_spam_lists_read_at_most_every_ten_minutes() {
     wallet.receive(None).await.unwrap();
     assert_eq!(transport.reads.load(Ordering::SeqCst), 0);
     // The next receive refreshes them. The client also reads the lists for the gap
-    // that replacing its copy owes to every protocol (Switch spec 8.3).
+    // that replacing its copy owes to every protocol (Dispatch spec 8.3).
     w.clock.advance_ms(1);
     wallet.receive(None).await.unwrap();
     wallet.receive(None).await.unwrap();

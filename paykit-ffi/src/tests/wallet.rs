@@ -5,13 +5,13 @@ use paykit_lib::{
     PaymentReference,
 };
 use paykit_sdk::{AppScopes, Paykit, RequestDestination, RequestDraft};
-use pubky_switch_client::{
+use pubky_dispatch_client::{
     app::{HomeserverReader, HomeserverWriter},
     store::MemoryStore,
 };
-use pubky_switch_core::records::AuthRequest;
-use pubky_switch_harness::parties::Asking;
-use pubky_switch_harness::{Backend, World};
+use pubky_dispatch_core::records::AuthRequest;
+use pubky_dispatch_harness::parties::Asking;
+use pubky_dispatch_harness::{Backend, World};
 use std::{collections::BTreeMap, sync::atomic::Ordering};
 use std::{error::Error, path::Path, sync::Arc};
 
@@ -19,7 +19,7 @@ type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
 mod notice;
 
-struct Home(Arc<pubky_switch_client::testing::TestHomeserver>);
+struct Home(Arc<pubky_dispatch_client::testing::TestHomeserver>);
 #[async_trait::async_trait]
 impl WalletHomeserver for Home {
     async fn get(&self, id: Vec<u8>, p: String) -> Result<Option<Vec<u8>>, HomeserverError> {
@@ -100,7 +100,7 @@ type EnrolledWallet = (
     Arc<WalletHost>,
     Arc<NativeWallet>,
     Vec<u8>,
-    pubky_switch_signer::Signer,
+    pubky_dispatch_signer::Signer,
 );
 
 pub(super) async fn enrolled_wallet(
@@ -121,7 +121,8 @@ pub(super) async fn enrolled_wallet(
     // A pending signer decision needs only the enrollment store. Even a busy
     // installed namespace must not replace that decision with a writer error.
     let physical = DeviceStore::open(root);
-    let ns = pubky_switch_client::store::client_namespace(&info.app_id.clone().try_into().unwrap());
+    let ns =
+        pubky_dispatch_client::store::client_namespace(&info.app_id.clone().try_into().unwrap());
     let owner = vec![23; 32];
     assert!(physical.acquire(ns.clone(), owner.clone())?);
     assert!(matches!(
@@ -218,19 +219,19 @@ async fn connect_after_earlier_batch(
     let other = world.identity("other-shop")?.public();
     world.unreachable("POST", "/ops");
     let held = app.allow_connect(&other).await.unwrap_err();
-    let pubky_switch_client::app::AppError::Ahead { ahead, .. } = &held else {
+    let pubky_dispatch_client::app::AppError::Ahead { ahead, .. } = &held else {
         return Err("later write did not wait for the original batch".into());
     };
     let since = ahead.kept_since_ms.ok_or("original batch was never sent")?;
     let until = ahead
         .answer_until_ms
         .ok_or("missing original answer window")?;
-    let service_reply = pubky_switch_client::app::AppError::Ahead {
+    let service_reply = pubky_dispatch_client::app::AppError::Ahead {
         ahead: *ahead,
         error: Box::new(
-            pubky_switch_client::error::ClientError::Switch {
+            pubky_dispatch_client::error::ClientError::Switch {
                 status: 503,
-                code: pubky_switch_core::http::ErrorCode::Unavailable,
+                code: pubky_dispatch_core::http::ErrorCode::Unavailable,
                 message: "unavailable".into(),
                 current: serde_json::Value::Null,
                 known_version: None,
@@ -242,13 +243,13 @@ async fn connect_after_earlier_batch(
     // Nothing of this call was kept or sent, whatever the earlier batch's resend met.
     assert!(
         matches!(WalletError::from(service_reply), WalletError::NotSent { failure }
-        if failure.kept_batch.is_none() && failure.switch_refusal.is_some()
+        if failure.kept_batch.is_none() && failure.dispatch_refusal.is_some()
             && failure.service_code.as_deref() == Some("unavailable"))
     );
-    let no_answer = pubky_switch_client::app::AppError::Ahead {
+    let no_answer = pubky_dispatch_client::app::AppError::Ahead {
         ahead: *ahead,
-        error: Box::new(pubky_switch_client::app::AppError::Transport(
-            pubky_switch_client::error::TransportError::Timeout,
+        error: Box::new(pubky_dispatch_client::app::AppError::Transport(
+            pubky_dispatch_client::error::TransportError::Timeout,
         )),
     };
     assert!(
@@ -260,12 +261,14 @@ async fn connect_after_earlier_batch(
     };
     assert!(failure.kept_batch.is_none() && failure.service_code.is_none());
     let rule = failure
-        .switch_refusal
+        .dispatch_refusal
         .clone()
         .ok_or("transport failure lost the earlier batch")?;
-    assert!(matches!(rule.kind(), SwitchRefusalKind::KeptBatchesAhead {
+    assert!(
+        matches!(rule.kind(), DispatchRefusalKind::KeptBatchesAhead {
         batch_id, kept_since_ms: Some(start), answer_until_ms: Some(end), kept: 1,
-    } if batch_id == first_id && start == since && end == until && start < end));
+    } if batch_id == first_id && start == since && end == until && start < end)
+    );
     Box::pin(receive(payer)).await?;
     assert!(payer.app().admits(&shop).await?);
     assert!(!payer.app().admits(&other).await?);
@@ -659,13 +662,13 @@ async fn later_checkout(
     ));
     let request: paykit_sdk::RequestRef = later.clone().try_into()?;
     let options: paykit_sdk::PayOptions = PaymentOptions::default().try_into()?;
-    // A dispatch that doesn't pass through that check is refused by the method's rail.
-    let dispatched: PaymentResult = wallet
+    // A handoff that doesn't pass through that check is refused by the method's rail.
+    let handed_off: PaymentResult = wallet
         .lend(async |app| app.pay_request(&request, options).await)
         .await?
         .into();
     assert!(matches!(
-        dispatched.decision,
+        handed_off.decision,
         PaymentDecision::Outcome {
             outcome: PaymentOutcome::Failed { .. }
         }
@@ -1184,7 +1187,7 @@ async fn wallet_config(world: &World) -> TestResult {
     let check_record = async |app: &mut Paykit| -> TestResult {
         assert!(app.app().publishes_record());
         let record =
-            pubky_switch_core::records::AppRecord::verify(app.app().record(), &app.identity())?;
+            pubky_dispatch_core::records::AppRecord::verify(app.app().record(), &app.identity())?;
         assert!(record.accepts("paykit-cap.offer"));
         Ok(())
     };

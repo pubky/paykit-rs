@@ -37,7 +37,7 @@ internal suspend fun checkPeriods(fixture: CheckoutFixture, wallet: NativeWallet
     refused(wallet.payPeriodAutomatically(missing, period, PeriodPriceChoice.RequestedAmount))
     refused(wallet.payPeriodUnderAllowance(missing, period))
 
-    // Reading a restored copy before its first listing leaves the active wallet alone (Switch spec 12.4).
+    // Reading a restored copy before its first listing leaves the active wallet alone (Dispatch spec 12.4).
     fixture.hostForStore(EnrollmentStore()).use { host ->
         host.restore(wallet.appId(), wallet.backup(), BackupDevice.IN_POSSESSION).use { restored ->
             try {

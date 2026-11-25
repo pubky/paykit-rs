@@ -22,9 +22,9 @@ use paykit_lib::{
 use paykit_sdk::{
     AllowanceRole, AppScopes, Paykit, RequestDestination, RequestDraft, UserConfirmed,
 };
-use pubky_switch_client::store::MemoryStore;
-use pubky_switch_core::json::check_uuid_v4;
-use pubky_switch_harness::{parties::Asking, Backend, World};
+use pubky_dispatch_client::store::MemoryStore;
+use pubky_dispatch_core::json::check_uuid_v4;
+use pubky_dispatch_harness::{parties::Asking, Backend, World};
 use std::{
     collections::BTreeMap,
     error::Error,
@@ -467,7 +467,7 @@ async fn funded_period(world: &World) -> TestResult {
         "per_payment_amount": null, "active_from": null, "expires_at": null,
         "allowed_payment_endpoint_identifiers": null
     }))?;
-    // Admit the shop for its Allowance proposal (Switch spec 7).
+    // Admit the shop for its Allowance proposal (Dispatch spec 7).
     w.payer.allow_connect(w.seller.identity().await?).await?;
     let buyer = w.buyer;
     let proposal = w

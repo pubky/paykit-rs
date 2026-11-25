@@ -1,13 +1,13 @@
-//! App records: Paykit's member of a Switch app record, `protocols.paykit` (Paykit spec 4,
+//! App records: Paykit's member of a Dispatch app record, `protocols.paykit` (Paykit spec 4,
 //! Paykit wire 3.2).
 //!
 //! **Reading** a payee's public endpoints ([`Paykit::public_endpoints`], and a payment in
 //! [`crate::PaymentMode::Public`]): the payee's `identity.json` is taken as for any
-//! destination (Paykit spec 7.2; Switch spec 4.3), then the record of each app current in it,
-//! in its order, is read from the payee's Homeserver, at the Switch's path for it (Switch spec
+//! destination (Paykit spec 7.2; Dispatch spec 4.3), then the record of each app current in it,
+//! in its order, is read from the payee's Homeserver, at the Dispatch's path for it (Dispatch spec
 //! 4.2), and used only if:
 //!
-//! - it verifies as the Switch's app record for the payee (Switch wire 3.2), and its
+//! - it verifies as the Dispatch's app record for the payee (Dispatch wire 3.2), and its
 //!   `app_id` is the one of the path it was read from;
 //! - the app is current in the payee's `identity.json` with the certificate the record
 //!   carries, which allows `paykit_request`, and a listed certificate hasn't expired (Paykit spec
@@ -17,8 +17,8 @@
 //!   plus the identity's `record_max_age`, and its `updated_at` isn't ahead of the payer's
 //!   clock (Paykit spec 4).
 //!
-//! Of one app's records, the one used is the one the Switch's comparison rules pick (Switch
-//! spec 4.2, Switch wire 3.2 "Equal times"), through the core's `RecordView`: the newest
+//! Of one app's records, the one used is the one the Dispatch's comparison rules pick (Dispatch
+//! spec 4.2, Dispatch wire 3.2 "Equal times"), through the core's `RecordView`: the newest
 //! seen, so a record served that is older than one seen is answered from the newest seen,
 //! checked as any record used. The records that took part are kept in the store, so the
 //! comparison survives a restart; a refused record never displaces one kept.
@@ -29,7 +29,7 @@
 //! record that can't be used may be the one that withdrew an endpoint. A conflict, two
 //! bodies at one `updated_at` until a strictly later record ends it, is reported as the
 //! app's failure too, and the reader keeps using the earlier record of the app it holds, if
-//! any (Switch spec 4.2): that record's endpoints stay offered, judged as any record used,
+//! any (Dispatch spec 4.2): that record's endpoints stay offered, judged as any record used,
 //! and its own failure, if it has one, follows the conflict. Discovery
 //! ([`Paykit::public_endpoints`]) and a public payment apply these same rules.
 //!
@@ -44,7 +44,7 @@
 //! what is left. A payment to a request's `required_app_id` reads only that app's record, so
 //! that app's failure leaves it no public destination (Paykit spec 8.1); an app whose records
 //! conflict still pays from the earlier record it holds, if any, the conflict reported
-//! beside it (Switch spec 4.2). The same checks run
+//! beside it (Dispatch spec 4.2). The same checks run
 //! again before money moves, on the record kept as the destination's carrier.
 //!
 //! **Publishing** this app's own Paykit member is `crate::own_record`'s.
@@ -60,14 +60,14 @@ use paykit_lib::{PaymentEndpointIdentifier, PaymentEndpointPayload};
 use std::ops::Range;
 use std::sync::Arc;
 
-use pubky_switch_client::app::{Initiator, PeerIdentity, SwitchCopy, UserConfirmed};
-use pubky_switch_client::error::TransportError;
-use pubky_switch_client::transport::BoxFuture;
-use pubky_switch_core::enc::zbase32_encode;
-use pubky_switch_core::records::{
+use pubky_dispatch_client::app::{Initiator, PeerIdentity, SwitchCopy, UserConfirmed};
+use pubky_dispatch_client::error::TransportError;
+use pubky_dispatch_client::transport::BoxFuture;
+use pubky_dispatch_core::enc::zbase32_encode;
+use pubky_dispatch_core::records::{
     app_record_path, AppRecord, IdentityDoc, RecordOrder, RecordView, CLOCK_TOLERANCE_MS,
 };
-use pubky_switch_core::sig::SignedDoc;
+use pubky_dispatch_core::sig::SignedDoc;
 use serde::{Deserialize, Serialize};
 
 use crate::destination::{
@@ -110,7 +110,7 @@ pub struct PublicPaymentList {
     /// The apps whose public endpoints couldn't be used, in the same order. An app with no
     /// record has no public endpoints and isn't one of them. An app here has no endpoints in
     /// [`Self::endpoints`], not even those of an earlier record the reader kept, except an app
-    /// whose records conflict: the earlier record it holds, if any, is still used (Switch
+    /// whose records conflict: the earlier record it holds, if any, is still used (Dispatch
     /// spec 4.2), and when that record fails too its failure follows the conflict (module
     /// docs).
     pub failures: Vec<PublicAppFailure>,
@@ -133,10 +133,10 @@ pub struct PublicAppFailure {
 pub enum PublicAppFailureReason {
     /// The payee's Homeserver couldn't serve the app's record now. A later read may.
     Homeserver(TransportError),
-    /// The reader refuses the record: it doesn't verify as the app's (Switch wire 3.2), its
+    /// The reader refuses the record: it doesn't verify as the app's (Dispatch wire 3.2), its
     /// Paykit member doesn't read (Paykit wire 3.2), the app isn't current in the payee's
     /// `identity.json` with the record's certificate or that certificate doesn't allow
-    /// `paykit_request`, the app's records conflict (Switch spec 4.2), or its newest records
+    /// `paykit_request`, the app's records conflict (Dispatch spec 4.2), or its newest records
     /// are more than the reader keeps of them. The text names the rule.
     Refused(String),
     /// The record has expired: past its `expires_at`, or its `updated_at` plus the identity's
@@ -231,7 +231,7 @@ impl UsableRecord {
 }
 
 /// A record read from `app_id`'s path on `payee`'s Homeserver, verified for the payee and
-/// named by its path (Switch wire 3.2, Switch spec 4.2). `None` when it isn't: it is ignored.
+/// named by its path (Dispatch wire 3.2, Dispatch spec 4.2). `None` when it isn't: it is ignored.
 pub(crate) fn read_record(payee: &[u8; 32], app_id: &[u8; 16], bytes: &[u8]) -> Option<AppRecord> {
     let signed: SignedDoc = serde_json::from_slice(bytes).ok()?;
     let record = AppRecord::verify(&signed, payee).ok()?;
@@ -323,19 +323,19 @@ impl PublicRead {
 const SEEN_RECORDS: usize = 64;
 
 /// The most bytes one payee app's kept records take, encoded: half the client store's cap
-/// on one value ([`pubky_switch_client::store::MAX_VALUE_BYTES`]), so the kept value always
+/// on one value ([`pubky_dispatch_client::store::MAX_VALUE_BYTES`]), so the kept value always
 /// fits with room to spare. Past it the oldest are dropped as past [`SEEN_RECORDS`]; the
 /// bound is per app, so one app's large records never crowd out another app's.
-const SEEN_RECORDS_BYTES: usize = (pubky_switch_client::store::MAX_VALUE_BYTES / 2) as usize;
+const SEEN_RECORDS_BYTES: usize = (pubky_dispatch_client::store::MAX_VALUE_BYTES / 2) as usize;
 
-/// The records of one payee app a reader has seen that took part in its comparison (Switch
-/// spec 4.2, Switch wire 3.2 "Equal times"), oldest first (`p/ar/<payee>/<app>`). Replayed
+/// The records of one payee app a reader has seen that took part in its comparison (Dispatch
+/// spec 4.2, Dispatch wire 3.2 "Equal times"), oldest first (`p/ar/<payee>/<app>`). Replayed
 /// in order, they rebuild the core's [`RecordView`]; kept, they survive a restart, so a
 /// copy older than one seen, or one conflicting with it, is never used after a reload.
 ///
 /// A served record whose timestamp group is too large to keep leaves `unkept_at`, its
 /// `updated_at`: no record at or before it is used, across restarts too, until a strictly
-/// later record is kept (Switch spec 4.2).
+/// later record is kept (Dispatch spec 4.2).
 ///
 /// Every record that leaves the set, and the time of a served group too large to keep, raise
 /// `dropped_at` ([`SeenRecords::raise_floor`]), which nothing lowers or clears. A record at or
@@ -365,7 +365,7 @@ impl SeenRecords {
     /// Where the kept part of `held`, in timestamp order, starts: past every record at or
     /// before the floor ([`SeenRecords::admits`]), the newest complete
     /// timestamp groups that fit both bounds. Keeping just one side of a conflict could make
-    /// it the fallback for a later conflict (Switch spec 4.2).
+    /// it the fallback for a later conflict (Dispatch spec 4.2).
     fn kept_from(&self, held: &[AppRecord]) -> usize {
         let floor = held.partition_point(|r| !self.admits(r));
         let mut count = 0;
@@ -438,7 +438,7 @@ impl SeenRecords {
         let start = self.kept_from(&held);
         if at < start {
             // Its group's other bodies are unknown, so no member of it is kept, used or the
-            // fallback of a later conflict (Switch spec 4.2).
+            // fallback of a later conflict (Dispatch spec 4.2).
             self.unkept_at = self.unkept_at.max(Some(record.updated_at()));
             self.raise_floor(record.updated_at());
             return None;
@@ -454,7 +454,7 @@ impl SeenRecords {
 
     /// Whether `record`, served now, is at or before a timestamp group the reader couldn't
     /// keep: its other bodies are unknown, so it may be in conflict or withdrawn. A group
-    /// ahead of the reader's clock `now` is set aside, as a record ahead of it is (Switch
+    /// ahead of the reader's clock `now` is set aside, as a record ahead of it is (Dispatch
     /// wire 3.2): one is never kept from a record ahead of the clock, so this is only after
     /// the clock went back, or a restored value no record set, which then holds nothing.
     fn before_unkept(&self, served_at: Option<u64>, now: u64) -> bool {
@@ -500,7 +500,7 @@ impl SeenRecords {
         self.merged(&Self::default(), payee)
     }
 
-    /// The union of these seen records and `other`'s, both of one app of `payee` (Switch spec
+    /// The union of these seen records and `other`'s, both of one app of `payee` (Dispatch spec
     /// 4.2). The later of the two `dropped_at` comes first: every record of either at or
     /// before it is dropped, so a record one side dropped never comes back through the
     /// other. Every other record of either, once, is then kept as a read keeps them
@@ -520,7 +520,7 @@ impl SeenRecords {
                 .max(self.unkept_at)
                 .max(other.unkept_at),
         };
-        // The same body twice is one record, whatever its signature (Switch wire 3.2).
+        // The same body twice is one record, whatever its signature (Dispatch wire 3.2).
         let mut all: Vec<AppRecord> = Vec::new();
         for signed in self.records.iter().chain(&other.records) {
             let record = AppRecord::verify(signed, payee).ok()?;
@@ -571,7 +571,7 @@ impl SeenRecords {
 
 /// Whether `record` can change a view that has seen `held`: one ahead of the clock takes part
 /// in nothing, one seen already is the same record, and one earlier than a record seen is
-/// earlier than the newest, which the view never goes back from (Switch wire 3.2).
+/// earlier than the newest, which the view never goes back from (Dispatch wire 3.2).
 /// A record conflicting with the newest while the view is in conflict already adds nothing:
 /// one more body at that `updated_at` keeps the conflict as it is. It is compared only with
 /// the records seen that the view uses at `now`: one ahead of the clock, as after the payer's
@@ -589,7 +589,7 @@ fn takes_part(record: &AppRecord, held: &[AppRecord], view: &RecordView, now: u6
 impl Paykit {
     /// Whether the payee app records this app keeps, judged now, still use `record`, the one
     /// a public payment selected, also as the earlier record kept under a conflict, and it
-    /// isn't at or before the floor (Switch spec 4.2; Paykit spec 4). A payment that
+    /// isn't at or before the floor (Dispatch spec 4.2; Paykit spec 4). A payment that
     /// reuses a read checks this before it pays, so it never pays a record the comparison it
     /// would make now has left behind. A local read only.
     pub(crate) async fn seen_still_uses(
@@ -603,7 +603,7 @@ impl Paykit {
         };
         let (view, _) = seen.view(payee, self.now())?;
         let hash = |r: &AppRecord| r.signed().doc_hash().ok();
-        // Under a conflict the record used is the earlier one the Switch rule keeps using.
+        // Under a conflict the record used is the earlier one the Dispatch rule keeps using.
         Ok(seen.admits(record)
             && view
                 .used()
@@ -618,7 +618,7 @@ impl Paykit {
     /// The rules of discovery ([`Paykit::public_endpoints`]) and of a public
     /// payment alike: an app whose record served now fails gives its failure and no endpoints
     /// (Paykit spec 4), except a conflict, reported while an earlier record held is still
-    /// used (Switch spec 4.2).
+    /// used (Dispatch spec 4.2).
     pub(crate) async fn public_records(
         &mut self,
         payee: &[u8; 32],
@@ -627,7 +627,7 @@ impl Paykit {
         confirmed: Option<UserConfirmed>,
         failures: &mut Vec<PublicAppFailure>,
     ) -> Result<std::result::Result<(PeerIdentity, Vec<UsableRecord>), Refusal>> {
-        // The current apps' records are read from the Homeserver beside the payee's switch
+        // The current apps' records are read from the Homeserver beside the payee's Dispatch
         // lookup, from the copy of identity.json taken first (Paykit spec 4, 14).
         let homeserver = Arc::clone(&self.homeserver);
         let clock = Arc::clone(&self.clock);
@@ -726,7 +726,7 @@ impl Paykit {
             }
             if refreshes == MAX_REFRESHES {
                 return Ok(Err(Refusal::IdentityUnavailable(
-                    "Switch spec 4.3: the payee's identity expired during its app record reads"
+                    "Dispatch spec 4.3: the payee's identity expired during its app record reads"
                         .into(),
                 )));
             }
@@ -767,7 +767,7 @@ impl Paykit {
                 }
             };
             let read = bytes.as_ref().and_then(|b| read_record(payee, &app_id, b));
-            // The record served is compared with those seen before (Switch spec 4.2): an older
+            // The record served is compared with those seen before (Dispatch spec 4.2): an older
             // one never replaces a newer one, and two bodies at one `updated_at` are a
             // conflict, during which neither is used and the reader goes on with the earlier
             // record it holds, until a strictly later one ends it.
@@ -784,7 +784,7 @@ impl Paykit {
             }
             // Every record that verifies as the app's takes part in the comparison, whatever
             // its Paykit member: two bodies at one `updated_at` are a conflict for every reader
-            // (Switch wire 3.2), and the newest record is the app's (Switch spec 4.2). A Paykit
+            // (Dispatch wire 3.2), and the newest record is the app's (Dispatch spec 4.2). A Paykit
             // member that doesn't read makes that record's endpoints unusable, as `usable`
             // judges the record used (Paykit wire 3.2), and decides nothing of the comparison.
             let served_ahead = read.as_ref().is_some_and(|record| record.is_ahead(now));
@@ -793,7 +793,7 @@ impl Paykit {
             if let Some(record) = read {
                 // A record at or before one dropped from the set takes part in nothing, as a
                 // record earlier than one held: what was dropped may have withdrawn it or
-                // conflicted with it (Switch spec 4.2). The records held answer for it.
+                // conflicted with it (Dispatch spec 4.2). The records held answer for it.
                 // A record at or before the floor takes part in nothing, as one earlier than
                 // a record held. One of the group too large to keep is refused again as it
                 // was, by `keep`, which keeps nothing at or before the floor.
@@ -875,7 +875,7 @@ impl Paykit {
             // clock, or in conflict with one seen, it is reported as this app's failure.
             let served_failure = if served_refused {
                 Some(PublicAppFailureReason::Refused(
-                    "Switch wire 3.2: the record served doesn't verify as the app's".into(),
+                    "Dispatch wire 3.2: the record served doesn't verify as the app's".into(),
                 ))
             } else if served_ahead {
                 Some(PublicAppFailureReason::Expired(
@@ -883,7 +883,7 @@ impl Paykit {
                 ))
             } else if view.in_conflict() {
                 Some(PublicAppFailureReason::Refused(
-                    "Switch spec 4.2: the app's records conflict at one updated_at".into(),
+                    "Dispatch spec 4.2: the app's records conflict at one updated_at".into(),
                 ))
             } else if view.used().is_none() {
                 // The view sets aside the records seen that are ahead of the clock, as after
@@ -898,7 +898,7 @@ impl Paykit {
                 None
             };
             // A conflict is told, and the reader "keeps using an earlier record of that app it
-            // already holds, if any" (Switch spec 4.2): that record, the one the view uses, is
+            // already holds, if any" (Dispatch spec 4.2): that record, the one the view uses, is
             // judged as any record used. Paykit spec 4 governs every other failure of the
             // record served: "One app's failure, a record it can't read, or one it refuses or
             // that has expired, is reported as that app's, and the other apps' usable
@@ -938,7 +938,7 @@ impl Paykit {
     /// app's failure never fails the read, and a failed app offers no endpoints in it, not
     /// even those of an earlier record kept, except an app whose records conflict, which
     /// keeps the earlier record it holds, if any (module docs); a public payment reads by the
-    /// same rules. `confirmed` is the user's confirmation for a payee whose switch couldn't
+    /// same rules. `confirmed` is the user's confirmation for a payee whose Dispatch couldn't
     /// confirm its apps ([`Refusal::IdentityUnconfirmed`]).
     ///
     /// # Errors
@@ -990,7 +990,7 @@ impl Paykit {
 
 #[cfg(test)]
 mod tests {
-    use pubky_switch_core::records::AppRecordBody;
+    use pubky_dispatch_core::records::AppRecordBody;
     use serde_json::json;
 
     use super::*;
@@ -1126,8 +1126,8 @@ mod tests {
 
     #[test]
     fn test_app_records_record_with_wrong_permissions_ignored() {
-        use pubky_switch_core::scopes::Permission;
-        // The Switch takes both certificates; Paykit's verifiers refuse them (Paykit wire
+        use pubky_dispatch_core::scopes::Permission;
+        // The Dispatch takes both certificates; Paykit's verifiers refuse them (Paykit wire
         // 3.1): `paykit_request` needs exactly `reply.add`.
         let missing = Party::with_permissions(
             "bob",

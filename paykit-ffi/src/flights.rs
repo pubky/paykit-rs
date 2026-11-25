@@ -1,11 +1,11 @@
 //! The host's `pay` calls in progress in this process, and the answers that came after the
 //! wallet stopped waiting (Paykit spec 7.2: the attempt ID is the idempotency key of one
-//! dispatch). Attempt IDs are random, so one record serves every wallet and every
+//! handoff). Attempt IDs are random, so one record serves every wallet and every
 //! `WalletHost` in the process.
 //!
 //! A wallet command waits for the host's `pay` at most its limit. The host's call runs as a
 //! task of its own, so it always runs to its end. While it runs, the attempt is never
-//! dispatched again and the host's lookup is not asked: both answer "pending", the method's
+//! handed off again and the host's lookup is not asked: both answer "pending", the method's
 //! own answer for a payment in flight. When the host's `pay` answers after the limit, the
 //! wallet open for that App ID resumes its payments. A paid or failed outcome the SDK can read
 //! is kept under its attempt ID, so that resume takes it without asking the host; it stays kept,
@@ -54,7 +54,7 @@ struct State {
 #[derive(Clone, Default)]
 pub(crate) struct Flights(Arc<Mutex<State>>);
 
-/// The result of waiting for one dispatch.
+/// The result of waiting for one handoff.
 pub(crate) enum Waited {
     Answered(Answer),
     /// The limit passed: the payment may have been sent, and its answer will be kept.
@@ -75,7 +75,7 @@ impl Flights {
     }
 
     /// Run `pay` for `app`'s attempt as its own task and wait for it at most `limit`.
-    pub(crate) async fn dispatch<F>(
+    pub(crate) async fn handoff<F>(
         &self,
         attempt: String,
         app: Option<AppId>,

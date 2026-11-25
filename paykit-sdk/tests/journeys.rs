@@ -1,7 +1,7 @@
 //! The ordinary wallet journeys, end to end through the SDK, on both backends: the client's
-//! scripted switches and the Switch service on PostgreSQL.
+//! scripted switches and the Dispatch service on PostgreSQL.
 //!
-//! Each identity has its own switch and its own signer, which approves each Paykit app it
+//! Each identity has its own Dispatch and its own signer, which approves each Paykit app it
 //! joins. Each test runs its journey on both backends, each on a fresh world, and names the
 //! backend in any failure. The service backend needs `PUBKY_SWITCH_TEST_DATABASE_URL`.
 //! Without it the service run is skipped, as in the other service tests, unless
@@ -48,11 +48,11 @@ use paykit_sdk::{
     AppScopes, AttemptId, PayOutcome, PayeeActivity, PayeeStatus, Paykit, PaykitConfig, ReceiptsOf,
     RequestDraft, RequestedScopes, Stage, Timer,
 };
-use pubky_switch_client::app::AppEnv;
-use pubky_switch_client::store::MemoryStore;
-use pubky_switch_client::transport::{BoxFuture, Request, Response, Transport, TransportError};
-use pubky_switch_harness::{parties::Asking, Backend, World};
-use pubky_switch_signer::{Protocols, Signer};
+use pubky_dispatch_client::app::AppEnv;
+use pubky_dispatch_client::store::MemoryStore;
+use pubky_dispatch_client::transport::{BoxFuture, Request, Response, Transport, TransportError};
+use pubky_dispatch_harness::{parties::Asking, Backend, World};
+use pubky_dispatch_signer::{Protocols, Signer};
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
@@ -179,14 +179,14 @@ fn message(panic: &(dyn Any + Send)) -> String {
         .unwrap_or_else(|| "a panic without a message".to_owned())
 }
 
-/// An identity with its own switch and its own signer.
+/// An identity with its own Dispatch and its own signer.
 struct Owner {
     name: String,
     signer: Signer,
 }
 
 impl Owner {
-    /// Create `name`'s identity, its switch at an origin of its own, and its signer.
+    /// Create `name`'s identity, its Dispatch at an origin of its own, and its signer.
     async fn enroll(world: &World, name: &str) -> TestResult<Self> {
         let identity = world.identity(name)?;
         let origin = format!("https://{name}.journey.test");
@@ -240,7 +240,7 @@ impl Owner {
             world.app_keys(&identity, app)?,
             &names,
             &[],
-            pubky_switch_core::enc::hash(app.as_bytes()),
+            pubky_dispatch_core::enc::hash(app.as_bytes()),
         )?;
         let review = self.signer.review(asking.request.signed(), &asking.auth)?;
         let approved = Box::pin(self.signer.approve(review)).await?;

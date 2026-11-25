@@ -10,8 +10,8 @@ use crate::Paykit;
 use paykit_lib::bodies::PRIVATE_LIST_MAX_AGE_MS;
 use paykit_lib::records::ListPublicationRecord;
 use paykit_lib::ListVersion;
-use pubky_switch_client::app::RecordApplication;
-use pubky_switch_core::ops::Condition;
+use pubky_dispatch_client::app::RecordApplication;
+use pubky_dispatch_core::ops::Condition;
 use serde::{Deserialize, Serialize};
 
 /// Latest possible expiry of an older nonempty list. A counter observed without its
@@ -31,7 +31,7 @@ impl Payable {
     }
 }
 
-/// What the client reported about a list's first delivery (Pubky Switch spec 11).
+/// What the client reported about a list's first delivery (Pubky Dispatch spec 11).
 /// `Undelivered` proves the recipient never got it. `Unknown` means it may have: no
 /// replacement follows without the user's confirmation (Paykit spec 8.4, 9).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]

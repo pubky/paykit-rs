@@ -1,4 +1,4 @@
-//! Paykit's flows on the client's scripted switches: two identities, each on its own switch,
+//! Paykit's flows on the client's scripted dispatches: two identities, each on its own Dispatch,
 //! with Paykit apps joined from approvals and a fake rail.
 
 #![recursion_limit = "256"]

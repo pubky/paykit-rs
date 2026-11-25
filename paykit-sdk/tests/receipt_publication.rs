@@ -26,17 +26,17 @@ use paykit_sdk::{
     AppScopes, PayOptions, PayOutcome, PayeeStatus, Paykit, ReceiptsOf, Refusal, RequestDraft,
     RequestRef, RequestedScopes, Timer,
 };
-use pubky_switch_client::app::{
-    Collection as SwitchCollection, RecordTarget, DEFAULT_CURSOR_DEFER_MS,
+use pubky_dispatch_client::app::{
+    Collection as DispatchCollection, RecordTarget, DEFAULT_CURSOR_DEFER_MS,
 };
-use pubky_switch_client::client::answers::FeedQuery;
-use pubky_switch_client::store::MemoryStore;
-use pubky_switch_client::transport::BoxFuture;
-use pubky_switch_client::{Credentials, SwitchClient};
-use pubky_switch_core::ops::{Condition, OpKind, SignedOp};
-use pubky_switch_core::shared::ApplicationRef;
-use pubky_switch_harness::{parties::Asking, Backend, World};
-use pubky_switch_signer::{Protocols, Signer};
+use pubky_dispatch_client::client::answers::FeedQuery;
+use pubky_dispatch_client::store::MemoryStore;
+use pubky_dispatch_client::transport::BoxFuture;
+use pubky_dispatch_client::{Credentials, SwitchClient};
+use pubky_dispatch_core::ops::{Condition, OpKind, SignedOp};
+use pubky_dispatch_core::shared::ApplicationRef;
+use pubky_dispatch_harness::{parties::Asking, Backend, World};
+use pubky_dispatch_signer::{Protocols, Signer};
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
@@ -57,7 +57,7 @@ async fn setup_identity(world: &World, name: &str, origin: &str) -> TestResult<S
     Ok(tokio::spawn(Box::pin(async move {
         let mut signer = Signer::create(env, keyring, &origin).await?;
         signer.resume().await?;
-        Ok::<_, pubky_switch_signer::SignerError>(signer)
+        Ok::<_, pubky_dispatch_signer::SignerError>(signer)
     }))
     .await??)
 }
@@ -73,14 +73,14 @@ async fn join(
 ) -> TestResult<(Paykit, Signer)> {
     let owner = world.identity(identity)?;
     let keys = world.app_keys(&owner, name)?;
-    let auth = pubky_switch_core::enc::hash(name.as_bytes());
+    let auth = pubky_dispatch_core::enc::hash(name.as_bytes());
     let names: Vec<_> = scopes.scopes.iter().map(String::as_str).collect();
     let request = Asking::for_scopes_with_paths(keys, &names, &[], auth)?;
     let review = signer.review(request.request.signed(), &request.auth)?;
     let (signer, approved) = tokio::spawn(Box::pin(async move {
         let approved = signer.approve(review).await?;
         signer.claim_delivered(&approved.request).await?;
-        Ok::<_, pubky_switch_signer::SignerError>((signer, approved))
+        Ok::<_, pubky_dispatch_signer::SignerError>((signer, approved))
     }))
     .await??;
     let join = request.join_request(owner.public(), &approved)?;
@@ -231,7 +231,7 @@ async fn with_issued_sale(scenario: impl AsyncFn(&World, IssuedSale) -> TestResu
 async fn record_op(
     wallet: &Paykit,
     key: [u8; 32],
-    writer: &pubky_switch_core::records::AppCert,
+    writer: &pubky_dispatch_core::records::AppCert,
 ) -> TestResult<SignedOp> {
     wallet
         .app()
@@ -348,7 +348,7 @@ async fn issued_sale(world: &World) -> TestResult<IssuedSale> {
     let identity = shop.identity();
     let observer = shop_client(world, &seller, &shop, "issuer")?;
     let target = RecordTarget::new(
-        SwitchCollection::new(
+        DispatchCollection::new(
             Collection::PayeeActivity.name(),
             Collection::PayeeActivity.fixed_policy(),
         ),
@@ -637,8 +637,8 @@ async fn publish_after_restart(
             "delete": delete.version.version, "compared": current.version, "published": final_record.version.version,
             "cursor_before": before, "cursor_at_publication": at_application.1,
             "cursor_after_receive": received.1, "next_local": next_local, "next_service": next_service,
-            "cursor_after": after, "receipt_hash": pubky_switch_core::enc::b64(&receipt.hash()),
-            "writer": pubky_switch_core::enc::b64(&final_record.writer), "rail_executions": 1,
+            "cursor_after": after, "receipt_hash": pubky_dispatch_core::enc::b64(&receipt.hash()),
+            "writer": pubky_dispatch_core::enc::b64(&final_record.writer), "rail_executions": 1,
         })
     );
     Ok(())

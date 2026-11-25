@@ -7,6 +7,7 @@ mod allowances;
 #[path = "../tests/hosts/checkout.rs"]
 mod checkout;
 mod config;
+mod dispatch_refusal;
 mod enrollment;
 mod environment;
 mod error;
@@ -36,7 +37,6 @@ mod restore;
 mod review;
 mod runtime;
 mod store;
-mod switch_refusal;
 mod wallet;
 // A group's module may export nothing yet; the allow stays, so binding a group never edits this file.
 #[allow(unused_imports)]
@@ -70,6 +70,7 @@ pub use payments::*;
 #[allow(unused_imports)]
 pub use periods::*;
 // A group's module may export nothing yet; the allow stays, so binding a group never edits this file.
+pub use dispatch_refusal::*;
 #[allow(unused_imports)]
 pub use public::*;
 pub use receive::*;
@@ -78,7 +79,6 @@ pub use requests::*;
 pub use restore::*;
 pub use review::*;
 pub use store::*;
-pub use switch_refusal::*;
 pub use wallet::*;
 uniffi::setup_scaffolding!();
 #[cfg(test)]

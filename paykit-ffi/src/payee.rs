@@ -192,7 +192,7 @@ pub struct RequestDraft {
     /// Opaque metadata encoded as a JSON object (Paykit wire 1.1, 4.5).
     #[uniffi(default = None)]
     pub metadata_json: Option<Vec<u8>>,
-    /// Invite code for delivery to the payer's Switch (Switch spec 7).
+    /// Invite code for delivery to the payer's Dispatch (Dispatch spec 7).
     #[uniffi(default = None)]
     pub invite_code: Option<String>,
 }
@@ -202,7 +202,7 @@ fn payment_reference(value: &str) -> Result<PaymentReference, WalletError> {
 }
 
 fn timestamp(ms: u64, field: &str) -> Result<u64, WalletError> {
-    if ms > pubky_switch_core::time::MAX_TIME_MS {
+    if ms > pubky_dispatch_core::time::MAX_TIME_MS {
         return Err(WalletError::invalid(field));
     }
     Ok(ms)
@@ -269,12 +269,12 @@ impl TryFrom<RequestDraft> for sdk::RequestDraft {
     }
 }
 
-/// The signed request and its delivery state (Paykit spec 8.1, Switch spec 11).
+/// The signed request and its delivery state (Paykit spec 8.1, Dispatch spec 11).
 #[derive(uniffi::Record)]
 pub struct SentRequest {
-    /// The signed request's message ID (Switch wire 5.1).
+    /// The signed request's message ID (Dispatch wire 5.1).
     pub msg_id: String,
-    /// Where delivery stands (Switch spec 11).
+    /// Where delivery stands (Dispatch spec 11).
     pub delivery: MessageDelivery,
     /// The request whose record is written in the batch that queues it (Paykit spec 8.1).
     pub request: Option<RequestId>,
@@ -361,7 +361,7 @@ impl TryFrom<sdk::PeriodView> for PeriodView {
 /// A payee's signed period details (Paykit wire 4.9).
 #[derive(uniffi::Record)]
 pub struct PeriodDetailsView {
-    /// The signed message ID (Switch wire 5.1).
+    /// The signed message ID (Dispatch wire 5.1).
     pub msg_id: String,
     /// The App ID that owns the destinations (Paykit wire 4.9).
     pub app_id: Vec<u8>,
@@ -499,15 +499,15 @@ pub struct RetainedReceipt {
 /// A Payment Receipt with its signed message frame and app certificate (Paykit wire 4.11, 5.2).
 #[derive(uniffi::Record)]
 pub struct SignedReceipt {
-    /// The original receipt's message ID (Switch wire 5.1).
+    /// The original receipt's message ID (Dispatch wire 5.1).
     pub msg_id: String,
     /// The identity that signed the app certificate (Paykit wire 5.2).
     pub sender: Vec<u8>,
-    /// The certificate's exact body bytes, base64url (Switch wire 2.2).
+    /// The certificate's exact body bytes, base64url (Dispatch wire 2.2).
     pub certificate_body: String,
-    /// The certificate signature, base64url (Switch wire 2.2).
+    /// The certificate signature, base64url (Dispatch wire 2.2).
     pub certificate_signature: String,
-    /// The original signed message frame, including the receipt JSON (Switch wire 4.5).
+    /// The original signed message frame, including the receipt JSON (Dispatch wire 4.5).
     pub plaintext: Vec<u8>,
     /// The inbox acceptance time in Unix milliseconds, when recorded (Paykit wire 5.2).
     pub accepted_at_ms: Option<u64>,
@@ -516,13 +516,13 @@ pub struct SignedReceipt {
 /// A deletion observed for a retained receipt (Paykit spec 6).
 #[derive(uniffi::Record)]
 pub struct ReceiptDeletion {
-    /// The signed deletion's item hash (Switch wire 6.6).
+    /// The signed deletion's item hash (Dispatch wire 6.6).
     pub delete: Vec<u8>,
-    /// The deletion's generation and sequence (Switch wire 1.7).
+    /// The deletion's generation and sequence (Dispatch wire 1.7).
     pub version: Version,
     /// The deleting App ID when the signed predecessor held the receipt (Paykit spec 6).
     pub writer: Option<Vec<u8>>,
-    /// The original verified feed page's service time, in Unix milliseconds (Switch spec 8.2).
+    /// The original verified feed page's service time, in Unix milliseconds (Dispatch spec 8.2).
     pub page_time_ms: Option<u64>,
 }
 
@@ -583,7 +583,7 @@ impl TryFrom<ResendSelection> for sdk::ResendSelection {
         if selection
             .msg_ids
             .iter()
-            .any(|id| pubky_switch_core::json::check_uuid_v4(id).is_err())
+            .any(|id| pubky_dispatch_core::json::check_uuid_v4(id).is_err())
         {
             return Err(WalletError::invalid("msg_ids"));
         }

@@ -2,7 +2,7 @@
 
 use super::*;
 use paykit_lib::records::{ActivityRecord, ActivitySide};
-use pubky_switch_client::app::{Collection as SwitchCollection, KeptBatchStatus, RecordTarget};
+use pubky_dispatch_client::app::{Collection as DispatchCollection, KeptBatchStatus, RecordTarget};
 use std::sync::Mutex;
 
 #[tokio::test]
@@ -26,7 +26,7 @@ async fn quota_case(fail_notice: bool) -> TestResult {
 }
 
 async fn confirm_after_quota(world: &World, fail_notice: bool) -> TestResult {
-    use pubky_switch_client::store::{Fault, FaultStore};
+    use pubky_dispatch_client::store::{Fault, FaultStore};
     // Two paid requests and a cancelled invoice occupy the merchant's three record slots.
     let origin = "https://shop.payment.test";
     let identity = world.identity("shop")?;
@@ -71,7 +71,7 @@ async fn confirm_after_quota(world: &World, fail_notice: bool) -> TestResult {
         .ok_or("missing unused request")?;
     let collection = Collection::PayeeActivity;
     let unused_target = RecordTarget::new(
-        SwitchCollection::new(collection.name(), collection.fixed_policy()),
+        DispatchCollection::new(collection.name(), collection.fixed_policy()),
         &natural_key::request_record(&merchant, &unused.request_hash),
     );
     let unused_key = wallets.seller_wallet.app().record_key(&unused_target)?;
@@ -81,7 +81,7 @@ async fn confirm_after_quota(world: &World, fail_notice: bool) -> TestResult {
         .await?;
     let number = settlement_bucket(&tag);
     let key = SettlementBucket::record_key(number, wallets.seller_wallet.app().naming_key())?;
-    let caller = pubky_switch_core::enc::zbase32_encode(&wallets.labelled.app_id());
+    let caller = pubky_dispatch_core::enc::zbase32_encode(&wallets.labelled.app_id());
     let ops_path = format!("/v1/{}/ops", identity.key().id());
     let quota_answers = Arc::new(Mutex::new(Vec::new()));
     let observed = Arc::clone(&quota_answers);
@@ -90,7 +90,7 @@ async fn confirm_after_quota(world: &World, fail_notice: bool) -> TestResult {
         if request.origin == origin
             && request.method == "POST"
             && request.path_and_query == ops_path
-            && request.header(pubky_switch_core::http::header::APP) == Some(caller.as_str())
+            && request.header(pubky_dispatch_core::http::header::APP) == Some(caller.as_str())
             && answer.status == 429
         {
             observed.lock().unwrap().push(answer.body.clone());
@@ -142,7 +142,7 @@ async fn confirm_after_quota(world: &World, fail_notice: bool) -> TestResult {
     assert_eq!(body["current"]["limit"], "record_keys");
     assert_eq!(
         refused.code(),
-        Some(pubky_switch_core::http::ErrorCode::QuotaExceeded)
+        Some(pubky_dispatch_core::http::ErrorCode::QuotaExceeded)
     );
     let original = refused
         .kept_batch()
@@ -153,7 +153,7 @@ async fn confirm_after_quota(world: &World, fail_notice: bool) -> TestResult {
             bucket, submission, storage,
         } if *bucket == number && submission.kept_batch() == Some(original)
             && matches!(storage.as_ref(), paykit_sdk::PaykitError::Client(
-                pubky_switch_client::app::AppError::Store(pubky_switch_client::StoreError::Unavailable))))
+                pubky_dispatch_client::app::AppError::Store(pubky_dispatch_client::StoreError::Unavailable))))
         );
         let app_id = wallets.labelled.app_id();
         drop(wallets.labelled);

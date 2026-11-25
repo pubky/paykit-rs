@@ -1,5 +1,5 @@
 //! Host display names stay local; selling labels retain their certificate authority
-//! (Switch spec 4.2; Paykit spec 3.1, 3.4, 8.1).
+//! (Dispatch spec 4.2; Paykit spec 3.1, 3.4, 8.1).
 #![recursion_limit = "256"]
 
 use std::collections::BTreeMap;
@@ -18,14 +18,14 @@ use paykit_sdk::{
     AppScopes, PayOptions, PayOutcome, PayeeStatus, Paykit, PaykitConfig, Refusal, RequestDraft,
     RequestedScopes, Timer,
 };
-use pubky_switch_client::app::{AppConfig, Publication};
-use pubky_switch_client::store::MemoryStore;
-use pubky_switch_client::transport::BoxFuture;
-use pubky_switch_client::{Credentials, SwitchClient};
-use pubky_switch_core::records::{app_record_path, AppRecord};
-use pubky_switch_core::sig::SignedDoc;
-use pubky_switch_harness::{parties::Asking, Backend, World};
-use pubky_switch_signer::{Protocols, Signer};
+use pubky_dispatch_client::app::{AppConfig, Publication};
+use pubky_dispatch_client::store::MemoryStore;
+use pubky_dispatch_client::transport::BoxFuture;
+use pubky_dispatch_client::{Credentials, SwitchClient};
+use pubky_dispatch_core::records::{app_record_path, AppRecord};
+use pubky_dispatch_core::sig::SignedDoc;
+use pubky_dispatch_harness::{parties::Asking, Backend, World};
+use pubky_dispatch_signer::{Protocols, Signer};
 use serde_json::Value;
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
@@ -80,7 +80,7 @@ async fn join(
         keys,
         &scopes,
         &[],
-        pubky_switch_core::enc::hash(spec.app.as_bytes()),
+        pubky_dispatch_core::enc::hash(spec.app.as_bytes()),
     )?;
     let review = signer.review(request.request.signed(), &request.auth)?;
     let approved = Box::pin(signer.approve(review)).await?;

@@ -49,18 +49,18 @@ jobs:
       postgres:
         image: postgres:17
         env:
-          POSTGRES_USER: switch
-          POSTGRES_PASSWORD: switch
+          POSTGRES_USER: dispatch
+          POSTGRES_PASSWORD: dispatch
           POSTGRES_DB: postgres
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U switch -d postgres"
+          --health-cmd "pg_isready -U Dispatch -d postgres"
           --health-interval 2s
           --health-timeout 5s
           --health-retries 30
     env:
-      PUBKY_SWITCH_TEST_DATABASE_URL: postgres://switch:switch@127.0.0.1:5432/postgres
+      PUBKY_SWITCH_TEST_DATABASE_URL: postgres://dispatch:dispatch@127.0.0.1:5432/postgres
       PUBKY_SWITCH_REQUIRE_DB: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -99,7 +99,7 @@ jobs:
   # The generated Kotlin and Swift consumers drive the bindings the way a wallet
   # does. The plain consumers use the production library; the checkout consumers
   # use the test-wallet library and run every restore decision. Both use the
-  # Scripted switch. The issuer is built last because building an example adds
+  # Scripted dispatch. The issuer is built last because building an example adds
   # the dev-dependency features to the library it links.
   kotlin-host:
     name: Kotlin host

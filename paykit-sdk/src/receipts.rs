@@ -9,7 +9,7 @@ use paykit_lib::derive::natural_key;
 use paykit_lib::periods::PeriodRef;
 use paykit_lib::records::{ActivityRecord, ActivitySide, RecordBinding, StoredMessage};
 use paykit_lib::{AttemptId, Body, Label, PaymentReference};
-use pubky_switch_client::app::UserConfirmed;
+use pubky_dispatch_client::app::UserConfirmed;
 use serde_json::{Map, Value};
 
 use crate::activity::ActivityTarget;

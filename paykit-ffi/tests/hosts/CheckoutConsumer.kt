@@ -141,7 +141,7 @@ private suspend fun restoreCheckout(
                     wallet.refuseRestoredRegistrations(state.registrations)
                     error("the unrecognized registration did not stop the wallet")
                 } catch (_: WalletException.Recovery) {}
-                val alarm = wallet.restoreState().alarm as SwitchAlarm.Compromise
+                val alarm = wallet.restoreState().alarm as DispatchAlarm.Compromise
                 check(alarm.n == 1uL && method.calls.get() == 0)
                 try {
                     wallet.confirmRestoredRegistrations(state.registrations)
@@ -472,7 +472,7 @@ private class DyingCallbacks : ReceiptReader(), WalletStore {
     override fun settlementId(endpoint: String, proofJson: ByteArray): ByteArray? = die("method.settlement_id")
     override suspend fun pay(payment: MethodPayment): MethodOutcome = die("method.pay")
     override suspend fun payment(attemptId: String): MethodOutcome? = die("method.payment")
-    override suspend fun allowanceHistory(payer: ByteArray): List<MethodDispatch>? = die("method.allowance_history")
+    override suspend fun allowanceHistory(payer: ByteArray): List<MethodHandoff>? = die("method.allowance_history")
     override suspend fun verify(proof: MethodProof): ULong? = die("method.verify")
 }
 
@@ -571,7 +571,7 @@ private fun dyingCallbacks() = runBlocking {
     dyingCallbacksChecked = true
 }
 
-/// Text the switch gave never leaves the bindings: not in a message, a description or a reason.
+/// Text the Dispatch gave never leaves the bindings: not in a message, a description or a reason.
 private fun outsideTextStaysInside() {
     val sentinel = "SENTINEL-outside-text"
     try {
@@ -584,7 +584,7 @@ private fun outsideTextStaysInside() {
             failure.code(), failure.context(), checkNotNull(failure.refusal()).reason(),
         )
         check(shown.none { it.contains(sentinel) }) { "outside text left the bindings" }
-        check(failure.context() == "switch_unavailable: a later call can succeed")
+        check(failure.context() == "dispatch_unavailable: a later call can succeed")
     }
 }
 

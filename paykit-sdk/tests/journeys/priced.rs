@@ -7,7 +7,7 @@ use paykit_lib::{Asset, Decimal, PaymentAmount, PaymentReference, Rate};
 use paykit_sdk::{
     PayOptions, PaykitConfig, PricedPayment, RateSource, Refusal, RequestDraft, RequestStatus,
 };
-use pubky_switch_harness::World;
+use pubky_dispatch_harness::World;
 
 use super::{
     btc, checkout, endpoint, on_both_backends, paid_and_receipted, payload, Checkout, Expected,
