@@ -2,7 +2,7 @@ use pubky_dispatch_harness::{Backend, World};
 use std::{error::Error, io::Write};
 
 pub(super) fn start() -> Result<World, Box<dyn Error>> {
-    let backend = if std::env::var_os("PUBKY_SWITCH_REQUIRE_DB").is_some() {
+    let backend = if std::env::var_os("PUBKY_DISPATCH_REQUIRE_DB").is_some() {
         Backend::Service
     } else {
         Backend::Scripted

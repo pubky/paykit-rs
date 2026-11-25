@@ -13324,7 +13324,7 @@ async fn test_loss_withdrawal_waits_for_the_service_key_of_its_selected_proposal
 
 async fn carried_loss_withdrawal(keep_key: bool) {
     use pubky_dispatch_client::app::RecordContent;
-    use pubky_dispatch_client::testing::{Fault, SWITCH_ORIGIN};
+    use pubky_dispatch_client::testing::{Fault, DISPATCH_ORIGIN};
     use pubky_dispatch_core::ops::{Condition, SignedOp};
     use pubky_dispatch_core::records::{Inbox, ServiceKeyEntry};
 
@@ -13405,7 +13405,7 @@ async fn carried_loss_withdrawal(keep_key: bool) {
 
     // An in-place service-key change preserves the selected upload and the chain.
     let next = recovered.change_key_into([74; 32]);
-    w.router.add_dispatch(SWITCH_ORIGIN, &next);
+    w.router.add_dispatch(DISPATCH_ORIGIN, &next);
     let advance = w
         .alice
         .sign_next(|doc| {
@@ -13416,7 +13416,7 @@ async fn carried_loss_withdrawal(keep_key: bool) {
                 });
             }
             doc.generation += 1;
-            doc.inbox = Inbox::new(SWITCH_ORIGIN, next.service_key());
+            doc.inbox = Inbox::new(DISPATCH_ORIGIN, next.service_key());
         })
         .unwrap();
     next.deliver_identity(&advance).unwrap();

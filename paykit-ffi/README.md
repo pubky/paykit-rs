@@ -114,7 +114,7 @@ The native enrollment cases use the actual signer, SQLite-backed device storage,
 
 ### Run the generated-language consumers
 
-The test issuer and enrolled checkout use Scripted by default. Set `PUBKY_SWITCH_REQUIRE_DB=1` and `PUBKY_SWITCH_TEST_DATABASE_URL` to run the signer, checkout, paid-wallet and recovery fixtures against the PostgreSQL-backed service.
+The test issuer and enrolled checkout use Scripted by default. Set `PUBKY_DISPATCH_REQUIRE_DB=1` and `PUBKY_DISPATCH_TEST_DATABASE_URL` to run the signer, checkout, paid-wallet and recovery fixtures against the PostgreSQL-backed service.
 
 On macOS, use the host library and the sources generated above. Set `LIB` to the absolute directory containing `libpaykit.dylib`, and use an absolute `OUT` path. The Kotlin consumer runs with a local Gradle installation. The Swift consumer imports the generated module from a host compiled in Swift 6 mode.
 

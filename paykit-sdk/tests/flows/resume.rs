@@ -245,7 +245,7 @@ async fn test_resume_on_a_failing_store_journals_nothing() {
     assert_eq!(stage(&wallet, &second).await, Stage::Paying);
 }
 
-/// The world's switches, where the next operation batch (`/ops`), once armed, fails at the
+/// The world's Dispatch services, where the next operation batch (`/ops`), once armed, fails at the
 /// host's transport with the error armed, nothing sent; later ones go through.
 struct RefusingOps {
     inner: Arc<pubky_dispatch_client::testing::Router>,

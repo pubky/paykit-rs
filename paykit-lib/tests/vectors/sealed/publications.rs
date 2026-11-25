@@ -45,11 +45,13 @@ pub(crate) fn address(keys: &Keys) -> Value {
         lp(&[&record.publisher, &record.recipient, &generation])
     );
     let policy = Policy::new(SCOPE, &[SCOPE]).permanent(Some(record.generation));
+    // Dispatch wire 1.5: a permanent policy's generation as its tagged pair.
     let material = lp(&[
-        labels::derive::PERMANENT_POLICY.as_bytes(),
+        labels::derive::POLICY.as_bytes(),
         SCOPE.as_bytes(),
         &u64be(1),
         SCOPE.as_bytes(),
+        labels::policy_tag::PERMANENT.as_bytes(),
         &generation,
     ]);
     let digest = policy.hash().unwrap();

@@ -212,19 +212,29 @@ fn policies() -> Value {
     let cases: Vec<Value> = named
         .iter()
         .map(|(name, policy)| {
+            // Dispatch wire 1.5: the write scopes, then each optional member present as a
+            // tagged pair, in order: create scope, delete scope, a permanent policy's
+            // generation (0 when null).
             let count = u64be(policy.write_scopes.len() as u64);
-            let label = if policy.permanent.is_some() {
-                labels::derive::PERMANENT_POLICY
-            } else {
-                labels::derive::POLICY
-            };
-            let mut parts: Vec<&[u8]> =
-                vec![label.as_bytes(), policy.read_scope.as_bytes(), &count];
+            let mut parts: Vec<&[u8]> = vec![
+                labels::derive::POLICY.as_bytes(),
+                policy.read_scope.as_bytes(),
+                &count,
+            ];
             parts.extend(policy.write_scopes.iter().map(String::as_bytes));
+            if let Some(scope) = &policy.create_scope {
+                parts.push(labels::policy_tag::CREATE_SCOPE.as_bytes());
+                parts.push(scope.as_bytes());
+            }
+            if let Some(scope) = &policy.delete_scope {
+                parts.push(labels::policy_tag::DELETE_SCOPE.as_bytes());
+                parts.push(scope.as_bytes());
+            }
             let generation = policy
                 .permanent
                 .map(|permanent| u64be(permanent.generation.unwrap_or(0)));
             if let Some(generation) = &generation {
+                parts.push(labels::policy_tag::PERMANENT.as_bytes());
                 parts.push(generation);
             }
             let hashed = lp(&parts);

@@ -1734,7 +1734,7 @@ async fn recovery_upload_for_listing(
 #[tokio::test]
 async fn test_restore_held_waits_for_a_listing_the_client_owes() {
     use pubky_dispatch_client::client::{Credentials, DispatchClient};
-    use pubky_dispatch_client::testing::SWITCH_ORIGIN;
+    use pubky_dispatch_client::testing::DISPATCH_ORIGIN;
 
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
@@ -1758,7 +1758,7 @@ async fn test_restore_held_waits_for_a_listing_the_client_owes() {
     assert!(!wallet.app().listing_owed().await.unwrap());
     let before = service.tip_seq();
     let client = DispatchClient::new(
-        SWITCH_ORIGIN,
+        DISPATCH_ORIGIN,
         w.alice_id(),
         Credentials::App {
             identity: w.alice_id(),

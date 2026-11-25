@@ -14,7 +14,7 @@ use paykit_sdk::{
 };
 use pubky_dispatch_client::app::UserConfirmed;
 use pubky_dispatch_client::clock::Clock;
-use pubky_dispatch_client::testing::{ScriptedDispatch, SWITCH_ORIGIN};
+use pubky_dispatch_client::testing::{ScriptedDispatch, DISPATCH_ORIGIN};
 use pubky_dispatch_core::claims::ClaimStatus;
 use pubky_dispatch_core::records::{Inbox, CLOCK_TOLERANCE_MS};
 
@@ -28,7 +28,7 @@ const NEXT_SECRET: [u8; 32] = [0x4e; 32];
 const LATER_SECRET: [u8; 32] = [0x4f; 32];
 
 /// Alice's signer declares her current generation lost (Dispatch spec 12.6 step 1): a new
-/// service recovering the account at the next generation, routed at [`SWITCH_ORIGIN`], the
+/// service recovering the account at the next generation, routed at [`DISPATCH_ORIGIN`], the
 /// next `identity.json` naming it with `recovery_from`, delivered there and published; then
 /// the old service is unreachable.
 pub(super) fn declare_loss(w: &World) -> Arc<ScriptedDispatch> {
@@ -37,12 +37,12 @@ pub(super) fn declare_loss(w: &World) -> Arc<ScriptedDispatch> {
 
 /// The signer replaces the first recovery service after a second declared loss.
 pub(super) fn declare_second_loss(w: &World) -> Arc<ScriptedDispatch> {
-    declare_loss_of(w, SWITCH_ORIGIN, LATER_SECRET)
+    declare_loss_of(w, DISPATCH_ORIGIN, LATER_SECRET)
 }
 
 /// The signer replaces the second recovery service with a new service key.
 pub(super) fn declare_third_loss(w: &World) -> Arc<ScriptedDispatch> {
-    declare_loss_of(w, SWITCH_ORIGIN, [123; 32])
+    declare_loss_of(w, DISPATCH_ORIGIN, [123; 32])
 }
 
 /// [`declare_loss`], with the next `identity.json` still listing the lost generation's
@@ -85,14 +85,14 @@ fn declare_loss_with(
         .alice
         .sign_next(|body| {
             body.generation = lost_generation + 1;
-            body.inbox = Inbox::new(SWITCH_ORIGIN, next.service_key());
+            body.inbox = Inbox::new(DISPATCH_ORIGIN, next.service_key());
             body.recovery_from = Some(lost_generation);
             body.service_keys.extend(kept_key);
         })
         .unwrap();
     next.deliver_identity(&doc).unwrap();
     w.router.remove(lost_origin);
-    w.router.add_dispatch(SWITCH_ORIGIN, &next);
+    w.router.add_dispatch(DISPATCH_ORIGIN, &next);
     next
 }
 
@@ -299,7 +299,7 @@ async fn recover_competing_writes(
     phone.app_mut().refresh_identity().await.unwrap();
     phone.app_mut().follow_provider().await.unwrap();
     let client = DispatchClient::new(
-        SWITCH_ORIGIN,
+        DISPATCH_ORIGIN,
         w.alice_id(),
         Credentials::App {
             identity: w.alice_id(),

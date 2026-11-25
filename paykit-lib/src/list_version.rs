@@ -28,7 +28,7 @@ impl ListVersion {
     pub fn new(generation: u64, counter: u64) -> Result<Self> {
         ensure(
             (1..=MAX_INT).contains(&generation) && (1..=MAX_INT).contains(&counter),
-            "Paykit wire 4.13: generation and counter must be positive Switch integers",
+            "Paykit wire 4.13: generation and counter must be positive Dispatch integers",
         )
         .map_err(Error::into_validation)?;
         Ok(Self {

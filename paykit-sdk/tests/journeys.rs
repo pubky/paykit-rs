@@ -1,11 +1,11 @@
 //! The ordinary wallet journeys, end to end through the SDK, on both backends: the client's
-//! scripted switches and the Dispatch service on PostgreSQL.
+//! scripted Dispatch services and the Dispatch service on PostgreSQL.
 //!
 //! Each identity has its own Dispatch and its own signer, which approves each Paykit app it
 //! joins. Each test runs its journey on both backends, each on a fresh world, and names the
-//! backend in any failure. The service backend needs `PUBKY_SWITCH_TEST_DATABASE_URL`.
+//! backend in any failure. The service backend needs `PUBKY_DISPATCH_TEST_DATABASE_URL`.
 //! Without it the service run is skipped, as in the other service tests, unless
-//! `PUBKY_SWITCH_REQUIRE_DB` is set, which CI sets; with it, a database that can't be reached
+//! `PUBKY_DISPATCH_REQUIRE_DB` is set, which CI sets; with it, a database that can't be reached
 //! fails the test.
 #![recursion_limit = "256"]
 

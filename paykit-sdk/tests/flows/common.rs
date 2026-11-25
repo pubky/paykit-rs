@@ -1216,7 +1216,7 @@ impl Transport for SlowDispatch {
     }
 }
 
-/// The world's switches, where the next answer to an operation batch (`/ops`), once armed,
+/// The world's Dispatch services, where the next answer to an operation batch (`/ops`), once armed,
 /// takes `ms` on the clock: the call returns after the batch was applied, the clock moved on.
 pub struct SlowOps {
     pub inner: Arc<Router>,

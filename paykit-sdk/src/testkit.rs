@@ -184,7 +184,7 @@ pub(crate) fn object(value: Value) -> Map<String, Value> {
     value.as_object().cloned().unwrap_or_default()
 }
 
-/// Two identities' switches, alice's and bob's, on one clock and Homeserver, for the unit
+/// Two identities' Dispatch services, alice's and bob's, on one clock and Homeserver, for the unit
 /// tests that drive a whole app: the setup of the flow tests' world, cut to what they use.
 pub(crate) struct Dispatches {
     pub(crate) clock: std::sync::Arc<pubky_dispatch_client::clock::TestClock>,

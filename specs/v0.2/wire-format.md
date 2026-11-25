@@ -122,7 +122,7 @@ A Paykit App's certificate is the Dispatch's (Dispatch wire 3.1). Paykit fixes i
 
 **Dispatch permissions from Paykit's scopes** (spec 3.1). The table's second column is Paykit's: the signer sets `permissions` from Paykit's scopes by it, and from another protocol's scopes by that protocol's table, and Paykit's verifiers derive the list again from the scopes they know; names they don't know, and other protocols' scopes, grant nothing in it. A scope may appear in several rows. The list holds each permission that one of the scopes grants, once, in the order below.
 
-A well-formed list with a permission missing, or, in a certificate that holds no other protocol's scope, with one extra, is refused by Paykit's verifiers, while the Dispatch takes it and enforces exactly that list: the Dispatch no longer checks the signer's derivation, so a signer that grants too much is honoured by the Dispatch and refused by Paykit's apps, and the signer is trusted with everything anyway. A change to this table needs a new certificate version (`v`), since verifiers of this version would refuse a certificate carrying the new list. Vectors: `documents.json` `certificate_rejections`, which the Dispatch takes (`switch_accepts`); those every reader refuses are the Dispatch set's `permission_rejections`.
+A well-formed list with a permission missing, or, in a certificate that holds no other protocol's scope, with one extra, is refused by Paykit's verifiers, while the Dispatch takes it and enforces exactly that list: the Dispatch no longer checks the signer's derivation, so a signer that grants too much is honoured by the Dispatch and refused by Paykit's apps, and the signer is trusted with everything anyway. A change to this table needs a new certificate version (`v`), since verifiers of this version would refuse a certificate carrying the new list. Vectors: `documents.json` `certificate_rejections`, which the Dispatch takes (`dispatch_accepts`); those every reader refuses are the Dispatch set's `permission_rejections`.
 
 | Dispatch permission | Granted by any of |
 |---|---|
@@ -191,8 +191,8 @@ Example (`documents.json` `executor_grant`, whose write built on version (1, 12)
 {
   "app_id": "cw5ahtdkixcafna9zh1y5y5o1w",
   "cert": {
-    "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFw...",
-    "sig": "Ir-nJajpFEnwb23vssI3EeOQj5e1-q6-40FrkjXZb0f6irORauaGp_fi8YPsLbC3V153vNz1PfcjyPJI_DXODA"
+    "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktZGlzcGF0Y2gu...",
+    "sig": "uYkofomrLmnpeDcNPqSgyPTqctrVUNvUo5-8tC-M4wPu2MO3c4g1ichWgmvsPdTwpCgkq2sV40b2-BBecbqiAw"
   },
   "confirmed_generation": 1,
   "sig": "jKZ13zfRyNtQPpLEeOU2USP0AH5ryagD_QqudMVFPn2bi61kshMto6Uuqxohf38_ueLZXBivfe9V3j_CWacmBg",
@@ -892,7 +892,7 @@ Example (alice's `payer_activity` record of bob's request, certificate and plain
   "request": {
     "sender": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
     "cert": {
-      "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFw...",
+      "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktZGlzcGF0Y2gu...",
       "sig": "4bAiKsZ2ITml9GP7Nqxgz3-lJ5WB25fIqYRarBxke89Mye8URlPFAM5qGTqWMxRcPS5lWLy1aDPt6IyRVQsoDA"
     },
     "plaintext": {
@@ -1006,8 +1006,8 @@ Example entry (`documents.json` `executor_grant_history_entry`: the record was c
   "grant": {
     "app_id": "cw5ahtdkixcafna9zh1y5y5o1w",
     "cert": {
-      "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFw...",
-      "sig": "Ir-nJajpFEnwb23vssI3EeOQj5e1-q6-40FrkjXZb0f6irORauaGp_fi8YPsLbC3V153vNz1PfcjyPJI_DXODA"
+      "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktZGlzcGF0Y2gu...",
+      "sig": "uYkofomrLmnpeDcNPqSgyPTqctrVUNvUo5-8tC-M4wPu2MO3c4g1ichWgmvsPdTwpCgkq2sV40b2-BBecbqiAw"
     },
     "confirmed_generation": 1,
     "sig": "jKZ13zfRyNtQPpLEeOU2USP0AH5ryagD_QqudMVFPn2bi61kshMto6Uuqxohf38_ueLZXBivfe9V3j_CWacmBg",

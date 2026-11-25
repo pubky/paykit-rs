@@ -3099,7 +3099,7 @@ async fn test_unrequested_later_write_changing_lost_to_delete_taken() {
 async fn test_unrequested_loss_marker_of_a_recovery_upload_kept_through_an_in_place_restore() {
     use pubky_dispatch_client::client::answers::{RecoveryUpload, UploadedOp};
     use pubky_dispatch_client::client::{Credentials, DispatchClient};
-    use pubky_dispatch_client::testing::{Fault, SWITCH_ORIGIN};
+    use pubky_dispatch_client::testing::{Fault, DISPATCH_ORIGIN};
     use pubky_dispatch_core::ops::{Entry, OpsRequest};
     let w = World::new();
     let storage = crate::common::store();
@@ -3175,7 +3175,7 @@ async fn test_unrequested_loss_marker_of_a_recovery_upload_kept_through_an_in_pl
     tablet.app_mut().refresh_identity().await.unwrap();
     tablet.app_mut().follow_provider().await.unwrap();
     DispatchClient::new(
-        SWITCH_ORIGIN,
+        DISPATCH_ORIGIN,
         w.alice_id(),
         Credentials::App {
             identity: w.alice_id(),

@@ -250,13 +250,13 @@ async fn test_shared_hold_kept_through_a_key_change_and_a_second_loss() {
     // A key change in place after the loss keeps `recovery_from` below `generation - 1`.
     let changed = next.change_key_into([75; 32]);
     w.router
-        .add_dispatch(pubky_dispatch_client::testing::SWITCH_ORIGIN, &changed);
+        .add_dispatch(pubky_dispatch_client::testing::DISPATCH_ORIGIN, &changed);
     let current = w
         .alice
         .sign_next(|body| {
             body.generation += 1;
             body.inbox = Inbox::new(
-                pubky_dispatch_client::testing::SWITCH_ORIGIN,
+                pubky_dispatch_client::testing::DISPATCH_ORIGIN,
                 changed.service_key(),
             );
         })
