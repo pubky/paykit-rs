@@ -884,7 +884,9 @@ pub(crate) fn restore_paykit_layer(
         let kept = state::restored::<crate::journal::AttemptFacts>(&key, &value, &binder)
             .map_err(|_| "the installation holds an invalid payment method fact")?;
         let merged = match facts.remove(&attempt) {
-            Some(backup) => backup.merged(kept),
+            Some(backup) => backup.merged(kept).map_err(|_| {
+                "Paykit spec 7.2: a payment's facts in the backup and the installation disagree"
+            })?,
             None => kept,
         };
         facts.insert(attempt, merged);
@@ -1552,8 +1554,9 @@ pub(crate) fn restore_paykit_layer(
     )
     .map_err(|_| "the pending Allowance replies cannot be retained")?;
     for (attempt, kept) in facts {
-        // Facts go only with their entry, as pruning deletes them only with it.
-        if journaled.contains(&attempt) {
+        // Facts go with their entry, as pruning deletes them with it; a sighting of the
+        // payment goes without one too, as the Allowance ledger may still list the attempt.
+        if journaled.contains(&attempt) || kept.paid_seen.is_some() && !kept.ledger_dropped {
             writes.push(
                 state::local_put(&key::attempt_facts(&attempt), &kept)
                     .map_err(|_| "a payment's method facts cannot be written")?,

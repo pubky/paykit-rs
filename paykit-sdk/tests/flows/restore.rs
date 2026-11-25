@@ -2162,6 +2162,58 @@ async fn test_restore_entry_holding_the_users_resolution_before_it_finished_refu
 }
 
 #[tokio::test]
+async fn test_restore_keeps_a_sighting_of_a_payment_this_installation_did_not_journal() {
+    // Facts go with their journal entry, but a sighting of a payment made goes without one:
+    // an attempt another own app made under an Allowance is known here only from the ledger
+    // and the claim. Facts with neither an entry nor a sighting are left out.
+    let w = World::new();
+    let (good, _) = backup_with_a_payment(&w).await;
+    let mut layer = layer_of(&good);
+    let entry = layer
+        .iter()
+        .find(|(k, _)| k.starts_with(b"j/"))
+        .map(|(_, v)| v.clone())
+        .unwrap();
+    let orphan = |byte: u8, sighted: bool| {
+        let mut value = entry.clone();
+        value["d"] = serde_json::json!({
+            "proof": null,
+            "paid_at_ms": null,
+            "method_failed": false,
+            "ask_again": false,
+            "told": false,
+            "told_paid": false,
+            "paid_seen": sighted.then(|| serde_json::json!({
+                "source": { "kind": "paid_history" },
+                "obligation": entry["d"]["obligation"],
+                "first_seen_ms": 1,
+            })),
+            "ledger_dropped": false,
+        });
+        let key = format!(
+            "jf/{}",
+            paykit_lib::AttemptId::from_bytes([byte; 16]).to_text()
+        );
+        (key.into_bytes(), value)
+    };
+    layer.push(orphan(8, true));
+    layer.push(orphan(9, false));
+    let backup = with_layer(&good, layer);
+    let backup = PaykitBackup::from_bytes(&serde_json::to_vec(&backup).unwrap()).unwrap();
+    let wallet = restored(&w, &backup).await;
+    let held = |byte: u8| {
+        let key = format!(
+            "jf/{}",
+            paykit_lib::AttemptId::from_bytes([byte; 16]).to_text()
+        );
+        let app = wallet.app();
+        async move { app.protocol_get("paykit", key.as_bytes()).await.unwrap() }
+    };
+    assert!(held(8).await.is_some());
+    assert!(held(9).await.is_none());
+}
+
+#[tokio::test]
 async fn test_restore_entry_paid_off_the_claim_and_resolved_otherwise_refused() {
     // The user's `done` off the claim goes with the user's resolution as done: a backup entry
     // paid off the claim but resolved failed or unknown is refused, writing nothing. Resolved

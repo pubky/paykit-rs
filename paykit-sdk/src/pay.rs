@@ -5847,8 +5847,16 @@ impl Paykit {
             if bound_passed(bound, service, now) {
                 let attempt = entry.attempt()?;
                 tx.delete(&key::journal(&attempt))
-                    .delete(&key::attempt_facts(&attempt))
                     .delete(&key::offline_batch(&attempt));
+                // The facts go with the entry, but a sighting of the payment stays until the
+                // Allowance ledger no longer lists the attempt (`ledger_dropped_writes`).
+                let sighted = self
+                    .attempt_facts(&attempt)
+                    .await?
+                    .is_some_and(|facts| facts.paid_seen.is_some() && !facts.ledger_dropped);
+                if !sighted {
+                    tx.delete(&key::attempt_facts(&attempt));
+                }
                 // Its acknowledged notices go with it; one not acknowledged stays for the
                 // host, and goes when acknowledged.
                 for kind in [NoticeKind::PaidAfterFailed, NoticeKind::HeldWithoutPay] {
@@ -7515,6 +7523,8 @@ mod tests {
             ask_again: false,
             told: false,
             told_paid: false,
+            paid_seen: None,
+            ledger_dropped: false,
         };
         // A write that would take the proof, the method's failure or told back is refused.
         for lost in [
@@ -7547,10 +7557,10 @@ mod tests {
             ..asking.clone()
         }));
         // A restore keeps what either copy holds.
-        let merged = AttemptFacts::default().merged(paid.clone());
+        let merged = AttemptFacts::default().merged(paid.clone()).unwrap();
         assert_eq!(merged.proof.as_ref(), Some(&proof));
         assert!(merged.method_failed && !merged.ask_again);
-        assert!(paid.grows_to(&merged.clone().merged(asking.clone())));
+        assert!(paid.grows_to(&merged.clone().merged(asking.clone()).unwrap()));
         // Facts no write could leave are refused.
         assert!(AttemptFacts {
             paid_at_ms: Some(1),
@@ -7565,6 +7575,49 @@ mod tests {
         .check()
         .is_err());
         assert!(paid.check().is_ok() && asking.check().is_ok());
+    }
+
+    #[test]
+    fn test_attempt_facts_keep_the_first_sighting_of_a_payment() {
+        use crate::journal::{AttemptFacts, PaidSeen, PaidSource};
+        let seen = |source, obligation, first_seen_ms| AttemptFacts {
+            paid_seen: Some(PaidSeen {
+                source,
+                obligation,
+                first_seen_ms,
+            }),
+            ..AttemptFacts::default()
+        };
+        let signed = seen(PaidSource::SignedDone, [1; 32], 10);
+        // A sighting is never taken back or replaced, and the ledger's drop never undone.
+        assert!(!signed.grows_to(&AttemptFacts::default()));
+        assert!(!signed.grows_to(&seen(PaidSource::PaidHistory, [1; 32], 5)));
+        assert!(AttemptFacts::default().grows_to(&signed));
+        let dropped = AttemptFacts {
+            ledger_dropped: true,
+            ..signed.clone()
+        };
+        assert!(signed.grows_to(&dropped) && !dropped.grows_to(&signed));
+        // A restore keeps the earlier of two sightings, either way round, and a sighting
+        // either copy holds.
+        let history = seen(PaidSource::PaidHistory, [1; 32], 5);
+        for (a, b) in [(&signed, &history), (&history, &signed)] {
+            let merged = a.clone().merged(b.clone()).unwrap();
+            assert_eq!(merged.paid_seen, history.paid_seen);
+        }
+        let merged = AttemptFacts::default().merged(signed.clone()).unwrap();
+        assert_eq!(merged.paid_seen, signed.paid_seen);
+        assert!(
+            dropped
+                .clone()
+                .merged(signed.clone())
+                .unwrap()
+                .ledger_dropped
+        );
+        // Two sightings of different obligations are a corrupt store.
+        assert!(signed
+            .merged(seen(PaidSource::PayerProof { dated: true }, [2; 32], 1))
+            .is_err());
     }
 
     fn is_client(error: &PaykitError, expected: &ClientRefusal) -> bool {

@@ -91,3 +91,59 @@ async fn test_pruning_keeps_a_payment_still_open_past_its_window() {
     assert_eq!(payments.len(), 1);
     assert_eq!(payments[0].stage, paykit_sdk::Stage::Paying);
 }
+
+/// The JSON Paykit keeps at `key`, `None` where nothing is.
+async fn held(wallet: &Paykit, key: &str) -> Option<serde_json::Value> {
+    wallet
+        .app()
+        .protocol_get("paykit", key.as_bytes())
+        .await
+        .unwrap()
+        .map(|bytes| serde_json::from_slice(&bytes).unwrap())
+}
+
+/// Put `value` at `key` of Paykit's state.
+async fn put(wallet: &mut Paykit, key: &str, value: &serde_json::Value) {
+    wallet
+        .app_mut()
+        .protocol_commit(
+            "paykit",
+            &[pubky_switch_client::app::LocalWrite::Put {
+                key: key.as_bytes().to_vec(),
+                value: serde_json::to_vec(value).unwrap(),
+            }],
+        )
+        .await
+        .unwrap();
+}
+
+/// A finished payment whose facts hold a sighting of it made, `dropped` by the Allowance
+/// ledger or not, pruned past its window: returns whether its facts are still kept.
+async fn sighted_facts_kept_after_pruning(dropped: bool) -> bool {
+    let w = World::new();
+    let mut wallet = paid(&w, Behaviour::Succeed).await;
+    let payment = wallet.payments().await.unwrap().remove(0);
+    let key = format!("jf/{}", payment.attempt_id.to_text());
+    let entry = held(&wallet, &format!("j/{}", payment.attempt_id.to_text()))
+        .await
+        .unwrap();
+    let mut facts = held(&wallet, &key).await.unwrap();
+    facts["d"]["paid_seen"] = serde_json::json!({
+        "source": { "kind": "signed_done" },
+        "obligation": entry["d"]["obligation"],
+        "first_seen_ms": w.clock.now_ms(),
+    });
+    facts["d"]["ledger_dropped"] = serde_json::json!(dropped);
+    put(&mut wallet, &key, &facts).await;
+    later(&w, &mut wallet, DAY_MS + RECONCILIATION_MS + 1_000).await;
+    assert!(wallet.payments().await.unwrap().is_empty());
+    held(&wallet, &key).await.is_some()
+}
+
+#[tokio::test]
+async fn test_pruning_keeps_a_sighting_until_the_allowance_ledger_drops_the_attempt() {
+    // The facts go with their entry, but a sighting of the payment made stays while the
+    // Allowance ledger may still list the attempt, and goes with the entry once it doesn't.
+    assert!(sighted_facts_kept_after_pruning(false).await);
+    assert!(!sighted_facts_kept_after_pruning(true).await);
+}
