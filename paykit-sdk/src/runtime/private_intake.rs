@@ -767,11 +767,28 @@ async fn commit_ignored_private_intake_cursors<S: StorageAdapter>(
 
 async fn audit_private_intake_peer<F, Fut>(
     peer: PubkyPublicKey,
-    mut acquire: F,
+    acquire: F,
 ) -> PrivateIntakePeerAudit
 where
     F: FnMut(PubkyPublicKey, Option<PrivateIntakeCursorRecord>) -> Fut,
     Fut: Future<Output = Result<PrivatePacketAcquisition>>,
+{
+    audit_private_intake_peer_while(peer, acquire, || true).await
+}
+
+/// [`audit_private_intake_peer`], which also ends after an `Inserted`
+/// acquisition once `keep_going` returns false, before the next acquisition
+/// starts. It then reports `Inserted` with `inserted` set, so the packets
+/// already buffered still wake consumers.
+async fn audit_private_intake_peer_while<F, Fut, K>(
+    peer: PubkyPublicKey,
+    mut acquire: F,
+    mut keep_going: K,
+) -> PrivateIntakePeerAudit
+where
+    F: FnMut(PubkyPublicKey, Option<PrivateIntakeCursorRecord>) -> Fut,
+    Fut: Future<Output = Result<PrivatePacketAcquisition>>,
+    K: FnMut() -> bool,
 {
     let mut inserted = false;
     for _ in 0..MAX_AUDIT_ACQUISITIONS_PER_PEER {
@@ -785,7 +802,12 @@ where
             }
         };
         match outcome {
-            PrivatePacketAcquisition::Inserted => inserted = true,
+            PrivatePacketAcquisition::Inserted => {
+                inserted = true;
+                if !keep_going() {
+                    break;
+                }
+            }
             PrivatePacketAcquisition::Absent
             | PrivatePacketAcquisition::InsertedAtCapacity
             | PrivatePacketAcquisition::AlreadyBuffered
@@ -1681,17 +1703,23 @@ async fn run_connected_private_intake_stream(
                             // durable cursor never passes an unprocessed
                             // packet, and `last_successful_audit_at` is not
                             // recorded; an error leaves the peer `Replaying`.
-                            let probe = audit_private_intake_peer(peer.clone(), |peer, cursor| {
-                                acquire(peer, cursor)
-                            })
+                            // A stop ends the probe between acquisitions, so
+                            // `stop()` and topology restarts wait only for the
+                            // acquisition in flight.
+                            let probe = audit_private_intake_peer_while(
+                                peer.clone(),
+                                |peer, cursor| acquire(peer, cursor),
+                                || !private_intake_stop_requested(&stop),
+                            )
                             .await;
-                            // The loop sees no stop while the probe runs. A
-                            // stop now ends this stream epoch, and a topology
-                            // change may have marked the peer `Stale` before
-                            // sending it, so drop the probe's outcome rather
-                            // than overwrite that state. Still announce the
-                            // packets it buffered and a pending handshake it
-                            // found, as `apply_private_intake_peer_audit` does.
+                            // A stop requested while the probe ran, which may
+                            // have ended it early, ends this stream epoch. A
+                            // topology change may have marked the peer
+                            // `Stale` before sending it, so drop the probe's
+                            // outcome rather than overwrite that state. Still
+                            // announce the packets it buffered and a pending
+                            // handshake it found, as
+                            // `apply_private_intake_peer_audit` does.
                             if private_intake_stop_requested(&stop) {
                                 if private_intake_peer_audit_needs_wakeup(&probe) {
                                     work.notify_waiters();
@@ -6500,6 +6528,89 @@ mod tests {
             run.woken_after_stop,
             "a probe that finds a pending handshake after the stop must still wake the consumer"
         );
+    }
+
+    #[tokio::test]
+    async fn test_live_insert_probe_ends_at_stop_between_acquisitions() {
+        let peer = users(1).remove(0);
+
+        let run = run_live_insert_event_stopped_at(
+            &peer,
+            vec![
+                Ok(PrivatePacketAcquisition::Inserted),
+                Ok(PrivatePacketAcquisition::Inserted),
+                // Left unused: the stop ends the probe before these.
+                Ok(PrivatePacketAcquisition::Inserted),
+                Ok(PrivatePacketAcquisition::Absent),
+            ],
+            1,
+        )
+        .await;
+
+        assert!(matches!(run.exit, PrivateIntakeEventLoopExit::Stopped));
+        assert_eq!(
+            run.acquisitions, 2,
+            "a stop during a probe acquisition must end the probe before the next one"
+        );
+        assert!(
+            run.woken_after_stop,
+            "the packet the probe buffered before the stop must still wake the consumer"
+        );
+        assert_eq!(
+            run.state,
+            PrivateIntakeTransportState::Replaying,
+            "a probe that ends at a stop must not write health"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_live_insert_probe_without_stop_runs_every_acquisition() {
+        let peer = users(1).remove(0);
+
+        let run = run_live_insert_event(
+            &peer,
+            vec![
+                Ok(PrivatePacketAcquisition::Inserted),
+                Ok(PrivatePacketAcquisition::Inserted),
+                Ok(PrivatePacketAcquisition::Inserted),
+                Ok(PrivatePacketAcquisition::Absent),
+            ],
+        )
+        .await;
+
+        assert!(matches!(run.exit, PrivateIntakeEventLoopExit::Ended));
+        assert_eq!(
+            run.observed.len(),
+            4,
+            "without a stop the probe runs until the next slot is absent"
+        );
+        assert_eq!(
+            run.health.peers[&peer],
+            PrivateIntakeTransportState::CaughtUp
+        );
+    }
+
+    #[tokio::test]
+    async fn test_audit_peer_while_ends_after_insert_once_keep_going_is_false() {
+        let peer = users(1).remove(0);
+        let acquisitions = AtomicUsize::new(0);
+
+        let result = audit_private_intake_peer_while(
+            peer,
+            |_, _| {
+                acquisitions.fetch_add(1, Ordering::SeqCst);
+                async { Ok(PrivatePacketAcquisition::Inserted) }
+            },
+            || false,
+        )
+        .await;
+
+        assert_eq!(acquisitions.load(Ordering::SeqCst), 1);
+        assert!(result.inserted);
+        assert!(matches!(
+            result.outcome,
+            Ok(PrivatePacketAcquisition::Inserted)
+        ));
     }
 
     /// The error a failed attempt carries, whatever its kind.
