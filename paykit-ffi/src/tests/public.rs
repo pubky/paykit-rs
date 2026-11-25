@@ -499,27 +499,77 @@ fn test_delivery_and_transport_codes_name_each_known_answer() {
         ),
         ("403 not_admitted", "not_admitted"),
         (
-            "429 rate_limited: not_found before the body was read (status 404)",
+            "429 rate_limited: 404 not_found before the body was read (status 404)",
             "rate_limited",
         ),
         ("500 not_admitted", "unknown"),
         (
-            "rate_limited before the body was read (status 429)",
+            "429 rate_limited before the body was read (status 429)",
             "rate_limited",
         ),
         (
-            "too_large before the body was read (status 413)",
+            "413 too_large before the body was read (status 413)",
             "too_large",
         ),
         (
-            "not_found before the body was read (status 404)",
+            "404 not_found before the body was read (status 404)",
             "not_found",
         ),
-        ("not_found before the body was read (status 503)", "unknown"),
+        // The two statuses disagree, or the name is bare: not the client's text.
+        (
+            "404 not_found before the body was read (status 503)",
+            "unknown",
+        ),
+        ("not_found before the body was read (status 404)", "unknown"),
     ] {
         let delivery = MessageDelivery::from(D::Queued {
             tries: 1,
             last_error: Some(text.into()),
+        });
+        assert_eq!(
+            delivery,
+            MessageDelivery::Queued {
+                tries: 1,
+                last_error: Some(code.into()),
+            },
+            "{text}"
+        );
+    }
+    // The texts the client writes from its own errors, as the outbox keeps them: a rewording
+    // of one fails here rather than turning its code into `unknown`. The two sentences of a
+    // dropped or refused kept batch are the client's own words, as above.
+    use pubky_dispatch_client::error::ClientError;
+    use pubky_dispatch_core::http::ErrorCode;
+    let answer = |code: ErrorCode| ClientError::Dispatch {
+        status: code.status(),
+        code,
+        message: "private details".into(),
+        current: serde_json::Value::Null,
+        known_version: None,
+        retry_after: None,
+    };
+    let unread = |status, code| ClientError::BodyUnread {
+        status,
+        code,
+        retry_after: None,
+    };
+    for (text, code) in [
+        (TransportError::Timeout.to_string(), "timeout"),
+        (answer(ErrorCode::NotAdmitted).to_string(), "not_admitted"),
+        (answer(ErrorCode::RateLimited).to_string(), "rate_limited"),
+        (
+            unread(429, ErrorCode::RateLimited).to_string(),
+            "rate_limited",
+        ),
+        (unread(413, ErrorCode::TooLarge).to_string(), "too_large"),
+        (
+            format!("the batch carrying it was refused: {}", ErrorCode::TooLarge),
+            "too_large",
+        ),
+    ] {
+        let delivery = MessageDelivery::from(D::Queued {
+            tries: 1,
+            last_error: Some(text.clone()),
         });
         assert_eq!(
             delivery,

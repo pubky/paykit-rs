@@ -326,6 +326,31 @@ fn test_dispatch_events_carry_the_lists_and_backup_evidence() {
     ));
 }
 
+/// Every member of a provider loss crosses, the count of unverified evidence included
+/// (Dispatch spec 12.6, Dispatch wire 7.4.14).
+#[test]
+fn test_dispatch_provider_loss_carries_every_member() {
+    let loss = crate::ProviderLoss::from(pubky_dispatch_client::app::ProviderLoss {
+        lost_generation: 1,
+        generation: 2,
+        declared_at_ms: 3,
+        accepted_from_ms: 4,
+        uncertain_until_ms: 5,
+        unverified: 6,
+    });
+    assert_eq!(
+        (
+            loss.lost_generation,
+            loss.generation,
+            loss.declared_at_ms,
+            loss.accepted_from_ms,
+            loss.uncertain_until_ms,
+            loss.unverified,
+        ),
+        (1, 2, 3, 4, 5, 6)
+    );
+}
+
 #[test]
 fn test_wallet_errors_carry_the_service_code_and_its_retry_time() {
     let (category, failure) =
