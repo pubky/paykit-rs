@@ -2120,6 +2120,125 @@ async fn test_restore_journal_entry_breaking_its_payment_invariants_refused() {
     }
 }
 
+#[tokio::test]
+async fn test_restore_entry_holding_the_users_resolution_before_it_finished_refused() {
+    // The user's resolution is journaled only as it finishes the entry, or beside the proof
+    // of a payment found made after it. An entry at `RailFailed` holding the user's `done`
+    // beside the method's failure, with no proof, would finish reported resolved over what
+    // the method said: refused, writing nothing. The same entry finished restores.
+    let w = World::new();
+    let (good, app_id) = backup_with_a_payment(&w).await;
+    let resolved = with_journal_member(&good, "failed_by_method", serde_json::json!(true));
+    let resolved = with_journal_member(&resolved, "user_resolved", serde_json::json!("done"));
+    let open = with_journal_member(&resolved, "stage", serde_json::json!("rail_failed"));
+    refused_writing_nothing(&w, open, app_id, "the user's resolution on an open entry").await;
+    let finished = with_journal_member(&resolved, "stage", serde_json::json!("finished"));
+    let backup = PaykitBackup::from_bytes(&serde_json::to_vec(&finished).unwrap()).unwrap();
+    let wallet = restored(&w, &backup).await;
+    assert_eq!(
+        wallet.payments().await.unwrap()[0].stage,
+        paykit_sdk::Stage::Finished
+    );
+    drop(wallet);
+    // The user's `done` off the claim, on a restored dispatch, by the same rule.
+    let paid = with_journal_member(&good, "failed_by_method", serde_json::json!(true));
+    let paid = with_journal_member(&paid, "restored", serde_json::json!(true));
+    let paid = with_journal_member(&paid, "user_paid", serde_json::json!(true));
+    let open = with_journal_member(&paid, "stage", serde_json::json!("rail_failed"));
+    refused_writing_nothing(
+        &w,
+        open,
+        app_id,
+        "the user's done off the claim on an open entry",
+    )
+    .await;
+    let finished = with_journal_member(&paid, "stage", serde_json::json!("finished"));
+    let backup = PaykitBackup::from_bytes(&serde_json::to_vec(&finished).unwrap()).unwrap();
+    let wallet = restored(&w, &backup).await;
+    assert_eq!(
+        wallet.payments().await.unwrap()[0].stage,
+        paykit_sdk::Stage::Finished
+    );
+}
+
+#[tokio::test]
+async fn test_restore_keeps_a_sighting_of_a_payment_this_installation_did_not_journal() {
+    // Facts go with their journal entry, but a sighting of a payment made goes without one:
+    // an attempt another own app made under an Allowance is known here only from the ledger
+    // and the claim. Facts with neither an entry nor a sighting are left out.
+    let w = World::new();
+    let (good, _) = backup_with_a_payment(&w).await;
+    let mut layer = layer_of(&good);
+    let entry = layer
+        .iter()
+        .find(|(k, _)| k.starts_with(b"j/"))
+        .map(|(_, v)| v.clone())
+        .unwrap();
+    let orphan = |byte: u8, sighted: bool| {
+        let mut value = entry.clone();
+        value["d"] = serde_json::json!({
+            "proof": null,
+            "paid_at_ms": null,
+            "method_failed": false,
+            "ask_again": false,
+            "told": false,
+            "told_paid": false,
+            "paid_seen": sighted.then(|| serde_json::json!({
+                "source": { "kind": "paid_history" },
+                "obligation": entry["d"]["obligation"],
+                "first_seen_ms": 1,
+            })),
+            "ledger_dropped": false,
+        });
+        let key = format!(
+            "jf/{}",
+            paykit_lib::AttemptId::from_bytes([byte; 16]).to_text()
+        );
+        (key.into_bytes(), value)
+    };
+    layer.push(orphan(8, true));
+    layer.push(orphan(9, false));
+    let backup = with_layer(&good, layer);
+    let backup = PaykitBackup::from_bytes(&serde_json::to_vec(&backup).unwrap()).unwrap();
+    let wallet = restored(&w, &backup).await;
+    let held = |byte: u8| {
+        let key = format!(
+            "jf/{}",
+            paykit_lib::AttemptId::from_bytes([byte; 16]).to_text()
+        );
+        let app = wallet.app();
+        async move { app.protocol_get("paykit", key.as_bytes()).await.unwrap() }
+    };
+    assert!(held(8).await.is_some());
+    assert!(held(9).await.is_none());
+}
+
+#[tokio::test]
+async fn test_restore_entry_paid_off_the_claim_and_resolved_otherwise_refused() {
+    // The user's `done` off the claim goes with the user's resolution as done: a backup entry
+    // paid off the claim but resolved failed or unknown is refused, writing nothing. Resolved
+    // done, or with no resolution beside it, it restores.
+    let w = World::new();
+    let (good, app_id) = backup_with_a_payment(&w).await;
+    let paid = with_journal_member(&good, "stage", serde_json::json!("finished"));
+    let paid = with_journal_member(&paid, "restored", serde_json::json!(true));
+    let paid = with_journal_member(&paid, "user_paid", serde_json::json!(true));
+    for resolution in [serde_json::json!("failed"), serde_json::json!("unknown")] {
+        let backup = with_journal_member(&paid, "user_resolved", resolution.clone());
+        refused_writing_nothing(&w, backup, app_id, &format!("paid and {resolution}")).await;
+    }
+    for resolution in [serde_json::json!("done"), serde_json::Value::Null] {
+        let held = with_journal_member(&paid, "user_resolved", resolution.clone());
+        let backup = PaykitBackup::from_bytes(&serde_json::to_vec(&held).unwrap()).unwrap();
+        let wallet = restored(&w, &backup).await;
+        assert_eq!(
+            wallet.payments().await.unwrap()[0].stage,
+            paykit_sdk::Stage::Finished,
+            "{resolution}"
+        );
+    }
+}
+
 /// A backup of alice's wallet with a payment priced by a rate in flight, confirmed at the
 /// amount the request's fixed rate gives its invoice, and the wallet's App ID.
 async fn backup_with_a_priced_payment(w: &World) -> (serde_json::Value, [u8; 16]) {

@@ -360,11 +360,9 @@ impl Paykit {
                             proof, paid_at_ms, ..
                         })) => {
                             if let Some(mut entry) = self.rebuilt_entry(&obligation, id).await? {
-                                entry.rail_proof = Some(proof);
-                                entry.paid_at_ms = paid_at_ms;
-                                // Journaled first: a report whose write fails leaves it for a
+                                // Kept first: a report whose write fails leaves it for a
                                 // resume, as [`PayOutcome::PaidOutcomeUnwritten`] says.
-                                self.set_stage(&mut entry, Stage::RailPaid).await?;
+                                self.learn_paid(&mut entry, proof, paid_at_ms).await?;
                                 report.resolved.push(self.report(&mut entry).await?);
                                 continue;
                             }
@@ -377,10 +375,9 @@ impl Paykit {
                             // payment while a late success could never be reported: the
                             // attempt stays doubtful, for a receipt or the user.
                             if let Some(mut entry) = self.rebuilt_entry(&obligation, id).await? {
-                                entry.failed_by_method = true;
-                                // Journaled first: a report whose write fails leaves it for a
+                                // Kept first: a report whose write fails leaves it for a
                                 // resume, as [`PayOutcome::PaidOutcomeUnwritten`] says.
-                                self.set_stage(&mut entry, Stage::RailFailed).await?;
+                                self.learn_failed(&mut entry, true).await?;
                                 report.resolved.push(self.report(&mut entry).await?);
                                 continue;
                             }
@@ -635,6 +632,8 @@ impl Paykit {
             transfer_bound: None,
             price: None,
             failed_on_claim: false,
+            failed_before_call: false,
+            user_resolved: None,
             billing_period: obligation
                 .period
                 .map(|period| KeptPeriod::of(&PeriodRef::from(period))),
@@ -685,7 +684,10 @@ impl Paykit {
         // A delivery operation for the whole call (Paykit spec 8.1).
         let _delivery = self.delivery_operation();
         // The call's future goes on the heap, as `receive`'s does: it nests deep.
-        Box::pin(self.resolve_attempt_inner(obligation, attempt, resolution, _confirmed)).await
+        Box::pin(self.resolve_attempt_inner(obligation, attempt, resolution, _confirmed)).await?;
+        // The user ended it, and the call tells them so: a resume reports it again only
+        // where its payment is found made after all.
+        self.mark_told_if_over(&attempt).await
     }
 
     async fn resolve_attempt_inner(
@@ -837,8 +839,17 @@ impl Paykit {
         }
         // With no claim entry, record or ledger write to make, only the journal changes:
         // the entry finishes locally.
+        // The entry keeps how the user resolved it, in the journal copy the batch carries:
+        // however that batch comes to apply, a later resume reads the resolution from the
+        // entry, never a failure the user didn't state (Paykit spec 7.3).
+        let resolved = match resolution {
+            Resolution::Done => crate::journal::UserResolution::Done,
+            Resolution::Unknown => crate::journal::UserResolution::Unknown,
+            Resolution::Failed => crate::journal::UserResolution::Failed,
+        };
         if batch.is_empty() {
             if let Some(entry) = entry.as_mut().filter(|e| e.open()) {
+                entry.user_resolved = Some(resolved);
                 self.set_stage(entry, Stage::Finished).await?;
             }
             return Ok(());
@@ -847,6 +858,7 @@ impl Paykit {
             if resolution == Resolution::Failed {
                 entry.end_before_the_call();
             }
+            entry.user_resolved = Some(resolved);
             entry.stage = Stage::Finished;
             batch = batch.local(self.journal_write(entry)?);
         }

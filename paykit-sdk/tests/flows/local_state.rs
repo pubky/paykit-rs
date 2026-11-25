@@ -518,6 +518,173 @@ async fn test_local_state_receipt_written_later_kept_on_an_entry_of_another_clai
 }
 
 #[tokio::test]
+async fn test_local_state_entry_holding_the_users_resolution_before_it_finished_is_corrupt() {
+    // The user's resolution is journaled only as it finishes the entry, or beside the proof
+    // of a payment found made after it. An entry at `RailFailed` holding the user's `done`
+    // beside the method's failure, with no proof, would finish reported resolved over what
+    // the method said: a corrupt store at load, and nothing is decided from it. The same
+    // entry finished reads.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    w.rail.next(Behaviour::Hang);
+    let PayOutcome::Pending { attempt_id, .. } = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .outcome
+        .unwrap()
+    else {
+        panic!("the payment is in flight");
+    };
+    let key = journal(&attempt_id);
+    let mut entry = held_json(&wallet, &key).await;
+    entry["d"]["failed_by_method"] = json!(true);
+    entry["d"]["user_resolved"] = json!("done");
+    entry["d"]["stage"] = json!("rail_failed");
+    put(&mut wallet, &key, &entry).await;
+    let read = wallet.payments().await.unwrap_err();
+    assert!(corrupt(&read), "{read:?}");
+    let resumed = wallet.resume_payments().await;
+    assert!(resumed.as_ref().is_err_and(corrupt), "{resumed:?}");
+    assert_eq!(w.rail.pay_calls(&attempt_id), 1);
+    entry["d"]["stage"] = json!("finished");
+    put(&mut wallet, &key, &entry).await;
+    let read = wallet.payments().await.unwrap();
+    assert_eq!(read[0].stage, paykit_sdk::Stage::Finished);
+}
+
+#[tokio::test]
+async fn test_local_state_users_resolution_beside_a_proof_the_recheck_found_reads() {
+    // The user resolved the payment as failed, its entry finished beside the method's
+    // failure, as when the user resolves it while the method's failure waits to be written.
+    // The method's history then shows it made after all: the recheck opens the entry again
+    // at `RailPaid` with the proof, the user's resolution kept beside it. That entry reads,
+    // and the payment is reported paid once its outcome is written. The same entry without
+    // the proof is a corrupt store.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    w.rail.next(Behaviour::Hang);
+    let PayOutcome::Pending { attempt_id, .. } = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .outcome
+        .unwrap()
+    else {
+        panic!("the payment is in flight");
+    };
+    let obligation = wallet.payments().await.unwrap()[0].obligation;
+    wallet
+        .resolve_attempt(
+            &obligation,
+            attempt_id,
+            Resolution::Failed,
+            UserConfirmed::new(),
+        )
+        .await
+        .unwrap();
+    let key = journal(&attempt_id);
+    let entry = held_json(&wallet, &key).await;
+    assert_eq!(entry["d"]["stage"], json!("finished"), "{entry}");
+    assert_eq!(entry["d"]["user_resolved"], json!("failed"), "{entry}");
+    // The method's failure, kept beside the entry, still asked about.
+    let facts_key = format!("jf/{}", attempt_id.to_text());
+    let mut facts = held_json(&wallet, &facts_key).await;
+    facts["d"]["method_failed"] = json!(true);
+    facts["d"]["ask_again"] = json!(true);
+    put(&mut wallet, &facts_key, &facts).await;
+    w.rail.settle(&attempt_id, false);
+    w.rail.complete_after_failure(&attempt_id);
+    // The outcome's write and its retry on the last flush go unanswered.
+    for _ in 0..2 {
+        w.alice
+            .switch()
+            .fail_next(pubky_switch_client::testing::Fault::Unanswered {
+                path: "/ops".into(),
+                after: 0,
+            });
+    }
+    let resumed = wallet.resume_payments().await.unwrap();
+    assert!(
+        matches!(
+            resumed.as_slice(),
+            [PayOutcome::PaidOutcomeUnwritten { .. }]
+        ),
+        "{resumed:?}"
+    );
+    let reopened = held_json(&wallet, &key).await;
+    assert_eq!(reopened["d"]["stage"], json!("rail_paid"), "{reopened}");
+    assert_eq!(
+        reopened["d"]["user_resolved"],
+        json!("failed"),
+        "{reopened}"
+    );
+    assert!(!reopened["d"]["rail_proof"].is_null(), "{reopened}");
+    assert!(wallet.payments().await.unwrap()[0].paid_by_method);
+    // Without the proof, the same entry is refused.
+    let mut proofless = reopened.clone();
+    for member in ["rail_proof", "paid_at_ms", "proof_msg_id"] {
+        proofless["d"][member] = Value::Null;
+    }
+    proofless["d"]["failed_on_claim"] = json!(false);
+    proofless["d"]["stage"] = json!("rail_failed");
+    put(&mut wallet, &key, &proofless).await;
+    let read = wallet.payments().await.unwrap_err();
+    assert!(corrupt(&read), "{read:?}");
+    // With it, the next resume writes the outcome and reports it paid.
+    put(&mut wallet, &key, &reopened).await;
+    let resumed = wallet.resume_payments().await.unwrap();
+    assert!(
+        matches!(resumed.as_slice(), [PayOutcome::Paid { .. }]),
+        "{resumed:?}"
+    );
+    assert_eq!(w.rail.pay_calls(&attempt_id), 1);
+}
+
+#[tokio::test]
+async fn test_local_state_entry_paid_off_the_claim_and_resolved_otherwise_is_corrupt() {
+    // The user's `done` off the claim is written with the user's resolution as done, in one
+    // transition: a restored entry paid off the claim but resolved failed or unknown would
+    // answer "already paid" and withhold a repeat on a word the user never gave. Each is a
+    // corrupt store at load; resolved done, or with no resolution beside it, it reads.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    w.rail.next(Behaviour::Hang);
+    let PayOutcome::Pending { attempt_id, .. } = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .outcome
+        .unwrap()
+    else {
+        panic!("the payment is in flight");
+    };
+    let key = journal(&attempt_id);
+    let mut entry = held_json(&wallet, &key).await;
+    entry["d"]["stage"] = json!("finished");
+    entry["d"]["restored"] = json!(true);
+    entry["d"]["user_paid"] = json!(true);
+    for resolution in [json!("failed"), json!("unknown")] {
+        entry["d"]["user_resolved"] = resolution.clone();
+        put(&mut wallet, &key, &entry).await;
+        let read = wallet.payments().await.unwrap_err();
+        assert!(corrupt(&read), "{resolution}: {read:?}");
+    }
+    for resolution in [json!("done"), Value::Null] {
+        entry["d"]["user_resolved"] = resolution.clone();
+        put(&mut wallet, &key, &entry).await;
+        let read = wallet.payments().await.unwrap();
+        assert_eq!(read[0].stage, paykit_sdk::Stage::Finished, "{resolution}");
+    }
+}
+
+#[tokio::test]
 async fn test_local_state_entry_keeping_another_request_is_corrupt() {
     // `a`'s entry keeps `b`'s request: its record would be rebuilt with another request
     // than the one its claim key and record name.

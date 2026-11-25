@@ -236,9 +236,9 @@ async fn reopen_held_payer(
         "{blocked}"
     );
     // A recovery notice the client holds stops the wallet as a whole: a resume under it
-    // returns the recovery at the first entry whose step the notice refuses, and nothing
-    // after it is written or looked up, so the payment the method reports made later waits
-    // for the resume after the notice clears.
+    // returns the recovery before any entry, and nothing is written or looked up, so both
+    // payments, the one the method reports made later included, wait in flight for the
+    // resume after the notice clears.
     let [first, later] = held;
     let refused = |resumed: &paykit_sdk::Result<Vec<PayOutcome>>| {
         matches!(resumed, Err(paykit_sdk::PaykitError::Client(AppError::Refused(refused))) if refused == &reason)
@@ -257,7 +257,7 @@ async fn reopen_held_payer(
             .map(|view| view.stage)
     };
     let payments = payer.payments().await?;
-    assert_eq!(stage(first, &payments), Some(paykit_sdk::Stage::RailFailed));
+    assert_eq!(stage(first, &payments), Some(paykit_sdk::Stage::Paying));
     assert_eq!(stage(later, &payments), Some(paykit_sdk::Stage::Paying));
     assert_eq!(
         rail.all_pay_calls(),

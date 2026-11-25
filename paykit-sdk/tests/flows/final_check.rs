@@ -1229,6 +1229,18 @@ fn blind(w: &World) {
     ));
 }
 
+/// The rail of `w` keeps its history again, for good and across a restore.
+fn sighted(w: &World) {
+    w.rail.set_declaration(
+        RailDeclaration::new(
+            paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
+            paykit_sdk::rail::FAKE_PAYMENT_TIME_TOLERANCE_MS,
+        )
+        .with_history(true)
+        .with_history_survives_restore(true),
+    );
+}
+
 /// After an explicit flush, no acceptance `store` journaled is known to the wallet's
 /// outbox: none was ever queued, so none could reach the payee (Paykit spec 7.2 step 2).
 async fn no_acceptance_queued(store: &HookedStore, wallet: &mut Paykit) {
@@ -2896,8 +2908,9 @@ async fn made_then_in_flight() -> (World, Paykit, paykit_sdk::AttemptId) {
 async fn test_resume_ends_at_the_switchs_answer_that_the_wallet_must_stop() {
     // The made payment's outcome write is answered that the app is no longer current, that
     // its certificate expired, or that the account awaits a recovery: a stop of the wallet
-    // as a whole. The resume
-    // returns it and asks the method about no later entry, so the second stays `Paying`.
+    // as a whole, which the resume returns. The second, which the method shows paid, was
+    // journaled with its proof before the stop was met, from the method's history alone:
+    // nothing of it goes to the switch, and it stays `RailPaid`.
     use pubky_switch_core::http::ErrorCode as E;
     for code in [E::NotCurrent, E::CertExpired, E::RecoveryRequired] {
         let (w, mut wallet, attempt_id) = made_then_in_flight().await;
@@ -2925,7 +2938,8 @@ async fn test_resume_ends_at_the_switchs_answer_that_the_wallet_must_stop() {
             .into_iter()
             .find(|p| p.attempt_id == attempt_id)
             .unwrap();
-        assert_eq!(second.stage, paykit_sdk::Stage::Paying, "{code:?}");
+        assert_eq!(second.stage, paykit_sdk::Stage::RailPaid, "{code:?}");
+        assert_eq!(w.rail.pay_calls(&attempt_id), 1);
     }
 }
 
@@ -2934,8 +2948,8 @@ async fn test_resume_ends_when_its_first_claim_read_installs_a_recovery_notice()
     // The first entry's payment stopped before its dispatch, so the resume reads its claim
     // first. The switch answers that read that the account awaits a recovery, with the
     // notice, which the client keeps. The wallet is stopped from then on: the resume returns
-    // the stop, and the later payment, which the method shows paid, is neither looked up nor
-    // written.
+    // the stop. The later payment, which the method shows paid, was journaled with its proof
+    // before, from the method's history alone, and nothing of it is written to the switch.
     for _ in 0..40 {
         let w = World::new();
         blind(&w);
@@ -2968,6 +2982,7 @@ async fn test_resume_ends_when_its_first_claim_read_installs_a_recovery_notice()
         }
         assert_eq!(order[0].stage, paykit_sdk::Stage::Attempted);
         assert_eq!(order[1].stage, paykit_sdk::Stage::Paying);
+        sighted(&w);
         w.rail.settle(&attempt_id, true);
         let generation = wallet.app().own_identity().generation();
         w.alice
@@ -2991,7 +3006,7 @@ async fn test_resume_ends_when_its_first_claim_read_installs_a_recovery_notice()
             .into_iter()
             .find(|p| p.attempt_id == attempt_id)
             .unwrap();
-        assert_eq!(later.stage, paykit_sdk::Stage::Paying);
+        assert_eq!(later.stage, paykit_sdk::Stage::RailPaid);
         assert_eq!(w.rail.pay_calls(&attempt_id), 1);
         return;
     }
@@ -3137,41 +3152,54 @@ async fn two_in_flight() -> (World, Paykit, [paykit_sdk::AttemptId; 2]) {
 }
 
 #[tokio::test]
-async fn test_resume_ends_at_a_payment_lookup_that_fails() {
+async fn test_resume_visits_the_later_payment_past_a_lookup_that_fails() {
     // Two payments in flight, both shown paid by the method. Its history can't be read for
-    // the first: that isn't the Switch client refusing the entry, so the call ends with the
-    // method's error as it is, and the later payment isn't looked up.
-    let (w, mut wallet, [_, later]) = two_in_flight().await;
+    // the first: a wait, so the first is left for the next resume, reported pending, and the
+    // later payment is still resolved behind it, its outcome written.
+    let (w, mut wallet, [first, later]) = two_in_flight().await;
     for attempt in wallet.payments().await.unwrap() {
         w.rail.settle(&attempt.attempt_id, true);
     }
-    w.rail.fail_next_lookups(1);
-    let resumed = wallet.resume_payments().await;
+    w.rail.set_lookup_unavailable(&first, true);
+    let resumed = wallet.resume_payments().await.unwrap();
     assert!(
-        matches!(
-            &resumed,
-            Err(paykit_sdk::PaykitError::Rail(
-                paykit_sdk::RailError::Unavailable(_)
-            ))
-        ),
+        resumed
+            .iter()
+            .any(|o| matches!(o, PayOutcome::Pending { attempt_id, .. } if *attempt_id == first)),
         "{resumed:?}"
     );
-    let later = wallet
-        .payments()
-        .await
-        .unwrap()
-        .into_iter()
-        .find(|p| p.attempt_id == later)
-        .unwrap();
-    assert_eq!(later.stage, paykit_sdk::Stage::Paying);
+    let stage = |payments: &[paykit_sdk::PaymentView], attempt| {
+        payments
+            .iter()
+            .find(|p| p.attempt_id == attempt)
+            .unwrap()
+            .stage
+    };
+    let payments = wallet.payments().await.unwrap();
+    assert_eq!(stage(&payments, first), paykit_sdk::Stage::Paying);
+    assert!(
+        matches!(
+            stage(&payments, later),
+            paykit_sdk::Stage::Finished | paykit_sdk::Stage::AcceptanceOwed
+        ),
+        "{payments:?}"
+    );
+    // The method answers again: the first is resolved too, neither paid twice.
+    w.rail.set_lookup_unavailable(&first, false);
+    wallet.resume_payments().await.unwrap();
+    let payments = wallet.payments().await.unwrap();
+    assert_ne!(stage(&payments, first), paykit_sdk::Stage::Paying);
+    assert_eq!(w.rail.pay_calls(&first), 1);
+    assert_eq!(w.rail.pay_calls(&later), 1);
 }
 
 #[tokio::test]
-async fn test_resume_ends_at_a_service_answer_that_is_no_stop() {
+async fn test_resume_returns_a_service_answer_no_retry_passes_after_the_later_payment() {
     // The first payment stopped before its dispatch, so the resume reads its claim first, and
-    // the switch answers that read with an error that is neither a stop nor a refusal of the
-    // Switch client. The call ends with it, as it is; the later payment, which the method
-    // shows paid, isn't looked up.
+    // the switch answers that read with an error that is no stop and that no retry passes
+    // (Switch spec 6.4). The later payment, which the method shows paid, is still resolved
+    // behind it, its outcome written, and the call then returns the answer as it is, so the
+    // caller learns why the first is left rather than seeing it pending at every resume.
     for _ in 0..40 {
         let w = World::new();
         blind(&w);
@@ -3202,6 +3230,7 @@ async fn test_resume_ends_at_a_service_answer_that_is_no_stop() {
         if order[0].attempt_id == attempt_id {
             continue;
         }
+        sighted(&w);
         w.rail.settle(&attempt_id, true);
         let code = pubky_switch_core::http::ErrorCode::PermissionMissing;
         w.alice
@@ -3227,7 +3256,33 @@ async fn test_resume_ends_at_a_service_answer_that_is_no_stop() {
             .into_iter()
             .find(|p| p.attempt_id == attempt_id)
             .unwrap();
-        assert_eq!(later.stage, paykit_sdk::Stage::Paying);
+        assert!(
+            matches!(
+                later.stage,
+                paykit_sdk::Stage::Finished | paykit_sdk::Stage::AcceptanceOwed
+            ),
+            "{later:?}"
+        );
+        assert_eq!(w.rail.pay_calls(&attempt_id), 1);
+        // The call that ended it returned an error, so it is told by the next one, once.
+        let resumed = wallet.resume_payments().await.unwrap();
+        assert_eq!(
+            resumed
+                .iter()
+                .filter(|outcome| matches!(
+                    outcome,
+                    PayOutcome::Paid { attempt_id: paid, proof_msg_id: Some(_), .. } if *paid == attempt_id
+                ))
+                .count(),
+            1,
+            "{resumed:?}"
+        );
+        assert!(!wallet
+            .resume_payments()
+            .await
+            .unwrap()
+            .iter()
+            .any(|outcome| outcome.attempt_id() == attempt_id));
         return;
     }
     panic!("no world put the stopped payment first");
@@ -3236,9 +3291,13 @@ async fn test_resume_ends_at_a_service_answer_that_is_no_stop() {
 #[tokio::test]
 async fn test_pay_reports_paid_when_a_stop_follows_its_written_outcome() {
     // The store stops after some commit of the payment. Wherever that falls after the outcome
-    // batch committed, which finishes the entry, the payment is reported `Paid`: nothing
-    // later reports a finished entry, and the proof's delivery is the outbox's.
+    // batch committed, which finishes the entry, the payment is reported `Paid` once: by the
+    // call, where it marked the outcome told first, or else by the next resume. The one
+    // exception is a stop right after the told mark, the call's last commit: the host never
+    // gets the call's answer, and the journal shows the payment made.
     use pubky_switch_client::store::{Fault, FaultStore};
+    let mut reported_by_resume = false;
+    let mut stopped_after_told = None;
     for after in 1..64 {
         let w = World::new();
         let (store, app_id, request) = with_a_request(&w).await;
@@ -3258,16 +3317,180 @@ async fn test_pay_reports_paid_when_a_stop_follows_its_written_outcome() {
             .pay_request(&request, PayOptions::default())
             .await
             .outcome;
-        if faulty.stopped() && matches!(outcome, Ok(PayOutcome::Paid { .. })) {
-            let journal = reload(&w, &store, app_id).await.payments().await.unwrap();
-            assert_eq!(journal[0].stage, paykit_sdk::Stage::Finished);
+        let mut reloaded = reload(&w, &store, app_id).await;
+        let journal = reloaded.payments().await.unwrap();
+        if journal
+            .first()
+            .is_some_and(|p| p.stage == paykit_sdk::Stage::Finished)
+        {
             assert!(journal[0].paid_by_method);
+            let resumed = reloaded.resume_payments().await.unwrap();
+            if matches!(outcome, Ok(PayOutcome::Paid { .. })) {
+                assert!(resumed.is_empty(), "after {after}: {resumed:?}");
+            } else if resumed.is_empty() {
+                stopped_after_told = Some(after);
+            } else {
+                assert!(
+                    matches!(resumed.as_slice(), [PayOutcome::Paid { .. }]),
+                    "after {after}: {outcome:?} then {resumed:?}"
+                );
+                reported_by_resume = true;
+                assert!(reloaded.resume_payments().await.unwrap().is_empty());
+            }
+        }
+        if !faulty.stopped() {
+            assert!(
+                matches!(outcome, Ok(PayOutcome::Paid { .. })),
+                "{outcome:?}"
+            );
+            assert!(reported_by_resume, "no stop fell after the written outcome");
+            // The only stop after which nothing reports it is the one after the last commit.
+            assert_eq!(stopped_after_told, Some(after - 1));
             return;
         }
-        assert!(
-            faulty.stopped(),
-            "the payment finished within {after} commits without meeting the stop"
-        );
     }
-    panic!("no stop fell after the written outcome");
+    panic!("the payment never finished within the commits tried");
+}
+
+#[tokio::test]
+async fn test_resume_releases_no_new_acceptance_while_the_payer_side_awaits_keys() {
+    // The payment's acceptance couldn't be queued at its dispatch, and the method then shows
+    // it paid. The wallet is renewed to read more with no bundle, so the payer's side waits
+    // for its keys: the resume journals the proof and signs or sends no acceptance, nor
+    // anything else. Once the keys come and the records are listed, the acceptance goes.
+    let w = World::new();
+    let store = Arc::new(HookedStore::default());
+    let mut wallet = w
+        .wallet_on("wallet", Arc::clone(&store) as Arc<dyn StateStore>)
+        .await;
+    let me = wallet.app_id();
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    store.refuse_acceptances(true);
+    w.rail.next(Behaviour::Hang);
+    let refused = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .outcome;
+    assert!(refused.is_err(), "{refused:?}");
+    store.refuse_acceptances(false);
+    let attempt_id = wallet.payments().await.unwrap()[0].attempt_id;
+    let old = wallet.app().cert().clone();
+    let wider = crate::certificate::renew(
+        &w,
+        me,
+        &paykit_sdk::AppScopes::new()
+            .pay()
+            .request()
+            .build()
+            .unwrap(),
+        1_000,
+    );
+    wallet.receive(None).await.unwrap();
+    crate::certificate::list(&w, me, &old, &wider);
+    wallet.receive(None).await.unwrap();
+    let summary = wallet.receive(None).await.unwrap();
+    assert!(summary.scope_keys_awaited, "{summary:?}");
+    w.rail.settle(&attempt_id, true);
+    let journaled = store.acceptances().len();
+    let before = w.router.log().len();
+    let resumed = wallet.resume_payments().await.unwrap();
+    assert!(
+        matches!(
+            resumed.as_slice(),
+            [PayOutcome::PaidOutcomeUnwritten { .. }]
+        ),
+        "{resumed:?}"
+    );
+    assert_eq!(
+        wallet.payments().await.unwrap()[0].stage,
+        paykit_sdk::Stage::RailPaid
+    );
+    // No acceptance signed, queued or sent, and nothing written.
+    assert_eq!(store.acceptances().len(), journaled);
+    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), 0);
+    let writes: Vec<String> = w.router.log()[before..]
+        .iter()
+        .filter(|line| line.contains("/ops"))
+        .cloned()
+        .collect();
+    assert!(writes.is_empty(), "{writes:?}");
+    crate::certificate::store_bundle(&w, me, &wider);
+    wallet.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    let resumed = wallet.resume_payments().await.unwrap();
+    assert!(
+        matches!(resumed.as_slice(), [PayOutcome::Paid { .. }]),
+        "{resumed:?}"
+    );
+    // The acceptance and the proof, each once.
+    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), 2);
+    assert_eq!(w.rail.executions(&attempt_id), 1);
+}
+
+#[tokio::test]
+async fn test_resume_waits_past_an_unverifiable_gateway_error_on_one_claim_read() {
+    // The first payment stopped before its dispatch, so the resume reads its claim first, and
+    // that read is answered `503` under a key that isn't the service's, as from a proxy in
+    // front of it: nothing of it is used, and it is a wait (Switch wire 7.1). The first is
+    // reported pending, and the later payment, which the method shows paid, is resolved
+    // behind it; the call returns both outcomes.
+    for _ in 0..40 {
+        let w = World::new();
+        blind(&w);
+        let store = Arc::new(HookedStore::default());
+        let mut wallet = w
+            .wallet_on("wallet", Arc::clone(&store) as Arc<dyn StateStore>)
+            .await;
+        let mut shop = w.shop().await;
+        let first = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+        let second = request_from(&mut shop, w.alice_id(), draft("2", w.clock.now_ms())).await;
+        wallet.receive(None).await.unwrap();
+        store.fail_commit_after_acceptance();
+        assert!(wallet
+            .pay_request(&first, PayOptions::default())
+            .await
+            .outcome
+            .is_err());
+        w.rail.next(Behaviour::Hang);
+        let PayOutcome::Pending { attempt_id, .. } = wallet
+            .pay_request(&second, PayOptions::default())
+            .await
+            .outcome
+            .unwrap()
+        else {
+            panic!("the second payment is in flight");
+        };
+        let order = wallet.payments().await.unwrap();
+        if order[0].attempt_id == attempt_id {
+            continue;
+        }
+        let stopped = order[0].attempt_id;
+        sighted(&w);
+        w.rail.settle(&attempt_id, true);
+        w.alice
+            .switch()
+            .fail_next(pubky_switch_client::testing::Fault::ErrorSignedWith {
+                path: "claims".into(),
+                code: pubky_switch_core::http::ErrorCode::Unavailable,
+                secret: [9; 32],
+            });
+        let resumed = wallet.resume_payments().await.unwrap();
+        assert!(
+            resumed.iter().any(
+                |o| matches!(o, PayOutcome::Pending { attempt_id, .. } if *attempt_id == stopped)
+            ),
+            "{resumed:?}"
+        );
+        assert!(
+            resumed.iter().any(
+                |o| matches!(o, PayOutcome::Paid { attempt_id: paid, .. } if *paid == attempt_id)
+            ),
+            "{resumed:?}"
+        );
+        assert_eq!(w.rail.pay_calls(&attempt_id), 1);
+        return;
+    }
+    panic!("no world put the stopped payment first");
 }
