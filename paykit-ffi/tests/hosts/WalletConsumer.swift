@@ -203,10 +203,10 @@ class ReceiptReader: WalletHomeserver, PaymentMethod, @unchecked Sendable {
     }
     func pay(payment: MethodPayment) async throws -> MethodOutcome {
         lock.withLock { transfers += 1 }
-        preconditionFailure("a receipted payment cannot be dispatched again")
+        preconditionFailure("a receipted payment cannot be handed off again")
     }
     func payment(attemptId: String) async throws -> MethodOutcome? { nil }
-    func allowanceHistory(payer: Data) async throws -> [MethodDispatch]? { nil }
+    func allowanceHistory(payer: Data) async throws -> [MethodHandoff]? { nil }
     func verify(proof: MethodProof) async throws -> UInt64? { nil }
     func settlementId(endpoint: String, proofJson: Data) throws -> Data? { nil }
 }
@@ -250,7 +250,7 @@ private func resumeRefusal(_ issuer: String, left: Bool, request: RequestId) asy
         guard let refusal = failure.refusal(), case .identityUnavailable = refusal.kind() else { preconditionFailure("unexpected resume refusal") }
         precondition(refusal.attemptedFailure() == nil)
     } catch let WalletError.Recovery(failure) {
-        guard left, failure.code() == "left", case .left? = failure.switchRefusal()?.kind() else { preconditionFailure("unexpected Switch refusal") }
+        guard left, failure.code() == "left", case .left? = failure.dispatchRefusal()?.kind() else { preconditionFailure("unexpected Dispatch refusal") }
     }
     precondition(method.transferCount == 0)
     try await wallet.shutdown()
@@ -290,7 +290,7 @@ private func recoverReceipt(_ issuer: String) async throws -> RequestId {
         (entry, "PaymentEntry"), (receipts[0], "Receipt"), (id, "RequestId"), (entry.amount, "Amount"),
         (BillingPeriod(startsAt: 1, endsAt: 2), "BillingPeriod"),
         (PaymentOutcome.paid(attemptId: entry.attemptId, proofMessageId: nil), "PaymentOutcome"),
-        (MethodDispatch(attemptId: entry.attemptId, amount: entry.amount, outcome: .pending), "MethodDispatch"),
+        (MethodHandoff(attemptId: entry.attemptId, amount: entry.amount, outcome: .pending), "MethodHandoff"),
         (periodUsage, "AllowancePeriodUsage"),
         (AllowanceUsage(lifetime: entry.amount.value, periods: [periodUsage], reserved: 0, spent: 1, released: 0), "AllowanceUsage"),
         (selection, "SelectedEndpoints"), (failure, "EndpointFailure"), (failure.error, "MethodError"),

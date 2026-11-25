@@ -2,10 +2,10 @@
 
 use super::*;
 use paykit_sdk::{MessageDelivery, Refusal, RequestStatus, SentRequest};
-use pubky_switch_client::app::AppEvent;
-use pubky_switch_client::client::{Credentials, SwitchClient};
-use pubky_switch_client::transport::{Request, Response};
-use pubky_switch_core::enc::unb64_array;
+use pubky_dispatch_client::app::AppEvent;
+use pubky_dispatch_client::client::{Credentials, SwitchClient};
+use pubky_dispatch_client::transport::{Request, Response};
+use pubky_dispatch_core::enc::unb64_array;
 use std::sync::Mutex;
 
 #[tokio::test]
@@ -179,7 +179,7 @@ async fn delivered_requests(world: &World, restore_creator: bool) -> TestResult 
     );
     assert_eq!(
         retried.accepted_at,
-        pubky_switch_core::time::parse_rfc3339(
+        pubky_dispatch_core::time::parse_rfc3339(
             first_answer["accepted_at"]
                 .as_str()
                 .ok_or("acceptance time missing")?

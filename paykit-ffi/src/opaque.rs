@@ -9,7 +9,7 @@
 //! only decoded.
 
 use paykit_lib::kinds::OPAQUE_MEMBERS;
-use pubky_switch_core::json::{check_json_as, Doc};
+use pubky_dispatch_core::json::{check_json_as, Doc};
 use serde_json::{Map, Value};
 
 /// Where a host's opaque JSON goes in a message, which decides how the wire checks it.

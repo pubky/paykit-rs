@@ -3,11 +3,11 @@
 use paykit_lib::grant::{grant_fields, EXECUTOR_GRANT_LABEL};
 use paykit_lib::records::{AllowanceRecord, GrantEntry, Origin};
 use paykit_lib::{Body, ExecutorGrant};
-use pubky_switch_client::app::{
+use pubky_dispatch_client::app::{
     KeptBatchStatus, KeptOp, LocalWrite, OpBatch, RecordRead, RecordTarget, UserConfirmed,
 };
-use pubky_switch_core::enc::hash;
-use pubky_switch_core::ops::{Condition, OpKind};
+use pubky_dispatch_core::enc::hash;
+use pubky_dispatch_core::ops::{Condition, OpKind};
 
 use super::approval::ApprovedOpening;
 use super::checkpoint::{ledger_target, ExecutorCheckpoint, ExecutorHistory, GrantEvidence};
@@ -218,7 +218,7 @@ impl Paykit {
             if !matches!(consent.consent, Consent::Held { .. }) {
                 return Err(held().into());
             }
-            // A missed inbox entry can hold an already dispatched attempt. The user can
+            // A missed inbox entry can hold an already handed off attempt. The user can
             // renew its consent against the exact ledger this installation incorporated.
             // Every new reservation still needs the method's complete history.
             let renews_known_consent = matches!(
@@ -442,7 +442,7 @@ impl Paykit {
             return Err(Refusal::AllowanceConfirmationNeeded { hold }.into());
         }
         let read = &current.record;
-        let pubky_switch_client::app::RecordContent::Value(bytes) = &read.content else {
+        let pubky_dispatch_client::app::RecordContent::Value(bytes) = &read.content else {
             return Err(regrant_waits().into());
         };
         if !read.authenticated
@@ -469,7 +469,7 @@ impl Paykit {
         let generation = self.app.own_identity().generation();
         // The write builds on the version the service holds the record's current write at:
         // after a recovery upload that can be lower than the version the write was first
-        // given (Pubky Switch wire 6.3, 7.6).
+        // given (Pubky Dispatch wire 6.3, 7.6).
         let base = current.installed_version;
         let fields = grant_fields(
             &own,
@@ -564,7 +564,7 @@ impl Paykit {
         // Read fresh first: an end or another change since the last receive, a hold set in
         // between, or a stopped app, refuses as it would before a write.
         if let Some(alarm) = self.app.alarm() {
-            return Err(pubky_switch_client::app::AppError::Alarm(alarm.clone()).into());
+            return Err(pubky_dispatch_client::app::AppError::Alarm(alarm.clone()).into());
         }
         let allow = allowance_target(&view.counterparty, &view.allowance_id);
         self.app

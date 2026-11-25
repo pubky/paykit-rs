@@ -1,7 +1,7 @@
 //! Payments under an Allowance for Kotlin and Swift: the executor, reservations and the ledger (Paykit spec 8.3).
 
 use crate::{
-    fixed, AllowanceHold, NativeWallet, PaymentResult, RequestId, SwitchAlarm, WalletError,
+    fixed, AllowanceHold, DispatchAlarm, NativeWallet, PaymentResult, RequestId, WalletError,
 };
 use paykit_sdk::UserConfirmed;
 use std::sync::Arc;
@@ -67,10 +67,10 @@ impl NativeWallet {
         .await
     }
 
-    /// Return the Switch alarm that stopped this wallet after an Allowance ledger rollback.
+    /// Return the Dispatch alarm that stopped this wallet after an Allowance ledger rollback.
     /// It survives reopening. Show its reason until the signer resolves the provider move
-    /// or loss (Paykit spec 8.3, Switch spec 10.1).
-    pub async fn ledger_alarm(&self) -> Result<Option<SwitchAlarm>, WalletError> {
+    /// or loss (Paykit spec 8.3, Dispatch spec 10.1).
+    pub async fn ledger_alarm(&self) -> Result<Option<DispatchAlarm>, WalletError> {
         self.with_wallet(|app| {
             Box::pin(async move {
                 // Local inspection reloads a failed commit without handing duties to the host.

@@ -8,21 +8,21 @@ use std::fmt;
 /// An extension message kept for the host until acknowledged or evicted (Paykit spec 3.3).
 #[derive(uniffi::Record)]
 pub struct ExtensionMessage {
-    /// The sender's 32-byte identity (Switch wire 5.1).
+    /// The sender's 32-byte identity (Dispatch wire 5.1).
     pub sender: Vec<u8>,
-    /// The sender's 16-byte App ID (Switch wire 5.1).
+    /// The sender's 16-byte App ID (Dispatch wire 5.1).
     pub sender_app: Vec<u8>,
     /// The extension kind `<prefix>.<name>` (Paykit wire 4.3).
     pub kind: String,
-    /// The signed message ID (Switch wire 5.1).
+    /// The signed message ID (Dispatch wire 5.1).
     pub msg_id: String,
-    /// The sender's creation time in Unix milliseconds (Switch spec 5.3).
+    /// The sender's creation time in Unix milliseconds (Dispatch spec 5.3).
     pub created_at_ms: u64,
-    /// The inbox's acceptance time in Unix milliseconds (Switch spec 8.2).
+    /// The inbox's acceptance time in Unix milliseconds (Dispatch spec 8.2).
     pub accepted_at_ms: u64,
-    /// The generation of the verified inbox entry (Switch spec 8.2).
+    /// The generation of the verified inbox entry (Dispatch spec 8.2).
     pub generation: u64,
-    /// The entry's sequence number within its generation (Switch spec 8.2).
+    /// The entry's sequence number within its generation (Dispatch spec 8.2).
     pub seq: u64,
     /// Base64url message hashes in the extension's order (Paykit wire 4.3).
     pub refs: Vec<String>,
@@ -129,7 +129,7 @@ fn extension_body(
     kind: &ExtensionKind,
     body_json: &str,
 ) -> Result<Map<String, Value>, WalletError> {
-    // The message context lets the Switch apply Paykit's opaque metadata rule (Paykit wire 4.3).
+    // The message context lets the Dispatch apply Paykit's opaque metadata rule (Paykit wire 4.3).
     let kind = kind.as_string();
     crate::opaque::object(
         body_json.as_bytes(),

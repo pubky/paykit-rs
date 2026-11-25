@@ -7,22 +7,22 @@ use super::{
     wallet::{enrolled_payer, enrolled_wallet, host, run},
 };
 use crate::{
-    AllowanceRole, AllowanceStatus, BackupDevice, HostRail, NativeWallet, PaymentDecision,
-    PaymentOutcome, PaymentResult, RefusalKind, RequestId, RuntimeTimer, SwitchAlarm, WalletError,
-    WalletFailure, WalletHost, WalletScopes,
+    AllowanceRole, AllowanceStatus, BackupDevice, DispatchAlarm, HostRail, NativeWallet,
+    PaymentDecision, PaymentOutcome, PaymentResult, RefusalKind, RequestId, RuntimeTimer,
+    WalletError, WalletFailure, WalletHost, WalletScopes,
 };
 use paykit_lib::{
     allowances::AllowanceTerms, Asset, AttemptId, Decimal, PaymentAmount,
     PaymentEndpointIdentifier, PaymentEndpointPayload, PaymentReference,
 };
 use paykit_sdk::{AppScopes, Paykit, RequestDestination, RequestDraft, UserConfirmed};
-use pubky_switch_client::{
+use pubky_dispatch_client::{
     app::AppError,
     store::{Fault, FaultStore, MemoryStore, StoreHandle},
     StoreError,
 };
-use pubky_switch_harness::{parties::Asking, Backend, World};
-use pubky_switch_signer::{CertChange, Signer};
+use pubky_dispatch_harness::{parties::Asking, Backend, World};
+use pubky_dispatch_signer::{CertChange, Signer};
 use std::{collections::BTreeMap, error::Error, sync::atomic::Ordering, sync::Arc};
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
@@ -395,7 +395,7 @@ fn test_executor_scope_is_required_on_another_payer() {
 async fn release(world: &World) -> TestResult {
     let mut p = Box::pin(Parties::open(world)).await?;
     let mut other = Box::pin(p.other_payer(world)).await?;
-    // Only the original executor expires while the reservation is held (Switch spec 10.2).
+    // Only the original executor expires while the reservation is held (Dispatch spec 10.2).
     let app_id = crate::fixed(p.payer.app_id().await?, "app_id")?;
     let lifetime = 3_600_000;
     let expiry = world
@@ -520,7 +520,7 @@ async fn regrant_lost(world: &World) -> TestResult {
     world.add_switch(successor, &[&buyer]).await?;
     let opening = Box::pin(p.signer.declare_provider_loss(
         successor,
-        pubky_switch_signer::UserConfirmed::shown_and_confirmed(),
+        pubky_dispatch_signer::UserConfirmed::shown_and_confirmed(),
     ))
     .await?;
     Box::pin(p.signer.end_staged_admission()).await?;
@@ -529,7 +529,7 @@ async fn regrant_lost(world: &World) -> TestResult {
     p.payer
         .lend(async move |app| app.app_mut().invite(&shop).await)
         .await??;
-    world.advance_ms(pubky_switch_client::app::DOC_CACHE_MS + 1);
+    world.advance_ms(pubky_dispatch_client::app::DOC_CACHE_MS + 1);
     Box::pin(receive_app(&mut p.shop)).await?;
 
     let view = p.payer.allowance(record.clone()).await?;
@@ -621,8 +621,8 @@ fn test_allowance_regrant_after_a_lost_reply_answers_not_resumed() {
 const MISSING_LEDGER: &str =
     "the current service is missing the executor's accepted permanent ledger";
 
-fn missing_ledger_alarm(alarm: Option<SwitchAlarm>) -> bool {
-    matches!(alarm, Some(SwitchAlarm::ProtocolRollback { protocol, reason })
+fn missing_ledger_alarm(alarm: Option<DispatchAlarm>) -> bool {
+    matches!(alarm, Some(DispatchAlarm::ProtocolRollback { protocol, reason })
         if protocol == "paykit" && reason == MISSING_LEDGER)
 }
 

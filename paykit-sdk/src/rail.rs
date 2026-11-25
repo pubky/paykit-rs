@@ -6,7 +6,7 @@
 //! check need:
 //!
 //! - **what it declares** ([`Rail::declaration`]): whether it is idempotent on the attempt ID
-//!   and for how long, whether its history shows a dispatch's outcome and for how long, and
+//!   and for how long, whether its history shows a handoff's outcome and for how long, and
 //!   whether that history survives a restore of the paying device (Paykit spec 7.2, "What a
 //!   payment method declares");
 //! - **which endpoints it pays** ([`Rail::select_endpoints`]): of the Payment Endpoints a
@@ -19,20 +19,20 @@
 //! - **what it would transfer** to a destination for an amount, before any write
 //!   ([`Rail::transfer`], Paykit spec 7.2 step 1);
 //! - **pay** an endpoint with the attempt ID as the idempotency key ([`Rail::pay`]);
-//! - **read** the outcome of a dispatch by its idempotency key, with the proof and the
+//! - **read** the outcome of a handoff by its idempotency key, with the proof and the
 //!   verified payment time ([`Rail::payment`]), and, for a payee, check a proof it received
 //!   by its own method ([`Rail::verify`], Paykit spec 8.1 step 4).
 //!
 //! An outcome is one of three, as in the v0.1 SDK (Paykit spec 7.2, "Failed means
 //! definitively not paid"): verified success, definitive failure, or nothing yet. A call that
 //! errs after a payment may have been submitted is nothing yet, never a failure; only
-//! [`RailError::Refused`] is authoritative, and a first dispatch it answers is written
+//! [`RailError::Refused`] is authoritative, and a first handoff it answers is written
 //! failed.
 //!
 //! `FakeRail` (feature `test-support`, tests only) is an in-memory rail for tests.
 
 use paykit_lib::{AttemptId, PaymentAmount, PaymentEndpointIdentifier, PaymentEndpointPayload};
-use pubky_switch_client::transport::BoxFuture;
+use pubky_dispatch_client::transport::BoxFuture;
 use serde_json::{Map, Value};
 
 #[cfg(feature = "test-support")]
@@ -47,7 +47,7 @@ pub use fake::{
 /// A failure of the payment method's call (Paykit spec 7.2). [`RailError::Unavailable`] is
 /// ambiguous: a payment may have been submitted, so it means nothing yet and the attempt
 /// stays open. [`RailError::Refused`] is authoritative: nothing was and nothing will be
-/// submitted, so a first dispatch it answers is written `failed`, its journal entry is
+/// submitted, so a first handoff it answers is written `failed`, its journal entry is
 /// finished, and a replacement payment may follow.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
@@ -79,16 +79,16 @@ pub struct RailDeclaration {
     pub idempotent: bool,
     /// How long the method remembers an idempotency key; `None` for good.
     pub idempotency_retention_ms: Option<u64>,
-    /// The method's history can show the outcome of a dispatch.
+    /// The method's history can show the outcome of a handoff.
     pub history: bool,
-    /// How long the history keeps a dispatch; `None` for good.
+    /// How long the history keeps a handoff; `None` for good.
     pub history_retention_ms: Option<u64>,
     /// The history lives with the account, not only on the paying device, so a restored
-    /// device sees every dispatch made after its backup.
+    /// device sees every handoff made after its backup.
     pub history_survives_restore: bool,
-    /// The longest a dispatch takes to complete or fail, in milliseconds: a day for an
-    /// ordinary Lightning payment (Switch spec 10.2). An attempt's `orphan_after` is at
-    /// least this plus [`crate::PRE_DISPATCH_BUDGET_MS`], so no other own app can resolve it
+    /// The longest a handoff takes to complete or fail, in milliseconds: a day for an
+    /// ordinary Lightning payment (Dispatch spec 10.2). An attempt's `orphan_after` is at
+    /// least this plus [`crate::PRE_HANDOFF_BUDGET_MS`], so no other own app can resolve it
     /// while its payment may still run.
     pub longest_completion_ms: u64,
     /// How far, in milliseconds, the method's verified payment time may lie before the
@@ -143,14 +143,14 @@ impl RailDeclaration {
         self
     }
 
-    /// The method's history can show the outcome of a dispatch.
+    /// The method's history can show the outcome of a handoff.
     #[must_use]
     pub fn with_history(mut self, history: bool) -> Self {
         self.history = history;
         self
     }
 
-    /// How long the history keeps a dispatch; for good when not set.
+    /// How long the history keeps a handoff; for good when not set.
     #[must_use]
     pub fn with_history_retention_ms(mut self, retention_ms: u64) -> Self {
         self.history_retention_ms = Some(retention_ms);
@@ -158,7 +158,7 @@ impl RailDeclaration {
     }
 
     /// The history lives with the account, not only on the paying device, so a restored
-    /// device sees every dispatch made after its backup.
+    /// device sees every handoff made after its backup.
     #[must_use]
     pub fn with_history_survives_restore(mut self, survives: bool) -> Self {
         self.history_survives_restore = survives;
@@ -169,10 +169,10 @@ impl RailDeclaration {
 /// A payment submitted or possibly submitted through the payer's wallet.
 /// The wallet includes its manual and automatic paths and reuses the original attempt ID.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct AllowanceDispatch {
+pub struct AllowanceHandoff {
     /// The original idempotency key used to pay.
     pub attempt_id: AttemptId,
-    /// The amount transferred, or durably bound to the dispatch, excluding fees.
+    /// The amount transferred, or durably bound to the handoff, excluding fees.
     pub amount: PaymentAmount,
     /// The method's outcome, including a payment whose result is still unknown.
     pub outcome: RailOutcome,
@@ -345,7 +345,7 @@ impl std::fmt::Debug for RailPayment {
     }
 }
 
-/// The outcome of a dispatch, as the method reports it.
+/// The outcome of a handoff, as the method reports it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum RailOutcome {
@@ -530,7 +530,7 @@ pub trait Rail: Send + Sync {
     /// yet, since a payment may have been submitted.
     fn pay(&self, payment: RailPayment) -> BoxFuture<'_, Result<RailOutcome, RailError>>;
 
-    /// The method's history of the dispatch under `idempotency_key`, with its proof and
+    /// The method's history of the handoff under `idempotency_key`, with its proof and
     /// verified payment time; `None` when the history shows none (Paykit spec 7.2, 7.3).
     ///
     /// # Errors
@@ -545,7 +545,7 @@ pub trait Rail: Send + Sync {
     /// methods and manual or automatic paths (Paykit spec 8.3). Start at the accounts'
     /// creation and include closed accounts, unresolved handoffs and later corrections
     /// through one consistent current wallet snapshot. The wallet establishes coverage
-    /// using its own history. A Switch timestamp cannot date a wallet dispatch.
+    /// using its own history. A Dispatch timestamp cannot date a wallet handoff.
     ///
     /// Return `None` when any account, path, original attempt ID, transfer amount or part
     /// of that history cannot be accounted for. Only a complete scan may return `Some`,
@@ -557,7 +557,7 @@ pub trait Rail: Send + Sync {
     fn allowance_history(
         &self,
         _payer: [u8; 32],
-    ) -> BoxFuture<'_, Result<Option<Vec<AllowanceDispatch>>, RailError>> {
+    ) -> BoxFuture<'_, Result<Option<Vec<AllowanceHandoff>>, RailError>> {
         Box::pin(async { Ok(None) })
     }
 

@@ -5,8 +5,8 @@ use std::collections::{HashMap, HashSet};
 use paykit_lib::allowances::{record_outcomes, AttemptEvidence, ClaimState, EntryOutcome, Ledger};
 use paykit_lib::records::{ActivityRecord, RecordBinding};
 use paykit_lib::{AttemptId, Body, Decimal};
-use pubky_switch_client::app::{OpBatch, RecordRead};
-use pubky_switch_core::ops::Condition;
+use pubky_dispatch_client::app::{OpBatch, RecordRead};
+use pubky_dispatch_core::ops::Condition;
 
 use super::evidence::AppliedRecord;
 use super::restore::LedgerRead;
@@ -26,7 +26,7 @@ impl Paykit {
         let batch = OpBatch::for_protocol(crate::protocol::BACKUP_NAME);
         let prepared = checked.stage(self, batch, Vec::new(), true).await?;
         let applied = self.submit(prepared).await?;
-        let name = pubky_switch_core::enc::b64(&ledger);
+        let name = pubky_dispatch_core::enc::b64(&ledger);
         let revision = applied
             .proofs
             .iter()
@@ -176,7 +176,7 @@ impl Paykit {
         &mut self,
         ledger: &Ledger,
         attempts: &HashMap<AttemptId, ([u8; 32], &Decimal)>,
-        dispatched: &HashMap<AttemptId, &crate::rail::AllowanceDispatch>,
+        handed_off: &HashMap<AttemptId, &crate::rail::AllowanceHandoff>,
         before: Option<&AppliedRecord>,
     ) -> Result<(Vec<AttemptId>, Vec<AttemptId>)> {
         let mut paid_attempts = Vec::new();
@@ -236,7 +236,7 @@ impl Paykit {
                 // showing the attempt failed, pending or not at all doesn't refute the payer's
                 // own signed proof, which counts the attempt spent (Paykit spec 8.3, `failed`
                 // releases).
-                let matches_method = match dispatched.get(&id).map(|d| &d.outcome) {
+                let matches_method = match handed_off.get(&id).map(|d| &d.outcome) {
                     Some(crate::rail::RailOutcome::Paid(method)) => matches!(proof.body(),
                         Body::PaymentProof(paid) if paid.proof == method.proof),
                     Some(crate::rail::RailOutcome::Failed | crate::rail::RailOutcome::Pending)
@@ -301,11 +301,9 @@ impl Paykit {
             if let Some(read) = self.app.read_claim(&obligation).await? {
                 // A `done` this read shows is a payment seen made, kept as any other, so a
                 // count that relies on an earlier read can't miss it (Paykit spec 8.3).
-                if read
-                    .view
-                    .attempt(&id.to_bytes())
-                    .is_some_and(|shown| shown.outcome == pubky_switch_core::claims::Outcome::Done)
-                {
+                if read.view.attempt(&id.to_bytes()).is_some_and(|shown| {
+                    shown.outcome == pubky_dispatch_core::claims::Outcome::Done
+                }) {
                     self.saw_paid(&id, obligation, crate::journal::PaidSource::ClaimShowsDone)
                         .await?;
                 }
@@ -400,7 +398,7 @@ impl Paykit {
         &mut self,
         ledger: &Ledger,
         claims: &HashMap<AttemptId, ReservationClaim>,
-        dispatched: &HashMap<AttemptId, &crate::rail::AllowanceDispatch>,
+        handed_off: &HashMap<AttemptId, &crate::rail::AllowanceHandoff>,
     ) -> Result<(HashMap<AttemptId, AttemptEvidence>, Vec<AttemptId>)> {
         let mut facts: HashMap<_, _> = claims
             .iter()
@@ -411,7 +409,7 @@ impl Paykit {
             .iter()
             .filter(|e| {
                 e.outcome != Some(EntryOutcome::Done)
-                    || dispatched.contains_key(&e.attempt_id) && !claims.contains_key(&e.attempt_id)
+                    || handed_off.contains_key(&e.attempt_id) && !claims.contains_key(&e.attempt_id)
             })
             .map(|e| (e.attempt_id, (e.obligation, &e.value)))
             .chain(
@@ -425,7 +423,7 @@ impl Paykit {
             return Ok((facts, Vec::new()));
         }
         let (dated, undated) =
-            Box::pin(self.dated_allowance_payments(ledger, &attempts, dispatched, None)).await?;
+            Box::pin(self.dated_allowance_payments(ledger, &attempts, handed_off, None)).await?;
         for id in dated {
             facts.entry(id).or_default().paid = true;
         }

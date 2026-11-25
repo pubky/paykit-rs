@@ -7,8 +7,8 @@ use paykit_sdk::{
     AcceptOptions, PayOptions, PayOutcome, Paykit, PaykitBackup, PaykitConfig, Rail, Refusal,
     RequestRef, RequestStatus,
 };
-use pubky_switch_client::app::UserConfirmed;
-use pubky_switch_client::clock::Clock;
+use pubky_dispatch_client::app::UserConfirmed;
+use pubky_dispatch_client::clock::Clock;
 
 use crate::common::{draft, request_from, store, World};
 
@@ -278,7 +278,7 @@ async fn test_hold_confirmation_cannot_confirm_another_request() {
 async fn reload(
     w: &World,
     app: Paykit,
-    storage: Arc<dyn pubky_switch_client::store::StateStore>,
+    storage: Arc<dyn pubky_dispatch_client::store::StateStore>,
 ) -> Paykit {
     let id = app.app_id();
     drop(app);
@@ -332,7 +332,7 @@ async fn test_hold_confirmation_reload_preserves_the_current_token() {
 }
 
 async fn unread_epoch(missing: bool) {
-    use pubky_switch_client::app::LocalWrite;
+    use pubky_dispatch_client::app::LocalWrite;
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
@@ -468,7 +468,8 @@ async fn test_hold_confirmation_paid_request_stays_unpayable_after_deletion_and_
         .delete_record(&target, Vec::new())
         .await
         .unwrap();
-    w.clock.advance_ms(401 * pubky_switch_core::records::DAY_MS);
+    w.clock
+        .advance_ms(401 * pubky_dispatch_core::records::DAY_MS);
     let mut later = w.wallet("later").await;
     assert!(later
         .app_mut()
@@ -491,7 +492,7 @@ async fn test_hold_confirmation_paid_request_stays_unpayable_after_deletion_and_
         .unwrap();
     assert_eq!(
         held.content,
-        pubky_switch_client::app::RecordContent::Deleted
+        pubky_dispatch_client::app::RecordContent::Deleted
     );
     assert!(later.payments().await.unwrap().is_empty());
     assert_eq!(w.rail.all_pay_calls(), calls);
@@ -574,17 +575,17 @@ async fn test_hold_confirmation_signed_payer_loss_outlives_consent_to_a_missed_i
 
 #[derive(Default)]
 struct HoldCommitStore {
-    inner: pubky_switch_client::store::MemoryStore,
+    inner: pubky_dispatch_client::store::MemoryStore,
     fault: std::sync::atomic::AtomicU8,
     hit: std::sync::atomic::AtomicBool,
 }
 
-impl pubky_switch_client::store::StateStore for HoldCommitStore {
+impl pubky_dispatch_client::store::StateStore for HoldCommitStore {
     fn get(
         &self,
         ns: &str,
         key: &[u8],
-    ) -> Result<Option<Vec<u8>>, pubky_switch_client::error::StoreError> {
+    ) -> Result<Option<Vec<u8>>, pubky_dispatch_client::error::StoreError> {
         self.inner.get(ns, key)
     }
     fn scan(
@@ -593,18 +594,18 @@ impl pubky_switch_client::store::StateStore for HoldCommitStore {
         prefix: &[u8],
         after: Option<&[u8]>,
         limit: u32,
-    ) -> Result<Vec<pubky_switch_client::store::KeyValue>, pubky_switch_client::error::StoreError>
+    ) -> Result<Vec<pubky_dispatch_client::store::KeyValue>, pubky_dispatch_client::error::StoreError>
     {
         self.inner.scan(ns, prefix, after, limit)
     }
     fn commit(
         &self,
-        batch: pubky_switch_client::store::WriteBatch,
-    ) -> Result<(), pubky_switch_client::error::StoreError> {
+        batch: pubky_dispatch_client::store::WriteBatch,
+    ) -> Result<(), pubky_dispatch_client::error::StoreError> {
         self.commit_with(batch, |batch| {
             self.inner
                 .commit(batch)
-                .map(|()| pubky_switch_client::store::CommitOutcome::Applied)
+                .map(|()| pubky_dispatch_client::store::CommitOutcome::Applied)
         })
         .map(|_| ())
     }
@@ -612,18 +613,20 @@ impl pubky_switch_client::store::StateStore for HoldCommitStore {
     fn acquire(
         &self,
         ns: &str,
-        owner: pubky_switch_client::store::StoreOwner,
-    ) -> Result<pubky_switch_client::store::AcquireOutcome, pubky_switch_client::error::StoreError>
-    {
+        owner: pubky_dispatch_client::store::StoreOwner,
+    ) -> Result<
+        pubky_dispatch_client::store::AcquireOutcome,
+        pubky_dispatch_client::error::StoreError,
+    > {
         self.inner.acquire(ns, owner)
     }
 
     fn commit_if(
         &self,
         ns: &str,
-        owner: pubky_switch_client::store::StoreOwner,
-        batch: pubky_switch_client::store::WriteBatch,
-    ) -> Result<pubky_switch_client::store::CommitOutcome, pubky_switch_client::error::StoreError>
+        owner: pubky_dispatch_client::store::StoreOwner,
+        batch: pubky_dispatch_client::store::WriteBatch,
+    ) -> Result<pubky_dispatch_client::store::CommitOutcome, pubky_dispatch_client::error::StoreError>
     {
         self.commit_with(batch, |batch| self.inner.commit_if(ns, owner, batch))
     }
@@ -631,16 +634,16 @@ impl pubky_switch_client::store::StateStore for HoldCommitStore {
 impl HoldCommitStore {
     fn commit_with(
         &self,
-        batch: pubky_switch_client::store::WriteBatch,
+        batch: pubky_dispatch_client::store::WriteBatch,
         apply: impl FnOnce(
-            pubky_switch_client::store::WriteBatch,
+            pubky_dispatch_client::store::WriteBatch,
         ) -> Result<
-            pubky_switch_client::store::CommitOutcome,
-            pubky_switch_client::error::StoreError,
+            pubky_dispatch_client::store::CommitOutcome,
+            pubky_dispatch_client::error::StoreError,
         >,
-    ) -> Result<pubky_switch_client::store::CommitOutcome, pubky_switch_client::error::StoreError>
+    ) -> Result<pubky_dispatch_client::store::CommitOutcome, pubky_dispatch_client::error::StoreError>
     {
-        use pubky_switch_client::{error::StoreError, store::Write};
+        use pubky_dispatch_client::{error::StoreError, store::Write};
         use std::sync::atomic::Ordering;
         let hold = batch.writes().iter().any(|write| matches!(write, Write::Put { key, .. } if key == b"p/paykit/rh" || key == b"p/paykit/mh" || key == b"p/paykit/mu"));
         let fault = if hold {
@@ -655,18 +658,18 @@ impl HoldCommitStore {
             return Err(StoreError::Unavailable);
         }
         let applied = apply(batch)?;
-        if applied != pubky_switch_client::store::CommitOutcome::Applied {
+        if applied != pubky_dispatch_client::store::CommitOutcome::Applied {
             return Ok(applied);
         }
         if fault == 2 {
             return Err(StoreError::Unknown);
         }
-        Ok(pubky_switch_client::store::CommitOutcome::Applied)
+        Ok(pubky_dispatch_client::store::CommitOutcome::Applied)
     }
 }
 
 async fn missed_commit(after: bool) {
-    use pubky_switch_client::store::{client_namespace, StateStore};
+    use pubky_dispatch_client::store::{client_namespace, StateStore};
     use std::sync::atomic::Ordering;
     let w = World::new();
     let storage = Arc::new(HoldCommitStore::default());
@@ -745,7 +748,7 @@ async fn test_hold_confirmation_missed_lost_commit_answer_keeps_the_new_epoch() 
 }
 
 async fn restore_commit(after: bool) {
-    use pubky_switch_client::store::{client_namespace, StateStore};
+    use pubky_dispatch_client::store::{client_namespace, StateStore};
     use std::sync::atomic::Ordering;
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
@@ -837,7 +840,7 @@ async fn confirmation_applied_after_a_newer_hold(w: &World) -> (Paykit, RequestR
 /// [`confirmation_applied_after_a_newer_hold`], the user confirming the newer hold before the
 /// kept batch lands when `confirm_newer`.
 async fn kept_confirmation_lands(w: &World, confirm_newer: bool) -> (Paykit, RequestRef) {
-    use pubky_switch_client::testing::Fault;
+    use pubky_dispatch_client::testing::Fault;
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
     let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
@@ -968,7 +971,7 @@ async fn test_hold_confirmation_applied_after_a_newer_hold_stays_held_after_a_cl
     restored.receive(None).await.unwrap();
     assert_eq!(
         restored.app().restore_held_cursor(),
-        Some(pubky_switch_client::app::HeldCursor::Clean)
+        Some(pubky_dispatch_client::app::HeldCursor::Clean)
     );
     restored.reconcile().await.unwrap();
     restored.end_reconcile(UserConfirmed::new()).await.unwrap();
@@ -996,7 +999,7 @@ async fn test_hold_confirmation_kept_subscription_acceptance_confirms_no_newer_h
     // The user accepts a held subscription, its batch unanswered and kept; a second
     // `missed` item is read before the batch is applied. The acceptance stands, but its
     // confirmation is of the earlier hold: no Billing Period is paid automatically.
-    use pubky_switch_client::testing::Fault;
+    use pubky_dispatch_client::testing::Fault;
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
@@ -1060,7 +1063,7 @@ async fn test_hold_confirmation_kept_subscription_acceptance_confirms_no_newer_h
 
 #[tokio::test]
 async fn test_hold_confirmation_backup_with_a_malformed_hold_identifier_is_refused() {
-    use pubky_switch_client::app::LocalWrite;
+    use pubky_dispatch_client::app::LocalWrite;
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;

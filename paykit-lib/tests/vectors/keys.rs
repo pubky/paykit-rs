@@ -1,10 +1,10 @@
-//! `keys.json`: the fixed keys of the set, each derived from its seed label (Switch wire 1.3,
+//! `keys.json`: the fixed keys of the set, each derived from its seed label (Dispatch wire 1.3,
 //! 1.5), with the scopes and permissions of each app's certificate in `documents.json`
 //! `certificates` (Paykit wire 3.1).
 
 use paykit_lib::scopes::SETTLEMENTS;
-use pubky_switch_core::enc::{b64, lp, pubky_id, u64be};
-use pubky_switch_core::scopes::permission_names;
+use pubky_dispatch_core::enc::{b64, lp, pubky_id, u64be};
+use pubky_dispatch_core::scopes::permission_names;
 use serde_json::{json, Value};
 
 use crate::common::{

@@ -3,9 +3,9 @@
 //! Destinations come only from the payee (Paykit spec 6): an app pays only to endpoints in a
 //! verified message from the payee's current app, or to the payee's public endpoints. Before
 //! money moves, the payer checks, against the payee's `identity.json` looked up within the
-//! last 10 minutes at its Homeserver and its switch, the higher version taken, through the
-//! client's version floor and equivocation check ([`pubky_switch_client::app::App::identity_of`],
-//! Switch spec 4.3):
+//! last 10 minutes at its Homeserver and its Dispatch, the higher version taken, through the
+//! client's version floor and equivocation check ([`pubky_dispatch_client::app::App::identity_of`],
+//! Dispatch spec 4.3):
 //!
 //! - the message carrying the destination is from the payee, from the app that owns the
 //!   destination, and names the obligation paid by its signed fields (a request is the one
@@ -27,24 +27,24 @@
 //! A removed app's destinations are ignored, even if its messages or its record are still
 //! held (Paykit spec 4).
 //!
-//! The payee's switch is asked beside the Homeserver's reads, and waited on for at most
+//! The payee's Dispatch is asked beside the Homeserver's reads, and waited on for at most
 //! [`IDENTITY_GRACE_MS`] after them, on the host's [`crate::Timer`]; a lookup still running
 //! is kept, and its answer taken at the next check before money moves (Paykit spec 4, 14).
 //!
 //! A request's or a Private Payment List's endpoint is a verified message's: it needs a copy
 //! of the payee's `identity.json` read in the last 10 minutes, from its Homeserver or its
-//! switch, and doesn't wait on the switch (Paykit spec 7.2). A public endpoint needs what
+//! Dispatch, and doesn't wait on the Dispatch (Paykit spec 7.2). A public endpoint needs what
 //! follows.
 //!
-//! The payee's `identity.json` is acted on as Switch spec 4.3 allows ([`PeerIdentity::may_act`]):
-//! once its switch confirmed the copy; otherwise a payment the user started goes on only on
+//! The payee's `identity.json` is acted on as Dispatch spec 4.3 allows ([`PeerIdentity::may_act`]):
+//! once its Dispatch confirmed the copy; otherwise a payment the user started goes on only on
 //! the user's explicit confirmation, and an automatic one (an executor) never does.
 //!
 //! Security: this is the check that stops a payment to a destination an attacker planted. It
 //! fails closed: a lookup that fails refuses the payment, and an automatic payment never acts
 //! on the Homeserver's copy alone (Paykit spec 7.2).
 //!
-//! [`PeerIdentity::may_act`]: pubky_switch_client::app::PeerIdentity::may_act
+//! [`PeerIdentity::may_act`]: pubky_dispatch_client::app::PeerIdentity::may_act
 
 use std::future::Future;
 use std::pin::Pin;
@@ -57,24 +57,24 @@ use paykit_lib::kinds::check_sender_scopes;
 use paykit_lib::records::{DestinationSource, StoredMessage};
 use paykit_lib::scopes::{acts_as_payee, check_certificate, holds, PaykitScope};
 use paykit_lib::Body;
-use pubky_switch_client::app::{
+use pubky_dispatch_client::app::{
     Initiator, MayAct, PeerIdentity, SwitchAnswer, SwitchCopy, UserConfirmed, DOC_CACHE_MS,
 };
-use pubky_switch_client::transport::BoxFuture;
-use pubky_switch_core::records::{AppCert, AppRecord, IdentityDoc, Standing};
+use pubky_dispatch_client::transport::BoxFuture;
+use pubky_dispatch_core::records::{AppCert, AppRecord, IdentityDoc, Standing};
 
 use crate::app_records::PublicAppFailureReason;
 use crate::error::{Refusal, Result};
 use crate::journal::Destination;
 use crate::paykit::Paykit;
 
-/// How long a payment waits for the payee's switch to answer a lookup that is still running
+/// How long a payment waits for the payee's Dispatch to answer a lookup that is still running
 /// after the Homeserver's read, before a user's payment may go on the user's confirmation
-/// (Switch spec 4.3, "No added latency").
+/// (Dispatch spec 4.3, "No added latency").
 pub const IDENTITY_GRACE_MS: u64 = 2_000;
 
 /// The time during which both parts of a public identity lookup are current
-/// (Switch spec 4.3). A directory-only version has no qualifying observation.
+/// (Dispatch spec 4.3). A directory-only version has no qualifying observation.
 pub(crate) fn public_read_window(identity: &PeerIdentity) -> Option<std::ops::Range<u64>> {
     let read = identity.read_at_ms?;
     Some(read.max(identity.switch_lookup_ms)..identity.fresh_until_ms())
@@ -105,8 +105,8 @@ fn public_action(identity: &PeerIdentity, now: u64, by: Initiator) -> MayAct {
 }
 
 /// The payee's copy of `identity.json` may still be acted on now, on the clock (Paykit
-/// spec 4, 7.2; Switch spec 4.3): read in the last 10 minutes, for a destination a
-/// verified message carries; for a public endpoint, as the switch's rules let `by`
+/// spec 4, 7.2; Dispatch spec 4.3): read in the last 10 minutes, for a destination a
+/// verified message carries; for a public endpoint, as the Dispatch's rules let `by`
 /// act, `confirmed` standing for the user's confirmation.
 pub(crate) fn payee_copy_usable(
     now: u64,
@@ -129,9 +129,9 @@ pub(crate) fn payee_copy_usable(
 }
 
 impl Paykit {
-    /// The payee's `identity.json` for acting on its destinations (Paykit spec 4, 7.2; Switch
-    /// spec 4.3, "The switch's copy"), as [`Paykit::payee_identity_with`] takes it, with no
-    /// other reads beside the switch's lookup.
+    /// The payee's `identity.json` for acting on its destinations (Paykit spec 4, 7.2; Dispatch
+    /// spec 4.3, "The Dispatch's copy"), as [`Paykit::payee_identity_with`] takes it, with no
+    /// other reads beside the Dispatch's lookup.
     pub(crate) async fn payee_identity(
         &mut self,
         payee: &[u8; 32],
@@ -145,16 +145,16 @@ impl Paykit {
         Ok(identity)
     }
 
-    /// The payee's `identity.json` for acting on its destinations (Paykit spec 4, 7.2; Switch
-    /// spec 4.3, "The switch's copy"): the copy held while it and its last switch lookup are
-    /// fresh, else the Homeserver's copy and then the payee's switch's, through the client's
+    /// The payee's `identity.json` for acting on its destinations (Paykit spec 4, 7.2; Dispatch
+    /// spec 4.3, "The Dispatch's copy"): the copy held while it and its last Dispatch lookup are
+    /// fresh, else the Homeserver's copy and then the payee's Dispatch's, through the client's
     /// version floor and equivocation check.
     ///
-    /// The switch's lookup runs beside `reads`, the Homeserver reads started from this copy.
+    /// The Dispatch's lookup runs beside `reads`, the Homeserver reads started from this copy.
     /// For a public endpoint a user may confirm the exact Homeserver observation after the
     /// lookup fails or the grace period on the host timer passes. An automatic payment waits
     /// for an answer. An outstanding lookup stays with this payee for the next check
-    /// before money moves (Paykit spec 4, 14; Switch spec 4.3, "No added latency").
+    /// before money moves (Paykit spec 4, 14; Dispatch spec 4.3, "No added latency").
     /// `Err` inside holds the refusal; the reads' result comes with it.
     pub(crate) async fn payee_identity_with<R: Send + 'static>(
         &mut self,
@@ -179,13 +179,13 @@ impl Paykit {
                 public_read_window(&kept.identity)
                     .is_some_and(|window| window.contains(&self.now()))
             });
-            let (identity, switch) = match kept {
-                Some(kept) => (kept.identity, Some(kept.switch)),
+            let (identity, dispatch) = match kept {
+                Some(kept) => (kept.identity, Some(kept.dispatch)),
                 None => match self.app.begin_identity_lookup(payee, refresh).await {
                     Ok(lookup) => (lookup.identity, lookup.switch.map(PendingLookup::new)),
                     Err(error) => {
                         let why = format!(
-                            "Switch spec 4.3: the payee's identity.json can't be read now: {error}"
+                            "Dispatch spec 4.3: the payee's identity.json can't be read now: {error}"
                         );
                         crate::pay::unless_local_stop(error)?;
                         return Ok((Err(Refusal::IdentityUnavailable(why)), read));
@@ -193,15 +193,15 @@ impl Paykit {
                 },
             };
             let started = reads.take().and_then(|start| start(&identity));
-            let identity = match switch {
+            let identity = match dispatch {
                 None => {
                     if let Some(started) = started {
                         read = Some(started.await);
                     }
                     identity
                 }
-                Some(switch) => {
-                    // A destination a verified message carries doesn't wait on the switch:
+                Some(dispatch) => {
+                    // A destination a verified message carries doesn't wait on the dispatch:
                     // its answer is taken only if it is there already.
                     let sleep: BoxFuture<'static, ()> = match (need, by) {
                         (Need::SwitchCopy, Initiator::Automatic) => {
@@ -210,7 +210,7 @@ impl Paykit {
                         (Need::SwitchCopy, _) => self.timer.sleep(IDENTITY_GRACE_MS),
                         (Need::FreshCopy, _) => Box::pin(async {}),
                     };
-                    let (lookup, done) = race(switch, started, sleep).await;
+                    let (lookup, done) = race(dispatch, started, sleep).await;
                     if done.is_some() {
                         read = done;
                     }
@@ -225,12 +225,12 @@ impl Paykit {
                                 }
                             }
                         }
-                        Lookup::Running(switch) => {
+                        Lookup::Running(dispatch) => {
                             self.lookups.insert(
                                 *payee,
                                 KeptLookup {
                                     identity: identity.clone(),
-                                    switch,
+                                    dispatch,
                                 },
                             );
                             identity
@@ -239,8 +239,8 @@ impl Paykit {
                 }
             };
             if need == Need::FreshCopy {
-                // A copy read in the last 10 minutes, from the Homeserver or the switch, is
-                // the one acted on (Paykit spec 7.2); the switch's confirmation isn't needed.
+                // A copy read in the last 10 minutes, from the Homeserver or the Dispatch, is
+                // the one acted on (Paykit spec 7.2); the Dispatch's confirmation isn't needed.
                 if payee_copy_usable(self.now(), &identity, need, by, confirmed) {
                     return Ok((Ok(identity), read));
                 }
@@ -269,8 +269,8 @@ impl Paykit {
                 _ => {
                     return Ok((
                         Err(Refusal::IdentityUnavailable(
-                            "Switch spec 4.3: no fresh copy of the payee's identity.json that \
-                             its switch confirmed; an automatic payment never acts on the \
+                            "Dispatch spec 4.3: no fresh copy of the payee's identity.json that \
+                             its dispatch confirmed; an automatic payment never acts on the \
                              Homeserver's copy alone"
                                 .into(),
                         )),
@@ -307,7 +307,7 @@ impl Paykit {
                 return Ok(Err(Refusal::Destination(why)));
             }
         }
-        // Switch spec 4.3 asks for the switch's confirmation for public endpoints only; a
+        // Dispatch spec 4.3 asks for the Dispatch's confirmation for public endpoints only; a
         // request's or a list's endpoint is the payee's verified message (Paykit spec 7.2).
         let mut identity = match self
             .payee_identity(payee, Need::of(carrier), by, confirmed)
@@ -372,7 +372,7 @@ impl Paykit {
             .map(|()| identity))
     }
 
-    /// The payee's switch lookup kept from an earlier check, taken if its answer has come,
+    /// The payee's Dispatch lookup kept from an earlier check, taken if its answer has come,
     /// without waiting for one that hasn't (Paykit spec 4): the copy it gives, or `None`
     /// when none was kept or it still runs, kept again. `Err` inside: the client refused
     /// the answer, and nothing is paid on it.
@@ -383,24 +383,24 @@ impl Paykit {
         let Some(kept) = self.lookups.remove(payee) else {
             return Ok(Ok(None));
         };
-        match race::<()>(kept.switch, None, Box::pin(async {})).await {
+        match race::<()>(kept.dispatch, None, Box::pin(async {})).await {
             (Lookup::Answered(answer), _) => match self.app.finish_identity_lookup(answer).await {
                 Ok(identity) => Ok(Ok(Some(identity))),
                 // An answer the client refuses to take is no answer to ignore: it may show
                 // the payee's identity.json equivocating, and then nothing is paid to it
-                // (Switch wire 3.3). It refuses as it does anywhere else.
+                // (Dispatch wire 3.3). It refuses as it does anywhere else.
                 Err(error) => {
                     let refusal = not_taken(&error);
                     crate::pay::unless_local_stop(error)?;
                     Ok(Err(refusal))
                 }
             },
-            (Lookup::Running(switch), _) => {
+            (Lookup::Running(dispatch), _) => {
                 self.lookups.insert(
                     *payee,
                     KeptLookup {
                         identity: kept.identity,
-                        switch,
+                        dispatch,
                     },
                 );
                 Ok(Ok(None))
@@ -408,7 +408,7 @@ impl Paykit {
         }
     }
 
-    /// Inspect an arrived switch answer without waiting or taking it. The owner still
+    /// Inspect an arrived Dispatch answer without waiting or taking it. The owner still
     /// finishes that exact answer through the client before acting on it (Paykit spec 7.2).
     pub(crate) fn inspect_ready_lookup<T>(
         &mut self,
@@ -418,10 +418,10 @@ impl Paykit {
         use std::task::Waker;
         let kept = self.lookups.get_mut(payee)?;
         let mut cx = Context::from_waker(Waker::noop());
-        match Pin::new(&mut kept.switch).poll(&mut cx) {
+        match Pin::new(&mut kept.dispatch).poll(&mut cx) {
             Poll::Ready(answer) => {
                 let result = inspect(&answer);
-                kept.switch = PendingLookup::new(std::future::ready(answer));
+                kept.dispatch = PendingLookup::new(std::future::ready(answer));
                 Some(result)
             }
             Poll::Pending => None,
@@ -440,7 +440,7 @@ impl Paykit {
         doc: &IdentityDoc,
         now: u64,
     ) -> std::result::Result<(), Refusal> {
-        // Judged again immediately before dispatch, by both clocks (Paykit spec 7.2).
+        // Judged again immediately before handoff, by both clocks (Paykit spec 7.2).
         let clocks = Clocks {
             device: now,
             service: self.service_time(),
@@ -451,21 +451,21 @@ impl Paykit {
     }
 }
 
-/// The refusal of a switch answer the client wouldn't take, such as two documents at one
-/// version, equivocation (Switch wire 3.3), for which the client also raises
+/// The refusal of a Dispatch answer the client wouldn't take, such as two documents at one
+/// version, equivocation (Dispatch wire 3.3), for which the client also raises
 /// `AppEvent::PeerEquivocation` for the host to alert the user, and refuses every later
 /// lookup of that identity.
-fn not_taken(error: &pubky_switch_client::app::AppError) -> Refusal {
+fn not_taken(error: &pubky_dispatch_client::app::AppError) -> Refusal {
     Refusal::IdentityUnavailable(format!(
-        "Switch spec 4.3: the payee's identity.json can't be taken: {error}"
+        "Dispatch spec 4.3: the payee's identity.json can't be taken: {error}"
     ))
 }
 
-/// What a destination needs of the payee's `identity.json` (Paykit spec 4, 7.2; Switch spec
+/// What a destination needs of the payee's `identity.json` (Paykit spec 4, 7.2; Dispatch spec
 /// 4.3).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Need {
-    /// A public endpoint: the copy the payee's switch confirmed, waited on through a grace,
+    /// A public endpoint: the copy the payee's Dispatch confirmed, waited on through a grace,
     /// or the user's explicit confirmation without it.
     SwitchCopy,
     /// A destination a verified message carries: a copy read in the last 10 minutes.
@@ -482,14 +482,14 @@ impl Need {
     }
 }
 
-/// A payee's switch lookup still running after its grace, with the copy it began from. An
+/// A payee's Dispatch lookup still running after its grace, with the copy it began from. An
 /// answer the payment fence saw come is kept in it, as a lookup that answers at once.
 pub(crate) struct KeptLookup {
     pub(crate) identity: PeerIdentity,
-    pub(crate) switch: PendingLookup,
+    pub(crate) dispatch: PendingLookup,
 }
 
-/// A switch lookup's answer to come.
+/// A Dispatch lookup's answer to come.
 ///
 /// The boxed future is `Send` but not `Sync`, and [`Paykit`] keeps it, so it sits in a
 /// `Mutex`: `Paykit` is then `Sync`, and the future of a call awaiting a `&self` method is
@@ -517,17 +517,17 @@ impl Future for PendingLookup {
     }
 }
 
-/// Where a switch lookup stands after [`race`].
+/// Where a Dispatch lookup stands after [`race`].
 enum Lookup {
     Answered(SwitchAnswer),
     Running(PendingLookup),
 }
 
-/// Run the switch's lookup beside `reads` until they finish, then wait on it at most until
-/// `grace` resolves (Switch spec 4.3, "No added latency"). Both are polled in turn on the
+/// Run the Dispatch's lookup beside `reads` until they finish, then wait on it at most until
+/// `grace` resolves (Dispatch spec 4.3, "No added latency"). Both are polled in turn on the
 /// caller's task: nothing is spawned, and a lookup not answered is handed back to be kept.
 async fn race<R>(
-    mut switch: PendingLookup,
+    mut dispatch: PendingLookup,
     reads: Option<BoxFuture<'static, R>>,
     mut grace: BoxFuture<'static, ()>,
 ) -> (Lookup, Option<R>) {
@@ -536,7 +536,7 @@ async fn race<R>(
     if let Some(mut reads) = reads {
         std::future::poll_fn(|cx| {
             if answer.is_none() {
-                if let Poll::Ready(a) = Pin::new(&mut switch).poll(cx) {
+                if let Poll::Ready(a) = Pin::new(&mut dispatch).poll(cx) {
                     answer = Some(a);
                 }
             }
@@ -554,7 +554,7 @@ async fn race<R>(
         return (Lookup::Answered(answer), done);
     }
     let answered = std::future::poll_fn(|cx| {
-        if let Poll::Ready(a) = Pin::new(&mut switch).poll(cx) {
+        if let Poll::Ready(a) = Pin::new(&mut dispatch).poll(cx) {
             return Poll::Ready(Some(a));
         }
         grace.as_mut().poll(cx).map(|()| None)
@@ -562,7 +562,7 @@ async fn race<R>(
     .await;
     match answered {
         Some(answer) => (Lookup::Answered(answer), done),
-        None => (Lookup::Running(switch), done),
+        None => (Lookup::Running(dispatch), done),
     }
 }
 
@@ -810,7 +810,7 @@ pub(crate) fn check_record_time(
 /// 3.1: its scope rules, and permissions with none missing and, without another protocol's
 /// scope, no other), allows the destination and, when listed, hasn't expired. Requests and
 /// period details may come from a labelled selling app. A list or public record requires
-/// plain `paykit_request`. The record stays within the identity's age limit (Paykit spec 4). The Switch takes a
+/// plain `paykit_request`. The record stays within the identity's age limit (Paykit spec 4). The Dispatch takes a
 /// certificate Paykit's verifiers refuse, so a record's, which nothing else checks, is
 /// checked here.
 pub(crate) fn current(
@@ -888,7 +888,7 @@ fn current_app(
 #[cfg(test)]
 mod tests {
     use paykit_lib::{PaymentEndpointIdentifier, PaymentEndpointPayload};
-    use pubky_switch_core::records::{IdentityBody, RemovedApp};
+    use pubky_dispatch_core::records::{IdentityBody, RemovedApp};
     use serde_json::json;
 
     use super::*;
@@ -978,7 +978,7 @@ mod tests {
     fn list_body(expires_at: u64) -> serde_json::Map<String, serde_json::Value> {
         object(json!({
             "version": { "generation": 1, "counter": 7 },
-            "expires_at": pubky_switch_core::time::rfc3339(expires_at),
+            "expires_at": pubky_dispatch_core::time::rfc3339(expires_at),
             "payment_endpoints": { "btc-bitcoin-p2wpkh": { "payload": "bc1q", "single_use": true } }
         }))
     }
@@ -1224,7 +1224,7 @@ mod tests {
 
     #[test]
     fn test_destination_record_carrier_with_wrong_permissions_refused() {
-        use pubky_switch_core::scopes::Permission;
+        use pubky_dispatch_core::scopes::Permission;
         // A public record's certificate is checked in full before it carries a destination
         // (Paykit wire 3.1): permissions missing one `paykit_request` needs, or holding another.
         let missing = Party::with_permissions(

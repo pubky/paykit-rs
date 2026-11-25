@@ -4,7 +4,7 @@
 
 use paykit_sdk::rail::{Behaviour, FAKE_LONGEST_COMPLETION_MS};
 use paykit_sdk::{PayOptions, PayOutcome, PayeeStatus, RailDeclaration, Refusal, RequestDraft};
-use pubky_switch_client::clock::Clock;
+use pubky_dispatch_client::clock::Clock;
 
 use crate::common::{draft, request_from, World};
 

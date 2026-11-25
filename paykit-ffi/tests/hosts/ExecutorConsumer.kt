@@ -2,9 +2,9 @@ package com.synonym.paykit.tests
 
 import com.synonym.paykit.*
 
-// This account has never dispatched a payment (Paykit spec 8.3).
+// This account has never handed off a payment (Paykit spec 8.3).
 private class EmptyExecutorAccount : ReceiptReader() {
-    override suspend fun allowanceHistory(payer: ByteArray): List<MethodDispatch> = emptyList()
+    override suspend fun allowanceHistory(payer: ByteArray): List<MethodHandoff> = emptyList()
 }
 
 private suspend fun checkExecutorCheckout(

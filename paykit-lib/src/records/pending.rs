@@ -152,7 +152,7 @@ impl PendingAllowanceRecord {
     ///
     /// # Errors
     ///
-    /// The Switch cannot derive the key from the policy.
+    /// The Dispatch cannot derive the key from the policy.
     pub fn record_key(&self, naming_key: &NamingKey) -> Result<[u8; 32]> {
         Collection::AllowanceProposals.record_key(
             naming_key,

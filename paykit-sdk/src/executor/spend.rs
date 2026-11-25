@@ -6,11 +6,11 @@ use paykit_lib::allowances::{
 use paykit_lib::kinds::Kind;
 use paykit_lib::records::ActivityRecord;
 use paykit_lib::{AllowanceId, PaymentEndpointIdentifier};
-use pubky_switch_client::app::OpBatch;
-use pubky_switch_core::claims::ClaimView;
-use pubky_switch_core::enc::serde_b64;
-use pubky_switch_core::ops::Condition;
-use pubky_switch_core::shared::ApplicationRef;
+use pubky_dispatch_client::app::OpBatch;
+use pubky_dispatch_core::claims::ClaimView;
+use pubky_dispatch_core::enc::serde_b64;
+use pubky_dispatch_core::ops::Condition;
+use pubky_dispatch_core::shared::ApplicationRef;
 use serde::{Deserialize, Serialize};
 
 use super::checkpoint::ledger_target;
@@ -22,7 +22,7 @@ use crate::allowances::{
 };
 use crate::journal::JournalEntry;
 use crate::marks::{DropMark, MarkFamily};
-use crate::pay::Dispatch;
+use crate::pay::Handoff;
 use crate::records::KeptMessage;
 use crate::state::key;
 use crate::stored::BoundNote;
@@ -50,8 +50,8 @@ impl JournalAllowance {
         self.id().is_ok()
             && r.seq > 0
             && r.generation > 0
-            && r.seq <= pubky_switch_core::json::MAX_INT
-            && r.generation <= pubky_switch_core::json::MAX_INT
+            && r.seq <= pubky_dispatch_core::json::MAX_INT
+            && r.generation <= pubky_dispatch_core::json::MAX_INT
     }
 
     pub(super) fn revision(&self) -> ApplicationRef {
@@ -473,7 +473,7 @@ impl AllowanceReservation {
                 *request,
                 None,
                 body.conversion.as_ref(),
-                pubky_switch_client::app::Initiator::Automatic,
+                pubky_dispatch_client::app::Initiator::Automatic,
             )
             .under_allowance();
             Box::pin(app.request_destination(
@@ -588,18 +588,18 @@ impl AllowanceReservation {
 
 impl Paykit {
     /// An incorporated reply supplies the exact application of this app's own
-    /// prepared write. Retain it before the first dispatch or return from the outcome.
+    /// prepared write. Retain it before the first handoff or return from the outcome.
     pub(crate) async fn keep_executor_reply(
         &mut self,
         entry: &JournalEntry,
-        proofs: &[pubky_switch_core::chain::TransitionProof],
+        proofs: &[pubky_dispatch_core::chain::TransitionProof],
     ) -> Result<bool> {
         let Some(under) = &entry.allowance else {
             return Ok(true);
         };
         let id = under.id()?;
         let target = ledger_target(&entry.payee, &id);
-        let name = pubky_switch_core::enc::b64(&self.app.record_key(&target)?);
+        let name = pubky_dispatch_core::enc::b64(&self.app.record_key(&target)?);
         let Some(revision) = proofs
             .iter()
             .find(|p| p.body().object == name)
@@ -770,10 +770,10 @@ impl Paykit {
         })
     }
 
-    pub(crate) async fn executor_dispatch_held(
+    pub(crate) async fn executor_handoff_held(
         &mut self,
         entry: &JournalEntry,
-        kind: Dispatch,
+        kind: Handoff,
     ) -> Result<bool> {
         let Some(under) = &entry.allowance else {
             return Ok(false);
@@ -792,7 +792,7 @@ impl Paykit {
                 return Ok(true);
             }
         };
-        let repeat = matches!(kind, Dispatch::Repeat { .. });
+        let repeat = matches!(kind, Handoff::Repeat { .. });
         if repeat {
             let Some(record) = bind_at(&checked.value, &self.identity(), &entry.payee, &id) else {
                 return Ok(true);
@@ -815,7 +815,7 @@ impl Paykit {
             let consent = self.local_get::<ConsentEntry>(&key::consent(&key)).await?;
             if original.grant.revision != under.revision()
                 // The record moves on only to a later write: a later generation of the same
-                // history continues the sequence (Pubky Switch spec, Section 12.5).
+                // history continues the sequence (Pubky Dispatch spec, Section 12.5).
                 || checked.revision.generation < under.revision().generation
                 || (checked.revision != under.revision()
                     && checked.revision.seq <= under.revision().seq)

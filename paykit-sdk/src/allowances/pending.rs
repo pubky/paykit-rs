@@ -13,13 +13,13 @@ use paykit_lib::collections::Collection;
 use paykit_lib::kinds::Kind;
 use paykit_lib::records::PendingAllowanceRecord;
 use paykit_lib::{allowances::Ledger, bodies::ProposerRole};
-use pubky_switch_client::app::{
+use pubky_dispatch_client::app::{
     AppError, KeptReason, LocalWrite, OpBatch, RecordContent, RecordRead, RecordTarget,
     SharedRecord,
 };
-use pubky_switch_core::enc::serde_b64;
-use pubky_switch_core::ops::{Condition, OpKind, RecordVersion};
-use pubky_switch_core::sealed::SealedValue;
+use pubky_dispatch_core::enc::serde_b64;
+use pubky_dispatch_core::ops::{Condition, OpKind, RecordVersion};
+use pubky_dispatch_core::sealed::SealedValue;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -35,7 +35,7 @@ pub(crate) struct PreparedPendingReply {
     #[serde(with = "serde_b64")]
     pub(crate) application: [u8; 32],
     pub(crate) source: crate::divergent::SeenVersion,
-    /// Only the Switch may carry an unanswered submission across a provider change.
+    /// Only the Dispatch may carry an unanswered submission across a provider change.
     pub(crate) prepared_in: u64,
     pub(crate) seals: Vec<SealedValue>,
     /// The received acceptance authorizing this generated pre-loss withdrawal.
@@ -121,7 +121,7 @@ pub(super) const LIMIT: usize = 8;
 impl Paykit {
     pub(crate) async fn pending_count(
         &mut self,
-        report: Option<&pubky_switch_client::app::ReceiveReport>,
+        report: Option<&pubky_dispatch_client::app::ReceiveReport>,
         peer: &[u8; 32],
         outgoing: bool,
     ) -> Result<std::result::Result<usize, Refusal>> {
@@ -136,7 +136,7 @@ impl Paykit {
         };
         // Members not verified yet, which a decision on every value waits for. Where the
         // current value of each of them needs nothing but a scope key the app doesn't hold
-        // yet, the key is what is awaited (Switch spec 3.5); any other is read again.
+        // yet, the key is what is awaited (Dispatch spec 3.5); any other is read again.
         if !current.uncertain_keys.is_empty() {
             let mut await_keys = true;
             for key in &current.uncertain_keys {
@@ -552,8 +552,8 @@ impl Paykit {
                 // signed original recoverable from the applied delete.
                 match self.app.queue_stored(msg.plaintext()).await {
                     Ok(id) => Some((id, batch.retirement)),
-                    Err(pubky_switch_client::app::AppError::Refused(
-                        pubky_switch_client::app::Refusal::WontDeliver(_),
+                    Err(pubky_dispatch_client::app::AppError::Refused(
+                        pubky_dispatch_client::app::Refusal::WontDeliver(_),
                     )) => None,
                     Err(error) => return Err(error.into()),
                 }
@@ -562,15 +562,15 @@ impl Paykit {
                     continue;
                 }
                 match self.app.delivery(&msg.message().msg_id).await? {
-                    Some(pubky_switch_client::app::Delivery::Accepted { .. }) => {
+                    Some(pubky_dispatch_client::app::Delivery::Accepted { .. }) => {
                         self.app
                             .protocol_commit(crate::protocol::BACKUP_NAME, &writes)
                             .await?;
                         continue;
                     }
                     Some(
-                        pubky_switch_client::app::Delivery::Kept { .. }
-                        | pubky_switch_client::app::Delivery::Queued { .. },
+                        pubky_dispatch_client::app::Delivery::Kept { .. }
+                        | pubky_dispatch_client::app::Delivery::Queued { .. },
                     ) => continue,
                     _ => None,
                 }
@@ -652,9 +652,9 @@ impl Paykit {
         let msg_id = &previous.message().msg_id;
         match self.send_message(msg_id).await? {
             Some(
-                pubky_switch_client::app::Delivery::Kept { .. }
-                | pubky_switch_client::app::Delivery::Queued { .. }
-                | pubky_switch_client::app::Delivery::Accepted { .. },
+                pubky_dispatch_client::app::Delivery::Kept { .. }
+                | pubky_dispatch_client::app::Delivery::Queued { .. }
+                | pubky_dispatch_client::app::Delivery::Accepted { .. },
             ) => Ok(Some(msg_id.clone())),
             None => {
                 Box::pin(self.retry_prepared_answer(key, &intent)).await?;
@@ -1023,7 +1023,7 @@ impl Paykit {
                 if kind != Kind::AllowanceAcceptance
                     && !is_fenced
                     && (matches!(error, AppError::Ahead { .. } | AppError::Refused(_))
-                        || error.code() == Some(pubky_switch_core::http::ErrorCode::Conflict))
+                        || error.code() == Some(pubky_dispatch_core::http::ErrorCode::Conflict))
                 {
                     self.local_delete(&intent_key).await?;
                 }
@@ -1041,7 +1041,7 @@ impl Paykit {
         message: &super::StoredMessage,
         evidence: &KeptMessage,
         stored_id: Option<u64>,
-        report: Option<&pubky_switch_client::app::ReceiveReport>,
+        report: Option<&pubky_dispatch_client::app::ReceiveReport>,
     ) -> Result<Option<Placed>> {
         let own = self.identity();
         let peer = message.sender();
@@ -1110,7 +1110,7 @@ impl Paykit {
             _ => None,
         };
         if let Some(deleted) = retained_delete {
-            let delete_at = pubky_switch_client::app::FeedPosition {
+            let delete_at = pubky_dispatch_client::app::FeedPosition {
                 generation: deleted.version.generation,
                 seq: deleted.version.version,
             };
@@ -1381,7 +1381,7 @@ impl Paykit {
 /// app doesn't hold yet. A newer write the client follows without taking it, or one it
 /// flagged, leaves the member unverified for another reason, and the value held under it
 /// is an older one: the signer's key wouldn't settle that, a later read does.
-fn solely_awaits_key(held: &pubky_switch_client::app::SharedRecord) -> bool {
+fn solely_awaits_key(held: &pubky_dispatch_client::app::SharedRecord) -> bool {
     crate::hold::awaits_key(&held.content)
         && held.authenticated
         && !held.doubtful
@@ -1393,7 +1393,7 @@ fn solely_awaits_key(held: &pubky_switch_client::app::SharedRecord) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use pubky_switch_client::app::{RecordContent, SharedRecord, Unopened};
+    use pubky_dispatch_client::app::{RecordContent, SharedRecord, Unopened};
 
     use super::*;
 
@@ -1403,7 +1403,7 @@ mod tests {
             key: [4; 32],
             collection: Collection::AllowanceProposals.name().into(),
             policy: Collection::AllowanceProposals.fixed_policy(),
-            version: pubky_switch_core::ops::RecordVersion::new(1, 2),
+            version: pubky_dispatch_core::ops::RecordVersion::new(1, 2),
             authenticated: true,
             writer: [1; 16],
             written_at_ms: Some(10),

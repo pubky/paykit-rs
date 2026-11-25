@@ -4,8 +4,8 @@ use paykit_lib::{
     recovery::RecoveryCommitments,
     scopes::{certificate_in_force_at_write, verify_certificate, RECOVERY},
 };
-use pubky_switch_client::app::{RecordApplication, RecordTarget};
-use pubky_switch_core::{enc::lp, records::IdentityDoc, shared::ApplicationRef};
+use pubky_dispatch_client::app::{RecordApplication, RecordTarget};
+use pubky_dispatch_core::{enc::lp, records::IdentityDoc, shared::ApplicationRef};
 
 use super::{LossBoundary, Paykit, Refusal, Result};
 
@@ -255,7 +255,7 @@ struct RecoveryReader {
 impl RecoveryReader {
     /// The refusal of a recovery read, by what clears it: a read of the own identity, a
     /// current certificate, a certificate holding the recovery scope, which the user
-    /// approves, or its key, which the signer stores when it is next online (Switch spec 3.5).
+    /// approves, or its key, which the signer stores when it is next online (Dispatch spec 3.5).
     fn refusal(self) -> Option<Refusal> {
         if !self.fresh {
             Some(Refusal::NotNow(crate::NotNowReason::ReadAgain(

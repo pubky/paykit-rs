@@ -1,8 +1,8 @@
 use super::*;
 use paykit_sdk::PaykitBackup;
-use pubky_switch_client::app::{KeptBatchDrop, KeptBatchStatus, RecordRead};
-use pubky_switch_client::client::Batch;
-use pubky_switch_core::enc::{serde_b64, serde_b64_vec};
+use pubky_dispatch_client::app::{KeptBatchDrop, KeptBatchStatus, RecordRead};
+use pubky_dispatch_client::client::Batch;
+use pubky_dispatch_core::enc::{serde_b64, serde_b64_vec};
 use serde::Deserialize;
 
 /// The two restore duties in the shop's unmodified serialized backup.

@@ -3,16 +3,16 @@
 use paykit_lib::allowances::{ClaimState, EntryOutcome, LedgerEntry};
 use paykit_lib::scopes::{certificate_in_force_at_write, verify_certificate};
 use paykit_lib::AttemptId;
-use pubky_switch_client::app::{App, KeptOp, RecordContent, RecordTarget, SharedRecord};
-use pubky_switch_core::chain::{check_attempt_proof, TransitionProof};
-use pubky_switch_core::claims::{ClaimStatus, ClaimType, ClaimView, Outcome};
-use pubky_switch_core::ident::collection_id;
-use pubky_switch_core::ops::{
+use pubky_dispatch_client::app::{App, KeptOp, RecordContent, RecordTarget, SharedRecord};
+use pubky_dispatch_core::chain::{check_attempt_proof, TransitionProof};
+use pubky_dispatch_core::claims::{ClaimStatus, ClaimType, ClaimView, Outcome};
+use pubky_dispatch_core::ident::collection_id;
+use pubky_dispatch_core::ops::{
     check_permission, check_shape, Condition, OpKind, RecordVersion, SignedOp, Writer,
 };
-use pubky_switch_core::records::AppCert;
-use pubky_switch_core::sealed::RecordValue;
-use pubky_switch_core::shared::ApplicationRef;
+use pubky_dispatch_core::records::AppCert;
+use pubky_dispatch_core::sealed::RecordValue;
+use pubky_dispatch_core::shared::ApplicationRef;
 use std::collections::{HashMap, HashSet};
 
 use super::ReservationClaim;
@@ -22,10 +22,10 @@ use super::ReservationClaim;
 pub(super) enum Purpose {
     /// Evidence of what happened: of a generation in the grant's history.
     Evidence,
-    /// It authorizes or dispatches a new attempt: of the current generation.
+    /// It authorizes or hands off a new attempt: of the current generation.
     Authorizes,
     /// Evidence already verified and retained under this installation's grant checkpoint.
-    /// Once the signer drops its generation's service key (Switch spec 4.3),
+    /// Once the signer drops its generation's service key (Dispatch spec 4.3),
     /// the retained proof can still date the write for the grant's accounting. The writer's
     /// signature, the proof's binding to the operation, the certificate in force and the
     /// grant's history are all still checked.
@@ -58,13 +58,13 @@ impl AppliedOperation {
     /// - **Evidence of what happened** ([`Purpose::Evidence`]): a record write, an attempt's
     ///   opening or outcome, a compaction receipt. Its transition proof keeps dating it,
     ///   verified with its own generation's key as the current `identity.json` lists it,
-    ///   through an orderly generation change or a cooperative move (Pubky Switch spec,
+    ///   through an orderly generation change or a cooperative move (Pubky Dispatch spec,
     ///   Sections 4.3 and 12.5). It counts while that generation is in the grant's history,
     ///   after the last provider loss, which nothing carries across (Paykit spec 8.3, "After
     ///   provider loss").
-    /// - **What authorizes or dispatches a new attempt** ([`Purpose::Authorizes`]): acted on
+    /// - **What authorizes or hands off a new attempt** ([`Purpose::Authorizes`]): acted on
     ///   only in the current generation, so a stale instance of an earlier generation
-    ///   authorizes nothing (Pubky Switch spec, Section 12.5).
+    ///   authorizes nothing (Pubky Dispatch spec, Section 12.5).
     fn applied(app: &App, kept: &KeptOp, purpose: Purpose) -> Option<Self> {
         Self::verify_for(app, kept, purpose)?.fit_for(app, purpose)
     }
@@ -315,7 +315,7 @@ pub(super) fn settled_state(
 }
 
 /// The pending condition must select this original write before acceptance. An upload
-/// changes its installation position and retains the original item hash (Switch wire 6.3).
+/// changes its installation position and retains the original item hash (Dispatch wire 6.3).
 fn pins_selected_proposal(
     pending: &[u8; 32],
     original: ApplicationRef,
@@ -347,9 +347,9 @@ fn pins_selected_proposal(
 /// with the service key the current `identity.json` lists for that generation, and the
 /// generation is in the grant's history, after the last provider loss.
 ///
-/// After an orderly generation change, the Switch client authenticates the version of a
+/// After an orderly generation change, the Dispatch client authenticates the version of a
 /// record read with no copy held (after a restore, or a move that dropped proofs) only for
-/// a proof of the current generation (Pubky Switch spec, Section 12.5). This app's own
+/// a proof of the current generation (Pubky Dispatch spec, Section 12.5). This app's own
 /// retained proof of an earlier generation still dates and places its own write: a read
 /// naming exactly its version, time and writer shows that write. It authenticates no other
 /// write, and no other app's.
@@ -680,7 +680,7 @@ impl AppliedRecord {
             return false;
         };
         // Versions order by generation, then sequence, which an orderly change continues
-        // (Pubky Switch spec, Section 12.5); both writes were retained as evidence of a
+        // (Pubky Dispatch spec, Section 12.5); both writes were retained as evidence of a
         // generation in the grant's history.
         self.at_ms >= original.at_ms
             && original.version() < self.expected
@@ -702,14 +702,14 @@ impl AppliedRecord {
     /// A current claim read settles the claim state. The independently retained opening
     /// and its proof must name the ledger writer, generation, application batch and time.
     /// `just_made`: the reservation this app is making now, whose opening authorizes its
-    /// dispatch; otherwise one that already applied, whose opening is evidence of what
+    /// handoff; otherwise one that already applied, whose opening is evidence of what
     /// happened ([`AppliedOperation::applied`]).
     pub(super) fn reservation(
         &self,
         app: &App,
         kept: &KeptOp,
         entry: &LedgerEntry,
-        read: &pubky_switch_client::app::ClaimRead,
+        read: &pubky_dispatch_client::app::ClaimRead,
         just_made: bool,
     ) -> Option<(ReservationClaim, u64)> {
         let purpose = if just_made {
@@ -735,7 +735,7 @@ impl AppliedRecord {
         app: &App,
         kept: &KeptOp,
         entry: &LedgerEntry,
-        read: &pubky_switch_client::app::ClaimRead,
+        read: &pubky_dispatch_client::app::ClaimRead,
         grant: &Condition,
     ) -> Option<ReservationClaim> {
         self.opening(
@@ -755,7 +755,7 @@ impl AppliedRecord {
         kept: &KeptOp,
         obligation: &[u8; 32],
         id: paykit_lib::AttemptId,
-        read: &pubky_switch_client::app::ClaimRead,
+        read: &pubky_dispatch_client::app::ClaimRead,
         accepted_under: Option<(&Condition, u64)>,
     ) -> Option<(ReservationClaim, u64)> {
         // Counting an attempt that applied: its opening is evidence of what happened.
@@ -778,7 +778,7 @@ impl AppliedRecord {
         kept: &KeptOp,
         obligation: &[u8; 32],
         id: paykit_lib::AttemptId,
-        read: &pubky_switch_client::app::ClaimRead,
+        read: &pubky_dispatch_client::app::ClaimRead,
         accepted_under: Option<(&Condition, u64)>,
         purpose: Purpose,
     ) -> Option<(ReservationClaim, u64)> {
@@ -850,7 +850,7 @@ impl AppliedRecord {
         app: &App,
         kept: &KeptOp,
         entry: &LedgerEntry,
-        read: &pubky_switch_client::app::ClaimRead,
+        read: &pubky_dispatch_client::app::ClaimRead,
     ) -> Option<()> {
         let applied = AppliedOperation::outcome(
             app,
@@ -904,7 +904,7 @@ mod tests {
     #[test]
     fn test_evidence_authorization_admits_only_the_current_generation() {
         // An opening answered in an earlier generation authorizes no new attempt, after an
-        // orderly change or a move as after a loss (Pubky Switch spec, Section 12.5).
+        // orderly change or a move as after a loss (Pubky Dispatch spec, Section 12.5).
         assert!(Purpose::Authorizes.admits(3, 3, None));
         assert!(!Purpose::Authorizes.admits(2, 3, None));
         assert!(!Purpose::Authorizes.admits(2, 3, Some(2)));

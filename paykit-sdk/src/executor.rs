@@ -23,7 +23,7 @@ use std::collections::{HashMap, HashSet};
 use paykit_lib::allowances::{usage, AllowanceTerms, AttemptEvidence, ClaimState, Ledger, Usage};
 use paykit_lib::AttemptId;
 
-use crate::rail::{AllowanceDispatch, Rail, RailOutcome};
+use crate::rail::{AllowanceHandoff, Rail, RailOutcome};
 
 /// The proposal must belong to the Allower's surviving history as of the grant.
 pub(crate) fn in_grant_history(
@@ -46,12 +46,12 @@ struct ReservationClaim {
 /// original attempt must be attributed before a missing service entry is an alarm.
 struct Accounting {
     counted: Usage,
-    unclassified: Vec<AllowanceDispatch>,
+    unclassified: Vec<AllowanceHandoff>,
     /// The evidence the ledger write takes, from the same verdicts as `counted`.
     writes: HashMap<AttemptId, AttemptEvidence>,
 }
 
-async fn wallet_inventory(rail: &dyn Rail, payer: [u8; 32]) -> Option<Vec<AllowanceDispatch>> {
+async fn wallet_inventory(rail: &dyn Rail, payer: [u8; 32]) -> Option<Vec<AllowanceHandoff>> {
     let declaration = rail.declaration();
     if !declaration.history || !declaration.history_survives_restore {
         return None;
@@ -162,7 +162,7 @@ fn attempt_verdict(seen: Seen) -> Verdict {
 // leave one out unnoticed; bundling them would hide which one a caller lacks.
 #[allow(clippy::too_many_arguments)]
 fn reconciled_usage(
-    inventory: Vec<AllowanceDispatch>,
+    inventory: Vec<AllowanceHandoff>,
     terms: &AllowanceTerms,
     ledger: &Ledger,
     claims: &HashMap<AttemptId, ReservationClaim>,
@@ -193,8 +193,8 @@ fn reconciled_usage(
                 Some(ClaimShows::SignedDone | ClaimShows::ShownDone)
             )
     };
-    for dispatch in inventory {
-        let id = dispatch.attempt_id;
+    for handoff in inventory {
+        let id = handoff.attempt_id;
         if !seen.insert(id) {
             return None;
         }
@@ -205,9 +205,9 @@ fn reconciled_usage(
             .or_else(|| failed.map(|f| (&f.obligation, &terms.asset, &f.value)));
         let Some((obligation, asset, value)) = member else {
             if let Some(entry) = retired.get(&id).filter(|entry| {
-                matches!(&dispatch.outcome, RailOutcome::Failed)
+                matches!(&handoff.outcome, RailOutcome::Failed)
                     || matches!(
-                        (entry, &dispatch.outcome),
+                        (entry, &handoff.outcome),
                         (
                             compaction::Retired::PreviouslyFailed(_),
                             RailOutcome::Paid(_)
@@ -221,13 +221,13 @@ fn reconciled_usage(
                     compaction::Retired::Paid(e) => (&e.asset, &e.value),
                     compaction::Retired::PreviouslyFailed(e) => (&terms.asset, &e.value),
                 };
-                if &dispatch.amount.asset != asset || &dispatch.amount.value != value {
+                if &handoff.amount.asset != asset || &handoff.amount.value != value {
                     return None;
                 }
                 retired.remove(&id);
                 continue;
             }
-            unclassified.push(dispatch);
+            unclassified.push(handoff);
             continue;
         };
         let claim = claims.get(&id);
@@ -240,12 +240,12 @@ fn reconciled_usage(
         });
         if claim.is_some_and(|claim| *obligation != claim.obligation)
             || (claim.is_none() && !payer_proved && !recorded_failure)
-            || asset != &dispatch.amount.asset
-            || value != &dispatch.amount.value
+            || asset != &handoff.amount.asset
+            || value != &handoff.amount.value
         {
             return None;
         }
-        methods.insert(id, MethodShows::from(&dispatch.outcome));
+        methods.insert(id, MethodShows::from(&handoff.outcome));
         match failed {
             None => {}
             // v0.2's check on a compacted failure, kept: the method's history showing it
@@ -258,7 +258,7 @@ fn reconciled_usage(
                     payer_proved || claim.is_some_and(|claim| claim.state == ClaimState::Done);
                 let failed_claim =
                     claim.is_some_and(|claim| matches!(claim.state, ClaimState::Failed { .. }));
-                match &dispatch.outcome {
+                match &handoff.outcome {
                     RailOutcome::Paid(_) => {}
                     RailOutcome::Failed if settled || failed_claim => {}
                     RailOutcome::Pending if settled => {}
@@ -307,7 +307,7 @@ mod tests {
         AllowanceId, Asset, Decimal, PaymentAmount, PaymentEndpointIdentifier,
         PaymentEndpointPayload,
     };
-    use pubky_switch_client::clock::TestClock;
+    use pubky_dispatch_client::clock::TestClock;
     use std::sync::Arc;
 
     #[test]
@@ -576,7 +576,7 @@ mod tests {
                 })),
             };
             let inventory = outcome
-                .map(|outcome| AllowanceDispatch {
+                .map(|outcome| AllowanceHandoff {
                     attempt_id: id,
                     amount: PaymentAmount {
                         asset: terms.asset.clone(),
@@ -673,7 +673,7 @@ mod tests {
                 state: ClaimState::Failed { by_owner: true },
             },
         )]);
-        let dispatch = AllowanceDispatch {
+        let handoff = AllowanceHandoff {
             attempt_id: id,
             amount: PaymentAmount {
                 asset: terms.asset.clone(),
@@ -681,9 +681,9 @@ mod tests {
             },
             outcome: RailOutcome::Failed,
         };
-        let read = |dispatch, claims: &HashMap<_, _>| {
+        let read = |handoff, claims: &HashMap<_, _>| {
             reconciled_usage(
-                vec![dispatch],
+                vec![handoff],
                 &terms,
                 &ledger,
                 claims,
@@ -697,7 +697,7 @@ mod tests {
         };
         // The verified failure releases the 70, whichever own app wrote it (Paykit spec
         // 8.3, `failed` releases), and the method's history agrees.
-        let accounting = read(dispatch.clone(), &claims).unwrap();
+        let accounting = read(handoff.clone(), &claims).unwrap();
         assert_eq!(accounting.counted.lifetime().as_str(), "0");
         assert!(accounting.unclassified.is_empty());
         let by_another = HashMap::from([(
@@ -707,23 +707,23 @@ mod tests {
                 state: ClaimState::Failed { by_owner: false },
             },
         )]);
-        let accounting = read(dispatch.clone(), &by_another).unwrap();
+        let accounting = read(handoff.clone(), &by_another).unwrap();
         assert_eq!(accounting.counted.lifetime().as_str(), "0");
         assert!(accounting.unclassified.is_empty());
-        assert!(read(dispatch.clone(), &HashMap::new()).is_none());
-        let mut different = dispatch.clone();
+        assert!(read(handoff.clone(), &HashMap::new()).is_none());
+        let mut different = handoff.clone();
         different.amount.value = Decimal::new("69").unwrap();
         assert!(read(different, &claims).is_none());
         // v0.2's check on a compacted failure, kept: the method's history still showing it
         // pending holds the ledger.
-        let mut pending = dispatch;
+        let mut pending = handoff;
         pending.outcome = RailOutcome::Pending;
         assert!(read(pending, &claims).is_none());
     }
 
     #[tokio::test]
     async fn test_account_history_charges_the_open_seventy_after_restore() {
-        // The wallet clock runs behind the Switch that dated the reservation at 1,001.
+        // The wallet clock runs behind the Dispatch that dated the reservation at 1,001.
         let clock = Arc::new(TestClock::new(16));
         let rail = FakeRail::with_clock(clock.clone());
         let payer = [3; 32];

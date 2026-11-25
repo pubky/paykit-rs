@@ -1,11 +1,11 @@
 //! The payment journal drops finished payments past their claim's reconciliation window,
-//! and keeps what a later reconcile needs (Paykit spec 7.1, 7.2; Switch spec 6.3).
+//! and keeps what a later reconcile needs (Paykit spec 7.1, 7.2; Dispatch spec 6.3).
 
 use paykit_sdk::rail::Behaviour;
 use paykit_sdk::{PayOptions, PayOutcome, Paykit};
-use pubky_switch_client::clock::Clock;
-use pubky_switch_core::claims::RECONCILIATION_MS;
-use pubky_switch_core::records::DAY_MS;
+use pubky_dispatch_client::clock::Clock;
+use pubky_dispatch_core::claims::RECONCILIATION_MS;
+use pubky_dispatch_core::records::DAY_MS;
 
 use crate::common::{draft, request_from, World};
 
@@ -108,7 +108,7 @@ async fn put(wallet: &mut Paykit, key: &str, value: &serde_json::Value) {
         .app_mut()
         .protocol_commit(
             "paykit",
-            &[pubky_switch_client::app::LocalWrite::Put {
+            &[pubky_dispatch_client::app::LocalWrite::Put {
                 key: key.as_bytes().to_vec(),
                 value: serde_json::to_vec(value).unwrap(),
             }],

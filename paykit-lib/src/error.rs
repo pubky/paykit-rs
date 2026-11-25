@@ -1,6 +1,6 @@
 //! Paykit's error type.
 
-/// A failure of one of Paykit's rules, or of a Switch rule Paykit relies on.
+/// A failure of one of Paykit's rules, or of a Dispatch rule Paykit relies on.
 ///
 /// Messages name the Paykit section of the rule that failed, such as `Paykit wire 1.2`.
 /// They never quote decrypted plaintext, secret keys or the text of a value that failed to
@@ -15,16 +15,16 @@ pub enum Error {
     /// of Paykit's rules: a misbehaving counterparty, own app or service.
     #[error("invalid: {0}")]
     Invalid(String),
-    /// A failure from `pubky-switch-core`, carried as the Switch reports it: a Switch format
+    /// A failure from `pubky-dispatch-core`, carried as the Dispatch reports it: a Dispatch format
     /// that doesn't parse, a signature that doesn't verify, or a crypto failure.
-    #[error("switch: {0}")]
-    Switch(#[from] pubky_switch_core::Error),
+    #[error("dispatch: {0}")]
+    Dispatch(#[from] pubky_dispatch_core::Error),
 }
 
 impl Error {
     /// The same failure, as a caller's own input that fails a structural check.
     ///
-    /// A Switch failure stays a Switch failure: it is carried as the Switch reports it.
+    /// A Dispatch failure stays a Dispatch failure: it is carried as the Dispatch reports it.
     pub fn into_validation(self) -> Self {
         match self {
             Self::Invalid(why) => Self::Validation(why),
@@ -60,8 +60,8 @@ mod tests {
             Error::Invalid("rule".into()).into_validation(),
             Error::Validation("rule".into())
         );
-        let switch = Error::Switch(pubky_switch_core::Error::Invalid("rule".into()));
-        assert_eq!(switch.clone().into_validation(), switch);
+        let dispatch = Error::Dispatch(pubky_dispatch_core::Error::Invalid("rule".into()));
+        assert_eq!(dispatch.clone().into_validation(), dispatch);
     }
 
     #[test]

@@ -5,7 +5,7 @@ use paykit_lib::periods::{
     destination_expired, evidence_seconds, payer_may_use_rates, rates_apply, BillingPeriod,
     PeriodRef, Recurrence,
 };
-use pubky_switch_core::time::rfc3339;
+use pubky_dispatch_core::time::rfc3339;
 use serde_json::{json, Value};
 
 use crate::common::{arr, generated, message, paykit, st, time, writing, Keys, Place};
