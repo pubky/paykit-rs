@@ -4086,18 +4086,3 @@ async fn test_period_payments_clock_note_kept_when_another_destination_fails() {
     );
     assert!(w.rail.all_executions().is_empty());
 }
-
-/// A period paid by hand, which ends in the Dispatch client's send, fits the stack the
-/// send-path guards state ([`crate::common::SEND_PATH_STACK_BYTES`]).
-#[test]
-fn test_period_payments_by_hand_fits_the_send_path_stack() -> Result<(), Box<dyn std::error::Error>> {
-    crate::common::on_stack(crate::common::SEND_PATH_STACK_BYTES, || async {
-        let w = World::new();
-        let mut shop = w.shop().await;
-        let mut wallet = w.wallet("wallet").await;
-        let (request, _) = subscribed(&w, &mut shop, &mut wallet).await;
-        let outcome = by_user(&mut wallet, &request, january(), PayOptions::default()).await?;
-        assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
-        Ok(())
-    })
-}

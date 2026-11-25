@@ -887,10 +887,11 @@ async fn journey(world: &World) -> TestResult {
     assert_eq!(account.count(), 0);
     Box::pin(payment(world, root.path(), &env, reopened, &account, id)).await
 }
-/// Run `journey` on a fresh `backend` world, on a thread with the wallet's stack size.
+/// Run `journey` on a fresh `backend` world, on a thread of the journeys' stack budget
+/// ([`super::JOURNEY_STACK_BYTES`]).
 pub(super) fn run(backend: Backend, journey: impl AsyncFn(&World) -> TestResult + Send + 'static) {
     let thread = std::thread::Builder::new()
-        .stack_size(1_835_008)
+        .stack_size(super::JOURNEY_STACK_BYTES)
         .spawn(move || {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()

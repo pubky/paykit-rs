@@ -141,9 +141,17 @@ async fn approval(world: &World) -> TestResult {
     Ok(())
 }
 
+/// The stack the binding journeys run on: the size they had at v0.2, kept as their stack
+/// budget. They guard the SDK's own frames on their paths, the payee's cancellation and a
+/// period's payment among them, with the Pubky Dispatch client's send path part of the stack
+/// they measure: a journey that overflows here means a frame on its path grew; find it
+/// rather than raise this. The wallet's own runtime threads are larger
+/// ([`crate::runtime::THREAD_STACK_BYTES`]).
+pub(super) const JOURNEY_STACK_BYTES: usize = 1_835_008;
+
 fn run(backend: Backend) {
     let thread = std::thread::Builder::new()
-        .stack_size(1_835_008)
+        .stack_size(JOURNEY_STACK_BYTES)
         .spawn(move || {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
