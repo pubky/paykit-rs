@@ -944,21 +944,28 @@ fn held_bound(
 /// its acceptance, on the highest service time verified, the message is given up, the host
 /// told ([`NoticeKind::MessageGivenUp`]), and the entry is passed, processed, nothing written.
 fn hold_until_it_reads(cx: &mut ReceiveContext<'_>, stored: &StoredMessage) -> Result<(), Fail> {
-    hold_entry_for(cx, stored, crate::notices::GivenUpOrigin::HeldUnread)
+    hold_entry_for(
+        cx,
+        stored,
+        crate::notices::GivenUpOrigin::HeldUnread,
+        "activity record unresolved",
+    )
 }
 
-/// Hold `stored`'s entry unprocessed until
+/// Hold `stored`'s entry unprocessed, for `reason`, until
 /// [`KEPT_MESSAGE_MS`] have passed since its acceptance on the highest service time
 /// verified; then give it up, the host told once ([`NoticeKind::MessageGivenUp`], from
-/// `origin`), and pass the entry, processed, nothing written.
+/// `origin`), and pass the entry, processed. The caller calls it before queuing any write of
+/// the message's own: a message given up is in no record (Paykit spec 8.1).
 pub(crate) fn hold_entry_for(
     cx: &mut ReceiveContext<'_>,
     stored: &StoredMessage,
     origin: crate::notices::GivenUpOrigin,
+    reason: &'static str,
 ) -> Result<(), Fail> {
     let accepted_at = stored.accepted_at().ok_or_else(Fail::corrupt)?;
     if !crate::stored::past_window(accepted_at, cx.highest_service_time()) {
-        return Err(Fail::wait_for("activity record unresolved"));
+        return Err(Fail::wait_for(reason));
     }
     let notice = key::message_notice(&stored.sender(), &stored.message().msg_id);
     if state::cx_get::<KeptNotice>(cx, &notice)?.is_none() {
@@ -1896,6 +1903,9 @@ fn receipt_effect(
         let key = cx.record_key(&target.record_target())?;
         conditions.push(cx.record_condition(&key)?);
     }
+    // The receipt's own write, queued only once its claim read is decided below: a receipt
+    // given up on a claim that doesn't read is in no record (Paykit spec 8.1).
+    let mut placement = None;
     let parent = if let Some(parent_target) = receipt_parent(stored) {
         let parent_key = cx.record_key(&parent_target.record_target())?;
         conditions.push(cx.record_condition(&parent_key)?);
@@ -1916,16 +1926,12 @@ fn receipt_effect(
         }
         let mut updated = record.clone();
         if activity::place(&mut updated, Role::Receipt, stored.clone()) {
-            cx.put_record(
-                &target.record_target(),
-                &updated.to_json()?,
-                conditions.clone(),
-            )?;
+            placement = Some(ReceiptPlacement::Period(Box::new(updated)));
         }
         Some(parent)
     } else {
         if found.names_held_proof {
-            place(cx, &target, sender, Role::Receipt, stored, seq, settlement)?;
+            placement = Some(ReceiptPlacement::Record);
         }
         None
     };
@@ -1952,25 +1958,67 @@ fn receipt_effect(
     )
     .map_err(|_| Fail::corrupt())?;
     // A receipt reaches only an app holding `paykit_pay`, which carries `claims.write`, and an
-    // entry that comes under a certificate without it is held unprocessed: this returns only for a
-    // certificate Paykit's checks would refuse.
-    if !cx.cert().has_permission(Permission::ClaimsWrite) {
+    // entry that comes under a certificate without it is held unprocessed: without it, which
+    // only a certificate Paykit's checks would refuse has, the receipt is placed and settles
+    // nothing.
+    let claims_write = cx.cert().has_permission(Permission::ClaimsWrite);
+    let obligation = claim;
+    // A claim the app keeps no view of is read from the Dispatch first, so the receipt
+    // settles it in the cursor's batch (Dispatch spec 10.2 row 3).
+    let fetched = if claims_write {
+        cx.switch_claim(&obligation)
+    } else {
+        None
+    };
+    let read = match fetched {
+        Some(ClaimFetch::Read(read)) => Some(DispatchClaim::Read(Some(read.view.clone()))),
+        Some(ClaimFetch::Absent) => Some(DispatchClaim::Read(None)),
+        // Refused for good: no later read by this app passes, such as without `claims.read`.
+        Some(ClaimFetch::Refused(code))
+            if pubky_dispatch_core::http::ErrorCode::parse(code)
+                .is_some_and(claim_read_refused_for_good) =>
+        {
+            Some(DispatchClaim::Refused)
+        }
+        // An answer a later read may pass says nothing of the claim, and neither does a code
+        // or a fetch outcome this version doesn't know: the entry is held and reads the claim
+        // again, for at most its 30 days, then given up, the host told (`hold_entry_for`;
+        // Paykit spec 8.1). The client refuses for good, before this sees them, a read
+        // answered `409 conflict`, `stale_epoch`, `stale_generation`, `stale_key`,
+        // `not_current`, `cert_expired` or `stale_identity`; it holds the entry itself on the
+        // others a later read may pass. Decided before the receipt's own write is queued, so a
+        // receipt given up is in no record.
+        Some(_) => {
+            return hold_entry_for(
+                cx,
+                stored,
+                crate::notices::GivenUpOrigin::ClaimUnread,
+                "receipt claim unread",
+            );
+        }
+        None => None,
+    };
+    match placement {
+        Some(ReceiptPlacement::Period(updated)) => {
+            cx.put_record(
+                &target.record_target(),
+                &updated.to_json()?,
+                conditions.clone(),
+            )?;
+        }
+        Some(ReceiptPlacement::Record) => {
+            place(cx, &target, sender, Role::Receipt, stored, seq, settlement)?;
+        }
+        None => {}
+    }
+    if !claims_write {
         return Ok(());
     }
-    let obligation = claim;
     let deadline = receipt_deadline(
         stored,
         parent.as_ref().unwrap_or(&record),
         journaled.as_ref(),
     );
-    // A claim the app keeps no view of is read from the Dispatch first, so the receipt
-    // settles it in the cursor's batch (Dispatch spec 10.2 row 3).
-    let read = cx.switch_claim(&obligation).map(|fetch| match fetch {
-        ClaimFetch::Read(read) => DispatchClaim::Read(Some(read.view.clone())),
-        ClaimFetch::Absent => DispatchClaim::Read(None),
-        // Refused, such as without `claims.read`.
-        _ => DispatchClaim::Refused,
-    });
     let view = match failure_view(cx.claim_view(&obligation)?, read) {
         FailureView::View(view) => view,
         FailureView::Refused => return Ok(()),
@@ -2004,6 +2052,15 @@ fn receipt_effect(
         keep_local(cx, local(&key::journal(&attempt_id), &entry)?);
     }
     Ok(())
+}
+
+/// The write a receipt makes to its record ([`receipt_effect`]), queued once its claim read
+/// is decided.
+enum ReceiptPlacement {
+    /// A period's receipt, into the period's record as updated.
+    Period(Box<ActivityRecord>),
+    /// Into the record at its target, by [`place`].
+    Record,
 }
 
 /// A receipt whose payer record at `target` the app holds but can't read now: a value that
@@ -2055,6 +2112,72 @@ fn admits_receipt_over_unread_record(
     }
     let scopes = cx.cert().scopes().to_vec();
     admits_new_state(cx, &stored.sender(), &scopes, stored)
+}
+
+/// Whether the Dispatch's answer `code` to a receipt's claim read refuses it for good, so the
+/// receipt settles nothing: whether no later read by this app passes after anything that
+/// can happen without its user. Any other answer says nothing of the claim, and the read is
+/// made again later, within the receipt's 30 days: settling nothing on it would leave a paid
+/// attempt unsettled, its late-receipt notice unraised and its journal entry not updated.
+pub(crate) fn claim_read_refused_for_good(code: pubky_dispatch_core::http::ErrorCode) -> bool {
+    use pubky_dispatch_core::http::ErrorCode as E;
+    // No wildcard: a code the Dispatch adds fails to build here until it is classified.
+    match code {
+        // A read this app makes that the service can't take, whatever happens later.
+        E::BadRequest | E::BadSignature | E::TooLarge => true,
+        // The read needs `claims.read`, or the service holds no such account: only the user
+        // (a renewal with another scope, a new account) changes that.
+        E::NotAdmitted | E::PermissionMissing | E::NotFound => true,
+        // A renewal of the certificate, a newer identity.json or a provider move, which come
+        // without the user, lets a later read pass.
+        E::NotCurrent | E::CertExpired | E::StaleIdentity | E::Moved => false,
+        // A new timestamp, a re-read, new keys, re-signing or re-sealing, which the client
+        // does by itself.
+        E::StaleTimestamp
+        | E::Conflict
+        | E::StaleEpoch
+        | E::StaleGeneration
+        | E::StaleKey
+        | E::IdentityNeeded => false,
+        // A wait.
+        E::RateLimited | E::QuotaExceeded | E::Staged | E::Unavailable | E::RecoveryRequired => {
+            false
+        }
+    }
+}
+
+/// What a failed read of a receipt's claim at a later write comes to
+/// ([`claim_read_after`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ClaimReadAfter {
+    /// Refused for good: the receipt settles nothing, and is still recorded.
+    Refused,
+    /// An answer a later read may pass: the receipt isn't written now, and reads the claim
+    /// again at the next receive, within its 30 days.
+    ReadAgain,
+    /// Not the Dispatch's answer, or a Dispatch that doesn't answer: the error, nothing decided.
+    Error,
+}
+
+/// What `error`, a failed read of a receipt's claim at a stored receipt's later write, comes
+/// to, by the rule of the first read ([`claim_read_refused_for_good`]): a Dispatch that doesn't
+/// answer, a wallet-wide stop and a failure that isn't the Dispatch's answer are the error.
+pub(crate) fn claim_read_after(error: &pubky_dispatch_client::app::AppError) -> ClaimReadAfter {
+    if crate::pay::dispatch_unavailable(error)
+        || crate::pay::stops_resume(&crate::error::PaykitError::Client(error.clone()))
+    {
+        return ClaimReadAfter::Error;
+    }
+    match error.code() {
+        Some(code) => {
+            if claim_read_refused_for_good(code) {
+                ClaimReadAfter::Refused
+            } else {
+                ClaimReadAfter::ReadAgain
+            }
+        }
+        None => ClaimReadAfter::Error,
+    }
 }
 
 /// What the Dispatch answered for a receipt's claim (Dispatch wire 7.4.8).
@@ -4523,6 +4646,65 @@ pub(crate) fn unrequested_of(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every answer of the Dispatch to a receipt's claim read, each classified here by name:
+    /// refused for good only where no later read by this app passes without its user.
+    #[test]
+    fn test_receive_claim_read_refused_only_when_no_later_read_passes() {
+        use super::ClaimReadAfter as After;
+        use pubky_dispatch_core::http::ErrorCode;
+        for code in ErrorCode::ALL {
+            // No wildcard: a code the Dispatch adds fails to build here until it is classified.
+            // The first read's answer, and the stored receipt's later read's, by name.
+            let (refused, later) = match code {
+                ErrorCode::BadRequest
+                | ErrorCode::BadSignature
+                | ErrorCode::TooLarge
+                | ErrorCode::NotAdmitted
+                | ErrorCode::PermissionMissing
+                | ErrorCode::NotFound => (true, After::Refused),
+                // Wallet-wide stops: the later write's read returns them.
+                ErrorCode::NotCurrent | ErrorCode::CertExpired | ErrorCode::RecoveryRequired => {
+                    (false, After::Error)
+                }
+                // A Dispatch that doesn't answer: returned.
+                ErrorCode::Unavailable | ErrorCode::Staged => (false, After::Error),
+                ErrorCode::StaleIdentity
+                | ErrorCode::Moved
+                | ErrorCode::StaleTimestamp
+                | ErrorCode::Conflict
+                | ErrorCode::StaleEpoch
+                | ErrorCode::StaleGeneration
+                | ErrorCode::StaleKey
+                | ErrorCode::IdentityNeeded
+                | ErrorCode::RateLimited
+                | ErrorCode::QuotaExceeded => (false, After::ReadAgain),
+            };
+            assert_eq!(
+                super::claim_read_refused_for_good(code),
+                refused,
+                "{code:?}"
+            );
+            let answer = pubky_dispatch_client::app::AppError::Switch(
+                pubky_dispatch_client::error::ClientError::Switch {
+                    status: code.status(),
+                    code,
+                    message: String::new(),
+                    current: serde_json::Value::Null,
+                    known_version: None,
+                    retry_after: None,
+                },
+            );
+            assert_eq!(super::claim_read_after(&answer), later, "{code:?}");
+        }
+        // A failure that isn't the Dispatch's answer decides nothing.
+        assert_eq!(
+            super::claim_read_after(&pubky_dispatch_client::app::AppError::Transport(
+                pubky_dispatch_client::error::TransportError::Timeout
+            )),
+            After::Error
+        );
+    }
 
     #[test]
     fn test_receive_placement_passes_over_a_refused_write_not_a_store_failure() {

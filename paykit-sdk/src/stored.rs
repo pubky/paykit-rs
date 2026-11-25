@@ -152,10 +152,24 @@ pub(crate) fn submitted<T>(result: std::result::Result<T, AppError>) -> Result<P
     Err(error)
 }
 
-/// Whether `error` is the Dispatch's refusal of a read, an answer with its error code, rather
-/// than a Dispatch that doesn't answer or a failure of the app's own.
-fn refused(error: &AppError) -> bool {
-    !crate::pay::dispatch_unavailable(error) && error.unkept().code().is_some()
+/// What a stored receipt's later read of its claim gives its write: the claim to decide on,
+/// as the Dispatch answered it, or the outcome the write ends in now. A refusal for good
+/// settles nothing ([`DispatchClaim::Refused`]). An answer a later read may pass says nothing
+/// of the claim: the receipt isn't written now, and reads the claim again at the next
+/// receive, within its 30 days, as any stored entry not written ([`Placed::Not`]; Paykit spec
+/// 8.1, Stored entries). A Dispatch that doesn't answer, a wallet-wide stop and a failure that
+/// isn't the Dispatch's answer are the error (`receive::claim_read_after`).
+fn claim_read_for_write(
+    read: std::result::Result<Option<pubky_dispatch_core::claims::ClaimView>, AppError>,
+) -> Result<std::result::Result<DispatchClaim, Placed>> {
+    match read {
+        Ok(view) => Ok(Ok(DispatchClaim::Read(view))),
+        Err(error) => match crate::receive::claim_read_after(&error) {
+            crate::receive::ClaimReadAfter::Refused => Ok(Ok(DispatchClaim::Refused)),
+            crate::receive::ClaimReadAfter::ReadAgain => Ok(Err(Placed::Not)),
+            crate::receive::ClaimReadAfter::Error => Err(error.into()),
+        },
+    }
 }
 
 /// The local key at which the client saves the ID of the batch it keeps of `stored`'s later
@@ -1630,10 +1644,14 @@ impl Paykit {
                 .map(|kept| kept.view);
             let mut view = failure_view(kept, None);
             if matches!(view, FailureView::ReadDispatch) {
-                let read = match self.app.read_claim(&obligation).await {
-                    Ok(read) => DispatchClaim::Read(read.map(|read| read.view)),
-                    Err(error) if refused(&error) => DispatchClaim::Refused,
-                    Err(error) => return Err(error.into()),
+                let read = self
+                    .app
+                    .read_claim(&obligation)
+                    .await
+                    .map(|read| read.map(|read| read.view));
+                let read = match claim_read_for_write(read)? {
+                    Ok(read) => read,
+                    Err(placed) => return Ok(placed),
                 };
                 view = failure_view(None, Some(read));
             }
@@ -1851,6 +1869,43 @@ mod tests {
         assert_eq!(found, allowed);
     }
     use crate::testkit::{object, Party};
+
+    #[test]
+    fn test_stored_receipt_claim_read_decides_its_write() {
+        use pubky_dispatch_core::http::ErrorCode;
+        let answered = |code: ErrorCode| {
+            Err(AppError::Switch(
+                pubky_dispatch_client::error::ClientError::Switch {
+                    status: code.status(),
+                    code,
+                    message: String::new(),
+                    current: serde_json::Value::Null,
+                    known_version: None,
+                    retry_after: None,
+                },
+            ))
+        };
+        // A later read may pass: not written now, read again within the 30 days.
+        assert_eq!(
+            claim_read_for_write(answered(ErrorCode::Conflict))
+                .unwrap()
+                .err(),
+            Some(Placed::Not)
+        );
+        // Refused for good: the receipt settles nothing, and is written.
+        assert!(matches!(
+            claim_read_for_write(answered(ErrorCode::PermissionMissing)).unwrap(),
+            Ok(DispatchClaim::Refused)
+        ));
+        // A Dispatch that doesn't answer, and a wallet-wide stop: the error.
+        assert!(claim_read_for_write(answered(ErrorCode::Unavailable)).is_err());
+        assert!(claim_read_for_write(answered(ErrorCode::CertExpired)).is_err());
+        // Read: the claim as read.
+        assert!(matches!(
+            claim_read_for_write(Ok(None)).unwrap(),
+            Ok(DispatchClaim::Read(None))
+        ));
+    }
 
     /// The later write's rule over every answer of the Dispatch, bare and with the batch held by
     /// the client (Dispatch spec 6.4, 12.5; Paykit spec 8.1). A batch held is judged first:

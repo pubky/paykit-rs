@@ -1140,6 +1140,7 @@ pub(crate) fn step_keep(
             cx,
             stored,
             crate::notices::GivenUpOrigin::Divergent,
+            "activity record unresolved",
         );
     };
     let record = held.key;
