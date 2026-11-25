@@ -123,6 +123,97 @@ fn test_public_endpoint_publishes_lists_and_removes() {
     run(Backend::Service, publish_endpoint);
 }
 
+/// Whether `notice` tells of a change of public endpoints that wasn't published.
+fn endpoint_change(notice: &crate::WalletNotice) -> bool {
+    matches!(
+        notice.kind,
+        crate::WalletNoticeKind::PublicEndpointChangeNotPublished
+    )
+}
+
+/// `wallet` reads its feed to the end.
+async fn read_through(wallet: &NativeWallet) -> TestResult {
+    for _ in 0..8 {
+        if !Box::pin(wallet.receive()).await?.more {
+            return Ok(());
+        }
+    }
+    Err("wallet did not finish its pages".into())
+}
+
+async fn held_endpoint_change(world: &World) -> TestResult {
+    let root = tempfile::tempdir()?;
+    let account = Arc::new(Account::open(root.path(), world.clock().clone()));
+    let scopes = crate::WalletScopes {
+        request: true,
+        ..Default::default()
+    };
+    let config = crate::WalletConfig {
+        publishes_record: Some(true),
+        ..Default::default()
+    };
+    let (host, wallet, app, _) = Box::pin(super::wallet::enrolled_wallet(
+        world,
+        root.path(),
+        account,
+        scopes,
+        Some(config),
+    ))
+    .await?;
+    let signed = vec![
+        endpoint("dropped", "lnbc1dropped"),
+        endpoint("kept", "lnbc1kept"),
+        endpoint("moved", "lnbc1old"),
+    ];
+    assert_eq!(
+        wallet.set_public_endpoints(signed.clone(), None).await?,
+        PublicationState::Published
+    );
+    // A change that was signed is never told, across a restart.
+    wallet.shutdown().await?;
+    let wallet = host.load(app.clone()).await?;
+    Box::pin(read_through(&wallet)).await?;
+    assert!(!wallet.notices().await?.iter().any(endpoint_change));
+    // The next change is saved while the service time can't be read, and isn't signed
+    // (Paykit spec 4, "Changes saved and not yet signed").
+    world.advance_ms(11 * 60 * 1000);
+    world.unreachable("GET", "/feed");
+    let asked = vec![
+        endpoint("added", "lnbc1added"),
+        endpoint("kept", "lnbc1kept"),
+        endpoint("moved", "lnbc1new"),
+    ];
+    assert!(wallet.set_public_endpoints(asked, None).await.is_err());
+    wallet.shutdown().await?;
+    let wallet = host.load(app).await?;
+    Box::pin(read_through(&wallet)).await?;
+    // The host is told each endpoint by class, and the signed record stays as it was.
+    let notices = wallet.notices().await?;
+    let mut told = notices.iter().filter(|notice| endpoint_change(notice));
+    let notice = told.next().ok_or("the held change was not told")?;
+    assert!(told.next().is_none());
+    assert_eq!(notice.endpoints_withdrawn, ["dropped"]);
+    assert_eq!(notice.endpoints_offered, ["added"]);
+    assert_eq!(notice.endpoints_changed, ["moved"]);
+    assert!(notices
+        .iter()
+        .filter(|notice| !endpoint_change(notice))
+        .all(|notice| notice.endpoints_withdrawn.is_empty()
+            && notice.endpoints_offered.is_empty()
+            && notice.endpoints_changed.is_empty()));
+    assert_eq!(wallet.own_public_endpoints().await?, signed);
+    wallet.acknowledge_notice(notice.id.clone()).await?;
+    assert!(!wallet.notices().await?.iter().any(endpoint_change));
+    wallet.shutdown().await?;
+    Ok(())
+}
+
+#[test]
+fn test_public_endpoint_change_held_unsigned_is_told_by_class() {
+    run(Backend::Scripted, held_endpoint_change);
+    run(Backend::Service, held_endpoint_change);
+}
+
 async fn invalid_endpoints(world: &World) -> TestResult {
     let root = tempfile::tempdir()?;
     let account = Arc::new(Account::open(root.path(), world.clock().clone()));

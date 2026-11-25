@@ -604,13 +604,6 @@ pub(crate) fn holds_capabilities(cert: &AppCert) -> bool {
     paykit_lib::scopes::holds(cert.scopes(), &paykit_lib::scopes::PaykitScope::Pay)
 }
 
-/// Paykit's member of the record signed under `cert`, a renewal the app takes, and its
-/// expiry ask, from `member` and `ask`, the ones the record has now (Paykit spec, "What this pin adopts",
-/// "Renewing a certificate"): the public endpoints go when the app under `cert` holds none
-/// ([`holds_public_endpoints`]), the capabilities when it lists none
-/// ([`holds_capabilities`]), and the ask is for no expiry once no public endpoint is left.
-/// Everything else of the member stays as it is, fields this version doesn't read included,
-/// and a member with nothing left is removed. Otherwise the member and its ask are unchanged.
 /// The public endpoints the user's last call would withdraw, offer, or give a new payload, by
 /// Payment Endpoint Identifier, against the record signed then (Paykit spec 4, "Changes saved
 /// and not yet signed"). Kept before the client is asked to save the change, only to tell the
@@ -630,6 +623,13 @@ impl EndpointChange {
     }
 }
 
+/// Paykit's member of the record signed under `cert`, a renewal the app takes, and its
+/// expiry ask, from `member` and `ask`, the ones the record has now (Paykit spec, "What this pin adopts",
+/// "Renewing a certificate"): the public endpoints go when the app under `cert` holds none
+/// ([`holds_public_endpoints`]), the capabilities when it lists none
+/// ([`holds_capabilities`]), and the ask is for no expiry once no public endpoint is left.
+/// Everything else of the member stays as it is, fields this version doesn't read included,
+/// and a member with nothing left is removed. Otherwise the member and its ask are unchanged.
 pub(crate) fn member_under(
     member: Option<&serde_json::Map<String, serde_json::Value>>,
     ask: RecordExpiry,
