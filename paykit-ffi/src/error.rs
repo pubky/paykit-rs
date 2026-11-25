@@ -418,6 +418,7 @@ fn held_for_user_code(reason: &crate::HeldForUserKind) -> &'static str {
         R::RecordUnreadable => "record_unreadable",
         R::FloorRecordUnreadable => "floor_record_unreadable",
         R::AllowanceNotResumed => "allowance_not_resumed",
+        R::AllowanceNotResumedAfterRestore => "allowance_not_resumed_after_restore",
         R::AllowanceExecutionHeld => "allowance_execution_held",
         R::AttemptCheck => "attempt_check",
         R::ReloadRequired => "reload_required",
