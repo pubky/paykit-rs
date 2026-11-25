@@ -1,6 +1,6 @@
 //! Return a genuine approval for the generated-language consumer's own signed request.
 use base64::{engine::general_purpose::STANDARD, Engine};
-use pubky_switch_core::{
+use pubky_dispatch_core::{
     records::{AppRequest, AuthRequest},
     sig::SignedDoc,
 };

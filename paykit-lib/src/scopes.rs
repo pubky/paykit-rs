@@ -1,24 +1,24 @@
-//! Paykit's scopes and the switch permissions they need (Paykit spec 3.1, 3.2, 3.5; Paykit
+//! Paykit's scopes and the Dispatch permissions they need (Paykit spec 3.1, 3.2, 3.5; Paykit
 //! wire 3.1).
 //!
-//! Paykit's scopes are names under the Switch's scope rule (Switch spec 3.3): `paykit_pay`,
+//! Paykit's scopes are names under the Dispatch's scope rule (Dispatch spec 3.3): `paykit_pay`,
 //! `paykit_request`, `paykit_request:<label>`, `paykit_allowance`,
 //! `paykit_allowance_execute`, `paykit_contacts`, `paykit_manage_contacts` and
-//! `paykit_ext:<prefix>`. Their roots are Paykit's by the Switch's root rule: `paykit`, and
-//! `paykit` followed by `_` or `-` and more characters (Switch wire 3.1 "Scope roots",
-//! [`is_paykit_root`]). The Switch checks every certificate's scopes against its own rule;
+//! `paykit_ext:<prefix>`. Their roots are Paykit's by the Dispatch's root rule: `paykit`, and
+//! `paykit` followed by `_` or `-` and more characters (Dispatch wire 3.1 "Scope roots",
+//! [`is_paykit_root`]). The Dispatch checks every certificate's scopes against its own rule;
 //! Paykit's verifiers, at apps and at payers, then check Paykit's rules here and the
 //! permissions Paykit's permission table derives from its scopes: exactly that list, or, for
-//! a certificate that also holds another protocol's scopes, at least it (Switch wire 3.1
+//! a certificate that also holds another protocol's scopes, at least it (Dispatch wire 3.1
 //! "Several protocols", Paykit wire 3.1).
 //!
 //! Security: these checks decide which app may send, receive and read what. A certificate
-//! that fails them is invalid at Paykit's verifiers even though the switch takes it and
+//! that fails them is invalid at Paykit's verifiers even though the Dispatch takes it and
 //! enforces its signed `permissions` (Paykit wire 3.1).
 
-use pubky_switch_core::records::{AppCert, IdentityDoc, Standing};
-use pubky_switch_core::scopes::{self as switch_scopes, Permission};
-use pubky_switch_core::sig::SignedDoc;
+use pubky_dispatch_core::records::{AppCert, IdentityDoc, Standing};
+use pubky_dispatch_core::scopes::{self as dispatch_scopes, Permission};
+use pubky_dispatch_core::sig::SignedDoc;
 
 use crate::error::{invalid, Error, Result};
 
@@ -29,7 +29,7 @@ pub const MAX_EXTENSION_SCOPES: usize = 8;
 pub const MAX_LABELLED_SCOPES: usize = 8;
 
 /// Paykit's protocol name, the prefix of its own kinds, `paykit.<name>`, and its first scope
-/// root (Paykit wire 3.1, 4.3; Switch wire 3.1 "Scope roots"). An extension prefix is never
+/// root (Paykit wire 3.1, 4.3; Dispatch wire 3.1 "Scope roots"). An extension prefix is never
 /// this name alone: it starts with `paykit-` ([`EXTENSION_PREFIX_START`]).
 pub const PAYKIT_PREFIX: &str = "paykit";
 
@@ -54,7 +54,7 @@ pub const MANAGE_CONTACTS: &str = "paykit_manage_contacts";
 pub const EXTENSION: &str = "paykit_ext";
 
 /// What every extension prefix starts with, so that its kinds `<prefix>.<name>` are Paykit's
-/// under the Switch's rule (Paykit wire 3.1; Switch wire 3.1 "Scope roots").
+/// under the Dispatch's rule (Paykit wire 3.1; Dispatch wire 3.1 "Scope roots").
 pub const EXTENSION_PREFIX_START: &str = "paykit-";
 
 /// The names of Paykit's scopes of spec 3.1, without sub-scopes: the roots the signer knows
@@ -73,7 +73,7 @@ pub const PAYKIT_SCOPE_NAMES: [&str; 9] = [
 ];
 
 /// Whether `root`, the part of a scope before any `:`, is Paykit's (Paykit spec 3.2, Paykit
-/// wire 3.1; Switch wire 3.1 "Scope roots"): `paykit`, or `paykit` followed by `_` or `-` and
+/// wire 3.1; Dispatch wire 3.1 "Scope roots"): `paykit`, or `paykit` followed by `_` or `-` and
 /// more characters, such as `paykit_pay` or `paykit_future`. A scope with any other root,
 /// such as `chat`, `pay` or `request`, is another protocol's.
 pub fn is_paykit_root(root: &str) -> bool {
@@ -86,9 +86,9 @@ pub fn is_paykit_root(root: &str) -> bool {
 
 /// A label of a labelled selling scope `paykit_request:<label>` (Paykit spec 3.1): 1 to 32
 /// characters of `a-z`, `0-9` and `-`, starting with a letter or digit, the syntax of the
-/// Switch's sub-scope. `paykit` is a label like any other.
+/// Dispatch's sub-scope. `paykit` is a label like any other.
 ///
-/// Payers and the switch see it, so it should be opaque, like `shop1`, never a name.
+/// Payers and the Dispatch see it, so it should be opaque, like `shop1`, never a name.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Label(String);
 
@@ -99,7 +99,7 @@ impl Label {
     ///
     /// [`Error::Invalid`] for a label outside the syntax.
     pub fn parse(text: &str) -> Result<Self> {
-        if !switch_scopes::is_sub(text) {
+        if !dispatch_scopes::is_sub(text) {
             return invalid(
                 "Paykit wire 3.1: a label is 1 to 32 of a-z, 0-9 and -, starting with a letter or digit",
             );
@@ -138,7 +138,7 @@ impl std::fmt::Display for Label {
 /// `a-z`, `0-9` and `-`, 32 characters at most, such as `paykit-cap`.
 ///
 /// A kind's prefix is its protocol's name, or that name followed by `-` and more characters
-/// (Switch wire 3.1 "Scope roots"), so every extension kind is Paykit's, and none is taken for
+/// (Dispatch wire 3.1 "Scope roots"), so every extension kind is Paykit's, and none is taken for
 /// Paykit's own `paykit.<name>`, whose prefix is the name alone.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ExtensionPrefix(String);
@@ -197,7 +197,7 @@ pub enum PaykitScope {
     /// `paykit_settlements` and `paykit_contacts`.
     RequestLabel(Label),
     /// `paykit_settlements`: read and write the identity's settlement marks; it has keys of its
-    /// own and no switch permission.
+    /// own and no Dispatch permission.
     Settlements,
     /// Read and publish recovery reports under a separate scope key.
     Recovery,
@@ -232,7 +232,7 @@ pub enum ScopeName {
     /// A well-formed scope of another protocol: one whose root, the part before any `:`,
     /// isn't Paykit's ([`is_paykit_root`]), such as `chat`, `pay` or `request`. It grants
     /// nothing in Paykit and has no keys here; holding one lets the certificate's
-    /// `permissions` hold more than Paykit's scopes need (Switch wire 3.1 "Several
+    /// `permissions` hold more than Paykit's scopes need (Dispatch wire 3.1 "Several
     /// protocols").
     OtherProtocol,
 }
@@ -279,15 +279,15 @@ impl PaykitScope {
             CONTACTS => ScopeName::Paykit(Self::Contacts),
             MANAGE_CONTACTS => ScopeName::Paykit(Self::ManageContacts),
             // Any other name of Paykit's roots is Paykit's, and ignored; one of another root
-            // is another protocol's (Switch wire 3.1 "Scope roots").
-            _ => match switch_scopes::split(name) {
+            // is another protocol's (Dispatch wire 3.1 "Scope roots").
+            _ => match dispatch_scopes::split(name) {
                 Some((root, _)) if !is_paykit_root(root) => ScopeName::OtherProtocol,
                 _ => ScopeName::Unknown,
             },
         }
     }
 
-    /// The switch permissions this scope needs, by Paykit's table (Paykit spec 3.2).
+    /// The Dispatch permissions this scope needs, by Paykit's table (Paykit spec 3.2).
     pub fn permissions(&self) -> &'static [Permission] {
         match self {
             Self::Pay => &[
@@ -330,7 +330,7 @@ pub fn holds_other_protocol(scopes: &[String]) -> bool {
 }
 
 /// Check a certificate's scopes against Paykit's rules (Paykit spec 3.1, Paykit wire 3.1),
-/// after the Switch's scope rule (Switch wire 3.1), which every reader applies first and
+/// after the Dispatch's scope rule (Dispatch wire 3.1), which every reader applies first and
 /// which already refuses a name twice, `paykit_request` beside a label, and more than 32
 /// scopes in all.
 ///
@@ -340,7 +340,7 @@ pub fn holds_other_protocol(scopes: &[String]) -> bool {
 /// `paykit_allowance_execute` without `paykit_allowance`, `paykit_pay` and `paykit_contacts`,
 /// `paykit_manage_contacts` without `paykit_contacts`, and `paykit_request` or a labelled
 /// selling scope without `paykit_settlements` or without `paykit_contacts`. Its bounds count only its own
-/// scopes, whatever another protocol's scopes beside them (Switch wire 3.1 "Several
+/// scopes, whatever another protocol's scopes beside them (Dispatch wire 3.1 "Several
 /// protocols"). It ignores other names it doesn't know.
 ///
 /// # Errors
@@ -401,16 +401,16 @@ pub fn check_scopes(scopes: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// Check the scopes an app asks the signer for (Paykit spec 3.1, Switch wire 3.9): the
-/// Switch's scope rule, Paykit's rules, and no name Paykit doesn't know: neither a name of
+/// Check the scopes an app asks the signer for (Paykit spec 3.1, Dispatch wire 3.9): the
+/// Dispatch's scope rule, Paykit's rules, and no name Paykit doesn't know: neither a name of
 /// Paykit's roots without a meaning nor another protocol's scope.
 ///
 /// # Errors
 ///
-/// [`Error::Switch`] for the Switch's rule; [`Error::Invalid`] for Paykit's or an unknown
+/// [`Error::Dispatch`] for the Dispatch's rule; [`Error::Invalid`] for Paykit's or an unknown
 /// name.
 pub fn check_requested_scopes(scopes: &[String]) -> Result<()> {
-    switch_scopes::check_scopes(scopes)?;
+    dispatch_scopes::check_scopes(scopes)?;
     check_scopes(scopes)?;
     if scopes.iter().any(|s| {
         matches!(
@@ -423,8 +423,8 @@ pub fn check_requested_scopes(scopes: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// The switch permissions a certificate's scopes need (Paykit spec 3.2, Paykit wire 3.1):
-/// each permission one of Paykit's scopes grants, once, in the Switch's fixed order. Names
+/// The Dispatch permissions a certificate's scopes need (Paykit spec 3.2, Paykit wire 3.1):
+/// each permission one of Paykit's scopes grants, once, in the Dispatch's fixed order. Names
 /// Paykit doesn't know, and malformed ones, grant nothing.
 pub fn permissions_for(scopes: &[String]) -> Vec<Permission> {
     let granted: Vec<Permission> = paykit_scopes(scopes)
@@ -437,8 +437,8 @@ pub fn permissions_for(scopes: &[String]) -> Vec<Permission> {
         .collect()
 }
 
-/// Paykit's verifiers' checks on a certificate the Switch's checks took (Paykit spec 3.2,
-/// Paykit wire 3.1; Switch wire 3.1 "Several protocols"):
+/// Paykit's verifiers' checks on a certificate the Dispatch's checks took (Paykit spec 3.2,
+/// Paykit wire 3.1; Dispatch wire 3.1 "Several protocols"):
 ///
 /// - Paykit's scope rules apply in full to its own scopes ([`check_scopes`]), and its bounds
 ///   count only them.
@@ -446,8 +446,8 @@ pub fn permissions_for(scopes: &[String]) -> Vec<Permission> {
 ///   exactly the list Paykit's scopes need ([`permissions_for`]), with none missing and no
 ///   other.
 /// - With one, such as a wallet that also chats, `permissions` holds every permission
-///   Paykit's scopes need, and may hold more: the other protocol's. The Switch's checks have
-///   already taken the list as well formed, each a switch permission, once, in order.
+///   Paykit's scopes need, and may hold more: the other protocol's. The Dispatch's checks have
+///   already taken the list as well formed, each a Dispatch permission, once, in order.
 ///
 /// A `paykit_pay:x` or a plain `paykit_ext` is Paykit's name with no meaning, not another
 /// protocol's scope, so it doesn't widen the list. Another protocol's scopes, and the permissions
@@ -477,12 +477,12 @@ pub fn holds_paykit_scope(scopes: &[String]) -> bool {
     !paykit_scopes(scopes).is_empty()
 }
 
-/// Verify a certificate as Paykit's verifiers do: the Switch's checks for `identity`
-/// (Switch wire 3.1), then Paykit's ([`check_certificate`]).
+/// Verify a certificate as Paykit's verifiers do: the Dispatch's checks for `identity`
+/// (Dispatch wire 3.1), then Paykit's ([`check_certificate`]).
 ///
 /// # Errors
 ///
-/// [`Error::Switch`] for the Switch's checks, [`Error::Invalid`] for Paykit's.
+/// [`Error::Dispatch`] for the Dispatch's checks, [`Error::Invalid`] for Paykit's.
 pub fn verify_certificate(signed: &SignedDoc, identity: &[u8; 32]) -> Result<AppCert> {
     let cert = AppCert::verify(signed, identity)?;
     check_certificate(&cert)?;
@@ -495,7 +495,7 @@ pub fn verify_certificate(signed: &SignedDoc, identity: &[u8; 32]) -> Result<App
 ///
 /// **Why a hit is the call's own result.** [`verify_certificate`] is pure over its two
 /// inputs: the signed certificate's exact bytes, its `body` and `sig`, and the identity it
-/// is verified for. It reads no clock, no store and no state outside them: the Switch's
+/// is verified for. It reads no clock, no store and no state outside them: the Dispatch's
 /// signature and member checks, then Paykit's scope rules over the certificate itself. So
 /// the same inputs always give the same result. The memo keeps only certificates that
 /// passed, keyed by a hash of both inputs, and a hit is taken only when the entry's own
@@ -559,11 +559,11 @@ fn memo_key(signed: &SignedDoc, identity: &[u8; 32]) -> [u8; 32] {
         bytes.extend_from_slice(part);
     }
     bytes.extend_from_slice(identity);
-    pubky_switch_core::enc::hash(&bytes)
+    pubky_dispatch_core::enc::hash(&bytes)
 }
 
 /// Whether a verified certificate was in force at the service-authenticated time of a
-/// record write (Switch wire 6.2, step 4). A removal includes its cutoff and a closed
+/// record write (Dispatch wire 6.2, step 4). A removal includes its cutoff and a closed
 /// renewal excludes its end.
 pub fn certificate_in_force_at_write(identity: &IdentityDoc, cert: &AppCert, written: u64) -> bool {
     let counts = match identity.standing(&cert.app_id(), &cert.hash()) {
@@ -589,10 +589,10 @@ pub fn keyed_scopes(scopes: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// Whether `scopes` hold `scope`, holding `name` covering every `name:<sub>` (Switch wire
+/// Whether `scopes` hold `scope`, holding `name` covering every `name:<sub>` (Dispatch wire
 /// 3.1): plain `paykit_request` holds every label.
 pub fn holds(scopes: &[String], scope: &PaykitScope) -> bool {
-    switch_scopes::holds(scopes, &scope.name())
+    dispatch_scopes::holds(scopes, &scope.name())
 }
 
 /// Whether `scopes` hold `paykit_request` or any labelled selling scope: a labelled selling
@@ -611,8 +611,8 @@ pub fn acts_as_payee(scopes: &[String]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pubky_switch_core::keys::{AppKeys, IdentityKey};
-    use pubky_switch_core::records::AppCertBody;
+    use pubky_dispatch_core::keys::{AppKeys, IdentityKey};
+    use pubky_dispatch_core::records::AppCertBody;
 
     fn owned(scopes: &[&str]) -> Vec<String> {
         scopes.iter().map(|s| (*s).to_owned()).collect()
@@ -1307,7 +1307,7 @@ mod tests {
     #[test]
     fn test_scopes_bounds_count_only_paykit_scopes() {
         // Eight labels with the scope they require, eight extension scopes and other
-        // protocols' scopes beside them: within Paykit's bounds, and the Switch's 32 in all.
+        // protocols' scopes beside them: within Paykit's bounds, and the Dispatch's 32 in all.
         let mut scopes: Vec<String> = (1..=8).map(|i| format!("paykit_request:shop{i}")).collect();
         scopes.push(SETTLEMENTS.into());
         scopes.push(CONTACTS.into());
@@ -1316,10 +1316,10 @@ mod tests {
         assert_eq!(scopes.len(), 32);
         let names: Vec<&str> = scopes.iter().map(String::as_str).collect();
         check_certificate(&cert(&names, &[LISTS_READ, ADD])).unwrap();
-        // One more is over the Switch's total, whoever's it is.
+        // One more is over the Dispatch's total, whoever's it is.
         let mut over = names.clone();
         over.push("chat15");
-        assert!(switch_scopes::check_scopes(&owned(&over)).is_err());
+        assert!(dispatch_scopes::check_scopes(&owned(&over)).is_err());
     }
 
     #[test]

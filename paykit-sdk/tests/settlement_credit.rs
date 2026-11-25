@@ -1,8 +1,8 @@
 //! Two wallets of the same seller confirm the same invoice settlement.
 #![recursion_limit = "256"]
 
-#[path = "settlement_credit/first_dispatch.rs"]
-mod first_dispatch;
+#[path = "settlement_credit/first_handoff.rs"]
+mod first_handoff;
 #[path = "settlement_credit/quota.rs"]
 mod quota;
 
@@ -24,11 +24,11 @@ use paykit_sdk::{
     AppScopes, PayOptions, PayOutcome, PayeeStatus, Paykit, ReceiptDetails, ReceiptsOf,
     RequestDraft, RequestRef, RequestedScopes, Timer,
 };
-use pubky_switch_client::store::MemoryStore;
-use pubky_switch_client::testing::TestIdentity;
-use pubky_switch_client::transport::BoxFuture;
-use pubky_switch_harness::{parties::Asking, Backend, World};
-use pubky_switch_signer::{Protocols, Signer};
+use pubky_dispatch_client::store::MemoryStore;
+use pubky_dispatch_client::testing::TestIdentity;
+use pubky_dispatch_client::transport::BoxFuture;
+use pubky_dispatch_harness::{parties::Asking, Backend, World};
+use pubky_dispatch_signer::{Protocols, Signer};
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
@@ -53,7 +53,7 @@ async fn signer_on(world: &World, identity: &TestIdentity, origin: &str) -> Test
     Ok(tokio::spawn(Box::pin(async move {
         let mut signer = Signer::create(env, keyring, &origin).await?;
         signer.resume().await?;
-        Ok::<_, pubky_switch_signer::SignerError>(signer)
+        Ok::<_, pubky_dispatch_signer::SignerError>(signer)
     }))
     .await??)
 }
@@ -69,14 +69,14 @@ async fn join(
 ) -> TestResult<(Paykit, Signer)> {
     let owner = world.identity(identity)?;
     let keys = world.app_keys(&owner, name)?;
-    let auth = pubky_switch_core::enc::hash(name.as_bytes());
+    let auth = pubky_dispatch_core::enc::hash(name.as_bytes());
     let names: Vec<_> = scopes.scopes.iter().map(String::as_str).collect();
     let request = Asking::for_scopes_with_paths(keys, &names, &[], auth)?;
     let review = signer.review(request.request.signed(), &request.auth)?;
     let (signer, approved) = tokio::spawn(Box::pin(async move {
         let approved = signer.approve(review).await?;
         signer.claim_delivered(&approved.request).await?;
-        Ok::<_, pubky_switch_signer::SignerError>((signer, approved))
+        Ok::<_, pubky_dispatch_signer::SignerError>((signer, approved))
     }))
     .await??;
     let join = request.join_request(owner.public(), &approved)?;
@@ -375,8 +375,8 @@ async fn competing_seller_wallets(world: &World) -> TestResult {
         assert_eq!(view.marks(), &[mark]);
         let retained = format!(
             "sm/{}/{}",
-            pubky_switch_core::enc::b64(&key),
-            pubky_switch_core::enc::b64(&mark.to_bytes())
+            pubky_dispatch_core::enc::b64(&key),
+            pubky_dispatch_core::enc::b64(&mark.to_bytes())
         );
         assert!(reader
             .app()
@@ -522,7 +522,7 @@ async fn confirm_after_other_credit(
     };
     let checked = rail.proof_checks().len();
     let consent = ReceiptDetails::new()
-        .with_unmarked_credit_confirmed(pubky_switch_client::app::UserConfirmed::new());
+        .with_unmarked_credit_confirmed(pubky_dispatch_client::app::UserConfirmed::new());
     assert!(Box::pin(loser.confirm_payment_with(losing_key, consent))
         .await?
         .is_none());
@@ -543,7 +543,7 @@ async fn confirm_after_other_credit(
 /// Distinct fake rail settlements whose marks share a physical bucket, each with the
 /// settlement ID the fake rail names it by.
 fn transactions_in_one_bucket<const N: usize>(
-    naming: &pubky_switch_core::ident::NamingKey,
+    naming: &pubky_dispatch_core::ident::NamingKey,
 ) -> TestResult<[([u8; 32], [u8; 32]); N]> {
     let fake_id = |number: u64| {
         let mut proof = serde_json::Map::new();
@@ -574,7 +574,7 @@ async fn finish_seller_lookups(wallets: &mut SellerWallets) -> TestResult {
         let identity = buyer.app_mut().identity_of(&seller, true).await?;
         assert_eq!(
             identity.switch_copy,
-            pubky_switch_client::app::SwitchCopy::Read
+            pubky_dispatch_client::app::SwitchCopy::Read
         );
     }
     Ok(())
@@ -685,8 +685,8 @@ async fn test_full_bucket_warns_once_and_a_confirmed_stored_receipt_stays_unsent
 }
 
 async fn stored_receipt_over_full_bucket(world: &World) -> TestResult {
-    use pubky_switch_client::app::{
-        Collection as SwitchCollection, OpBatch, RecordTarget, UserConfirmed,
+    use pubky_dispatch_client::app::{
+        Collection as DispatchCollection, OpBatch, RecordTarget, UserConfirmed,
     };
     let mut seller_wallets = Box::pin(enrolled_seller_wallets(world)).await?;
     let (buyer, request, record) = Box::pin(paid_request(
@@ -736,11 +736,11 @@ async fn stored_receipt_over_full_bucket(world: &World) -> TestResult {
     }
     let collection = Collection::Settlements;
     let target = RecordTarget::new(
-        SwitchCollection::new(collection.name(), collection.fixed_policy()),
+        DispatchCollection::new(collection.name(), collection.fixed_policy()),
         &natural_key::settlement_bucket(number),
     );
     let value = serde_json::to_vec(
-        &serde_json::json!({"v":1, "marks":pubky_switch_core::enc::b64(&bytes)}),
+        &serde_json::json!({"v":1, "marks":pubky_dispatch_core::enc::b64(&bytes)}),
     )?;
     let put = seller_wallets
         .seller_wallet
@@ -799,7 +799,7 @@ async fn stored_receipt_over_full_bucket(world: &World) -> TestResult {
     let evidence = seller_wallets.seller_wallet.app().shared_evidence().await?;
     let mut receipt_writes = 0;
     for kept in &evidence.ops {
-        use pubky_switch_core::ops::{Condition, OpKind, SignedOp};
+        use pubky_dispatch_core::ops::{Condition, OpKind, SignedOp};
         if kept.cert != *seller_wallets.seller_wallet.app().cert().signed() {
             continue;
         }
@@ -904,7 +904,7 @@ async fn declare_shop_loss(world: &World, signer: Box<Signer>) -> TestResult {
         signer
             .declare_provider_loss(
                 origin,
-                pubky_switch_signer::UserConfirmed::shown_and_confirmed(),
+                pubky_dispatch_signer::UserConfirmed::shown_and_confirmed(),
             )
             .await?;
         signer.end_staged_admission().await
@@ -927,7 +927,7 @@ async fn test_recovered_bucket_repairs_retained_marks_without_another_payment() 
 }
 
 async fn repair_recovered_bucket(world: &World) -> TestResult {
-    use pubky_switch_client::app::{Collection as SwitchCollection, RecordTarget};
+    use pubky_dispatch_client::app::{Collection as DispatchCollection, RecordTarget};
 
     let mut seller_wallets = Box::pin(enrolled_seller_wallets(world)).await?;
     let [first, second] =
@@ -935,7 +935,7 @@ async fn repair_recovered_bucket(world: &World) -> TestResult {
     let number = settlement_bucket(&first.1);
     let collection = Collection::Settlements;
     let target = RecordTarget::new(
-        SwitchCollection::new(collection.name(), collection.fixed_policy()),
+        DispatchCollection::new(collection.name(), collection.fixed_policy()),
         &natural_key::settlement_bucket(number),
     );
     let key = seller_wallets.seller_wallet.app().record_key(&target)?;
@@ -1017,7 +1017,7 @@ async fn repair_recovered_bucket(world: &World) -> TestResult {
         .ok_or("missing uploaded bucket")?;
     assert!(!upload.divergent);
     assert_eq!(upload.content.value(), older.content.value());
-    let pubky_switch_core::ops::Condition::RecordCurrent {
+    let pubky_dispatch_core::ops::Condition::RecordCurrent {
         revision,
         deleted: false,
         ..
@@ -1053,7 +1053,7 @@ async fn repair_recovered_bucket(world: &World) -> TestResult {
     // A crash can follow a native read before Paykit resumes its outstanding repair.
     app.app_mut().refresh_identity().await?;
     app.app_mut().follow_provider().await?;
-    let pubky_switch_client::app::RecordRead::Fresh(before) =
+    let pubky_dispatch_client::app::RecordRead::Fresh(before) =
         app.app_mut().read_record_fresh(&target).await?
     else {
         return Err("the returning seller wallet must receive a current hosted bucket".into());
@@ -1068,7 +1068,7 @@ async fn repair_recovered_bucket(world: &World) -> TestResult {
     assert!(!before.divergent && !before.flagged && !before.not_taken && !before.doubtful);
     assert_eq!(
         app.app().record_condition(&key).await?,
-        pubky_switch_core::ops::Condition::RecordCurrent {
+        pubky_dispatch_core::ops::Condition::RecordCurrent {
             key,
             revision,
             deleted: false
@@ -1171,8 +1171,8 @@ async fn test_absent_bucket_after_loss_keeps_known_marks_and_uses_the_payment_ti
 }
 
 async fn credit_after_loss(world: &World, when: SettlementTime) -> TestResult {
-    use pubky_switch_client::app::{
-        Collection as SwitchCollection, KeptReason, RecordRead, RecordTarget, UserConfirmed,
+    use pubky_dispatch_client::app::{
+        Collection as DispatchCollection, KeptReason, RecordRead, RecordTarget, UserConfirmed,
     };
     let mut seller_wallets = Box::pin(enrolled_seller_wallets(world)).await?;
     let [original, distinct] =
@@ -1180,7 +1180,7 @@ async fn credit_after_loss(world: &World, when: SettlementTime) -> TestResult {
     let number = settlement_bucket(&original.1);
     let collection = Collection::Settlements;
     let target = RecordTarget::new(
-        SwitchCollection::new(collection.name(), collection.fixed_policy()),
+        DispatchCollection::new(collection.name(), collection.fixed_policy()),
         &natural_key::settlement_bucket(number),
     );
     let key = seller_wallets.seller_wallet.app().record_key(&target)?;
@@ -1342,17 +1342,17 @@ async fn credit_after_loss(world: &World, when: SettlementTime) -> TestResult {
 
 #[tokio::test]
 async fn test_absent_settlement_bucket_without_a_loss_keeps_the_wallet_stopped() -> TestResult {
-    use pubky_switch_client::app::{
-        Alarm, AppError, Collection as SwitchCollection, KeptReason, RecordRead, RecordTarget,
+    use pubky_dispatch_client::app::{
+        Alarm, AppError, Collection as DispatchCollection, KeptReason, RecordRead, RecordTarget,
     };
 
-    let world = World::start(Backend::Scripted)?.ok_or("missing scripted switch")?;
+    let world = World::start(Backend::Scripted)?.ok_or("missing scripted Dispatch")?;
     let mut seller_wallets = Box::pin(enrolled_seller_wallets(&world)).await?;
     let [credited, pending] =
         transactions_in_one_bucket(seller_wallets.seller_wallet.app().naming_key())?;
     let number = settlement_bucket(&credited.1);
     let target = RecordTarget::new(
-        SwitchCollection::new(
+        DispatchCollection::new(
             Collection::Settlements.name(),
             Collection::Settlements.fixed_policy(),
         ),
@@ -1541,7 +1541,7 @@ async fn restored_receipt_delivery_after_cancellation(
     if history == ReceiptHistory::Unavailable {
         world.unreachable(
             "GET",
-            &format!("/records/{}", pubky_switch_core::enc::b64(&key)),
+            &format!("/records/{}", pubky_dispatch_core::enc::b64(&key)),
         );
     }
     let kept = seller_wallets
@@ -1594,12 +1594,12 @@ async fn restored_receipt_delivery_after_cancellation(
         let historical = Box::pin(signer.revoke(
             shop_id,
             Some(cutoff),
-            pubky_switch_signer::UserConfirmed::shown_and_confirmed(),
+            pubky_dispatch_signer::UserConfirmed::shown_and_confirmed(),
         ))
         .await?;
         assert_eq!(
             historical.standing(&shop_id, &issued.cert().hash()),
-            pubky_switch_core::records::Standing::Removed {
+            pubky_dispatch_core::records::Standing::Removed {
                 distrust_from: cutoff
             }
         );
@@ -1726,9 +1726,9 @@ async fn restored_receipt_delivery_after_cancellation(
 async fn check_receipt_at_removal(
     world: &World,
     backup: &paykit_sdk::PaykitBackup,
-    historical: &pubky_switch_core::records::IdentityDoc,
-    cert: &pubky_switch_core::records::AppCert,
-    original: &pubky_switch_client::app::QueuedMessage,
+    historical: &pubky_dispatch_core::records::IdentityDoc,
+    cert: &pubky_dispatch_core::records::AppCert,
+    original: &pubky_dispatch_client::app::QueuedMessage,
     rail: &Arc<FakeRail>,
     valid: bool,
 ) -> TestResult {
@@ -1765,7 +1765,7 @@ async fn check_receipt_at_removal(
         );
         let receipt = format!(
             "/{}/{}",
-            pubky_switch_core::enc::b64(&original.hash),
+            pubky_dispatch_core::enc::b64(&original.hash),
             original.msg_id
         );
         assert!(key.ends_with(receipt.as_bytes()));
@@ -1778,13 +1778,13 @@ async fn check_receipt_at_removal(
             matches!(
                 restored,
                 Err(paykit_sdk::PaykitError::Client(
-                    pubky_switch_client::app::AppError::InvalidData(_)
+                    pubky_dispatch_client::app::AppError::InvalidData(_)
                 ))
             ),
             "the later write has no valid historical authorization"
         );
-        let namespace = pubky_switch_client::store::client_namespace(&cert.app_id());
-        assert!(pubky_switch_client::store::StateStore::scan(
+        let namespace = pubky_dispatch_client::store::client_namespace(&cert.app_id());
+        assert!(pubky_dispatch_client::store::StateStore::scan(
             store.as_ref(),
             &namespace,
             b"",
@@ -1800,11 +1800,11 @@ async fn check_receipt_at_removal(
 /// The original signed operation, certificate, service proof and receipt stay byte-identical.
 fn receipt_backup_with_historical_identity(
     backup: &paykit_sdk::PaykitBackup,
-    historical: &pubky_switch_core::records::IdentityDoc,
+    historical: &pubky_dispatch_core::records::IdentityDoc,
 ) -> TestResult<paykit_sdk::PaykitBackup> {
-    use pubky_switch_client::app::{decode_local_state, encode_local_state};
-    use pubky_switch_core::enc::{b64, unb64};
-    use pubky_switch_core::records::IdentityDoc;
+    use pubky_dispatch_client::app::{decode_local_state, encode_local_state};
+    use pubky_dispatch_core::enc::{b64, unb64};
+    use pubky_dispatch_core::records::IdentityDoc;
 
     let mut selected: serde_json::Value = serde_json::from_slice(&backup.to_bytes()?)?;
     let layer = &mut selected["layers"][0];

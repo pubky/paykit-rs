@@ -13,7 +13,7 @@ use paykit_lib::records::{
     bounded_msg_ids, ActivityRecord, ActivitySide, StoredMessage, MAX_PERIOD_DETAILS,
 };
 use paykit_lib::{Body, Label};
-use pubky_switch_client::app::{Collection as SwitchCollection, RecordTarget};
+use pubky_dispatch_client::app::{Collection as DispatchCollection, RecordTarget};
 use serde::{Deserialize, Serialize};
 
 /// A message's role in an activity record (Paykit wire 5.3).
@@ -128,27 +128,30 @@ impl ActivityTarget {
         let collection = self.collection();
         let policy = collection.policy(self.label().as_ref());
         RecordTarget::new(
-            SwitchCollection::new(collection.name(), policy),
+            DispatchCollection::new(collection.name(), policy),
             &self.natural_key,
         )
     }
 }
 
 /// The client's collection of one of Paykit's collections, under the policy of `label`.
-pub(crate) fn switch_collection(collection: Collection, label: Option<&Label>) -> SwitchCollection {
-    SwitchCollection::new(collection.name(), collection.policy(label))
+pub(crate) fn dispatch_collection(
+    collection: Collection,
+    label: Option<&Label>,
+) -> DispatchCollection {
+    DispatchCollection::new(collection.name(), collection.policy(label))
 }
 
 /// The client's collection of one of Paykit's collections with every policy it allows (Paykit spec
 /// 6, Paykit wire 5.1): `payee_activity` is a sub-scope family, the fixed `paykit_request` policy
 /// and one per label, so an app holding `paykit_request` lists and takes every label's records, and
 /// one holding only `paykit_request:<label>` its label's; the others have their fixed policy alone.
-pub(crate) fn family(collection: Collection) -> SwitchCollection {
+pub(crate) fn family(collection: Collection) -> DispatchCollection {
     match collection {
         Collection::PayeeActivity => {
-            SwitchCollection::with_sub_scopes(collection.name(), collection.fixed_policy())
+            DispatchCollection::with_sub_scopes(collection.name(), collection.fixed_policy())
         }
-        _ => SwitchCollection::new(collection.name(), collection.fixed_policy()),
+        _ => DispatchCollection::new(collection.name(), collection.fixed_policy()),
     }
 }
 

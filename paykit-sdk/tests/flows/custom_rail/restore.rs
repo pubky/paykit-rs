@@ -5,8 +5,8 @@ use paykit_lib::collections::Collection;
 use paykit_sdk::{
     AppScopes, PayOptions, PayOutcome, Paykit, PaykitBackup, Rail, UnrequestedPayment,
 };
-use pubky_switch_client::app::{Collection as SwitchCollection, RecordTarget};
-use pubky_switch_client::store::StateStore;
+use pubky_dispatch_client::app::{Collection as DispatchCollection, RecordTarget};
+use pubky_dispatch_client::store::StateStore;
 use std::sync::{Arc, Mutex};
 
 struct Payment {
@@ -25,7 +25,7 @@ struct Payment {
 
 fn target(natural: &[u8]) -> RecordTarget {
     RecordTarget::new(
-        SwitchCollection::new(
+        DispatchCollection::new(
             Collection::PayeeActivity.name(),
             Collection::PayeeActivity.fixed_policy(),
         ),

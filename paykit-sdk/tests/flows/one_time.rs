@@ -3,7 +3,7 @@
 
 use paykit_sdk::rail::Behaviour;
 use paykit_sdk::{MessageDelivery, PayOptions, PayOutcome, PayeeStatus, Refusal, RequestStatus};
-use pubky_switch_client::clock::Clock;
+use pubky_dispatch_client::clock::Clock;
 
 use crate::common::{draft, request_from, FailingRecordReads, World, HOUR_MS};
 
@@ -83,7 +83,7 @@ async fn test_one_time_credit_requires_the_requested_endpoint() {
         let received = summary.report.events.iter().any(|event| {
             matches!(
                 event,
-                pubky_switch_client::app::AppEvent::MessageReceived { kind, .. }
+                pubky_dispatch_client::app::AppEvent::MessageReceived { kind, .. }
                     if kind == "paykit.payment_receipt"
             )
         });
@@ -407,7 +407,7 @@ async fn test_one_time_payee_activity_store_failure_is_an_error() {
             paykit_sdk::AppScopes::new().request().build().unwrap(),
             paykit_sdk::PaykitConfig::default(),
             std::sync::Arc::clone(&failing)
-                as std::sync::Arc<dyn pubky_switch_client::store::StateStore>,
+                as std::sync::Arc<dyn pubky_dispatch_client::store::StateStore>,
         )
         .await;
     request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
@@ -423,14 +423,14 @@ async fn test_one_time_payee_activity_store_failure_is_an_error() {
     assert!(
         matches!(
             error,
-            paykit_sdk::PaykitError::Client(pubky_switch_client::app::AppError::Store(_))
+            paykit_sdk::PaykitError::Client(pubky_dispatch_client::app::AppError::Store(_))
         ),
         "{error:?}"
     );
 }
 
 /// A one-time request from bob's `shop` to alice, signed and not delivered, with its hash.
-fn unsent_request(w: &World) -> (pubky_switch_core::message::MessagePlaintext, [u8; 32]) {
+fn unsent_request(w: &World) -> (pubky_dispatch_core::message::MessagePlaintext, [u8; 32]) {
     let body = serde_json::json!({
         "amount": { "asset": "btc", "value": "1" },
         "payment_reference": "order-1",
@@ -614,15 +614,15 @@ async fn test_one_time_receipt_naming_another_proof_leaves_the_proof_recordable(
 // The kept-copy stop (Paykit spec 8.1): a payee's cancellation that can't be placed in its
 // record still refuses every new attempt
 
-/// The next `n` batches the wallet's switch is sent are refused, `403`: the app's
+/// The next `n` batches the wallet's Dispatch is sent are refused, `403`: the app's
 /// placements of a kept cancellation among them.
 fn refuse_batches(w: &World, n: usize) {
     for _ in 0..n {
         w.alice
             .switch()
-            .fail_next(pubky_switch_client::testing::Fault::Error {
+            .fail_next(pubky_dispatch_client::testing::Fault::Error {
                 path: "/ops".into(),
-                code: pubky_switch_core::http::ErrorCode::PermissionMissing,
+                code: pubky_dispatch_core::http::ErrorCode::PermissionMissing,
                 current: serde_json::Value::Null,
             });
     }
@@ -632,7 +632,7 @@ fn refuse_batches(w: &World, n: usize) {
 /// receives the cancellation, and its placement in the record is refused.
 async fn cancelled_unplaced(
     w: &World,
-    store: std::sync::Arc<dyn pubky_switch_client::store::StateStore>,
+    store: std::sync::Arc<dyn pubky_dispatch_client::store::StateStore>,
 ) -> (paykit_sdk::Paykit, paykit_sdk::RequestRef) {
     let mut wallet = w.wallet_on("wallet", store).await;
     let mut shop = w.shop().await;
@@ -732,7 +732,7 @@ async fn test_one_time_kept_stop_refuses_a_payment_after_a_restore() {
     assert!(app.app().restore_held_cursor().is_some());
     refuse_batches(&w, 1);
     let _ = app.reconcile().await;
-    app.end_reconcile(pubky_switch_client::app::UserConfirmed::new())
+    app.end_reconcile(pubky_dispatch_client::app::UserConfirmed::new())
         .await
         .unwrap();
     record_uncancelled(&app, &request).await;
@@ -748,7 +748,7 @@ async fn test_one_time_kept_stop_refuses_a_payment_after_a_restore() {
 
 #[tokio::test]
 async fn test_one_time_request_waits_for_the_payer_to_admit_the_payee() {
-    // Alice's wallet hasn't invited bob: her switch doesn't admit his request, which waits
+    // Alice's wallet hasn't invited bob: her Dispatch doesn't admit his request, which waits
     // for her, not for the shop's certificate. Once she invites him, it goes.
     let w = World::new();
     let mut wallet = w
@@ -801,7 +801,7 @@ async fn test_one_time_request_kept_is_sent_once_by_the_next_write() {
     let mut shop = w.shop().await;
     w.bob
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+        .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
             path: "/ops".into(),
             after: 0,
         });
@@ -834,8 +834,8 @@ async fn test_one_time_request_kept_is_sent_once_by_the_next_write() {
     assert_eq!(w.alice.switch().entries_from(&w.bob_id()), 1);
 }
 
-fn unreachable_ops() -> pubky_switch_client::testing::Fault {
-    pubky_switch_client::testing::Fault::Unreachable {
+fn unreachable_ops() -> pubky_dispatch_client::testing::Fault {
+    pubky_dispatch_client::testing::Fault::Unreachable {
         path: "/ops".into(),
         after: 0,
     }
@@ -906,9 +906,9 @@ async fn test_one_time_request_kept_then_refused_reads_as_failed() {
     );
     w.bob
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::Error {
+        .fail_next(pubky_dispatch_client::testing::Fault::Error {
             path: "/ops".into(),
-            code: pubky_switch_core::http::ErrorCode::PermissionMissing,
+            code: pubky_dispatch_core::http::ErrorCode::PermissionMissing,
             current: serde_json::Value::Null,
         });
     shop.flush().await.unwrap();
@@ -925,7 +925,7 @@ async fn test_one_time_request_kept_then_refused_reads_as_failed() {
 
 #[tokio::test]
 async fn test_one_time_request_kept_then_refused_at_a_read_reads_as_failed_once_acknowledged() {
-    // The read sends the kept batch again and the switch refuses it: the receive takes the
+    // The read sends the kept batch again and the Dispatch refuses it: the receive takes the
     // client's event from its report, so the request reads as failed even after the host
     // acknowledged that event.
     let w = World::new();
@@ -937,9 +937,9 @@ async fn test_one_time_request_kept_then_refused_at_a_read_reads_as_failed_once_
         .unwrap();
     w.bob
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::Error {
+        .fail_next(pubky_dispatch_client::testing::Fault::Error {
             path: "/ops".into(),
-            code: pubky_switch_core::http::ErrorCode::PermissionMissing,
+            code: pubky_dispatch_core::http::ErrorCode::PermissionMissing,
             current: serde_json::Value::Null,
         });
     let summary = shop.receive(None).await.unwrap();
@@ -948,7 +948,7 @@ async fn test_one_time_request_kept_then_refused_at_a_read_reads_as_failed_once_
         .events
         .iter()
         .find_map(|event| match event {
-            pubky_switch_client::app::AppEvent::BatchRefused { id, .. } => Some(*id),
+            pubky_dispatch_client::app::AppEvent::BatchRefused { id, .. } => Some(*id),
             _ => None,
         })
         .expect("the refusal is reported");
@@ -964,7 +964,7 @@ async fn test_one_time_request_kept_then_refused_at_a_read_reads_as_failed_once_
     );
 }
 
-/// A request bob's shop sends to alice while his switch can't be reached: the client keeps
+/// A request bob's shop sends to alice while his Dispatch can't be reached: the client keeps
 /// its batch. Returns the request's `msg_id` and the kept batch's ID.
 async fn kept_request(w: &World, shop: &mut paykit_sdk::Paykit) -> (String, [u8; 16]) {
     w.bob.switch().fail_next(unreachable_ops());
@@ -998,15 +998,15 @@ async fn test_one_time_request_kept_reads_as_kept_after_a_store_failure_and_a_re
         .await;
     let me = shop.app_id();
     drop(shop);
-    let fault = std::sync::Arc::new(pubky_switch_client::store::FaultStore::new(
+    let fault = std::sync::Arc::new(pubky_dispatch_client::store::FaultStore::new(
         std::sync::Arc::clone(&base),
-        pubky_switch_client::store::Fault::FailBefore(3),
+        pubky_dispatch_client::store::Fault::FailBefore(3),
     ));
     let mut shop = w
         .load_on_clock(
             &w.bob,
             std::sync::Arc::clone(&fault)
-                as std::sync::Arc<dyn pubky_switch_client::store::StateStore>,
+                as std::sync::Arc<dyn pubky_dispatch_client::store::StateStore>,
             me,
             std::sync::Arc::clone(&w.clock),
         )
@@ -1046,12 +1046,12 @@ async fn test_one_time_request_kept_past_the_retention_then_refused_reads_as_fai
     let mut shop = w.shop().await;
     let (msg_id, _) = kept_request(&w, &mut shop).await;
     w.clock
-        .advance_ms(pubky_switch_client::app::SENT_RETENTION_MS + HOUR_MS);
+        .advance_ms(pubky_dispatch_client::app::SENT_RETENTION_MS + HOUR_MS);
     w.bob
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::Error {
+        .fail_next(pubky_dispatch_client::testing::Fault::Error {
             path: "/ops".into(),
-            code: pubky_switch_core::http::ErrorCode::PermissionMissing,
+            code: pubky_dispatch_core::http::ErrorCode::PermissionMissing,
             current: serde_json::Value::Null,
         });
     shop.flush().await.unwrap();
@@ -1099,21 +1099,21 @@ async fn test_one_time_attempt_kept_then_forgotten_reads_the_claim_and_pays_once
     let batch_id = kept.kept_batch().expect("the attempt's batch is kept");
     w.alice
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::Error {
+        .fail_next(pubky_dispatch_client::testing::Fault::Error {
             path: "/ops".into(),
-            code: pubky_switch_core::http::ErrorCode::PermissionMissing,
+            code: pubky_dispatch_core::http::ErrorCode::PermissionMissing,
             current: serde_json::Value::Null,
         });
     wallet.flush().await.unwrap();
     assert!(
         matches!(
             wallet.app().kept_batch(batch_id).await.unwrap(),
-            Some(pubky_switch_client::app::KeptBatchStatus::Dropped { .. })
+            Some(pubky_dispatch_client::app::KeptBatchStatus::Dropped { .. })
         ),
         "the refusal drops the batch"
     );
     w.clock
-        .advance_ms(pubky_switch_client::app::SENT_RETENTION_MS + HOUR_MS);
+        .advance_ms(pubky_dispatch_client::app::SENT_RETENTION_MS + HOUR_MS);
     wallet.flush().await.unwrap();
     assert_eq!(wallet.app().kept_batch(batch_id).await.unwrap(), None);
     assert_eq!(
@@ -1177,7 +1177,7 @@ async fn test_one_time_attempt_kept_at_the_backup_restored_never_pays_again() {
     restored.receive(None).await.unwrap();
     restored.reconcile().await.unwrap();
     restored
-        .end_reconcile(pubky_switch_client::app::UserConfirmed::new())
+        .end_reconcile(pubky_dispatch_client::app::UserConfirmed::new())
         .await
         .unwrap();
     restored.resume_payments().await.unwrap();
@@ -1200,8 +1200,8 @@ async fn test_one_time_attempt_kept_at_the_backup_restored_never_pays_again() {
 }
 
 #[tokio::test]
-async fn test_one_time_expired_request_not_found_at_the_switch_is_not_found() {
-    // Past the request's expiry the switch answers the record's read `404`, though the
+async fn test_one_time_expired_request_not_found_at_the_dispatch_is_not_found() {
+    // Past the request's expiry the Dispatch answers the record's read `404`, though the
     // wallet keeps its open copy: nothing shows the request open, so it isn't refused as
     // expired, and nothing is paid.
     let w = World::new();
@@ -1215,9 +1215,9 @@ async fn test_one_time_expired_request_not_found_at_the_switch_is_not_found() {
     wallet.receive(None).await.unwrap();
     w.alice
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::Error {
+        .fail_next(pubky_dispatch_client::testing::Fault::Error {
             path: "/records/".into(),
-            code: pubky_switch_core::http::ErrorCode::NotFound,
+            code: pubky_dispatch_core::http::ErrorCode::NotFound,
             current: serde_json::Value::Null,
         });
     let refused = wallet
@@ -1249,9 +1249,9 @@ async fn test_one_time_attempt_kept_then_refused_reads_the_claim_while_its_end_i
         .expect("the attempt's batch is kept");
     w.alice
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::Error {
+        .fail_next(pubky_dispatch_client::testing::Fault::Error {
             path: "/ops".into(),
-            code: pubky_switch_core::http::ErrorCode::PermissionMissing,
+            code: pubky_dispatch_core::http::ErrorCode::PermissionMissing,
             current: serde_json::Value::Null,
         });
     wallet.flush().await.unwrap();
@@ -1259,7 +1259,7 @@ async fn test_one_time_attempt_kept_then_refused_reads_the_claim_while_its_end_i
     assert!(
         matches!(
             wallet.app().kept_batch(batch_id).await.unwrap(),
-            Some(pubky_switch_client::app::KeptBatchStatus::Dropped { .. })
+            Some(pubky_dispatch_client::app::KeptBatchStatus::Dropped { .. })
         ),
         "the client still knows the batch dropped"
     );
@@ -1297,7 +1297,7 @@ async fn test_one_time_attempt_kept_then_applied_writes_failed_and_pays_once() {
     assert!(
         matches!(
             wallet.app().kept_batch(batch_id).await.unwrap(),
-            Some(pubky_switch_client::app::KeptBatchStatus::Applied { .. })
+            Some(pubky_dispatch_client::app::KeptBatchStatus::Applied { .. })
         ),
         "{:?}",
         wallet.app().kept_batch(batch_id).await
@@ -1327,9 +1327,9 @@ async fn test_one_time_attempt_kept_then_applied_writes_failed_and_pays_once() {
 }
 
 #[tokio::test]
-async fn test_one_time_expired_request_read_refused_by_the_switch_keeps_its_code() {
-    // Past the request's expiry the switch refuses the record's read for good: the
-    // refusal is the answer, with the switch's code, never taken as the record unchanged.
+async fn test_one_time_expired_request_read_refused_by_the_dispatch_keeps_its_code() {
+    // Past the request's expiry the Dispatch refuses the record's read for good: the
+    // refusal is the answer, with the Dispatch's code, never taken as the record unchanged.
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
@@ -1341,9 +1341,9 @@ async fn test_one_time_expired_request_read_refused_by_the_switch_keeps_its_code
     wallet.receive(None).await.unwrap();
     w.alice
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::Error {
+        .fail_next(pubky_dispatch_client::testing::Fault::Error {
             path: "/records/".into(),
-            code: pubky_switch_core::http::ErrorCode::PermissionMissing,
+            code: pubky_dispatch_core::http::ErrorCode::PermissionMissing,
             current: serde_json::Value::Null,
         });
     let refused = wallet
@@ -1353,7 +1353,7 @@ async fn test_one_time_expired_request_read_refused_by_the_switch_keeps_its_code
         .unwrap_err();
     assert_eq!(
         refused.code(),
-        Some(pubky_switch_core::http::ErrorCode::PermissionMissing),
+        Some(pubky_dispatch_core::http::ErrorCode::PermissionMissing),
         "{refused:?}"
     );
     assert!(w.rail.all_executions().is_empty());
@@ -1371,9 +1371,9 @@ async fn sealed_requests(
     n: usize,
 ) -> (
     Vec<paykit_sdk::RequestRef>,
-    pubky_switch_core::records::AppCert,
+    pubky_dispatch_core::records::AppCert,
 ) {
-    let days = pubky_switch_core::records::DAY_MS;
+    let days = pubky_dispatch_core::records::DAY_MS;
     let mut requests = Vec::new();
     for i in 0..n {
         let mut lasting =
@@ -1414,8 +1414,8 @@ async fn sealed_requests(
         assert!(
             matches!(
                 held.content,
-                pubky_switch_client::app::RecordContent::Unreadable(
-                    pubky_switch_client::app::Unopened::KeyNotHeld { .. }
+                pubky_dispatch_client::app::RecordContent::Unreadable(
+                    pubky_dispatch_client::app::Unopened::KeyNotHeld { .. }
                 )
             ),
             "{:?}",
@@ -1455,7 +1455,7 @@ async fn test_one_time_cancellation_while_its_record_awaits_its_key_stops_it_pas
     assert!(got.key_epochs_awaited.is_empty(), "{got:?}");
     // Past 30 days from its acceptance, nothing is given up: the stop stands.
     w.clock
-        .advance_ms(paykit_sdk::KEPT_MESSAGE_MS + pubky_switch_core::records::DAY_MS);
+        .advance_ms(paykit_sdk::KEPT_MESSAGE_MS + pubky_dispatch_core::records::DAY_MS);
     for _ in 0..2 {
         wallet.receive(None).await.unwrap();
     }
@@ -1493,7 +1493,7 @@ async fn keeps_stop(w: &World, wallet: &paykit_sdk::Paykit, hash: [u8; 32]) -> b
         .app()
         .record_key(&crate::outcome_record::payer_record(&request))
         .unwrap();
-    let stops = format!("kc/{}/", pubky_switch_core::enc::b64(&key));
+    let stops = format!("kc/{}/", pubky_dispatch_core::enc::b64(&key));
     wallet
         .app()
         .protocol_scan("paykit", stops.as_bytes())
@@ -1574,7 +1574,7 @@ async fn test_one_time_stop_dropped_for_the_bounds_kept_again_when_sent_again() 
     // again, so the request it cancels never becomes payable (Paykit spec 8.1).
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
-    // Bob's switch admits the wallet's asks by an invite.
+    // Bob's Dispatch admits the wallet's asks by an invite.
     let mut shop = w.shop().await;
     shop.app_mut().invite(&w.alice_id()).await.unwrap();
     let unknown = |i: usize| [u8::try_from(i + 1).unwrap(); 32];
@@ -1652,7 +1652,7 @@ async fn test_one_time_stop_for_a_request_not_held_goes_30_days_after_its_accept
     cancel_to(&w, &[wallet.app_id()], hash);
     wallet.receive(None).await.unwrap();
     assert!(keeps_stop(&w, &wallet, hash).await);
-    let day = pubky_switch_core::records::DAY_MS;
+    let day = pubky_dispatch_core::records::DAY_MS;
     w.clock.advance_ms(paykit_sdk::KEPT_MESSAGE_MS - day);
     wallet.receive(None).await.unwrap();
     assert!(keeps_stop(&w, &wallet, hash).await);
@@ -1662,22 +1662,23 @@ async fn test_one_time_stop_for_a_request_not_held_goes_30_days_after_its_accept
 }
 
 /// Send the wallet's own housekeeping now, its next receive key's registration and a
-/// deferred cursor move (Switch spec 3.6, 8.2), so that its next receive sends the switch
-/// only Paykit's writes, which the switch is set to refuse.
+/// deferred cursor move (Dispatch spec 3.6, 8.2), so that its next receive sends the Dispatch
+/// only Paykit's writes, which the Dispatch is set to refuse.
 async fn housekeeping(wallet: &mut paykit_sdk::Paykit) {
     wallet.app_mut().rotate().await.unwrap();
     wallet.app_mut().flush_cursor().await.unwrap();
 }
 
 /// Bob's cancellation of a request the wallet holds no record of yet, then, 20 days on, the
-/// request itself, whose write the switch refuses: the wallet keeps a stop for it and the
+/// request itself, whose write the Dispatch refuses: the wallet keeps a stop for it and the
 /// request to write later. Returns the request.
 async fn stop_then_request_stored(w: &World, wallet: &mut paykit_sdk::Paykit) -> [u8; 32] {
     let (request, hash) = unsent_request(w);
     cancel_to(w, &[wallet.app_id()], hash);
     wallet.receive(None).await.unwrap();
     assert!(keeps_stop(w, wallet, hash).await);
-    w.clock.advance_ms(20 * pubky_switch_core::records::DAY_MS);
+    w.clock
+        .advance_ms(20 * pubky_dispatch_core::records::DAY_MS);
     w.deliver(&w.bob, "shop", &w.alice, &[wallet.app_id()], &request);
     // The receive step's write, and the app's first write of it, are refused.
     housekeeping(wallet).await;
@@ -1705,7 +1706,7 @@ async fn test_one_time_stop_for_a_request_kept_to_write_stays_past_30_days() {
     let mut wallet = w.wallet("wallet").await;
     let _shop = w.shop().await;
     let hash = stop_then_request_stored(&w, &mut wallet).await;
-    let day = pubky_switch_core::records::DAY_MS;
+    let day = pubky_dispatch_core::records::DAY_MS;
     w.clock
         .advance_ms(paykit_sdk::KEPT_MESSAGE_MS - 20 * day + day);
     housekeeping(&mut wallet).await;
@@ -1748,7 +1749,7 @@ async fn test_one_time_stop_for_a_request_given_up_goes_past_30_days() {
     let (request, hash) = unsent_request(&w);
     cancel_to(&w, &[wallet.app_id()], hash);
     wallet.receive(None).await.unwrap();
-    let day = pubky_switch_core::records::DAY_MS;
+    let day = pubky_dispatch_core::records::DAY_MS;
     w.clock.advance_ms(day);
     w.deliver(&w.bob, "shop", &w.alice, &[wallet.app_id()], &request);
     housekeeping(&mut wallet).await;
@@ -1898,7 +1899,7 @@ async fn test_one_time_cancellation_of_a_request_not_held_kept_as_stop_and_reply
     );
 }
 
-/// `app` pays `request`: the acceptance goes with the dispatch, then the method reports the
+/// `app` pays `request`: the acceptance goes with the handoff, then the method reports the
 /// payment failed, so the claim is free again and the record keeps the acceptance.
 async fn failed_after_acceptance(
     w: &World,
@@ -1996,16 +1997,16 @@ async fn test_one_time_rejection_while_the_records_are_not_listed_refused_as_not
     wallet.receive(None).await.unwrap();
     let now = w.clock.now_ms();
     w.alice.switch().push_missed(1, now - 1_000, now);
-    let unlisted = || pubky_switch_client::testing::Fault::Error {
+    let unlisted = || pubky_dispatch_client::testing::Fault::Error {
         path: "records?collection".into(),
-        code: pubky_switch_core::http::ErrorCode::Unavailable,
+        code: pubky_dispatch_core::http::ErrorCode::Unavailable,
         current: serde_json::Value::Null,
     };
     // The client lists right after the item, the wallet's three collections, before Paykit's
     // own listing at the end of the receive, which fails.
     w.alice
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+        .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
             path: "records?collection".into(),
             after: 3,
         });
@@ -2084,7 +2085,7 @@ async fn test_one_time_restore_asks_wait_for_a_sealed_records_key() {
     crate::common::restore_with_unknown_cursor(&mut restored).await;
     restored.reconcile().await.unwrap();
     restored
-        .end_reconcile(pubky_switch_client::app::UserConfirmed::new())
+        .end_reconcile(pubky_dispatch_client::app::UserConfirmed::new())
         .await
         .unwrap();
     restored.receive(None).await.unwrap();
@@ -2111,8 +2112,8 @@ pub(crate) fn stop_key(w: &World, wallet: &paykit_sdk::Paykit, hash: [u8; 32]) -
     let shop = w.bob.identity().app_keys("shop").app_id_bytes();
     format!(
         "kc/{}/{}/{:020}",
-        pubky_switch_core::enc::b64(&key),
-        pubky_switch_core::enc::b64(&w.bob.switch().app(&shop).cert.unwrap().hash()),
+        pubky_dispatch_core::enc::b64(&key),
+        pubky_dispatch_core::enc::b64(&w.bob.switch().app(&shop).cert.unwrap().hash()),
         wallet.app().own_identity().generation(),
     )
     .into_bytes()
@@ -2152,7 +2153,7 @@ async fn test_one_time_stop_naming_another_request_refused_as_corrupt() {
         .app_mut()
         .protocol_commit(
             "paykit",
-            &[pubky_switch_client::app::LocalWrite::Put { key, value }],
+            &[pubky_dispatch_client::app::LocalWrite::Put { key, value }],
         )
         .await
         .unwrap();
@@ -2398,7 +2399,7 @@ async fn test_one_time_restore_asks_the_readable_now_and_the_sealed_once_open() 
     crate::common::restore_with_unknown_cursor(&mut restored).await;
     restored.reconcile().await.unwrap();
     restored
-        .end_reconcile(pubky_switch_client::app::UserConfirmed::new())
+        .end_reconcile(pubky_dispatch_client::app::UserConfirmed::new())
         .await
         .unwrap();
     restored.receive(None).await.unwrap();
@@ -2469,15 +2470,15 @@ async fn test_one_time_confirming_a_request_over_a_sealed_record_refused_as_not_
             .unwrap()
             .unwrap()
             .content,
-        pubky_switch_client::app::RecordContent::Unreadable(
-            pubky_switch_client::app::Unopened::KeyNotHeld { .. }
+        pubky_dispatch_client::app::RecordContent::Unreadable(
+            pubky_dispatch_client::app::Unopened::KeyNotHeld { .. }
         )
     ));
     let refused = wallet
         .confirm_possibly_cancelled(
             &request,
             &held,
-            pubky_switch_client::app::UserConfirmed::new(),
+            pubky_dispatch_client::app::UserConfirmed::new(),
         )
         .await
         .unwrap_err();
@@ -2505,7 +2506,7 @@ async fn test_one_time_cancellation_of_a_request_missing_from_a_copy_not_listed_
     // own listing at the end of the receive, which fails.
     w.alice
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+        .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
             path: "records?collection".into(),
             after: 3,
         });
@@ -2535,7 +2536,7 @@ async fn test_one_time_stop_at_another_key_refuses_the_receive_steps_bounds() {
         .app_mut()
         .protocol_commit(
             "paykit",
-            &[pubky_switch_client::app::LocalWrite::Put { key, value }],
+            &[pubky_dispatch_client::app::LocalWrite::Put { key, value }],
         )
         .await
         .unwrap();
@@ -2559,7 +2560,7 @@ async fn wallet_restored(w: &World, mut wallet: paykit_sdk::Paykit) -> paykit_sd
     .unwrap();
     wallet.reconcile().await.unwrap();
     wallet
-        .end_reconcile(pubky_switch_client::app::UserConfirmed::new())
+        .end_reconcile(pubky_dispatch_client::app::UserConfirmed::new())
         .await
         .unwrap();
     wallet
@@ -2665,7 +2666,7 @@ async fn test_one_time_credit_requires_the_fixed_endpoint_owner() {
             seller_wallet.payee_activity().await.unwrap()[0].status == PayeeStatus::Receipted;
         let summary = wallet.receive(None).await.unwrap();
         let receipt = summary.report.events.iter().any(|event| matches!(event,
-            pubky_switch_client::app::AppEvent::MessageReceived { kind, .. } if kind == "paykit.payment_receipt"));
+            pubky_dispatch_client::app::AppEvent::MessageReceived { kind, .. } if kind == "paykit.payment_receipt"));
         assert_eq!(
             (verified, confirmed, credited, receipt),
             (correct_owner, correct_owner, correct_owner, correct_owner)
@@ -2710,12 +2711,12 @@ async fn test_one_time_cancellation_kept_after_an_old_backup_survives_its_in_pla
     // The device ran after the backup: its key registrations since are its own.
     wallet
         .app_mut()
-        .confirm_restored_registrations(pubky_switch_client::app::UserConfirmed::new())
+        .confirm_restored_registrations(pubky_dispatch_client::app::UserConfirmed::new())
         .await
         .unwrap();
     wallet.reconcile().await.unwrap();
     wallet
-        .end_reconcile(pubky_switch_client::app::UserConfirmed::new())
+        .end_reconcile(pubky_dispatch_client::app::UserConfirmed::new())
         .await
         .unwrap();
     w.deliver(&w.bob, "shop", &w.alice, &[wallet.app_id()], &request);

@@ -18,14 +18,14 @@ use paykit_sdk::{
     PayOptions, PayOutcome, PayeeStatus, Paykit, PaykitBackup, PaykitConfig, PaykitError,
     PeriodPrice, Rail, Refusal, RequestDraft, RequestRef, RequestStatus,
 };
-use pubky_switch_client::app::{
-    Collection as SwitchCollection, OpBatch, RecordTarget, UserConfirmed,
+use pubky_dispatch_client::app::{
+    Collection as DispatchCollection, OpBatch, RecordTarget, UserConfirmed,
 };
-use pubky_switch_client::clock::Clock;
-use pubky_switch_client::store::{KeyValue, MemoryStore, StateStore, Write, WriteBatch};
-use pubky_switch_client::testing::START_MS;
-use pubky_switch_core::claims::{ClaimStatus, ClaimType};
-use pubky_switch_core::ops::{Condition, OpKind};
+use pubky_dispatch_client::clock::Clock;
+use pubky_dispatch_client::store::{KeyValue, MemoryStore, StateStore, Write, WriteBatch};
+use pubky_dispatch_client::testing::START_MS;
+use pubky_dispatch_core::claims::{ClaimStatus, ClaimType};
+use pubky_dispatch_core::ops::{Condition, OpKind};
 
 use crate::common::{btc, endpoint, store, World, HOUR_MS};
 
@@ -167,7 +167,7 @@ fn early() -> PayOptions {
 fn natural_target(natural: &[u8]) -> RecordTarget {
     let collection = Collection::PayerActivity;
     RecordTarget::new(
-        SwitchCollection::new(collection.name(), collection.policy(None)),
+        DispatchCollection::new(collection.name(), collection.policy(None)),
         natural,
     )
 }
@@ -230,7 +230,7 @@ fn proof_of(record: &ActivityRecord) -> (&StoredMessage, &PaymentProof) {
     (stored, proof)
 }
 
-/// The conditions of every `attempt` alice's switch applied on the claim of `obligation`.
+/// The conditions of every `attempt` alice's Dispatch applied on the claim of `obligation`.
 fn attempt_conditions(w: &World, obligation: &[u8; 32]) -> Vec<Vec<Condition>> {
     w.alice
         .switch()
@@ -244,7 +244,7 @@ fn attempt_conditions(w: &World, obligation: &[u8; 32]) -> Vec<Vec<Condition>> {
         .collect()
 }
 
-/// The `record.put`s alice's switch applied at the payer's `natural` key, as `app` keys it,
+/// The `record.put`s alice's Dispatch applied at the payer's `natural` key, as `app` keys it,
 /// each with its conditions.
 fn puts(w: &World, app: &Paykit, natural: &[u8]) -> Vec<Vec<Condition>> {
     let key = app.app().record_key(&natural_target(natural)).unwrap();
@@ -671,7 +671,9 @@ async fn test_period_payments_details_expired_by_the_service_time_at_planning_sa
     wallet.receive(None).await.unwrap();
     drop(wallet);
     w.clock.set_ms(expires);
-    let behind = Arc::new(pubky_switch_client::clock::TestClock::new(expires - 10_000));
+    let behind = Arc::new(pubky_dispatch_client::clock::TestClock::new(
+        expires - 10_000,
+    ));
     let mut wallet = w
         .load_on_clock(
             &w.alice,
@@ -695,9 +697,9 @@ async fn test_period_payments_details_expired_by_the_service_time_at_planning_sa
 async fn test_period_payments_details_expired_by_the_attempt_answer_not_paid() {
     // The wallet's device clock runs ten seconds behind the service. February is paid only
     // to its period details' destination. The service time first reaches their expiry in
-    // the attempt's answer: the attempt is written failed before dispatch, with no payment
+    // the attempt's answer: the attempt is written failed before handoff, with no payment
     // method call, and the refusal says the device clock is behind (Paykit spec 7.2, check
-    // the destination, the last time immediately before dispatch).
+    // the destination, the last time immediately before handoff).
     let w = World::new();
     let base = Arc::new(StageStore::default());
     let mut shop = w.shop().await;
@@ -721,7 +723,9 @@ async fn test_period_payments_details_expired_by_the_attempt_answer_not_paid() {
     wallet.receive(None).await.unwrap();
     drop(wallet);
     w.clock.set_ms(expires - 5_000);
-    let behind = Arc::new(pubky_switch_client::clock::TestClock::new(expires - 15_000));
+    let behind = Arc::new(pubky_dispatch_client::clock::TestClock::new(
+        expires - 15_000,
+    ));
     let mut wallet = w
         .load_on_clock(
             &w.alice,
@@ -1018,7 +1022,7 @@ async fn test_period_payments_hand_mark_creates_or_keeps_the_period_record() {
 #[tokio::test]
 async fn test_period_payments_hand_batch_in_conflict_writes_no_attempt_and_no_mark() {
     // The phone writes January's period record after the wallet read it. The wallet's payment
-    // by hand marks the record at the version it read: the switch refuses the batch, and
+    // by hand marks the record at the version it read: the Dispatch refuses the batch, and
     // neither the attempt nor the mark is written. The record is read again on that
     // conflict, and the next try lands the attempt and the mark together (Paykit spec 8.3).
     let w = World::new();
@@ -1063,7 +1067,7 @@ async fn test_period_payments_hand_batch_kept_unanswered_is_no_payment() {
     // The attempt's batch, carrying the mark, gets no answer: the client keeps it, and the
     // call returns its error with the batch's ID, nothing paid; the mark lands only with the
     // attempt, once the client sends the batch again and it applies (Paykit spec 8.3).
-    use pubky_switch_client::testing::Fault;
+    use pubky_dispatch_client::testing::Fault;
     let w = World::new();
     let mut shop = w.shop().await;
     let mut wallet = w.wallet("wallet").await;
@@ -1224,7 +1228,7 @@ async fn check_period_resolution(with_details: bool) {
 
 #[tokio::test]
 async fn test_period_payments_restore_an_orphan_then_confirm_the_owners_paid_proof() {
-    use pubky_switch_client::store::{Fault, FaultStore};
+    use pubky_dispatch_client::store::{Fault, FaultStore};
     let w = World::new();
     let mut shop = w.shop().await;
     let fault = Arc::new(FaultStore::new(store(), Fault::None));
@@ -1318,7 +1322,7 @@ async fn test_period_payments_restore_an_orphan_then_confirm_the_owners_paid_pro
 /// A backup taken after the rail paid can predate the original wallet's
 /// successful outcome batch. Its signed proof remains the same payment.
 async fn restore_before_original_completion(answered: bool, priced: bool) {
-    use pubky_switch_client::store::{Fault, FaultStore};
+    use pubky_dispatch_client::store::{Fault, FaultStore};
     let fault = Arc::new(FaultStore::new(store(), Fault::None));
     let (w, mut shop, mut wallet, request, rate) = if priced {
         let (w, shop, wallet, request, id) =
@@ -1390,7 +1394,7 @@ async fn restore_before_original_completion(answered: bool, priced: bool) {
     }
     assert!(matches!(
         wallet.app().delivery(original_id).await.unwrap(),
-        Some(pubky_switch_client::app::Delivery::Accepted { .. })
+        Some(pubky_dispatch_client::app::Delivery::Accepted { .. })
     ));
     shop.receive(None).await.unwrap();
     if answered {
@@ -1482,7 +1486,7 @@ async fn test_period_payments_retained_delete_holds_the_period_after_claim_reten
         .unwrap();
     assert_eq!(
         deleted.content,
-        pubky_switch_client::app::RecordContent::Deleted
+        pubky_dispatch_client::app::RecordContent::Deleted
     );
     w.clock.advance_ms(401 * DAY_MS);
     let base = store();
@@ -1912,7 +1916,7 @@ async fn test_period_payments_priced_repeat_requires_unexpired_selected_rates() 
 }
 
 #[tokio::test]
-async fn test_period_payments_priced_first_dispatch_rechecks_selected_rate_expiry() {
+async fn test_period_payments_priced_first_handoff_rechecks_selected_rate_expiry() {
     for stage in ["attempted", "paying"] {
         let base = Arc::new(StageStore::default());
         let (w, _shop, mut wallet, request, _) = Box::pin(priced_period_on(
@@ -2002,7 +2006,7 @@ async fn test_period_payments_recorded_attempt_rechecks_the_period_rate_issuer()
             .bob
             .next_doc(|doc| {
                 doc.apps.retain(|app| app.app_id != issuer);
-                doc.removed.push(pubky_switch_core::records::RemovedApp {
+                doc.removed.push(pubky_dispatch_core::records::RemovedApp {
                     app_id: issuer,
                     distrust_from: now,
                 });
@@ -2114,7 +2118,7 @@ async fn test_period_payments_priced_default_uses_latest_details_carrying_rates(
     );
     assert_eq!(
         shown.payload_hash,
-        pubky_switch_core::enc::hash(b"lnbc1invoice")
+        pubky_dispatch_core::enc::hash(b"lnbc1invoice")
     );
     assert_eq!(shown.amount, btc("0.0002"));
     w.clock.advance_ms(1_000);
@@ -2348,7 +2352,7 @@ impl StateStore for StageStore {
         &self,
         ns: &str,
         key: &[u8],
-    ) -> Result<Option<Vec<u8>>, pubky_switch_client::error::StoreError> {
+    ) -> Result<Option<Vec<u8>>, pubky_dispatch_client::error::StoreError> {
         self.inner.get(ns, key)
     }
 
@@ -2358,15 +2362,15 @@ impl StateStore for StageStore {
         prefix: &[u8],
         after: Option<&[u8]>,
         limit: u32,
-    ) -> Result<Vec<KeyValue>, pubky_switch_client::error::StoreError> {
+    ) -> Result<Vec<KeyValue>, pubky_dispatch_client::error::StoreError> {
         self.inner.scan(ns, prefix, after, limit)
     }
 
-    fn commit(&self, batch: WriteBatch) -> Result<(), pubky_switch_client::error::StoreError> {
+    fn commit(&self, batch: WriteBatch) -> Result<(), pubky_dispatch_client::error::StoreError> {
         self.commit_with(batch, |batch| {
             self.inner
                 .commit(batch)
-                .map(|()| pubky_switch_client::store::CommitOutcome::Applied)
+                .map(|()| pubky_dispatch_client::store::CommitOutcome::Applied)
         })
         .map(|_| ())
     }
@@ -2374,18 +2378,20 @@ impl StateStore for StageStore {
     fn acquire(
         &self,
         ns: &str,
-        owner: pubky_switch_client::store::StoreOwner,
-    ) -> Result<pubky_switch_client::store::AcquireOutcome, pubky_switch_client::error::StoreError>
-    {
+        owner: pubky_dispatch_client::store::StoreOwner,
+    ) -> Result<
+        pubky_dispatch_client::store::AcquireOutcome,
+        pubky_dispatch_client::error::StoreError,
+    > {
         self.inner.acquire(ns, owner)
     }
 
     fn commit_if(
         &self,
         ns: &str,
-        owner: pubky_switch_client::store::StoreOwner,
+        owner: pubky_dispatch_client::store::StoreOwner,
         batch: WriteBatch,
-    ) -> Result<pubky_switch_client::store::CommitOutcome, pubky_switch_client::error::StoreError>
+    ) -> Result<pubky_dispatch_client::store::CommitOutcome, pubky_dispatch_client::error::StoreError>
     {
         self.commit_with(batch, |batch| self.inner.commit_if(ns, owner, batch))
     }
@@ -2400,10 +2406,10 @@ impl StageStore {
         apply: impl FnOnce(
             WriteBatch,
         ) -> Result<
-            pubky_switch_client::store::CommitOutcome,
-            pubky_switch_client::error::StoreError,
+            pubky_dispatch_client::store::CommitOutcome,
+            pubky_dispatch_client::error::StoreError,
         >,
-    ) -> Result<pubky_switch_client::store::CommitOutcome, pubky_switch_client::error::StoreError>
+    ) -> Result<pubky_dispatch_client::store::CommitOutcome, pubky_dispatch_client::error::StoreError>
     {
         let armed = self.hook.lock().unwrap().as_ref().map(|(stage, _)| *stage);
         let due = armed.is_some_and(|stage| {
@@ -2433,7 +2439,7 @@ async fn test_period_payments_payee_cancellation_crosses_an_accepted_attempt() {
 }
 
 #[tokio::test]
-async fn test_period_payments_seller_stop_crosses_the_first_dispatch_by_policy() {
+async fn test_period_payments_seller_stop_crosses_the_first_handoff_by_policy() {
     Box::pin(seller_stop_after_attempt(StopAt::Policy)).await;
 }
 
@@ -2533,7 +2539,7 @@ async fn seller_stop_after_attempt(stop_at: StopAt) {
     ));
     let path = format!(
         "/records/{}",
-        pubky_switch_core::enc::b64(&payer.app().record_key(&parent).unwrap())
+        pubky_dispatch_core::enc::b64(&payer.app().record_key(&parent).unwrap())
     );
     if matches!(stop_at, StopAt::PolicyRead | StopAt::PolicyReadMarked) {
         base.on_stage("paying", move || {
@@ -2603,8 +2609,8 @@ async fn seller_stop_after_attempt(stop_at: StopAt) {
 pub(super) fn diverge_at_paying(base: &Arc<StageStore>, app: [u8; 16], record: [u8; 32]) {
     let store = Arc::clone(base) as Arc<dyn StateStore>;
     base.on_stage("paying", move || {
-        let ns = pubky_switch_client::store::client_namespace(&app);
-        let key = format!("rcdiv/{}", pubky_switch_core::enc::b64(&record));
+        let ns = pubky_dispatch_client::store::client_namespace(&app);
+        let key = format!("rcdiv/{}", pubky_dispatch_core::enc::b64(&record));
         let mut batch = WriteBatch::new();
         batch
             .put(&ns, key.into_bytes(), br#"{"v":3,"d":null}"#.to_vec())
@@ -2616,7 +2622,7 @@ pub(super) fn diverge_at_paying(base: &Arc<StageStore>, app: [u8; 16], record: [
 #[tokio::test]
 async fn test_period_payments_period_record_divergent_after_the_paying_commit_holds_it() {
     // Right after the wallet journals January's `Paying`, by hand or by its policy, a view
-    // shows January's period record divergent: the dispatch is held, nothing paid, as the
+    // shows January's period record divergent: the handoff is held, nothing paid, as the
     // check before it judges every pause after its last read (Paykit spec 6).
     for automatic in [false, true] {
         let w = World::new();
@@ -2659,7 +2665,7 @@ async fn test_period_payments_unknown_restore_holds_until_the_user_confirms() {
     app.receive(None).await.unwrap();
     assert_eq!(
         app.app().restore_held_cursor(),
-        Some(pubky_switch_client::app::HeldCursor::Unknown)
+        Some(pubky_dispatch_client::app::HeldCursor::Unknown)
     );
     app.reconcile().await.unwrap();
     app.end_reconcile(UserConfirmed::new()).await.unwrap();
@@ -2690,7 +2696,7 @@ async fn test_period_payments_clean_restore_pays_without_hold_confirmation() {
     let mut app = restored(&w, &backup).await;
     assert_eq!(
         app.app().restore_held_cursor(),
-        Some(pubky_switch_client::app::HeldCursor::Clean)
+        Some(pubky_dispatch_client::app::HeldCursor::Clean)
     );
     app.reconcile().await.unwrap();
     app.end_reconcile(UserConfirmed::new()).await.unwrap();
@@ -2702,7 +2708,7 @@ async fn test_period_payments_clean_restore_pays_without_hold_confirmation() {
 }
 
 /// A wallet on an idempotent rail without history pays January of bob's subscription by
-/// hand, the dispatch left in flight; then `between` runs with the shop and the shop's record
+/// hand, the handoff left in flight; then `between` runs with the shop and the shop's record
 /// of the sale, and the wallet resumes a minute later. Returns how many times the rail was
 /// called, and the resume's outcome of the payment.
 async fn resumed_period_repeat(
@@ -2740,8 +2746,8 @@ async fn resumed_period_repeat(
 }
 
 #[tokio::test]
-async fn test_period_payments_resume_repeats_a_periods_dispatch_unless_cancelled_since() {
-    // A crash leaves January's dispatch in flight: the resume repeats it on the idempotent
+async fn test_period_payments_resume_repeats_a_periods_handoff_unless_cancelled_since() {
+    // A crash leaves January's handoff in flight: the resume repeats it on the idempotent
     // method, its period record's mark from the user's own attempt withholding nothing; once
     // the payee has cancelled the subscription meanwhile, it isn't repeated, and the attempt
     // stays "may be paid" (Paykit spec 7.2, 8.2, 8.3).
@@ -2794,7 +2800,7 @@ async fn resume_marked_subscription(
     )
     .await;
     after_mark(&mut shop, sale).await;
-    // The method settles the first dispatch and has no history lookup.
+    // The method settles the first handoff and has no history lookup.
     w.rail.settle(&attempt, true);
     w.clock.advance_ms(60_000);
     let mut wallet = w
@@ -2855,7 +2861,7 @@ async fn test_period_payments_hold_a_cancelled_attempt_on_a_manual_only_subscrip
 }
 
 #[tokio::test]
-async fn test_period_payments_hold_a_dispatch_without_idempotency_or_history() {
+async fn test_period_payments_hold_a_handoff_without_idempotency_or_history() {
     let w = World::new();
     let resumed = resume_marked_subscription(&w, false, async |_, _| {}).await;
     assert_period_stays_uncertain(&w, resumed);
@@ -2989,7 +2995,7 @@ async fn test_period_payments_reconcile_leaves_a_period_whose_destination_it_can
     );
     let attempt = paykit_lib::AttemptId::generate().unwrap();
     let op =
-        pubky_switch_client::app::ClaimOp::attempt(obligation, 0, attempt.to_bytes(), 4200, None);
+        pubky_dispatch_client::app::ClaimOp::attempt(obligation, 0, attempt.to_bytes(), 4200, None);
     wallet
         .app_mut()
         .submit_batch(
@@ -2997,7 +3003,7 @@ async fn test_period_payments_reconcile_leaves_a_period_whose_destination_it_can
                 .op(op.kind())
                 .obligation_deadline(
                     obligation,
-                    pubky_switch_client::app::ObligationDeadline::NoDeadline,
+                    pubky_dispatch_client::app::ObligationDeadline::NoDeadline,
                 ),
         )
         .await
@@ -3026,7 +3032,7 @@ async fn test_period_payments_reconcile_leaves_a_period_whose_destination_it_can
     assert!(period_record(&w, &app, &request, period).await.is_none());
 }
 
-/// A backup `w`'s wallet takes paying January by hand, its dispatch in flight.
+/// A backup `w`'s wallet takes paying January by hand, its handoff in flight.
 async fn backup_paying_january(w: &World) -> serde_json::Value {
     let mut shop = w.shop().await;
     let mut wallet = w.wallet("wallet").await;
@@ -3047,8 +3053,8 @@ async fn restore_takes(
     tamper: impl Fn(&mut serde_json::Value),
 ) -> bool {
     let data = backup["layers"][0]["data"].as_str().unwrap();
-    let bytes = pubky_switch_core::enc::unb64(data).unwrap();
-    let mut state: Vec<(Vec<u8>, Vec<u8>)> = pubky_switch_client::app::decode_local_state(&bytes)
+    let bytes = pubky_dispatch_core::enc::unb64(data).unwrap();
+    let mut state: Vec<(Vec<u8>, Vec<u8>)> = pubky_dispatch_client::app::decode_local_state(&bytes)
         .unwrap()
         .into_iter()
         .collect();
@@ -3063,8 +3069,8 @@ async fn restore_takes(
     }
     assert!(found, "no journal entry");
     let mut out = backup.clone();
-    out["layers"][0]["data"] = serde_json::Value::String(pubky_switch_core::enc::b64(
-        &pubky_switch_client::app::encode_local_state(&state),
+    out["layers"][0]["data"] = serde_json::Value::String(pubky_dispatch_core::enc::b64(
+        &pubky_dispatch_client::app::encode_local_state(&state),
     ));
     let backup = PaykitBackup::from_bytes(&serde_json::to_vec(&out).unwrap()).unwrap();
     Paykit::restore(
@@ -3103,10 +3109,10 @@ async fn test_period_payments_restore_refuses_a_period_entry_no_run_writes() {
     );
     let request_key = |e: &serde_json::Value| {
         let payee =
-            pubky_switch_core::enc::unb64_array::<32>(e["payee"].as_str().unwrap()).unwrap();
-        let hash =
-            pubky_switch_core::enc::unb64_array::<32>(e["request_hash"].as_str().unwrap()).unwrap();
-        pubky_switch_core::enc::b64(&natural_key::request_record(&payee, &hash))
+            pubky_dispatch_core::enc::unb64_array::<32>(e["payee"].as_str().unwrap()).unwrap();
+        let hash = pubky_dispatch_core::enc::unb64_array::<32>(e["request_hash"].as_str().unwrap())
+            .unwrap();
+        pubky_dispatch_core::enc::b64(&natural_key::request_record(&payee, &hash))
     };
     let shifted = |e: &mut serde_json::Value, member: &str, by: u64| {
         let at = e["billing_period"][member].as_u64().unwrap();
@@ -3116,7 +3122,7 @@ async fn test_period_payments_restore_refuses_a_period_entry_no_run_writes() {
         Box::new(move |e| shifted(e, "starts_at", 1)),
         Box::new(move |e| shifted(e, "ends_at", 1000)),
         Box::new(|e| e["deadline"] = serde_json::json!(START_MS + DAY_MS)),
-        Box::new(|e| e["obligation"] = serde_json::json!(pubky_switch_core::enc::b64(&[7; 32]))),
+        Box::new(|e| e["obligation"] = serde_json::json!(pubky_dispatch_core::enc::b64(&[7; 32]))),
         Box::new(|e| e["acceptance_owed"] = serde_json::json!(true)),
         Box::new(move |e| e["natural_key"] = serde_json::json!(request_key(e))),
         Box::new(|e| e["billing_period"]["ends_at"] = e["billing_period"]["starts_at"].clone()),
@@ -3129,15 +3135,15 @@ async fn test_period_payments_restore_refuses_a_period_entry_no_run_writes() {
     let naming = w.wallet("other").await.app().naming_key().clone();
     let unperiodic = move |e: &mut serde_json::Value| {
         let payee =
-            pubky_switch_core::enc::unb64_array::<32>(e["payee"].as_str().unwrap()).unwrap();
-        let hash =
-            pubky_switch_core::enc::unb64_array::<32>(e["request_hash"].as_str().unwrap()).unwrap();
+            pubky_dispatch_core::enc::unb64_array::<32>(e["payee"].as_str().unwrap()).unwrap();
+        let hash = pubky_dispatch_core::enc::unb64_array::<32>(e["request_hash"].as_str().unwrap())
+            .unwrap();
         e["billing_period"] = serde_json::Value::Null;
-        e["natural_key"] = serde_json::json!(pubky_switch_core::enc::b64(
+        e["natural_key"] = serde_json::json!(pubky_dispatch_core::enc::b64(
             &natural_key::request_record(&payee, &hash)
         ));
         let obligation = paykit_lib::derive::request_obligation(&naming, &payee, &hash, 0);
-        e["obligation"] = serde_json::json!(pubky_switch_core::enc::b64(&obligation));
+        e["obligation"] = serde_json::json!(pubky_dispatch_core::enc::b64(&obligation));
     };
     assert!(!restore_takes(&w, &backup, unperiodic).await);
     // An entry without the member at all is refused too: it is required.
@@ -3385,7 +3391,7 @@ async fn test_period_payments_by_policy_from_the_period_the_acceptance_was_recor
 /// The wallet, on a store that moves the clock 2 s on right after it journals `stage`, pays
 /// the first hour of an hourly subscription by policy a second before the hour's automatic
 /// window ends. Returns the world, the wallet, the request and the payment's result.
-async fn dispatch_past_the_window(
+async fn handoff_past_the_window(
     stage: &'static str,
 ) -> (World, Paykit, RequestRef, paykit_sdk::Result<PayOutcome>) {
     let w = World::new();
@@ -3403,12 +3409,12 @@ async fn dispatch_past_the_window(
 }
 
 #[tokio::test]
-async fn test_period_payments_by_policy_window_ended_before_the_dispatch_fails_the_attempt() {
+async fn test_period_payments_by_policy_window_ended_before_the_handoff_fails_the_attempt() {
     // The hour's automatic window ends after its attempt is journaled, once before the
-    // `Paying` commit and once just after it: the attempt isn't dispatched, it is written
+    // `Paying` commit and once just after it: the attempt isn't handed off, it is written
     // `failed`, and the user pays the hour by hand (Paykit spec 8.2).
     for stage in ["attempted", "paying"] {
-        let (w, mut wallet, request, outcome) = Box::pin(dispatch_past_the_window(stage)).await;
+        let (w, mut wallet, request, outcome) = Box::pin(handoff_past_the_window(stage)).await;
         let refused = outcome.unwrap_err();
         assert!(
             matches!(refusal(&refused), Refusal::AttemptFailed(why)
@@ -3428,9 +3434,9 @@ async fn test_period_payments_by_policy_window_ended_before_the_dispatch_fails_t
 
 #[tokio::test]
 async fn test_period_payments_by_policy_repeat_completes_past_the_window() {
-    // The hour's dispatch by policy is in flight when its automatic window ends: a resume's
-    // repeat completes the payment already dispatched, the window judging only a first
-    // dispatch (Paykit spec 8.2).
+    // The hour's handoff by policy is in flight when its automatic window ends: a resume's
+    // repeat completes the payment already handed off, the window judging only a first
+    // handoff (Paykit spec 8.2).
     let w = World::new();
     w.rail.set_declaration(
         paykit_sdk::RailDeclaration::new(
@@ -3876,7 +3882,7 @@ async fn pay_with_two_destination_senders(senders: PeriodSenders) {
 
     if matches!(senders, PeriodSenders::SellerWalletRemoved) {
         w.homeserver
-            .remove(w.bob_id(), pubky_switch_core::records::IDENTITY_PATH);
+            .remove(w.bob_id(), pubky_dispatch_core::records::IDENTITY_PATH);
         w.router.remove(w.bob.origin());
         w.clock.advance_ms(11 * 60_000);
         let unavailable = by_user(&mut wallet, &request, february(), PayOptions::default())
@@ -3894,7 +3900,7 @@ async fn pay_with_two_destination_senders(senders: PeriodSenders) {
         w.bob
             .next_doc(|doc| {
                 doc.apps.retain(|app| app.app_id != removed);
-                doc.removed.push(pubky_switch_core::records::RemovedApp {
+                doc.removed.push(pubky_dispatch_core::records::RemovedApp {
                     app_id: removed,
                     distrust_from: w.clock.now_ms(),
                 });
@@ -4026,7 +4032,9 @@ async fn behind_at_february_expiry(
     wallet.receive(None).await.unwrap();
     drop(wallet);
     w.clock.set_ms(expires);
-    let behind = Arc::new(pubky_switch_client::clock::TestClock::new(expires - 10_000));
+    let behind = Arc::new(pubky_dispatch_client::clock::TestClock::new(
+        expires - 10_000,
+    ));
     let mut wallet = w.load_on_clock(&w.alice, disk, app_id, behind).await;
     wallet.receive(None).await.unwrap();
     (w, wallet, request, expires)

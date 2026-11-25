@@ -1,20 +1,20 @@
 //! Paykit's derivations (Paykit spec 7.1, 10; Paykit wire 1.5): message, request and terms
 //! hashes, obligation IDs, natural keys, settlement IDs and the tags of settlement marks.
 //!
-//! They use the Switch's `hash()`, `derive()`, `lp()` and blinding (Switch wire 1.4, 1.5).
+//! They use the Dispatch's `hash()`, `derive()`, `lp()` and blinding (Dispatch wire 1.4, 1.5).
 //! Paykit's own derivations, the obligation ID and the settlement and occurrence tags, use the
 //! labels `paykit/v1/obligation` and `paykit/v1/settlement`, never a `pubky-switch/v1/` one
-//! (Switch spec 1).
+//! (Dispatch spec 1).
 //!
 //! Security: obligation IDs, record keys and settlement and occurrence tags are blinded with
-//! the naming key of the identity whose switch holds them, so the service can't tell which
+//! the naming key of the identity whose Dispatch holds them, so the service can't tell which
 //! counterparty, request or settlement they name, and no payer can aim a settlement at a
 //! bucket or a tag. The obligation of a payment without a request blinds its attempt ID the
 //! same way: one who holds only the attempt ID, such as the payee from the proof, can't
 //! compute its claim key. It names no payee.
 
-use pubky_switch_core::enc::{derive, hash, lp, u64be};
-use pubky_switch_core::ident::NamingKey;
+use pubky_dispatch_core::enc::{derive, hash, lp, u64be};
+use pubky_dispatch_core::ident::NamingKey;
 use serde_json::{Map, Value};
 
 use crate::identifiers::{AllowanceId, AttemptId, PaymentEndpointIdentifier};
@@ -36,9 +36,9 @@ pub const SETTLEMENT_TAG_LEN: usize = 12;
 pub const OCCURRENCE_TAG_LEN: usize = 8;
 
 /// A message hash, as `refs` and request hashes name messages: `hash(message JSON bytes)`
-/// (Paykit wire 1.5, Switch wire 5.1).
+/// (Paykit wire 1.5, Dispatch wire 5.1).
 pub fn message_hash(json: &[u8]) -> [u8; 32] {
-    pubky_switch_core::message::message_hash(json)
+    pubky_dispatch_core::message::message_hash(json)
 }
 
 /// The request hash: the hash of the request message's exact JSON bytes (Paykit wire 1.5).
@@ -79,7 +79,7 @@ pub fn request_obligation_material(
 /// The obligation ID of a request, or of one Billing Period of a recurring request, used as
 /// the claim key (Paykit spec 7.1, Paykit wire 1.5): `derive("paykit/v1/obligation",
 /// "request", blind(payee identity), blind(request hash), u64(period start))`, blinded with
-/// the payer's naming key, whose switch holds the claim.
+/// the payer's naming key, whose Dispatch holds the claim.
 pub fn request_obligation(
     naming_key: &NamingKey,
     payee: &[u8; 32],
@@ -95,7 +95,7 @@ pub fn request_obligation(
 
 /// [`request_obligation`] from its inputs already blinded with the payer's naming key:
 /// `blind(payee identity)` and `blind(request hash)` (Paykit wire 1.5). For an app that
-/// blinds through its Switch client and never holds the naming key itself.
+/// blinds through its Dispatch client and never holds the naming key itself.
 pub fn request_obligation_blinded(
     blinded_payee: &[u8; 32],
     blinded_request_hash: &[u8; 32],
@@ -131,7 +131,7 @@ pub fn payment_obligation_blinded(blinded_attempt_id: &[u8; 32]) -> [u8; 32] {
     derive(OBLIGATION_LABEL, &[b"payment", blinded_attempt_id])
 }
 
-/// Paykit's natural keys (Paykit wire 1.5, Switch spec 13.3): the inputs, blinded with the
+/// Paykit's natural keys (Paykit wire 1.5, Dispatch spec 13.3): the inputs, blinded with the
 /// naming key, that name what a record is about.
 pub mod natural_key {
     use super::*;
@@ -202,7 +202,7 @@ pub fn settlement_tag_material(settlement_id: &[u8]) -> Vec<u8> {
 }
 
 /// A settlement's tag (Paykit wire 1.5): `derive("paykit/v1/settlement", "tag",
-/// blind(lp(settlement ID)))`, blinded with the naming key of the payee, whose switch holds
+/// blind(lp(settlement ID)))`, blinded with the naming key of the payee, whose Dispatch holds
 /// the marks. It derives from the settlement ID alone, whatever the endpoint, the counterparty
 /// or the occurrence, so one settlement has one tag and one mark (Paykit spec 8.1 step 4).
 pub fn settlement_tag(naming_key: &NamingKey, settlement_id: &[u8]) -> [u8; 32] {
@@ -210,7 +210,7 @@ pub fn settlement_tag(naming_key: &NamingKey, settlement_id: &[u8]) -> [u8; 32] 
 }
 
 /// [`settlement_tag`] from its input already blinded with the payee's naming key,
-/// `blind(lp(settlement ID))`. For an app that blinds through its Switch client and never
+/// `blind(lp(settlement ID))`. For an app that blinds through its Dispatch client and never
 /// holds the naming key itself.
 pub fn settlement_tag_blinded(blinded: &[u8; 32]) -> [u8; 32] {
     derive(SETTLEMENT_LABEL, &[b"tag", blinded])
@@ -386,7 +386,7 @@ mod tests {
     }
 
     fn blake3_derive(material: &[u8]) -> [u8; 32] {
-        let parts = pubky_switch_core::enc::split_lp(material).unwrap();
+        let parts = pubky_dispatch_core::enc::split_lp(material).unwrap();
         let refs: Vec<&[u8]> = parts.iter().map(Vec::as_slice).collect();
         derive(OBLIGATION_LABEL, &refs)
     }

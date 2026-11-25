@@ -26,7 +26,7 @@ private enum CheckoutFailure: Error {
 class CheckoutMethod: ReceiptReader, @unchecked Sendable {
     private let ledger: URL
     private let guardLock = NSLock()
-    private var dispatches = 0
+    private var handoffs = 0
     private var pendingLookup = false
     /// The test services' clock, which dates each payment as a real method's evidence would.
     private var clock: (() -> UInt64)?
@@ -36,7 +36,7 @@ class CheckoutMethod: ReceiptReader, @unchecked Sendable {
     func chargedAttempt() throws -> String { try guardLock.withLock { try stored()! } }
     let progress = AsyncThrowingStream<CheckoutStep, Error>.makeStream()
     let release = PaymentGate()
-    var calls: Int { guardLock.withLock { dispatches } }
+    var calls: Int { guardLock.withLock { handoffs } }
 
     init(ledger: URL) { self.ledger = ledger }
 
@@ -53,7 +53,7 @@ class CheckoutMethod: ReceiptReader, @unchecked Sendable {
 
     override func pay(payment: MethodPayment) async throws -> MethodOutcome {
         try guardLock.withLock {
-            dispatches += 1
+            handoffs += 1
             precondition(payment.endpoint == "btc-lightning-bolt11" && payment.payload == "lnbc1checkout")
             precondition(payment.amount.asset == "btc" && payment.amount.value == "7")
             precondition(payment.paymentReference == "checkout-7")
@@ -378,7 +378,7 @@ private func throwingCallbacks() throws {
     }
 }
 
-/// Text the switch gave never leaves the bindings: not in a message, a description or a reason.
+/// Text the Dispatch gave never leaves the bindings: not in a message, a description or a reason.
 private func outsideTextStaysInside() {
     let sentinel = "SENTINEL-outside-text"
     do {
@@ -391,7 +391,7 @@ private func outsideTextStaysInside() {
             failure.code(), failure.context(), refusal.reason(),
         ]
         precondition(!shown.contains { $0.contains(sentinel) }, "outside text left the bindings")
-        precondition(failure.context() == "switch_unavailable: a later call can succeed")
+        precondition(failure.context() == "dispatch_unavailable: a later call can succeed")
     } catch {
         preconditionFailure("unexpected error")
     }

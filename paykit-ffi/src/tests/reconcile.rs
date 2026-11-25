@@ -17,17 +17,17 @@ use paykit_lib::{
     Asset, AttemptId, Decimal, PaymentAmount, PaymentReference,
 };
 use paykit_sdk::{AppScopes, Paykit, RequestDestination, RequestDraft, RequestRef};
-use pubky_switch_client::{
-    app::{ClaimOp, Collection as SwitchCollection, ObligationDeadline, OpBatch, RecordTarget},
+use pubky_dispatch_client::{
+    app::{ClaimOp, Collection as DispatchCollection, ObligationDeadline, OpBatch, RecordTarget},
     store::MemoryStore,
 };
-use pubky_switch_core::{
+use pubky_dispatch_core::{
     claims::Outcome,
     enc::{b64, lp},
     records::{IdentityDoc, DAY_MS},
     shared::ApplicationRef,
 };
-use pubky_switch_harness::{parties::Asking, Backend, World};
+use pubky_dispatch_harness::{parties::Asking, Backend, World};
 use std::{error::Error, sync::Arc};
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
@@ -87,7 +87,7 @@ async fn publish_report(
     }))?;
     let family = Collection::RecoveryUploads;
     let target = RecordTarget::new(
-        SwitchCollection::new(family.name(), family.fixed_policy()),
+        DispatchCollection::new(family.name(), family.fixed_policy()),
         &lp(&[&original, &opening.hash()]),
     );
     app.put_record(&target, &value, vec![]).await?;
@@ -129,7 +129,7 @@ async fn members(world: &World) -> TestResult {
     world.add_switch(successor, &[&buyer]).await?;
     let opening = Box::pin(signer.declare_provider_loss(
         successor,
-        pubky_switch_signer::UserConfirmed::shown_and_confirmed(),
+        pubky_dispatch_signer::UserConfirmed::shown_and_confirmed(),
     ))
     .await?;
     Box::pin(signer.end_staged_admission()).await?;
@@ -209,7 +209,7 @@ async fn members_of_another_app(world: &World) -> TestResult {
     world.add_switch(successor, &[&buyer]).await?;
     let opening = Box::pin(signer.declare_provider_loss(
         successor,
-        pubky_switch_signer::UserConfirmed::shown_and_confirmed(),
+        pubky_dispatch_signer::UserConfirmed::shown_and_confirmed(),
     ))
     .await?;
     Box::pin(signer.end_staged_admission()).await?;
@@ -235,7 +235,7 @@ async fn members_of_another_app(world: &World) -> TestResult {
             }))?;
             let family = Collection::RecoveryUploads;
             let target = RecordTarget::new(
-                SwitchCollection::new(family.name(), family.fixed_policy()),
+                DispatchCollection::new(family.name(), family.fixed_policy()),
                 &lp(&[&laptop_id, &opening.hash()]),
             );
             app.app_mut().put_record(&target, &value, vec![]).await?;
@@ -246,7 +246,7 @@ async fn members_of_another_app(world: &World) -> TestResult {
     Box::pin(signer.revoke(
         laptop_id,
         None,
-        pubky_switch_signer::UserConfirmed::shown_and_confirmed(),
+        pubky_dispatch_signer::UserConfirmed::shown_and_confirmed(),
     ))
     .await?;
     receive(&wallet, opening.generation()).await?;
@@ -455,7 +455,7 @@ async fn resolve(world: &World) -> TestResult {
     assert_eq!(second.outcome(&wallet).await?, Some(Outcome::Failed));
     assert!(reconcile(&wallet).await?.doubtful.is_empty());
 
-    // The failed claim expires after its pinned deadline and reconciliation window (Switch wire 6.8).
+    // The failed claim expires after its pinned deadline and reconciliation window (Dispatch wire 6.8).
     world.advance_ms(31 * DAY_MS);
     receive(&wallet, 0).await?;
     assert_eq!(second.outcome(&wallet).await?, None);
@@ -478,7 +478,7 @@ fn test_doubtful_attempt_resolves_its_original_claim_until_expiry() {
 /// A payment the method charged, whose answer was lost, restored from a backup after a
 /// provider loss: the new service holds no claim for it, so only the journal entry's own
 /// handle can carry the user's answer (Paykit spec 7.2, 7.3).
-async fn restored_dispatch(world: &World, resolution: ConfirmedResolution) -> TestResult {
+async fn restored_handoff(world: &World, resolution: ConfirmedResolution) -> TestResult {
     use crate::{BackupDevice, PaymentOptions, PaymentStage};
     use paykit_lib::{PaymentEndpointIdentifier, PaymentEndpointPayload};
     use std::sync::atomic::Ordering;
@@ -542,7 +542,7 @@ async fn restored_dispatch(world: &World, resolution: ConfirmedResolution) -> Te
     world.add_switch(successor, &[&buyer]).await?;
     let opening = Box::pin(signer.declare_provider_loss(
         successor,
-        pubky_switch_signer::UserConfirmed::shown_and_confirmed(),
+        pubky_dispatch_signer::UserConfirmed::shown_and_confirmed(),
     ))
     .await?;
     Box::pin(signer.end_staged_admission()).await?;
@@ -583,11 +583,11 @@ async fn restored_dispatch(world: &World, resolution: ConfirmedResolution) -> Te
 }
 
 async fn restored_paid(world: &World) -> TestResult {
-    Box::pin(restored_dispatch(world, ConfirmedResolution::Paid)).await
+    Box::pin(restored_handoff(world, ConfirmedResolution::Paid)).await
 }
 
 async fn restored_failed(world: &World) -> TestResult {
-    Box::pin(restored_dispatch(world, ConfirmedResolution::Failed)).await
+    Box::pin(restored_handoff(world, ConfirmedResolution::Failed)).await
 }
 
 #[test]

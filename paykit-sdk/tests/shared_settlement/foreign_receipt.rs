@@ -4,12 +4,12 @@ use super::*;
 use paykit_lib::records::StoredMessage;
 use paykit_sdk::rail::Behaviour;
 use paykit_sdk::PaykitBackup;
-use pubky_switch_client::app::{Collection, RecordTarget};
-use pubky_switch_core::claims::{Basis, ClaimStatus, EntryKind, Outcome};
-use pubky_switch_core::ops::{Condition, OpKind, SignedOp};
+use pubky_dispatch_client::app::{Collection, RecordTarget};
+use pubky_dispatch_core::claims::{Basis, ClaimStatus, EntryKind, Outcome};
+use pubky_dispatch_core::ops::{Condition, OpKind, SignedOp};
 
 #[tokio::test]
-async fn test_foreign_requested_receipt_recovered_on_scripted_switch() -> TestResult {
+async fn test_foreign_requested_receipt_recovered_on_scripted_dispatch() -> TestResult {
     Box::pin(recovered_receipt(Backend::Scripted)).await
 }
 
@@ -224,7 +224,7 @@ async fn receipt_after_loss(w: &World, source: Recovery) -> TestResult {
         let doc = Box::pin(alice.revoke(
             owner,
             None,
-            pubky_switch_signer::UserConfirmed::shown_and_confirmed(),
+            pubky_dispatch_signer::UserConfirmed::shown_and_confirmed(),
         ))
         .await?;
         assert!(doc.listed_cert(&owner).is_none());
@@ -236,7 +236,7 @@ async fn receipt_after_loss(w: &World, source: Recovery) -> TestResult {
     w.add_switch(recovery, &[&w.identity("payer")?]).await?;
     Box::pin(alice.declare_provider_loss(
         recovery,
-        pubky_switch_signer::UserConfirmed::shown_and_confirmed(),
+        pubky_dispatch_signer::UserConfirmed::shown_and_confirmed(),
     ))
     .await?;
     w.advance_ms(1000);
@@ -286,7 +286,7 @@ async fn receipt_after_loss(w: &World, source: Recovery) -> TestResult {
     let kept_value: serde_json::Value = serde_json::from_slice(&kept[0].1)?;
     assert_eq!(
         kept_value["d"]["plaintext"],
-        pubky_switch_core::enc::b64(&issued.plaintext().encode())
+        pubky_dispatch_core::enc::b64(&issued.plaintext().encode())
     );
     assert_eq!(
         kept_value["d"]["cert"],

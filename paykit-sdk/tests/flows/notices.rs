@@ -6,11 +6,11 @@ use std::sync::Arc;
 
 use paykit_sdk::rail::Behaviour;
 use paykit_sdk::{NoticeKind, PayOptions, PayOutcome, Paykit, PaykitConfig, Rail};
-use pubky_switch_client::clock::Clock;
-use pubky_switch_client::testing::Fault;
-use pubky_switch_core::claims::ClaimStatus;
-use pubky_switch_core::http::ErrorCode;
-use pubky_switch_core::records::DAY_MS;
+use pubky_dispatch_client::clock::Clock;
+use pubky_dispatch_client::testing::Fault;
+use pubky_dispatch_core::claims::ClaimStatus;
+use pubky_dispatch_core::http::ErrorCode;
+use pubky_dispatch_core::records::DAY_MS;
 
 use crate::common::{draft, request_from, store, World};
 
@@ -113,7 +113,7 @@ async fn test_notices_late_receipt_of_a_payment_written_failed_raises_one() {
     assert!(kept.is_empty());
 }
 
-/// The next `n` batches at alice's switch are refused for good, `403 permission_missing`.
+/// The next `n` batches at alice's Dispatch are refused for good, `403 permission_missing`.
 fn refuse_writes(w: &World, n: usize) {
     for _ in 0..n {
         w.alice.switch().fail_next(Fault::Error {
@@ -202,7 +202,7 @@ async fn test_notices_late_receipt_raised_by_an_owner_restored_from_before_the_f
     restored.receive(None).await.unwrap();
     restored.reconcile().await.unwrap();
     restored
-        .end_reconcile(pubky_switch_client::app::UserConfirmed::new())
+        .end_reconcile(pubky_dispatch_client::app::UserConfirmed::new())
         .await
         .unwrap();
     assert!(restored.payments().await.unwrap().is_empty());
@@ -236,7 +236,7 @@ async fn journal_names(wallet: &mut Paykit, attempt_id: paykit_lib::AttemptId, o
         .app_mut()
         .protocol_commit(
             "paykit",
-            &[pubky_switch_client::app::LocalWrite::Put {
+            &[pubky_dispatch_client::app::LocalWrite::Put {
                 key: key.into_bytes(),
                 value: serde_json::to_vec(&entry).unwrap(),
             }],
@@ -288,7 +288,7 @@ async fn test_notices_late_receipt_written_later_raised_by_an_own_app_from_its_k
     let (_wallet, mut shop, attempt_id) = paid_after_failed(&w).await;
     other.receive(None).await.unwrap();
     w.clock.advance_ms(PAST_THE_CLAIM_MS);
-    // The client's own read first takes what is due at the switch past the window.
+    // The client's own read first takes what is due at the Dispatch past the window.
     other.app_mut().receive(None).await.unwrap();
     receipt(&mut shop).await;
     refuse_writes(&w, 2);
@@ -306,7 +306,7 @@ async fn test_notices_late_receipt_written_later_raised_by_an_own_app_from_its_k
 }
 
 /// Alice's second wallet, joined after her first one paid bob, keeps no view of the payment's
-/// claim, so bob's receipt makes it read the claim at the switch. The read is answered `code`.
+/// claim, so bob's receipt makes it read the claim at the dispatch. The read is answered `code`.
 /// Returns the second wallet and the payment's claim, the receipt not read yet.
 async fn receipt_read_answered(w: &World, code: ErrorCode) -> (Paykit, [u8; 32]) {
     let (other, obligation, _) = receipt_read_answered_by(w, code).await;
@@ -676,7 +676,7 @@ async fn test_notices_receipt_past_the_deadline_within_the_claim_settles_it_and_
 
 #[tokio::test]
 async fn test_notices_late_receipt_raises_none_at_an_app_without_the_claim_or_the_payment() {
-    // An own app that joins once the claim is gone holds no view of it, and the switch no
+    // An own app that joins once the claim is gone holds no view of it, and the Dispatch no
     // longer holds it: nothing stable tells it the payment was marked failed, since the
     // record's `status` is informational (Paykit wire 5.3). It records the receipt and
     // raises nothing; the app that made the payment raises the notice from its journal.
@@ -725,7 +725,7 @@ async fn test_notices_receipt_on_a_claim_settled_already_ends_the_wait() {
 
 #[tokio::test]
 async fn test_notices_receipt_at_exactly_the_claims_window_end_counts_it_gone() {
-    // At the claim's deadline plus the 30 days it is kept after it, the switch may delete it:
+    // At the claim's deadline plus the 30 days it is kept after it, the Dispatch may delete it:
     // the receipt counts the claim gone, and raises the notice.
     let w = World::new();
     let (mut wallet, mut shop, _) = paid_after_failed(&w).await;
@@ -741,7 +741,7 @@ async fn test_notices_receipt_at_exactly_the_claims_window_end_counts_it_gone() 
         .unwrap();
     receipt(&mut shop).await;
     w.clock
-        .set_ms(deadline + pubky_switch_core::claims::RECONCILIATION_MS);
+        .set_ms(deadline + pubky_dispatch_core::claims::RECONCILIATION_MS);
     wallet.receive(None).await.unwrap();
     let notices = wallet.notices().await.unwrap();
     assert_eq!(notices.len(), 1, "{notices:?}");
@@ -792,8 +792,8 @@ async fn test_notices_late_receipt_held_while_its_record_awaits_its_key() {
     assert!(
         matches!(
             held.content,
-            pubky_switch_client::app::RecordContent::Unreadable(
-                pubky_switch_client::app::Unopened::KeyNotHeld { .. }
+            pubky_dispatch_client::app::RecordContent::Unreadable(
+                pubky_dispatch_client::app::Unopened::KeyNotHeld { .. }
             )
         ),
         "{:?}",
@@ -880,7 +880,7 @@ async fn test_notices_receipt_waiting_for_its_records_key_given_up_once_the_clie
     let sent = w.clock.now_ms();
     receipt(&mut shop).await;
     let mut events = Vec::new();
-    for _ in 0..pubky_switch_client::app::RETRY_EVENT_READS + 2 {
+    for _ in 0..pubky_dispatch_client::app::RETRY_EVENT_READS + 2 {
         let summary = wallet.receive(None).await.unwrap();
         assert_eq!(summary.key_epochs_awaited, vec![sealed_at], "{summary:?}");
         assert!(summary.scope_keys_awaited);
@@ -889,13 +889,13 @@ async fn test_notices_receipt_waiting_for_its_records_key_given_up_once_the_clie
     assert!(
         !events
             .iter()
-            .any(|e| matches!(e, pubky_switch_client::app::AppEvent::StoreFailing { .. })),
+            .any(|e| matches!(e, pubky_dispatch_client::app::AppEvent::StoreFailing { .. })),
         "{events:?}"
     );
     assert!(wallet.notices().await.unwrap().is_empty());
     // A day short of the 21 days it still waits.
     w.clock
-        .set_ms(sent + pubky_switch_client::app::MAX_UNVERIFIED_AGE_MS - DAY_MS);
+        .set_ms(sent + pubky_dispatch_client::app::MAX_UNVERIFIED_AGE_MS - DAY_MS);
     let summary = wallet.receive(None).await.unwrap();
     assert_eq!(summary.key_epochs_awaited, vec![sealed_at], "{summary:?}");
     assert!(wallet.notices().await.unwrap().is_empty());
@@ -961,7 +961,7 @@ async fn test_notices_receipt_waiting_for_its_key_never_shown_as_a_store_unavail
     wallet.receive(None).await.unwrap();
     receipt(&mut shop).await;
     let mut events = Vec::new();
-    for _ in 0..pubky_switch_client::app::RETRY_EVENT_READS + 2 {
+    for _ in 0..pubky_dispatch_client::app::RETRY_EVENT_READS + 2 {
         let summary = wallet.receive(None).await.unwrap();
         events.extend(summary.report.events);
     }
@@ -976,9 +976,9 @@ async fn test_notices_receipt_waiting_for_its_key_never_shown_as_a_store_unavail
         .filter(|e| {
             matches!(
                 e,
-                pubky_switch_client::app::AppEvent::StoreFailing { .. }
-                    | pubky_switch_client::app::AppEvent::Parked {
-                        reason: pubky_switch_client::app::ParkReason::StoreUnavailable,
+                pubky_dispatch_client::app::AppEvent::StoreFailing { .. }
+                    | pubky_dispatch_client::app::AppEvent::Parked {
+                        reason: pubky_dispatch_client::app::ParkReason::StoreUnavailable,
                         ..
                     }
             )
@@ -991,7 +991,7 @@ async fn test_notices_receipt_waiting_for_its_key_never_shown_as_a_store_unavail
 /// done.
 async fn restored_in_place(
     w: &World,
-    storage: Arc<dyn pubky_switch_client::store::StateStore>,
+    storage: Arc<dyn pubky_dispatch_client::store::StateStore>,
     backup: &paykit_sdk::PaykitBackup,
 ) -> Paykit {
     let mut wallet = Paykit::restore(
@@ -1056,7 +1056,7 @@ async fn put_notice(
     app.app_mut()
         .protocol_commit(
             "paykit",
-            &[pubky_switch_client::app::LocalWrite::Put {
+            &[pubky_dispatch_client::app::LocalWrite::Put {
                 key: key.to_vec(),
                 value: serde_json::to_vec(&value).unwrap(),
             }],

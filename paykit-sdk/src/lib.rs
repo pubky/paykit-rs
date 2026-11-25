@@ -7,7 +7,7 @@
 //! re-sends, labelled selling scopes, reconciliation, and the scopes an app asks for at
 //! approval. Payment rails stay outside Paykit, behind a narrow rail interface ([`Rail`]).
 //!
-//! It builds on `pubky-switch-client` for the Switch's side, and on `paykit-lib` for
+//! It builds on `pubky-dispatch-client` for the Dispatch's side, and on `paykit-lib` for
 //! Paykit's formats and rules. The protocol is defined by the Paykit spec and wire format in
 //! `specs/v0.2/`.
 //!
@@ -25,7 +25,7 @@
 //!   [`Paykit::allowances`]).
 //! - [`Rail`]: the payment method's interface; `rail::FakeRail` for tests (feature
 //!   `test-support`).
-//! - [`Timer`]: the host's timer, which bounds the wait for a payee's switch.
+//! - [`Timer`]: the host's timer, which bounds the wait for a payee's dispatch.
 //! - [`AppScopes`]: Paykit's side of approval.
 //! - [`app_records`]: Paykit's member of app records, and reading a payee's public
 //!   endpoints from them ([`Paykit::public_endpoints`]).
@@ -40,7 +40,7 @@
 //! to calculate the Billing Periods of a recurring request. When the user chooses a period,
 //! [`Paykit::pay_period`] pays it on its own claim. A host whose policy authorizes payment
 //! of an accepted subscription without an Allowance can call [`Paykit::pay_period_automatically`]
-//! for the current period. A first dispatch for an attempt already open finishes
+//! for the current period. A first handoff for an attempt already open finishes
 //! across the payee's cancellation and sends its proof for that period.
 //! The Allowance executor with its grant and ledger, and publishing Private Payment Lists,
 //! build on the same parts in their own modules.
@@ -119,7 +119,7 @@ pub use pay::{
 };
 pub use paykit::{
     orphan_floor_s, Paykit, PaykitBackup, PaykitConfig, ReceiveSummary, DEFAULT_RESEND_BUDGET,
-    PRE_DISPATCH_BUDGET_MS,
+    PRE_HANDOFF_BUDGET_MS,
 };
 pub use paykit_lib::bodies::RequestDestination;
 pub use paykit_lib::{
@@ -128,7 +128,7 @@ pub use paykit_lib::{
 };
 pub use periods::{PeriodDetailsView, PeriodPrice, PeriodView};
 pub use protocol::{PaykitProtocol, HANDLED_KINDS};
-pub use pubky_switch_client::app::{
+pub use pubky_dispatch_client::app::{
     App, AppConfig, AppEnv, JoinRequest, ProtocolSet, UserConfirmed,
 };
 pub use publish::history::PublicationConflict;
@@ -198,7 +198,7 @@ mod tests {
             payee: [1; 32],
             app_id: [2; 16],
             endpoint_id: id(),
-            payload_hash: pubky_switch_core::enc::hash(payload().as_str().as_bytes()),
+            payload_hash: pubky_dispatch_core::enc::hash(payload().as_str().as_bytes()),
             amount: btc(),
             transfer: Transfer::new(Some(btc())),
         };
@@ -318,7 +318,7 @@ mod tests {
                         rate_source_hash: [4; 32],
                         app_id: [2; 16],
                         endpoint_id: id(),
-                        payload_hash: pubky_switch_core::enc::hash(payload().as_str().as_bytes()),
+                        payload_hash: pubky_dispatch_core::enc::hash(payload().as_str().as_bytes()),
                         requested: btc(),
                         source: RateSource::Request,
                         rate: paykit_lib::Rate::new(

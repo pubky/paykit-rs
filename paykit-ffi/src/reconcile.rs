@@ -154,7 +154,7 @@ impl NativeWallet {
 
     /// Record the user's decision for this reported attempt after showing that it may
     /// already have paid. A paid decision also updates the payer's activity record.
-    /// If the claim has lost the attempt, only an open restored dispatch can still be
+    /// If the claim has lost the attempt, only an open restored handoff can still be
     /// resolved as paid or failed. Call it only with the user's answer (Paykit spec 7.2, 7.3).
     pub async fn resolve_confirmed_attempt(
         &self,

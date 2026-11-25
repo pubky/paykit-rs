@@ -7,10 +7,10 @@
 //! month's last day. Period `k` is `[boundary(k), boundary(k+1))`. The same rule gives the
 //! periods of an Allowance's anchored limits (Paykit spec 8.3).
 //!
-//! Times are Unix milliseconds, as everywhere in the Switch's formats. Every computation is
+//! Times are Unix milliseconds, as everywhere in the Dispatch's formats. Every computation is
 //! checked: a period outside the times the grammar can write fails instead of wrapping.
 
-use pubky_switch_core::time::{rfc3339, MAX_TIME_MS};
+use pubky_dispatch_core::time::{rfc3339, MAX_TIME_MS};
 use serde_json::{json, Map, Value};
 
 use crate::error::{invalid, Error, Result};
@@ -611,7 +611,7 @@ fn days_in_month(year: i128, month: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pubky_switch_core::time::parse_rfc3339;
+    use pubky_dispatch_core::time::parse_rfc3339;
 
     fn t(text: &str) -> u64 {
         parse_rfc3339(text).unwrap()

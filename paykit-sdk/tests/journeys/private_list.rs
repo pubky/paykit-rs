@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use paykit_lib::identifiers::{PaymentEndpointIdentifier, PaymentEndpointPayload};
 use paykit_sdk::rail::FakeRail;
 use paykit_sdk::{Paykit, PaykitConfig, Refusal, UnrequestedPayment};
-use pubky_switch_harness::World;
+use pubky_dispatch_harness::World;
 
 use super::{
     btc, checkout, endpoint, on_both_backends, paid_and_receipted, payload, Checkout, Expected,

@@ -11,7 +11,7 @@ use crate::Paykit;
 use paykit_lib::bodies::{PaymentProof, PrivatePaymentListRequest, PRIVATE_LIST_MAX_AGE_MS};
 use paykit_lib::records::StoredMessage;
 use paykit_lib::{Kind, ListVersion};
-use pubky_switch_client::app::{
+use pubky_dispatch_client::app::{
     AppError, Delivery, ReceiveContext, ReceiveReport, RecordRead, Refusal, WontDeliver,
 };
 use serde::{Deserialize, Serialize};
@@ -45,7 +45,7 @@ impl RequestsAnswered {
                 if last.seq == self.through
                     && last.version.is_none_or(|v| self.named.contains(&v)) =>
             {
-                pubky_switch_core::json::check_uuid_v4(&last.id)?;
+                pubky_dispatch_core::json::check_uuid_v4(&last.id)?;
             }
             None if self.through == 0 && self.named.is_empty() && !self.requested => {}
             _ => return Err(PaykitError::corrupt()),
@@ -198,17 +198,17 @@ impl Answers {
             return Err(PaykitError::corrupt());
         }
         for offer in &self.offers {
-            pubky_switch_core::json::check_uuid_v4(&offer.id)?;
+            pubky_dispatch_core::json::check_uuid_v4(&offer.id)?;
         }
         for hint in &self.hints {
-            pubky_switch_core::json::check_uuid_v4(&hint.id)?;
+            pubky_dispatch_core::json::check_uuid_v4(&hint.id)?;
         }
         if let Some(repeat) = &self.repeat {
-            pubky_switch_core::json::check_uuid_v4(&repeat.id)?;
+            pubky_dispatch_core::json::check_uuid_v4(&repeat.id)?;
         }
         if let Some(last) = &self.last {
-            pubky_switch_core::json::check_uuid_v4(&last.request.id)?;
-            pubky_switch_core::json::check_uuid_v4(&last.id)?;
+            pubky_dispatch_core::json::check_uuid_v4(&last.request.id)?;
+            pubky_dispatch_core::json::check_uuid_v4(&last.id)?;
         }
         Ok(())
     }
@@ -516,7 +516,7 @@ pub(crate) fn note_proof(
         return Ok(());
     };
     // Only a payee app holding plain `paykit_request` takes a proof without a request this
-    // far (Switch wire 5.1 check 10; `writes_payee_label`).
+    // far (Dispatch wire 5.1 check 10; `writes_payee_label`).
     if proof.payment_app_id != cx.app_id() {
         return Ok(());
     }
@@ -691,7 +691,7 @@ impl Paykit {
             possible = DAILY;
             through = Some(ListVersion::new(
                 generation - 1,
-                pubky_switch_core::json::MAX_INT,
+                pubky_dispatch_core::json::MAX_INT,
             )?);
         } else {
             for record in self.app.records_of(COLLECTION).await? {
@@ -719,7 +719,7 @@ impl Paykit {
                 let counter = match self.publication_at(&record).await {
                     Ok(issue) => issue.counter,
                     Err(error) if crate::hold::local_failure(&error) => return Err(error),
-                    Err(_) => pubky_switch_core::json::MAX_INT,
+                    Err(_) => pubky_dispatch_core::json::MAX_INT,
                 };
                 if counter > known {
                     through = through.max(Some(ListVersion::new(past, counter)?));

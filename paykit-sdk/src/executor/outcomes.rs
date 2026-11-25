@@ -5,8 +5,8 @@ use std::collections::{HashMap, HashSet};
 use paykit_lib::allowances::{record_outcomes, AttemptEvidence, ClaimState, EntryOutcome, Ledger};
 use paykit_lib::records::{ActivityRecord, RecordBinding};
 use paykit_lib::{Asset, AttemptId, Body, Decimal};
-use pubky_switch_client::app::{OpBatch, RecordRead, UserConfirmed};
-use pubky_switch_core::ops::Condition;
+use pubky_dispatch_client::app::{OpBatch, RecordRead, UserConfirmed};
+use pubky_dispatch_core::ops::Condition;
 
 use super::evidence::AppliedRecord;
 use super::restore::LedgerRead;
@@ -35,7 +35,7 @@ impl LedgerFacts {
     /// back ([`Paykit::release_allowance_attempt`]).
     /// The amount, scaled, the user could give back by releasing every attempt another app
     /// reported failed that is releasable by the evidence the release itself requires:
-    /// never paid, ended before dispatch on this installation, failed by another app, and
+    /// never paid, ended before handoff on this installation, failed by another app, and
     /// with the record write the release is conditioned on. `None` when there is none.
     pub(super) fn releasable(&self) -> Option<u128> {
         self.other_failures
@@ -82,7 +82,7 @@ impl Paykit {
 
     /// Confirm the release of the displayed attempt (Paykit spec 8.3). The current
     /// claim must still show another app's failure. This executor must have durably
-    /// ended the attempt before dispatch on the original installation.
+    /// ended the attempt before handoff on the original installation.
     ///
     /// # Errors
     ///
@@ -107,7 +107,7 @@ impl Paykit {
             .await?
             .ok_or_else(super::preparation::no_executor_base)?;
         let refused = || {
-            Refusal::Usage("release requires another app's failed claim and this wallet's evidence that the attempt ended before dispatch".into())
+            Refusal::Usage("release requires another app's failed claim and this wallet's evidence that the attempt ended before handoff".into())
         };
         let entry = checked
             .ledger
@@ -136,7 +136,7 @@ impl Paykit {
             || shown.duplicate
             || shown.possibly_duplicate
             || shown.owner != self.app_id()
-            || shown.outcome != pubky_switch_core::claims::Outcome::Failed
+            || shown.outcome != pubky_dispatch_core::claims::Outcome::Failed
             || shown.resolved_by.is_none_or(|by| by == shown.owner)
         {
             return Err(refused().into());
@@ -166,7 +166,7 @@ impl Paykit {
         let batch = OpBatch::for_protocol(crate::protocol::BACKUP_NAME);
         let prepared = checked.stage(self, batch, conditions, true).await?;
         let applied = self.submit(prepared).await?;
-        let name = pubky_switch_core::enc::b64(&ledger);
+        let name = pubky_dispatch_core::enc::b64(&ledger);
         let revision = applied
             .proofs
             .iter()
@@ -285,7 +285,7 @@ impl Paykit {
         &mut self,
         ledger: &Ledger,
         attempts: &HashMap<AttemptId, ([u8; 32], &Decimal)>,
-        dispatched: &HashMap<AttemptId, &crate::rail::AllowanceDispatch>,
+        handed_off: &HashMap<AttemptId, &crate::rail::AllowanceHandoff>,
         before: Option<&AppliedRecord>,
     ) -> Result<Vec<AttemptId>> {
         let mut paid_attempts = Vec::new();
@@ -328,7 +328,7 @@ impl Paykit {
                     .ops
                     .iter()
                     .any(|op| AppliedRecord::current(&self.app, &record, &fresh, op).is_some());
-                let matches_method = match dispatched.get(&id).map(|d| &d.outcome) {
+                let matches_method = match handed_off.get(&id).map(|d| &d.outcome) {
                     Some(crate::rail::RailOutcome::Paid(method)) => matches!(proof.body(),
                         Body::PaymentProof(paid) if paid.proof == method.proof),
                     _ => true,
@@ -452,7 +452,7 @@ impl Paykit {
         asset: &Asset,
         grant: &Condition,
         claims: &HashMap<AttemptId, ReservationClaim>,
-        dispatched: &HashMap<AttemptId, &crate::rail::AllowanceDispatch>,
+        handed_off: &HashMap<AttemptId, &crate::rail::AllowanceHandoff>,
     ) -> Result<LedgerFacts> {
         let mut observed = LedgerFacts::default();
         let mut facts: HashMap<_, _> = claims
@@ -464,7 +464,7 @@ impl Paykit {
             .iter()
             .filter(|e| {
                 e.outcome != Some(EntryOutcome::Done)
-                    || dispatched.contains_key(&e.attempt_id) && !claims.contains_key(&e.attempt_id)
+                    || handed_off.contains_key(&e.attempt_id) && !claims.contains_key(&e.attempt_id)
             })
             .map(|e| (e.attempt_id, (e.obligation, &e.value)))
             .chain(
@@ -479,7 +479,7 @@ impl Paykit {
             return Ok(observed);
         }
         for id in
-            Box::pin(self.dated_allowance_payments(ledger, &attempts, dispatched, None)).await?
+            Box::pin(self.dated_allowance_payments(ledger, &attempts, handed_off, None)).await?
         {
             facts.entry(id).or_default().paid = true;
         }
@@ -487,7 +487,7 @@ impl Paykit {
             return Err(crate::PaykitError::corrupt());
         };
         for (id, (obligation, value)) in attempts {
-            if dispatched.contains_key(&id)
+            if handed_off.contains_key(&id)
                 || facts
                     .get(&id)
                     .is_some_and(|fact| fact.paid || fact.claim == Some(ClaimState::Done))
@@ -551,7 +551,7 @@ impl Paykit {
                     && facts.get(id).is_some_and(|fact| {
                         !fact.paid && fact.claim == Some(ClaimState::Failed { by_owner: false })
                     })
-                    && !dispatched
+                    && !handed_off
                         .get(id)
                         .is_some_and(|d| matches!(d.outcome, crate::rail::RailOutcome::Paid(_)))
             })

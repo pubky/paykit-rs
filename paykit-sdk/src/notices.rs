@@ -12,7 +12,7 @@
 //! imports into the same wallet store.
 
 use paykit_lib::AttemptId;
-use pubky_switch_core::enc::{b64, serde_b64, unb64_array};
+use pubky_dispatch_core::enc::{b64, serde_b64, unb64_array};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{PaykitError, Refusal, Result};
@@ -44,13 +44,13 @@ pub enum NoticeKind {
     /// [`crate::PayOutcome::Pending`] or [`crate::PayOutcome::PaidOutcomeUnwritten`]
     /// meanwhile.
     HeldWithoutPay,
-    /// A message whose effect the switch refused for good, kept to write into its record
+    /// A message whose effect the Dispatch refused for good, kept to write into its record
     /// later, wasn't written within [`crate::KEPT_MESSAGE_MS`] of its acceptance: the SDK gave
-    /// it up (Switch spec 8.2). Its entry stays stored, for the host
-    /// ([`pubky_switch_client::app::App::parked_entries`]), and a request it was no longer
+    /// it up (Dispatch spec 8.2). Its entry stays stored, for the host
+    /// ([`pubky_dispatch_client::app::App::parked_entries`]), and a request it was no longer
     /// shows as [`crate::RequestStatus::Unrecorded`]. Acknowledging the notice
     /// ([`Paykit::acknowledge_notice`]) forgets the entry first
-    /// ([`pubky_switch_client::app::App::forget_parked`]); if that fails, the notice stays
+    /// ([`pubky_dispatch_client::app::App::forget_parked`]); if that fails, the notice stays
     /// and the error is returned, so an entry is never left stored once its notice is gone.
     ///
     /// Also a rejection or payer's cancellation this app recorded while sends to the payee
@@ -121,7 +121,7 @@ pub enum NoticeKind {
     /// and again at each load while it stands; it names no attempt, message or counterparty.
     BlockFloorHeld,
     /// A block floor raise this wallet owes was tried and isn't written, with no divergence
-    /// hold: the floor doesn't read, or the switch refuses the write for now (Paykit wire 5.6,
+    /// hold: the floor doesn't read, or the Dispatch refuses the write for now (Paykit wire 5.6,
     /// Raising). Until it is, an unblocked sender's one-time requests wait and it is asked
     /// nothing, and while a widening's raise waits no one is asked to re-send. It is tried again
     /// at the next receive, and from its second unwritten try in a row after a wait of one
@@ -206,7 +206,7 @@ pub enum SettlementSubject {
         /// The own app that signed the current value.
         writer: [u8; 16],
         /// The physical application of the signed write.
-        application: pubky_switch_core::shared::ApplicationRef,
+        application: pubky_dispatch_core::shared::ApplicationRef,
     },
     /// Distinct retained occurrence marks for this opaque tag in this bucket.
     Conflicting {
@@ -284,7 +284,7 @@ impl SettlementSubject {
                     Self::Changed {
                         bucket,
                         writer,
-                        application: pubky_switch_core::shared::ApplicationRef {
+                        application: pubky_dispatch_core::shared::ApplicationRef {
                             generation,
                             seq,
                             item_hash,
@@ -387,7 +387,7 @@ pub(crate) struct KeptNotice {
 #[serde(rename_all = "snake_case")]
 pub(crate) enum GivenUpOrigin {
     /// The client dropped its entry, stored while it waited for a scope key, past the
-    /// bounds of Switch spec 8.2: it was never processed, so a copy its sender sends again is
+    /// bounds of Dispatch spec 8.2: it was never processed, so a copy its sender sends again is
     /// taken as a new message.
     KeyWait,
     /// A payer's reply kept for its record, or a receipt kept for a payer record that
@@ -438,8 +438,8 @@ pub(crate) enum GivenUpFrom {
     Origin(GivenUpOrigin),
 }
 
-/// The handle of an entry the client keeps stored (Switch spec 8.2): its local ID, and the
-/// message hash [`pubky_switch_client::app::App::forget_parked`] checks it by.
+/// The handle of an entry the client keeps stored (Dispatch spec 8.2): its local ID, and the
+/// message hash [`pubky_dispatch_client::app::App::forget_parked`] checks it by.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct StoredHandle {
     pub(crate) stored_id: u64,
@@ -515,7 +515,7 @@ impl KeptNotice {
             attempt_id: Some(attempt.to_text()),
             msg_id: None,
             counterparty: Some(b64(&payee)),
-            request_hash: request_hash.map(|hash| pubky_switch_core::enc::b64(hash)),
+            request_hash: request_hash.map(|hash| pubky_dispatch_core::enc::b64(hash)),
             message_hash: None,
             raised_at_ms: at,
             acknowledged: false,
@@ -544,7 +544,7 @@ impl KeptNotice {
             attempt_id: None,
             msg_id: Some(msg_id.to_owned()),
             counterparty: Some(b64(&sender)),
-            request_hash: request_hash.map(|hash| pubky_switch_core::enc::b64(&hash)),
+            request_hash: request_hash.map(|hash| pubky_dispatch_core::enc::b64(&hash)),
             message_hash: None,
             raised_at_ms: at,
             acknowledged: false,
@@ -606,7 +606,7 @@ impl KeptNotice {
             msg_id: Some(msg_id.to_owned()),
             counterparty: Some(b64(to)),
             request_hash: None,
-            message_hash: Some(pubky_switch_core::enc::b64(hash)),
+            message_hash: Some(pubky_dispatch_core::enc::b64(hash)),
             raised_at_ms: at,
             acknowledged: false,
             stored: None,
@@ -836,7 +836,7 @@ pub(crate) fn bind_notice(key: &str, notice: &KeptNotice) -> Result<()> {
             if !notice.kind.names_outgoing_message()
                 || notice.counterparty.as_deref() != Some(&b64(&to))
                 || notice.msg_id.as_ref() != Some(&msg_id)
-                || notice.message_hash.as_deref() != Some(&pubky_switch_core::enc::b64(&hash))
+                || notice.message_hash.as_deref() != Some(&pubky_dispatch_core::enc::b64(&hash))
                 || notice.attempt_id.is_some()
                 || notice.request_hash.is_some()
                 || notice.stored.is_some()
@@ -894,7 +894,7 @@ impl Paykit {
         }
         let message = stored.message();
         // A live outbox, an accepted delivery or a terminal client result already has a
-        // host-visible disposition (Switch spec 11). Preserve it.
+        // host-visible disposition (Dispatch spec 11). Preserve it.
         if self.app.delivery(&message.msg_id).await?.is_some() {
             return Ok(());
         }
@@ -1131,7 +1131,7 @@ mod tests {
             attempt_id: Some(attempt.to_text()),
             msg_id: None,
             counterparty: Some(b64(&[1; 32])),
-            request_hash: Some(pubky_switch_core::enc::b64(&[2; 32])),
+            request_hash: Some(pubky_dispatch_core::enc::b64(&[2; 32])),
             message_hash: None,
             raised_at_ms: 3,
             acknowledged: false,
@@ -1210,7 +1210,7 @@ mod tests {
                 SettlementSubject::Changed {
                     bucket: 3,
                     writer: [2; 16],
-                    application: pubky_switch_core::shared::ApplicationRef {
+                    application: pubky_dispatch_core::shared::ApplicationRef {
                         generation: 2,
                         seq: 3,
                         item_hash: [7; 32],
@@ -1264,7 +1264,7 @@ mod tests {
             msg_id: Some(id.into()),
             counterparty: Some(b64(&to)),
             request_hash: None,
-            message_hash: Some(pubky_switch_core::enc::b64(&hash)),
+            message_hash: Some(pubky_dispatch_core::enc::b64(&hash)),
             raised_at_ms: 3,
             acknowledged: false,
             stored: None,
@@ -1320,7 +1320,7 @@ mod tests {
             ),
         ] {
             assert!(bind_notice(&key, &notice).is_ok());
-            notice.message_hash = Some(pubky_switch_core::enc::b64(&[7; 32]));
+            notice.message_hash = Some(pubky_dispatch_core::enc::b64(&[7; 32]));
             assert!(bind_notice(&key, &notice).is_err());
         }
     }

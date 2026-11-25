@@ -4,8 +4,8 @@ use crate::common::{draft, request_from, World};
 use paykit_lib::collections::Collection;
 use paykit_lib::derive::natural_key;
 use paykit_sdk::{AppScopes, PayOptions, Refusal};
-use pubky_switch_client::app::{Collection as SwitchCollection, RecordTarget};
-use pubky_switch_client::clock::Clock;
+use pubky_dispatch_client::app::{Collection as DispatchCollection, RecordTarget};
+use pubky_dispatch_client::clock::Clock;
 
 #[tokio::test]
 async fn test_payee_deletion_observation_displays_the_original_receipt_and_preserves_the_hold() {
@@ -30,7 +30,7 @@ async fn test_payee_deletion_observation_displays_the_original_receipt_and_prese
     let key = shop.payee_activity().await.unwrap()[0].record;
     let signed = shop.confirm_payment(&key).await.unwrap().unwrap();
     let target = RecordTarget::new(
-        SwitchCollection::new(
+        DispatchCollection::new(
             Collection::PayeeActivity.name(),
             Collection::PayeeActivity.fixed_policy(),
         ),
@@ -109,13 +109,13 @@ async fn test_payee_deletion_observation_displays_the_original_receipt_and_prese
         prior.hash()
     );
     assert_eq!(w.record_writes(&w.bob, &key), writes + 1);
-    let pubky_switch_client::app::RecordRead::Fresh(published) = seller_wallet
+    let pubky_dispatch_client::app::RecordRead::Fresh(published) = seller_wallet
         .app_mut()
         .read_record_fresh(&target)
         .await
         .unwrap()
     else {
-        panic!("the switch must return the published receipt");
+        panic!("the Dispatch must return the published receipt");
     };
     let published = paykit_lib::records::ActivityRecord::read(
         published.content.value().unwrap(),
@@ -146,7 +146,7 @@ async fn test_payee_deletion_observation_displays_the_original_receipt_and_prese
     assert_eq!(full.len(), 1);
     assert_eq!(
         full[0].0,
-        format!("rc/{}", pubky_switch_core::enc::b64(&prior.hash())).as_bytes()
+        format!("rc/{}", pubky_dispatch_core::enc::b64(&prior.hash())).as_bytes()
     );
     for count in 2..=8 {
         seller_wallet
@@ -201,7 +201,7 @@ async fn test_payee_deletion_without_a_copy_keeps_the_delete_through_reload() {
         .await;
     let request = request_from(&mut shop, w.alice_id(), draft("0.00025", w.clock.now_ms())).await;
     let target = RecordTarget::new(
-        SwitchCollection::new(
+        DispatchCollection::new(
             Collection::PayeeActivity.name(),
             Collection::PayeeActivity.fixed_policy(),
         ),
@@ -230,7 +230,7 @@ async fn test_payee_deletion_without_a_copy_keeps_the_delete_through_reload() {
         .app()
         .protocol_scan(
             "paykit",
-            format!("del/{}/", pubky_switch_core::enc::b64(&key)).as_bytes(),
+            format!("del/{}/", pubky_dispatch_core::enc::b64(&key)).as_bytes(),
         )
         .await
         .unwrap()
@@ -282,7 +282,7 @@ async fn test_payee_deletion_without_a_copy_keeps_the_delete_through_reload() {
         .unwrap();
     restored.receive(None).await.unwrap();
     let confirmed = paykit_sdk::ReceiptDetails::new()
-        .with_maybe_credited_confirmed(pubky_switch_client::app::UserConfirmed::new());
+        .with_maybe_credited_confirmed(pubky_dispatch_client::app::UserConfirmed::new());
     assert!(matches!(
         restored
             .confirm_payment_with(&key, confirmed)
@@ -328,7 +328,7 @@ async fn test_payee_deletion_an_older_receipt_survives_without_naming_the_writer
     let receipt = shop.confirm_payment(&key).await.unwrap().unwrap();
     seller_wallet.receive(None).await.unwrap();
     let target = RecordTarget::new(
-        SwitchCollection::new(
+        DispatchCollection::new(
             Collection::PayeeActivity.name(),
             Collection::PayeeActivity.fixed_policy(),
         ),
@@ -469,7 +469,7 @@ async fn receipt_on_older_restore(when: BeforeRestore) {
     shop.receive(None).await.unwrap();
     let key = shop.payee_activity().await.unwrap()[0].record;
     let target = RecordTarget::new(
-        SwitchCollection::new(
+        DispatchCollection::new(
             Collection::PayeeActivity.name(),
             Collection::PayeeActivity.fixed_policy(),
         ),
@@ -579,7 +579,7 @@ async fn receipt_on_older_restore(when: BeforeRestore) {
     }
     restored.receive(None).await.unwrap();
     let confirmed = paykit_sdk::ReceiptDetails::new()
-        .with_maybe_credited_confirmed(pubky_switch_client::app::UserConfirmed::new());
+        .with_maybe_credited_confirmed(pubky_dispatch_client::app::UserConfirmed::new());
     let result = restored.confirm_payment_with(&key, confirmed).await;
     if matches!(when, BeforeRestore::Offline) {
         assert_eq!(result.unwrap(), None);
@@ -604,7 +604,7 @@ async fn test_payee_deletion_receipt_conflict_rejects_a_different_signed_proof()
 
 async fn confirm_after_conflict(changed_proof: bool) {
     use crate::common::{endpoint, store, ReadHook};
-    use pubky_switch_client::transport::Transport;
+    use pubky_dispatch_client::transport::Transport;
     use std::sync::Arc;
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
@@ -631,7 +631,7 @@ async fn confirm_after_conflict(changed_proof: bool) {
     shop.receive(None).await.unwrap();
     seller_wallet.receive(None).await.unwrap();
     let target = RecordTarget::new(
-        SwitchCollection::new(
+        DispatchCollection::new(
             Collection::PayeeActivity.name(),
             Collection::PayeeActivity.fixed_policy(),
         ),
@@ -717,7 +717,7 @@ async fn confirm_after_conflict(changed_proof: bool) {
             .is_empty());
         return;
     }
-    let path = format!("records/{}", pubky_switch_core::enc::b64(&key));
+    let path = format!("records/{}", pubky_dispatch_core::enc::b64(&key));
     reads.after_read(&path, move || {
         rail.set_fraction_digits(endpoint("btc-lightning-bolt11"), Some(0))
     });

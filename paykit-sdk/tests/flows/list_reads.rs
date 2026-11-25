@@ -7,8 +7,8 @@ use std::sync::Arc;
 use paykit_sdk::{
     AppScopes, PayOptions, PayOutcome, Paykit, PaykitConfig, ReceiptsOf, RequestStatus,
 };
-use pubky_switch_client::clock::Clock;
-use pubky_switch_client::store::StateStore;
+use pubky_dispatch_client::clock::Clock;
+use pubky_dispatch_client::store::StateStore;
 
 use crate::common::{draft, request_from, store, World};
 

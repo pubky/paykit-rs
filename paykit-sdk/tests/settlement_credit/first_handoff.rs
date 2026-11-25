@@ -1,16 +1,16 @@
-//! The buyer's first payment when the seller's real switch answer reaches the final check.
+//! The buyer's first payment when the seller's real Dispatch answer reaches the final check.
 use super::*;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::Poll;
 
-use pubky_switch_client::error::TransportError;
-use pubky_switch_client::store::{client_namespace, StateStore};
-use pubky_switch_client::transport::{FirstSend, Request, Response, Transport};
+use pubky_dispatch_client::error::TransportError;
+use pubky_dispatch_client::store::{client_namespace, StateStore};
+use pubky_dispatch_client::transport::{FirstSend, Request, Response, Transport};
 
 const SELLER: &str = "https://seller.payment.test";
 
 /// Deliver the seller's actual answer to this buyer's original request at its
-/// journaled first dispatch. Every other request, including its deadline, goes through.
+/// journaled first handoff. Every other request, including its deadline, goes through.
 struct LateSeller {
     transport: Arc<dyn Transport>,
     store: Arc<MemoryStore>,

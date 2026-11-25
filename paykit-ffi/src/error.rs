@@ -1,5 +1,5 @@
 use paykit_sdk::{PaykitError, Refusal};
-use pubky_switch_client::{
+use pubky_dispatch_client::{
     app::{AppError, Refusal as AppRefusal},
     error::StoreError,
 };
@@ -74,7 +74,7 @@ pub enum WalletError {
         failure: Arc<WalletFailure>,
     },
     /// The call may have taken effect. Reconcile before trying again; `failure.kept_batch`
-    /// names a Switch batch kept for this call.
+    /// names a Dispatch batch kept for this call.
     #[error("outcome unknown: {}", failure.code)]
     OutcomeUnknown {
         /// What failed.
@@ -119,7 +119,7 @@ pub struct WalletFailure {
     pub(crate) settlement_bucket: Option<u16>,
     pub(crate) settlement_warning: Option<SettlementWarningOutcome>,
     pub(crate) kept_batch: Option<Vec<u8>>,
-    pub(crate) switch_refusal: Option<Arc<crate::SwitchRefusal>>,
+    pub(crate) dispatch_refusal: Option<Arc<crate::DispatchRefusal>>,
     pub(crate) refusal: Option<Arc<PaymentRefusal>>,
 }
 
@@ -134,7 +134,7 @@ impl std::fmt::Debug for WalletFailure {
             .field("settlement_bucket", &self.settlement_bucket)
             .field("settlement_warning", &self.settlement_warning)
             .field("kept_batch", &self.kept_batch.is_some())
-            .field("switch_refusal", &self.switch_refusal)
+            .field("dispatch_refusal", &self.dispatch_refusal)
             .field("refusal", &self.refusal)
             .finish()
     }
@@ -151,7 +151,7 @@ impl WalletFailure {
     pub fn context(&self) -> String {
         self.context.clone()
     }
-    /// The Switch service's error code, when it answered with one.
+    /// The Dispatch service's error code, when it answered with one.
     pub fn service_code(&self) -> Option<String> {
         self.service_code.clone()
     }
@@ -159,13 +159,13 @@ impl WalletFailure {
     pub fn retry_after_ms(&self) -> Option<u64> {
         self.retry_after_ms
     }
-    /// The budget a full quota names (`quota_exceeded`'s `current.limit`, Switch wire 9.3),
+    /// The budget a full quota names (`quota_exceeded`'s `current.limit`, Dispatch wire 9.3),
     /// such as `storage` or `contacts`, so the host can say which one to clear; `None` for a
     /// name these bindings don't know.
     pub fn quota_limit(&self) -> Option<String> {
         self.quota_limit.clone()
     }
-    /// For `settlement_warning_unsaved`, the settlement bucket whose record slot the Switch
+    /// For `settlement_warning_unsaved`, the settlement bucket whose record slot the Dispatch
     /// refused: the host shows that bucket's warning if it has yet to.
     pub fn settlement_bucket(&self) -> Option<u16> {
         self.settlement_bucket
@@ -176,13 +176,13 @@ impl WalletFailure {
     pub fn settlement_warning_outcome(&self) -> Option<SettlementWarningOutcome> {
         self.settlement_warning
     }
-    /// A Switch batch kept for this call, which the wallet sends again by itself.
+    /// A Dispatch batch kept for this call, which the wallet sends again by itself.
     pub fn kept_batch(&self) -> Option<Vec<u8>> {
         self.kept_batch.clone()
     }
-    /// The Switch rule that held this call or a batch ahead of it.
-    pub fn switch_refusal(&self) -> Option<Arc<crate::SwitchRefusal>> {
-        self.switch_refusal.clone()
+    /// The Dispatch rule that held this call or a batch ahead of it.
+    pub fn dispatch_refusal(&self) -> Option<Arc<crate::DispatchRefusal>> {
+        self.dispatch_refusal.clone()
     }
     /// The payment refusal behind the failure, with its evidence.
     pub fn refusal(&self) -> Option<Arc<PaymentRefusal>> {
@@ -210,12 +210,12 @@ impl WalletError {
     }
 }
 
-/// The Switch client's chain proof failing: handled as a rollback alarm.
+/// The Dispatch client's chain proof failing: handled as a rollback alarm.
 const CHAIN: (Category, &str) = (Category::Recovery, "chain");
 /// A write kept unsent behind earlier kept batches: the client returns it only with the
 /// call's own batch kept, so it may still apply.
 const KEPT_BATCHES_AHEAD: (Category, &str) = (Category::OutcomeUnknown, "kept_batches_ahead");
-/// A Switch client failure these bindings don't know.
+/// A Dispatch client failure these bindings don't know.
 const CLIENT_UNCLASSIFIED: (Category, &str) = (Category::OutcomeUnknown, "client_unclassified");
 /// A payment method failure these bindings don't know.
 const METHOD_UNCLASSIFIED: (Category, &str) = (Category::OutcomeUnknown, "method_unclassified");
@@ -285,7 +285,7 @@ fn failure(category: Category, code: &str) -> (Category, WalletFailure) {
             settlement_bucket: None,
             settlement_warning: None,
             kept_batch: None,
-            switch_refusal: None,
+            dispatch_refusal: None,
             refusal: None,
         },
     )
@@ -349,7 +349,7 @@ pub(crate) fn refusal_category(kind: &crate::RefusalKind) -> (Category, &'static
         K::WaitingForList {
             device_clock_behind: true,
         } => (NeedsUser, "waiting_for_list_clock_behind"),
-        K::SwitchUnavailable => (RetryLater, "switch_unavailable"),
+        K::DispatchUnavailable => (RetryLater, "dispatch_unavailable"),
         K::PaymentInProgress => (RetryLater, "payment_in_progress"),
         K::BeingHandledByOtherWallet => (RetryLater, "being_handled_by_other_wallet"),
         K::IdentityUnavailable => (RetryLater, "identity_unavailable"),
@@ -422,7 +422,7 @@ fn held_for_user_code(reason: &crate::HeldForUserKind) -> &'static str {
         R::AllowanceExecutionHeld => "allowance_execution_held",
         R::AttemptCheck => "attempt_check",
         R::ReloadRequired => "reload_required",
-        R::SwitchClient => "switch_client_hold",
+        R::SwitchClient => "dispatch_client_hold",
         R::Unresolved => "held_unresolved",
         R::PendingProposalsFull => "pending_proposals_full",
         R::AllowanceLedgerFull => "allowance_ledger_full",
@@ -440,11 +440,11 @@ fn recovery_code(reason: &crate::RecoveryNeededKind) -> &'static str {
     }
 }
 
-/// The action a Switch service's error answer calls for, by the Retry column of Switch spec
-/// 6.4. The code is `switch_` and the wire's error code (Switch wire 7.6). Every code carries
+/// The action a Dispatch service's error answer calls for, by the Retry column of Dispatch spec
+/// 6.4. The code is `dispatch_` and the wire's error code (Dispatch wire 7.6). Every code carries
 /// its retry rule on the wire, so a code these bindings don't name takes the case of its rule.
-fn service_category(code: pubky_switch_core::http::ErrorCode) -> (Category, String) {
-    use pubky_switch_core::http::{ErrorCode as E, Retry as R};
+fn service_category(code: pubky_dispatch_core::http::ErrorCode) -> (Category, String) {
+    use pubky_dispatch_core::http::{ErrorCode as E, Retry as R};
     use Category::*;
     let category = match (code, code.retry()) {
         // The app's certificate or its place in the identity ended: stop and recover.
@@ -473,10 +473,10 @@ fn service_category(code: pubky_switch_core::http::ErrorCode) -> (Category, Stri
             | R::Yes,
         ) => RetryLater,
     };
-    (category, format!("switch_{}", code.as_str()))
+    (category, format!("dispatch_{}", code.as_str()))
 }
 
-/// A limit name of Switch wire 9.3, as the bindings' own text: a name the answer gives that
+/// A limit name of Dispatch wire 9.3, as the bindings' own text: a name the answer gives that
 /// isn't one of them is never passed on, since the answer's text is the service's.
 fn known_quota_limit(limit: &str) -> Option<&'static str> {
     [
@@ -499,39 +499,39 @@ fn known_quota_limit(limit: &str) -> Option<&'static str> {
 }
 
 /// The action a full quota calls for, by the limit the answer names and what frees it
-/// (Switch wire 9.3).
+/// (Dispatch wire 9.3).
 fn quota_category(limit: Option<&str>) -> (Category, String) {
     use Category::*;
     let (category, code) = match limit {
         // Frees with time: the recipient's apps reading their feed, or the service deleting
         // old claims.
         Some("inbox" | "sender_share" | "claims" | "claim_share") => {
-            (RetryLater, "switch_quota_wait")
+            (RetryLater, "dispatch_quota_wait")
         }
         // Frees as this app's open attempts resolve, some only by the user's answer.
-        Some("open_attempts") => (NeedsUser, "switch_quota_open_attempts"),
+        Some("open_attempts") => (NeedsUser, "dispatch_quota_open_attempts"),
         // Frees only after the user removes something, through another app or the signer.
         Some(
             "storage" | "record_keys" | "contacts" | "conversations" | "deny" | "invite_codes",
-        ) => (NeedsUser, "switch_quota_full"),
+        ) => (NeedsUser, "dispatch_quota_full"),
         // Nothing applied; the recipient may answer its pending requests, or never.
-        Some("connect_requests") => (NotSent, "switch_quota_connect_requests"),
+        Some("connect_requests") => (NotSent, "dispatch_quota_connect_requests"),
         // Final for this obligation: no more attempts fit its claim.
-        Some("attempts") => (Permanent, "switch_quota_final"),
+        Some("attempts") => (Permanent, "dispatch_quota_final"),
         // A limit these bindings don't know: shown, never retried by itself, since what frees
         // a limit differs by limit and only the user can be told which.
-        _ => (NeedsUser, "switch_quota_exceeded"),
+        _ => (NeedsUser, "dispatch_quota_exceeded"),
     };
     (category, code.into())
 }
 
-/// The action and stable code of a failure of the Switch client's base client.
-fn switch_client_category(e: &pubky_switch_client::error::ClientError) -> (Category, String) {
-    use pubky_switch_client::error::ClientError as C;
+/// The action and stable code of a failure of the Dispatch client's base client.
+fn dispatch_client_category(e: &pubky_dispatch_client::error::ClientError) -> (Category, String) {
+    use pubky_dispatch_client::error::ClientError as C;
     use Category::*;
     let (category, code) = match e {
         C::Switch {
-            code: pubky_switch_core::http::ErrorCode::QuotaExceeded,
+            code: pubky_dispatch_core::http::ErrorCode::QuotaExceeded,
             current,
             ..
         } => return quota_category(current.get("limit").and_then(|limit| limit.as_str())),
@@ -560,23 +560,23 @@ fn switch_client_category(e: &pubky_switch_client::error::ClientError) -> (Categ
 }
 
 // A failure that comes after the request left the device is `RetryLater` only where calling
-// again is safe whatever the first request did. Some requests the Switch client sends
+// again is safe whatever the first request did. Some requests the Dispatch client sends
 // outside a kept batch are safe to repeat only while the first is outstanding: an inbox
 // append the service no longer holds is appended again, and a late connect request can
-// reopen a declined one (Switch wire 7.4.3, 7.4.7). A failure doesn't name the request it
+// reopen a declined one (Dispatch wire 7.4.3, 7.4.7). A failure doesn't name the request it
 // came from, so each such failure is `OutcomeUnknown`, bare as well as behind a kept batch.
 
 /// An answer whose response signature doesn't verify, or whose signed headers don't read:
-/// nothing of it was used, its status included, which proves nothing (Switch wire 7.1,
+/// nothing of it was used, its status included, which proves nothing (Dispatch wire 7.1,
 /// "Response signature"). The request went out and may have taken effect.
 const SENT_UNVERIFIED: (Category, &str) = (Category::OutcomeUnknown, "bad_service_signature");
 
 /// The action and stable code of a failure of the host's transport: one that sent nothing
 /// keeps its cause's code, and one once the request may have gone out is `OutcomeUnknown`.
 fn transport_category(
-    error: &pubky_switch_client::error::TransportError,
+    error: &pubky_dispatch_client::error::TransportError,
 ) -> (Category, &'static str) {
-    use pubky_switch_client::error::TransportError as T;
+    use pubky_dispatch_client::error::TransportError as T;
     use Category::*;
     match error {
         // No connection could be made: nothing was sent, so calling again is safe.
@@ -602,9 +602,9 @@ fn transport_category(
 
 /// An error answer the service gave before it read the request's body: it binds the request
 /// without its body, so it is final for nothing, and the call failed as when no answer comes
-/// (Switch wire 7.1). The client gives it for these three codes only.
-fn body_unread_category(code: pubky_switch_core::http::ErrorCode) -> (Category, &'static str) {
-    use pubky_switch_core::http::ErrorCode as E;
+/// (Dispatch wire 7.1). The client gives it for these three codes only.
+fn body_unread_category(code: pubky_dispatch_core::http::ErrorCode) -> (Category, &'static str) {
+    use pubky_dispatch_core::http::ErrorCode as E;
     match code {
         E::TooLarge | E::RateLimited | E::NotFound => (Category::OutcomeUnknown, "body_unread"),
         // A code the client doesn't give here, so unknown to these bindings.
@@ -612,7 +612,7 @@ fn body_unread_category(code: pubky_switch_core::http::ErrorCode) -> (Category, 
     }
 }
 
-/// The action and stable code of a rule of the Switch client's app layer that refused a call.
+/// The action and stable code of a rule of the Dispatch client's app layer that refused a call.
 fn app_refusal_category(refusal: &AppRefusal) -> (Category, &'static str) {
     use Category::*;
     match refusal {
@@ -635,9 +635,9 @@ fn app_refusal_category(refusal: &AppRefusal) -> (Category, &'static str) {
     }
 }
 
-/// The action, code and Switch details of a failure of the Switch client.
+/// The action, code and Dispatch details of a failure of the Dispatch client.
 fn client_failure(e: &AppError) -> (Category, WalletFailure) {
-    use pubky_switch_client::error::ClientError;
+    use pubky_dispatch_client::error::ClientError;
     use Category::*;
     let (mut category, mut failure) = match e.unkept() {
         AppError::ExpiredUnsent => failure(NotSent, "expired_unsent"),
@@ -657,19 +657,19 @@ fn client_failure(e: &AppError) -> (Category, WalletFailure) {
             let (category, code) = app_refusal_category(refusal);
             failure(category, code)
         }
-        AppError::Switch(switch) => {
-            let (category, code) = switch_client_category(switch);
+        AppError::Switch(dispatch) => {
+            let (category, code) = dispatch_client_category(dispatch);
             let (category, mut failure) = failure(category, &code);
             if let ClientError::Switch { retry_after, .. }
-            | ClientError::BodyUnread { retry_after, .. } = switch
+            | ClientError::BodyUnread { retry_after, .. } = dispatch
             {
                 failure.retry_after_ms = retry_after.map(|s| s.saturating_mul(1000));
             }
             if let ClientError::Switch {
-                code: pubky_switch_core::http::ErrorCode::QuotaExceeded,
+                code: pubky_dispatch_core::http::ErrorCode::QuotaExceeded,
                 current,
                 ..
-            } = switch
+            } = dispatch
             {
                 failure.quota_limit = current
                     .get("limit")
@@ -683,7 +683,7 @@ fn client_failure(e: &AppError) -> (Category, WalletFailure) {
     };
     failure.service_code = e.code().map(|code| code.as_str().into());
     failure.kept_batch = e.kept_batch().map(Vec::from);
-    failure.switch_refusal = crate::SwitchRefusal::from_error(e);
+    failure.dispatch_refusal = crate::DispatchRefusal::from_error(e);
     // A batch kept for this call may have applied: reconcile before trying again.
     if failure.kept_batch.is_some() && !matches!(category, Recovery) {
         category = OutcomeUnknown;
@@ -743,7 +743,7 @@ impl From<PaykitError> for WalletError {
                 _ => client_failure(error),
             },
             // The edit is saved and published once what stopped its signing clears. The SDK
-            // builds this from a refusal of the Switch client: a recovery stays one, kept
+            // builds this from a refusal of the Dispatch client: a recovery stays one, kept
             // batches ahead keep their doubt, and anything else needs the user or a sibling
             // app to act, since the saved edit means "not sent" or "final" is untrue.
             PaykitError::PublicEndpointChangePending(error) => {
@@ -771,7 +771,7 @@ impl From<PaykitError> for WalletError {
             // Nothing applied: read the current state, decide again, then redo.
             PaykitError::Conflict(_) => failure(NotSent, "conflict"),
             PaykitError::Homeserver(_) => failure(RetryLater, "homeserver"),
-            // The Switch refused a new settlement bucket for lack of a record slot, and its
+            // The Dispatch refused a new settlement bucket for lack of a record slot, and its
             // warning couldn't be saved or checked. The marked receipt and its delivery are
             // still kept, and the kept batch may still apply: the user is shown the bucket's
             // warning, which grants no consent to issue another receipt.
@@ -835,7 +835,7 @@ impl PaymentRefusal {
     }
 }
 
-/// Only the code: the SDK's refusal text can quote what the switch or the network said.
+/// Only the code: the SDK's refusal text can quote what the Dispatch or the network said.
 impl std::fmt::Debug for PaymentRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_tuple("PaymentRefusal")
@@ -847,7 +847,7 @@ impl std::fmt::Debug for PaymentRefusal {
 #[uniffi::export]
 impl PaymentRefusal {
     /// A fixed description for display: the refusal's code and what its case means. The SDK's
-    /// own refusal text can quote what the switch or the network said, so it never leaves
+    /// own refusal text can quote what the Dispatch or the network said, so it never leaves
     /// the bindings; the refusal's data is in `kind()`.
     pub fn reason(&self) -> String {
         let (category, code) = self.case();

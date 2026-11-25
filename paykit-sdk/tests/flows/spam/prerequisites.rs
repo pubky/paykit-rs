@@ -6,10 +6,10 @@ use std::sync::Arc;
 
 use paykit_sdk::rail::FakeRail;
 use paykit_sdk::{AppScopes, PayOptions, PayOutcome, PaykitConfig, RequestStatus};
-use pubky_switch_client::app::{AppConfig, AppEvent, RETRY_EVENT_READS};
-use pubky_switch_client::clock::Clock;
-use pubky_switch_client::error::StoreError;
-use pubky_switch_harness::{Backend, World};
+use pubky_dispatch_client::app::{AppConfig, AppEvent, RETRY_EVENT_READS};
+use pubky_dispatch_client::clock::Clock;
+use pubky_dispatch_client::error::StoreError;
+use pubky_dispatch_harness::{Backend, World};
 
 use crate::common::{draft, enrolled_wallet, request_from, store, ListsStore};
 

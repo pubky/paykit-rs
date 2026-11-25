@@ -1,8 +1,8 @@
-//! Divergent records (Paykit spec 6, "Divergent records"; 8.1; Switch spec 12.6, Switch wire
+//! Divergent records (Paykit spec 6, "Divergent records"; 8.1; Dispatch spec 12.6, Dispatch wire
 //! 7.4.9, 7.4.14).
 //!
 //! After a provider loss, an upload that conflicts with a write made at the new service is
-//! kept at the switch, and the record's view shows `divergent` until a writer writes a newer
+//! kept at the Dispatch, and the record's view shows `divergent` until a writer writes a newer
 //! version there. The client holds that flag for the latest view it read
 //! ([`SharedRecord::divergent`]) and raises `AppEvent::RecordDivergent` once per change; the
 //! app takes the current write as any other, but the upload may hold what it lacks, such as
@@ -21,10 +21,10 @@
 //!   the same way.
 //! - **No automatic decision that starts or repeats a payment, or accepts a request**, while
 //!   a record is paused or its view divergent, confirmed or not
-//!   ([`Pause::blocks_automatic`]): today a resume's repeat of a dispatched payment, against
+//!   ([`Pause::blocks_automatic`]): today a resume's repeat of a handed off payment, against
 //!   its request record or the `payment_lists` record of its destination.
-//! - **A payment already dispatched is recorded once the user has confirmed**
-//!   ([`Pause::dispatched_write_waits`]): its owed acceptance, its outcome and its proof
+//! - **A payment already handed off is recorded once the user has confirmed**
+//!   ([`Pause::handed_off_write_waits`]): its owed acceptance, its outcome and its proof
 //!   wait while the record is paused, and go once it is confirmed, also over a view still
 //!   divergent, so the payee gets the proof of a payment made.
 //! - **By hand only after the user's confirmation** ([`Pause::blocks_by_hand`]): paying a
@@ -97,12 +97,12 @@ use paykit_lib::collections::Collection;
 use paykit_lib::derive::natural_key;
 use paykit_lib::records::StoredMessage;
 use paykit_lib::Body;
-use pubky_switch_client::app::{
+use pubky_dispatch_client::app::{
     AppError, EventId, ReceiveContext, RecordContent, RecordTarget, Refusal as ClientRefusal,
     SharedRecord, UserConfirmed,
 };
-use pubky_switch_core::enc::serde_b64;
-use pubky_switch_core::ops::RecordVersion;
+use pubky_dispatch_core::enc::serde_b64;
+use pubky_dispatch_core::ops::RecordVersion;
 use serde::{Deserialize, Serialize};
 
 use crate::activity::{ActivityTarget, Role};
@@ -148,7 +148,7 @@ pub struct DivergentRecord {
 }
 
 /// The version of a record's write, as a mark keeps it: by generation, then `seq`, the
-/// order a record's versions only grow in (Switch wire 6.2).
+/// order a record's versions only grow in (Dispatch wire 6.2).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub(crate) struct SeenVersion {
     generation: u64,
@@ -523,7 +523,7 @@ impl Pause {
     /// No automatic decision that starts or repeats a payment, or accepts a request: while
     /// the view shows it divergent, the user's confirmation included, while it is paused,
     /// and while the messages kept over it wait to be written (Paykit spec 6). Recording a
-    /// payment already dispatched is [`Pause::dispatched_write_waits`].
+    /// payment already handed off is [`Pause::handed_off_write_waits`].
     pub(crate) fn blocks_automatic(self) -> bool {
         self.paused || self.divergent || self.writes_waiting
     }
@@ -562,13 +562,13 @@ impl Pause {
         self.paused
     }
 
-    /// A write that records a payment already dispatched, its acceptance owed, its outcome
+    /// A write that records a payment already handed off, its acceptance owed, its outcome
     /// and its proof, at a payment, a resume or a repair, waits while the record is paused
     /// and while the messages kept over it wait to be written, and goes once the user has
     /// confirmed it and they are written, also over a view still divergent: the payee gets
     /// the proof of a payment made. [`Pause::blocks_automatic`] is for what starts or
     /// repeats a payment, not for recording one made.
-    pub(crate) fn dispatched_write_waits(self) -> bool {
+    pub(crate) fn handed_off_write_waits(self) -> bool {
         self.paused || self.writes_waiting
     }
 }
@@ -698,7 +698,7 @@ impl DivergentWrite {
     fn settlement(&self) -> Result<Option<Vec<u8>>> {
         self.settlement
             .as_deref()
-            .map(pubky_switch_core::enc::unb64)
+            .map(pubky_dispatch_core::enc::unb64)
             .transpose()
             .map_err(|_| PaykitError::corrupt())
     }
@@ -1190,7 +1190,7 @@ pub(crate) fn step_keep(
         }
         crate::receive::keep_local(
             cx,
-            pubky_switch_client::app::LocalWrite::Delete {
+            pubky_dispatch_client::app::LocalWrite::Delete {
                 key: key::divergent_write(&record, role, &sender, &msg_id).into_bytes(),
             },
         );
@@ -1201,7 +1201,7 @@ pub(crate) fn step_keep(
     let kept_key = key::divergent_write(&record, role, &stored.sender(), &stored.message().msg_id);
     let kept_settlement = match stored.body() {
         Body::PaymentProof(proof) if stored.message().refs.is_empty() => {
-            Some(pubky_switch_core::enc::b64(
+            Some(pubky_dispatch_core::enc::b64(
                 &settlement(&proof.payment_endpoint_identifier, &proof.proof)
                     .ok_or_else(Fail::corrupt)?,
             ))
@@ -1376,7 +1376,7 @@ impl Paykit {
     }
 
     /// [`Paykit::pause_seen`] for the record `held`, as a list read took it from the client
-    /// a moment before: the same record [`pubky_switch_client::app::App::shared_record`]
+    /// a moment before: the same record [`pubky_dispatch_client::app::App::shared_record`]
     /// returns, as nothing is written between them.
     pub(crate) async fn pause_seen_held(&self, held: &SharedRecord) -> Result<Pause> {
         let view = View::of(held);
@@ -1464,11 +1464,11 @@ impl Paykit {
         .into())
     }
 
-    /// Whether a write that records a payment already dispatched, its acceptance owed, its
+    /// Whether a write that records a payment already handed off, its acceptance owed, its
     /// outcome and its proof, over the record at `record` waits
-    /// ([`Pause::dispatched_write_waits`]): the one gate of every path that writes one.
-    pub(crate) async fn dispatched_write_waits(&mut self, record: &[u8; 32]) -> Result<bool> {
-        Ok(self.pause_at(record).await?.dispatched_write_waits())
+    /// ([`Pause::handed_off_write_waits`]): the one gate of every path that writes one.
+    pub(crate) async fn handed_off_write_waits(&mut self, record: &[u8; 32]) -> Result<bool> {
+        Ok(self.pause_at(record).await?.handed_off_write_waits())
     }
 
     /// Whether a later write of `stored` over the record at `record` waits, by the one rule
@@ -1809,7 +1809,7 @@ impl Paykit {
             else {
                 continue;
             };
-            let delete = pubky_switch_client::app::LocalWrite::Delete {
+            let delete = pubky_dispatch_client::app::LocalWrite::Delete {
                 key: key::divergent_write(&record, role, sender, dropped_id).into_bytes(),
             };
             match self
@@ -1835,7 +1835,7 @@ impl Paykit {
                         .rail
                         .settlement_id(&proof.payment_endpoint_identifier, &proof.proof)
                         .ok_or_else(PaykitError::corrupt)?;
-                    Some(pubky_switch_core::enc::b64(&settled))
+                    Some(pubky_dispatch_core::enc::b64(&settled))
                 }
                 _ => None,
             };
@@ -2215,7 +2215,7 @@ mod tests {
             let held = view(divergent, 4);
             let pause = marked.pause(Some(&held));
             assert!(pause.paused && pause.blocks_by_hand() && pause.blocks_automatic());
-            assert!(pause.blocks_credit() && pause.dispatched_write_waits());
+            assert!(pause.blocks_credit() && pause.handed_off_write_waits());
             assert_eq!(pause.write_waits(), divergent);
             // No mark is written over it, and it never goes by itself.
             assert!(marked.after_view(&held).is_none());
@@ -2232,21 +2232,21 @@ mod tests {
     }
 
     #[test]
-    fn test_divergent_dispatched_write_waits_while_paused_and_goes_once_confirmed() {
+    fn test_divergent_handed_off_write_waits_while_paused_and_goes_once_confirmed() {
         let paused = DivergentMark::paused(&view(true, 3));
-        assert!(Pause::of(Some(&paused), Some(&view(true, 3))).dispatched_write_waits());
+        assert!(Pause::of(Some(&paused), Some(&view(true, 3))).handed_off_write_waits());
         // Paused with the view cleared: still waits for the confirmation.
-        assert!(Pause::of(Some(&paused), Some(&view(false, 4))).dispatched_write_waits());
+        assert!(Pause::of(Some(&paused), Some(&view(false, 4))).handed_off_write_waits());
         // Confirmed over a view still divergent: the record of a payment made goes, while
         // nothing starts or repeats a payment automatically.
         let pause = Pause::of(Some(&confirmed(3)), Some(&view(true, 3)));
-        assert!(!pause.dispatched_write_waits() && pause.blocks_automatic());
+        assert!(!pause.handed_off_write_waits() && pause.blocks_automatic());
         // Messages kept over it go first.
         let waiting = Pause {
             writes_waiting: true,
             ..pause
         };
-        assert!(waiting.dispatched_write_waits() && waiting.blocks_by_hand());
+        assert!(waiting.handed_off_write_waits() && waiting.blocks_by_hand());
         assert!(waiting.blocks_credit() && !waiting.kept_writes_wait());
     }
 
@@ -2396,7 +2396,7 @@ mod tests {
             record: RECORD,
             role: WriteRole::Proof,
             seen: view(true, 3).version,
-            settlement: Some(pubky_switch_core::enc::b64(b"fake:t1")),
+            settlement: Some(pubky_dispatch_core::enc::b64(b"fake:t1")),
             message: KeptMessage::taken(&proof, 0),
         };
         let rail = |_: &paykit_lib::PaymentEndpointIdentifier,
@@ -2502,9 +2502,9 @@ mod tests {
         else {
             panic!("an acceptance goes into an activity record");
         };
-        let blind = |input: &[u8]| pubky_switch_core::enc::hash(input);
+        let blind = |input: &[u8]| pubky_dispatch_core::enc::hash(input);
         let at = target.record_target();
-        let record = pubky_switch_core::ident::record_key_from_blinded(
+        let record = pubky_dispatch_core::ident::record_key_from_blinded(
             &at.collection.name,
             &blind(&at.natural_key),
             &at.collection.policy.hash().unwrap(),

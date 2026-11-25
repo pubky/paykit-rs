@@ -1,4 +1,4 @@
-//! `messages.json`: every kind as v0.2 sends it (Switch wire 4.5, Paykit wire 4),
+//! `messages.json`: every kind as v0.2 sends it (Dispatch wire 4.5, Paykit wire 4),
 //! `label_rejections`, `multi_protocol_senders`, `cancellation_roles`, `payee_label_senders`, `conversion_terms`,
 //! `conversion_amounts`, `proof_members`, `receipt_members` and `list_versions`.
 
@@ -12,10 +12,10 @@ use paykit_lib::identifiers::{AllowanceId, PaymentEndpointIdentifier};
 use paykit_lib::kinds::{check_kind_scopes, Kind, PaykitKindRules, OPAQUE_MEMBERS};
 use paykit_lib::records::{ActivityRecord, ActivitySide, StoredMessage};
 use paykit_lib::{amount_for_endpoint, EndpointAmount};
-use pubky_switch_core::enc::b64;
-use pubky_switch_core::message::{Message, MessagePlaintext, VerifiedSender};
-use pubky_switch_core::receive::KindRules;
-use pubky_switch_core::records::AppCert;
+use pubky_dispatch_core::enc::b64;
+use pubky_dispatch_core::message::{Message, MessagePlaintext, VerifiedSender};
+use pubky_dispatch_core::receive::KindRules;
+use pubky_dispatch_core::records::AppCert;
 use serde_json::{json, Value};
 
 use crate::common::{
@@ -67,7 +67,7 @@ pub(crate) fn check() {
             "{name}: plaintext"
         );
         assert_eq!(b64(&plaintext.hash()), st(m, "hash"), "{name}: hash");
-        // The recipient checks of Switch wire 5.1 that need the certificate (4 to 6).
+        // The recipient checks of Dispatch wire 5.1 that need the certificate (4 to 6).
         let sender_cert = cert(sender);
         let message = plaintext
             .check(
@@ -454,8 +454,8 @@ fn sender_cert(keys: &Keys, chat_only: bool) -> AppCert {
 }
 
 /// Check 8 at alice's wallet for a message the shop signed, presented with `sender`: the
-/// recipient checks that need the certificate first (Switch wire 5.1 checks 4 to 6).
-fn at_wallet(keys: &Keys, json: &[u8], sender: &AppCert) -> pubky_switch_core::Result<()> {
+/// recipient checks that need the certificate first (Dispatch wire 5.1 checks 4 to 6).
+fn at_wallet(keys: &Keys, json: &[u8], sender: &AppCert) -> pubky_dispatch_core::Result<()> {
     let shop = keys.app("shop");
     let plaintext = MessagePlaintext::sign_json(&shop.keys, json.to_vec(), OPAQUE_MEMBERS).unwrap();
     let message = plaintext
@@ -657,7 +657,7 @@ fn cancellation_at(
     json: &[u8],
     sender: &AppCert,
     recipient: &AppCert,
-) -> pubky_switch_core::Result<()> {
+) -> pubky_dispatch_core::Result<()> {
     let shop = keys.app("shop");
     let plaintext = MessagePlaintext::sign_json(&shop.keys, json.to_vec(), OPAQUE_MEMBERS).unwrap();
     let message = plaintext

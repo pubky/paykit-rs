@@ -99,7 +99,7 @@ pub enum RefusalKind {
     Transfer {
         /// The payee's identity key.
         payee: Vec<u8>,
-        /// The 16-byte Switch App ID.
+        /// The 16-byte Dispatch App ID.
         app_id: Vec<u8>,
         /// The selected Payment Endpoint Identifier.
         endpoint: String,
@@ -118,7 +118,7 @@ pub enum RefusalKind {
         period: Option<crate::BillingPeriod>,
         /// Hash of the signed message that supplies the rate.
         source_hash: Vec<u8>,
-        /// The 16-byte Switch App ID.
+        /// The 16-byte Dispatch App ID.
         app_id: Vec<u8>,
         /// The selected Payment Endpoint Identifier.
         endpoint: String,
@@ -226,7 +226,7 @@ pub enum RefusalKind {
     /// automatic payment (Paykit spec 8.2), or the request or Billing Period doesn't qualify
     /// under its Allowance: outside its terms, or its lifetime limit used up with nothing
     /// reserved or to release, the Allowance the payment was reserved under expired before
-    /// its first dispatch, or it was set up before a provider loss and never granted here:
+    /// its first handoff, or it was set up before a provider loss and never granted here:
     /// end it and set up a new one (Paykit spec 8.3); or, after a provider loss, the request
     /// is one-time, under the shared post-loss hold (Paykit spec 8.1). The user may still pay it by hand.
     NotAutomatic,
@@ -234,7 +234,7 @@ pub enum RefusalKind {
     AttemptedPeriodsFull,
     /// The destination failed the payment checks.
     Destination,
-    /// An attempt was written and failed before dispatch. Inspect attemptedFailure for the original refusal.
+    /// An attempt was written and failed before handoff. Inspect attemptedFailure for the original refusal.
     AttemptFailed,
     /// The wallet could not find a usable destination.
     NoDestination,
@@ -281,8 +281,8 @@ pub enum RefusalKind {
     RecordHeld,
     /// Paykit refused the app's certificate.
     CertificateRefused,
-    /// The wallet's own Switch service did not answer.
-    SwitchUnavailable,
+    /// The wallet's own Dispatch service did not answer.
+    DispatchUnavailable,
     /// A native case that this binding does not recognize.
     Unknown,
 }
@@ -412,13 +412,13 @@ impl PaymentRefusal {
             Refusal::Usage(_) => D::Usage,
             Refusal::RecordHeld(_) => D::RecordHeld,
             Refusal::CertificateRefused(_) => D::CertificateRefused,
-            Refusal::SwitchUnavailable(_) => D::SwitchUnavailable,
+            Refusal::DispatchUnavailable(_) => D::DispatchUnavailable,
             _ => D::Unknown,
         }
     }
 }
 
-/// A record version (Switch wire 1.7, 6.2): the (generation, `seq`) of the write that
+/// A record version (Dispatch wire 1.7, 6.2): the (generation, `seq`) of the write that
 /// produced it, given by the service.
 #[derive(uniffi::Record)]
 pub struct Version {
@@ -427,8 +427,8 @@ pub struct Version {
     /// The `seq` of the write in its generation.
     pub version: u64,
 }
-impl From<pubky_switch_core::ops::RecordVersion> for Version {
-    fn from(v: pubky_switch_core::ops::RecordVersion) -> Self {
+impl From<pubky_dispatch_core::ops::RecordVersion> for Version {
+    fn from(v: pubky_dispatch_core::ops::RecordVersion) -> Self {
         Self {
             generation: v.generation,
             version: v.version,
@@ -505,7 +505,7 @@ pub enum NotNowKind {
     FloorUnreadable,
     /// A raise of the block floor left unwritten waits before it is tried again.
     FloorRaiseWaiting,
-    /// No service time is verified yet; a read of the switch clears this.
+    /// No service time is verified yet; a read of the Dispatch clears this.
     NoServiceTime,
     /// What the call relies on isn't verified or changed; a later read clears this.
     ReadAgain,
@@ -573,7 +573,7 @@ pub enum HeldForUserKind {
     AttemptCheck,
     /// The host loads the wallet again before editing its record.
     ReloadRequired,
-    /// The Switch client holds the attempt back, as the message names: reconcile mode, the
+    /// The Dispatch client holds the attempt back, as the message names: reconcile mode, the
     /// clocks apart, or a display read owed.
     SwitchClient,
     /// A hold on one request, publication or delivery that no wait clears, as the message

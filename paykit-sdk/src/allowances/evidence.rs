@@ -11,7 +11,7 @@ use crate::receive::{self, Fail};
 use crate::records::KeptMessage;
 use crate::state::{self, key, Binder};
 use paykit_lib::{collections::Collection, records::StoredMessage, Body};
-use pubky_switch_client::app::{
+use pubky_dispatch_client::app::{
     DeliveryView, FeedPosition, LocalWrite, ReceiveContext, SharedRecord,
 };
 use serde::{Deserialize, Serialize};
@@ -277,7 +277,7 @@ impl Paykit {
     /// A retained input alone cannot authorize deleting an unrelated live proposal.
     pub(super) async fn may_discard_with_evidence(
         &self,
-        target: &pubky_switch_client::app::RecordTarget,
+        target: &pubky_dispatch_client::app::RecordTarget,
         held: &SharedRecord,
         current: &paykit_lib::records::PendingAllowanceRecord,
     ) -> Result<bool> {
@@ -299,7 +299,7 @@ impl Paykit {
 
     async fn same_pending_lifetime(
         &self,
-        target: &pubky_switch_client::app::RecordTarget,
+        target: &pubky_dispatch_client::app::RecordTarget,
         held: &SharedRecord,
         source: SeenVersion,
     ) -> Result<bool> {
@@ -310,7 +310,7 @@ impl Paykit {
     async fn resolve_pending_evidence(
         &mut self,
         held: &SharedRecord,
-        target: &pubky_switch_client::app::RecordTarget,
+        target: &pubky_dispatch_client::app::RecordTarget,
         record: &[u8; 32],
         evidence: &ConflictEvidence,
         message: &StoredMessage,

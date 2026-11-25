@@ -7,7 +7,7 @@ use crate::{
 };
 use paykit_lib::{bodies, periods::PeriodRef, PaymentEndpointIdentifier, Rate};
 use paykit_sdk::{PeriodPrice, Refusal, RequestStatus};
-use pubky_switch_core::time::MAX_TIME_MS;
+use pubky_dispatch_core::time::MAX_TIME_MS;
 use std::sync::Arc;
 
 /// A recurring request as of the payer's last read (Paykit spec 8.2, 8.5).
@@ -247,12 +247,12 @@ impl RecurringRequest {
 }
 
 /// A signed message and where its delivery stands. A kept batch goes at the wallet's next
-/// write or read, so calling again would send a second message (Switch spec 11).
+/// write or read, so calling again would send a second message (Dispatch spec 11).
 #[derive(uniffi::Record)]
 pub struct SentMessage {
-    /// The signed message's ID (Switch wire 5.1).
+    /// The signed message's ID (Dispatch wire 5.1).
     pub msg_id: String,
-    /// Where delivery stands (Switch spec 11).
+    /// Where delivery stands (Dispatch spec 11).
     pub delivery: MessageDelivery,
 }
 
