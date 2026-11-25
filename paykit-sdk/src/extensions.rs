@@ -282,7 +282,13 @@ impl Paykit {
         if wanted == held {
             return Ok(());
         }
-        match self.app.update_accepts().await {
+        // A held change still untold shuts the gate of every signing: the kinds wait for it.
+        let Ok(app) = Box::pin(self.signing_app()).await else {
+            return Ok(());
+        };
+        let updated = app.update_accepts().await;
+        self.note_own_record_write(&updated);
+        match updated {
             Ok(_) => Ok(()),
             Err(error @ (AppError::Store(_) | AppError::Alarm(_))) => Err(error.into()),
             Err(_) => Ok(()),

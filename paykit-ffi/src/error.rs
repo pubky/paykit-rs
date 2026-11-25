@@ -396,6 +396,7 @@ fn not_now_code(reason: &crate::NotNowKind) -> &'static str {
         R::ScopeKeysAwaited => "scope_keys_awaited",
         R::ValueAwaitsKey => "value_awaits_key",
         R::FloorUnreadable => "floor_unreadable",
+        R::EndpointChangeUntold => "endpoint_change_untold",
         R::FloorRaiseWaiting => "floor_raise_waiting",
         R::NoServiceTime => "no_service_time",
         R::ReadAgain => "read_again",

@@ -426,6 +426,10 @@ pub struct Paykit {
     /// public endpoint edit builds on it until the app is loaded again
     /// (`crate::own_record`).
     pub(crate) own_record_unknown: bool,
+    /// Whether a change of Paykit's member the client holds aside may still be untold: the
+    /// gate of every signing of the app's record stays shut until it is told and cleared
+    /// (`crate::own_record`, `Paykit::held_change_settled`). Shut at every construction.
+    pub(crate) held_change_untold: bool,
     /// The capabilities the join checked, which its first update signs as they are
     /// (`crate::own_record`); `None` otherwise.
     pub(crate) capability_snapshot: Option<Vec<paykit_lib::PaymentEndpointIdentifier>>,
@@ -521,6 +525,7 @@ impl Paykit {
             first_read_done: false,
             first_read_summary: None,
             own_record_unknown: false,
+            held_change_untold: true,
             capability_snapshot: None,
             identity_told: Vec::new(),
             raise_unwritten: false,
@@ -818,6 +823,8 @@ impl Paykit {
         Box::pin(self.sweep_divergent()).await?;
         // The host hears again, at each load, of what holds the identity for good.
         self.tell_identity_notices().await?;
+        // A change the client held aside at this load is told before anything can sign.
+        self.settle_held_change_at_open().await;
         // A crash between the restore's commit and clock clamp leaves the clamp for the
         // next load. Nothing is written under a certificate Paykit refuses.
         if self.certificate_refused().is_none() {
@@ -895,6 +902,7 @@ impl Paykit {
             paykit.stamp_restore_time().await?;
             // An app restored opens as one loaded does.
             paykit.tell_identity_notices().await?;
+            paykit.settle_held_change_at_open().await;
             Ok(paykit)
         })
         .await

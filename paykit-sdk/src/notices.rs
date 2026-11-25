@@ -147,8 +147,10 @@ pub enum NoticeKind {
     /// [`Notice::endpoints_withdrawn`], [`Notice::endpoints_offered`] and
     /// [`Notice::endpoints_changed`] name what it asked, by class. The host withdraws again the
     /// endpoints it would have withdrawn, and asks the user before making the offers and
-    /// payload changes again; with no list, it shows the current endpoints. Kept
-    /// until acknowledged, and through a restore; it can be told again for the same change.
+    /// payload changes again; with no list, it shows the current endpoints. Raised at the
+    /// load or restore that held the change, one notice for each change; kept until
+    /// acknowledged, and through a restore; it can be told again for the same change, with
+    /// the same ID.
     PublicEndpointChangeNotPublished,
 }
 
@@ -191,7 +193,6 @@ impl NoticeKind {
             Self::BlockFloorHeld,
             Self::FloorRaiseWaiting,
             Self::AutomaticPaymentsHeld,
-            Self::PublicEndpointChangeNotPublished,
         ]
         .into_iter()
         .find(|kind| kind.tag() == tag)
@@ -409,7 +410,7 @@ pub(crate) struct KeptNotice {
     /// For an endpoint change not published: the public endpoints the change asked to
     /// withdraw and offer or change, when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) endpoints: Option<crate::own_record::EndpointChange>,
+    pub(crate) endpoints: Option<crate::own_record::EndpointClasses>,
 }
 
 /// Where a message given up with no entry stored came from: no entry, so no handle.
@@ -873,22 +874,17 @@ pub(crate) fn bind_notice(key: &str, notice: &KeptNotice) -> Result<()> {
             SettlementSubject::Changed { .. } | SettlementSubject::Conflicting { .. },
         )) => peer.is_none(),
         Some(StateKey::SettlementNotice(SettlementSubject::Bucket(_))) => true,
-        Some(StateKey::IdentityNotice(_)) => peer.is_none(),
+        Some(StateKey::IdentityNotice(_) | StateKey::EndpointChangeNotice(_)) => peer.is_none(),
         _ => peer.is_some(),
     };
     if !peer_allowed {
         return Err(PaykitError::corrupt());
     }
-    // Only the notice of an endpoint change not published names endpoints, and it is kept
-    // with no lists rather than with empty ones.
-    if let Some(change) = &notice.endpoints {
-        let at_its_key = matches!(
-            family,
-            Some(StateKey::IdentityNotice(
-                NoticeKind::PublicEndpointChangeNotPublished
-            ))
-        );
-        if !at_its_key || change.is_empty() {
+    // Only the notice of an endpoint change not published names endpoints, each one that
+    // reads (Paykit wire 1.4), and it is kept with no lists rather than with empty ones.
+    if let Some(classes) = &notice.endpoints {
+        let at_its_key = matches!(family, Some(StateKey::EndpointChangeNotice(_)));
+        if !at_its_key || classes.is_empty() || !classes.reads() {
             return Err(PaykitError::corrupt());
         }
     }
@@ -911,10 +907,19 @@ pub(crate) fn bind_notice(key: &str, notice: &KeptNotice) -> Result<()> {
         }
         _ if notice.settlement.is_some() => Err(PaykitError::corrupt()),
         Some(StateKey::IdentityNotice(kind)) => {
-            let mut plain = notice.clone();
-            if kind == NoticeKind::PublicEndpointChangeNotPublished {
-                plain.endpoints = None;
+            if *notice == KeptNotice::identity(kind, notice.raised_at_ms) {
+                Ok(())
+            } else {
+                Err(PaykitError::corrupt())
             }
+        }
+        // Deleted at its acknowledgement, so never kept acknowledged.
+        Some(StateKey::EndpointChangeNotice(_)) => {
+            let plain = KeptNotice {
+                endpoints: None,
+                ..notice.clone()
+            };
+            let kind = NoticeKind::PublicEndpointChangeNotPublished;
             if plain == KeptNotice::identity(kind, notice.raised_at_ms) {
                 Ok(())
             } else {
@@ -1076,6 +1081,7 @@ impl Paykit {
                     | StateKey::SettlementNotice(_)
                     | StateKey::DroppedLost { .. }
                     | StateKey::IdentityNotice(_)
+                    | StateKey::EndpointChangeNotice(_)
             )
         ) {
             return Err(Refusal::NotFound.into());
@@ -1085,9 +1091,7 @@ impl Paykit {
             // it twice is no error.
             if matches!(
                 StateKey::parse(key.as_bytes()),
-                Some(StateKey::IdentityNotice(
-                    NoticeKind::PublicEndpointChangeNotPublished
-                ))
+                Some(StateKey::EndpointChangeNotice(_))
             ) {
                 return Ok(());
             }
@@ -1174,27 +1178,28 @@ impl Paykit {
     }
 
     /// Tell the host that a change of public endpoints saved earlier wasn't published, with
-    /// the endpoints `asked` names ([`NoticeKind::PublicEndpointChangeNotPublished`]).
+    /// the endpoints `classes` names, if known ([`NoticeKind::PublicEndpointChangeNotPublished`]).
+    /// Each change is told at a key of its own, from `change`, the digest that names it: told
+    /// again, as after a crash before its clear, it is the same notice, and acknowledging one
+    /// change never takes another's.
     ///
     /// # Errors
     ///
     /// A store failure, or a kept notice that doesn't read.
     pub(crate) async fn endpoint_change_not_published(
         &mut self,
-        asked: crate::own_record::EndpointChange,
+        change: &[u8; 32],
+        classes: Option<crate::own_record::EndpointClasses>,
     ) -> Result<()> {
+        let key = key::endpoint_change_notice(change);
+        if self.kept_notice(&key).await?.is_some() {
+            return Ok(());
+        }
         let kind = NoticeKind::PublicEndpointChangeNotPublished;
-        let key = key::identity_notice(kind);
-        let mut notice = match self.kept_notice(&key).await? {
-            Some(kept) => kept,
-            None => KeptNotice::identity(kind, self.service_time().unwrap_or(0)),
+        let notice = KeptNotice {
+            endpoints: classes.filter(|classes| !classes.is_empty()),
+            ..KeptNotice::identity(kind, self.service_time().unwrap_or(0))
         };
-        // A change told while an earlier one is still shown joins it.
-        let mut endpoints = notice.endpoints.take().unwrap_or_default();
-        endpoints.withdrawn.extend(asked.withdrawn);
-        endpoints.offered.extend(asked.offered);
-        endpoints.changed.extend(asked.changed);
-        notice.endpoints = (!endpoints.is_empty()).then_some(endpoints);
         self.local_put(&key, &notice).await
     }
 
@@ -1266,7 +1271,7 @@ impl Paykit {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::own_record::EndpointChange;
+    use crate::own_record::EndpointClasses;
 
     fn kept(attempt: &AttemptId) -> KeptNotice {
         KeptNotice {
@@ -1292,7 +1297,6 @@ mod tests {
             NoticeKind::BlockFloorHeld,
             NoticeKind::FloorRaiseWaiting,
             NoticeKind::AutomaticPaymentsHeld,
-            NoticeKind::PublicEndpointChangeNotPublished,
         ] {
             let key = key::identity_notice(kind);
             let notice = KeptNotice::identity(kind, 5);
@@ -1315,9 +1319,9 @@ mod tests {
         }
     }
 
-    fn endpoint_change(withdrawn: &[&str], offered: &[&str], changed: &[&str]) -> EndpointChange {
+    fn classes(withdrawn: &[&str], offered: &[&str], changed: &[&str]) -> EndpointClasses {
         let set = |ids: &[&str]| ids.iter().map(|id| id.to_string()).collect();
-        EndpointChange {
+        EndpointClasses {
             withdrawn: set(withdrawn),
             offered: set(offered),
             changed: set(changed),
@@ -1327,9 +1331,9 @@ mod tests {
     #[test]
     fn test_endpoint_change_notice_names_each_class_in_its_own_list() {
         let kind = NoticeKind::PublicEndpointChangeNotPublished;
-        let key = key::identity_notice(kind);
+        let key = key::endpoint_change_notice(&[7; 32]);
         let mut notice = KeptNotice::identity(kind, 5);
-        notice.endpoints = Some(endpoint_change(&["old"], &["new-a", "new-b"], &["moved"]));
+        notice.endpoints = Some(classes(&["old"], &["new-a", "new-b"], &["moved"]));
         assert!(bind_notice(&key, &notice).is_ok());
         let view = notice.view("id".into()).unwrap();
         let names = |ids: &[paykit_lib::PaymentEndpointIdentifier]| {
@@ -1341,20 +1345,47 @@ mod tests {
         assert_eq!(names(&view.endpoints_offered), ["new-a", "new-b"]);
         assert_eq!(names(&view.endpoints_changed), ["moved"]);
         // With no lists, the host is told only that a change wasn't published.
-        let plain = KeptNotice::identity(kind, 5).view("id".into()).unwrap();
+        let plain = KeptNotice::identity(kind, 5);
+        assert!(bind_notice(&key, &plain).is_ok());
+        let plain = plain.view("id".into()).unwrap();
         assert!(plain.endpoints_withdrawn.is_empty());
         assert!(plain.endpoints_offered.is_empty());
         assert!(plain.endpoints_changed.is_empty());
     }
 
     #[test]
+    fn test_endpoint_change_notice_binds_only_at_a_change_key() {
+        let kind = NoticeKind::PublicEndpointChangeNotPublished;
+        let notice = KeptNotice::identity(kind, 5);
+        // Each change at a key of its own; none at the kind's tag alone.
+        assert!(bind_notice(&key::endpoint_change_notice(&[1; 32]), &notice).is_ok());
+        assert!(bind_notice(&key::identity_notice(kind), &notice).is_err());
+        assert_eq!(
+            StateKey::parse(key::endpoint_change_notice(&[1; 32]).as_bytes()),
+            Some(StateKey::EndpointChangeNotice([1; 32]))
+        );
+        assert!(StateKey::parse(b"nt/endpoint_change_not_published/short").is_none());
+        // Never kept acknowledged, and naming no counterparty or other kind.
+        let key = key::endpoint_change_notice(&[1; 32]);
+        let mut acknowledged = notice.clone();
+        acknowledged.acknowledged = true;
+        assert!(bind_notice(&key, &acknowledged).is_err());
+        let mut named = notice.clone();
+        named.counterparty = Some(b64(&[1; 32]));
+        assert!(bind_notice(&key, &named).is_err());
+        let mut other = notice.clone();
+        other.kind = NoticeKind::BlockFloorHeld;
+        assert!(bind_notice(&key, &other).is_err());
+    }
+
+    #[test]
     fn test_endpoint_change_notice_refuses_lists_elsewhere_empty_or_unreadable() {
         let kind = NoticeKind::PublicEndpointChangeNotPublished;
-        let key = key::identity_notice(kind);
+        let key = key::endpoint_change_notice(&[7; 32]);
         let mut empty = KeptNotice::identity(kind, 5);
-        empty.endpoints = Some(EndpointChange::default());
+        empty.endpoints = Some(EndpointClasses::default());
         assert!(bind_notice(&key, &empty).is_err());
-        let change = endpoint_change(&["old"], &[], &[]);
+        let change = classes(&["old"], &[], &[]);
         // No other notice names endpoints.
         let mut other = KeptNotice::identity(NoticeKind::BlockFloorHeld, 5);
         other.endpoints = Some(change.clone());
@@ -1372,15 +1403,17 @@ mod tests {
         assert!(bind_notice(&delivery_key, &delivery).is_ok());
         delivery.endpoints = Some(change);
         assert!(bind_notice(&delivery_key, &delivery).is_err());
-        // An identifier the wire refuses reads as a corrupt store, in every list.
+        // An identifier the wire refuses is a corrupt store at the bind, in every list.
         for bad in ["..", "private", "a/b", ""] {
             for class in 0..3 {
                 let mut ids = [&[][..], &[][..], &[][..]];
                 ids[class] = std::slice::from_ref(&bad);
                 let mut notice = KeptNotice::identity(kind, 5);
-                notice.endpoints = Some(endpoint_change(ids[0], ids[1], ids[2]));
-                assert!(bind_notice(&key, &notice).is_ok());
-                assert!(notice.view("id".into()).is_err(), "{bad:?} in list {class}");
+                notice.endpoints = Some(classes(ids[0], ids[1], ids[2]));
+                assert!(
+                    bind_notice(&key, &notice).is_err(),
+                    "{bad:?} in list {class}"
+                );
             }
         }
     }

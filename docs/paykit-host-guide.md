@@ -139,23 +139,29 @@ nothing, while a different map replaces the saved edit.
 
 A reload or a restore before that holds the saved edit aside, and the wallet
 never signs it, a withdrawal included (Paykit spec 4, "Changes saved and not yet
-signed"). After its first read, the next `receive` clears it and raises
-`NoticeKind::PublicEndpointChangeNotPublished`, naming each endpoint the change
+signed"). The load or the restore itself, before it returns and before any read,
+raises `NoticeKind::PublicEndpointChangeNotPublished` and clears the held edit,
+so no later call can sign over it. The notice names each endpoint the change
 named by its class: to withdraw (`endpoints_withdrawn`), to offer
-(`endpoints_offered`) and to give a new payload (`endpoints_changed`). On that
-notice the host must:
+(`endpoints_offered`) and to give a new payload (`endpoints_changed`). Each held
+change is a notice of its own, with its own `id`. If the notice can't be
+written at the open, the wallet still opens: the edit stays held, and every call
+that would sign the record is refused with `NotNowReason::EndpointChangeUntold`
+until the next `receive`, or the next such call, tells it. On that notice the
+host must:
 
 - withdraw again each endpoint in `endpoints_withdrawn` with
   `remove_public_endpoint`, without asking the user again: the user already asked,
-  and the call reads first and only removes under the current record. If another
-  device offered that endpoint again since, the user offers it again;
+  and the call reads first and only removes under the current record. After a
+  restore, the call waits for the first receive (`Refusal::NotNow` before it). If
+  another device offered that endpoint again since, the user offers it again;
 - show the user `endpoints_offered`, `endpoints_changed` and the current
   `own_public_endpoints`, and make those offers and payload changes again only
   when the user asks;
 - with all three lists empty, show the user that a change of the public
   endpoints wasn't published, with the current endpoints;
-- acknowledge the notice. It can be told again for the same change, and
-  acknowledging it again is no error.
+- acknowledge the notice. It can be told again for the same change, with the
+  same `id`, and acknowledging it again is no error.
 
 Until then a withdrawn endpoint stays published, and the upkeep keeps renewing
 the record that holds it.
@@ -568,7 +574,7 @@ A selling app that publishes a Private Payment List keeps a counter for each rec
 
 These three are not kept after the call returns. A crash before the host handles them, or a Paykit error after the read, can lose them; `SeenMarksIncomplete` is held in memory from the restore until the first `receive`, so a crash before that first `receive` loses it too. Duty events are kept until acknowledged and can be read again with `unacknowledged_events`.
 
-`AppEvent::RecordEditsHeld` is a duty event the wallet takes for Paykit: it decides Paykit's held record change as above and acknowledges the event for `"paykit"`. A held change of another protocol named in it is that protocol's to read and clear.
+`AppEvent::RecordEditsHeld` is a duty event the wallet takes for Paykit: it tells and clears Paykit's held record change at the open as above, works out the held accepted kinds again at the first `receive` that reads, and then acknowledges the event for `"paykit"`. A held change of another protocol named in it is that protocol's to read and clear.
 
 ### Withdrawing public endpoints and paying offline
 
@@ -632,7 +638,8 @@ backup, keeps, kind by kind:
 A notice the host acknowledged after the backup, which acknowledging deleted, can be
 listed again after the restore: the same occurrence comes back with the same `id` and
 `raised_at_ms`, and the host may skip one it recorded acknowledging with both.
-`NoticeKind::PublicEndpointChangeNotPublished` can be told again for the same change. A notice
+`NoticeKind::PublicEndpointChangeNotPublished` can be told again for the same change, with the
+same `id`, and a restore keeps each one either store holds. A notice
 raised again is a new occurrence with the same `id` and a later `raised_at_ms`, such as a
 `HeldWithoutPay` whose hold started again, or an identity notice told again while its
 hold stands: show it as the table below says. Handle Dispatch
@@ -690,7 +697,7 @@ the new cursor to the service. Acknowledging the deletion notice leaves the cred
 | `NoticeKind::BlockFloorHeld` | Tell the user that the wallet saw the identity's block floor diverge after a provider loss and holds it for good: no one-time request is paid automatically, each can still be paid by hand, and an unblock or a widening that needs the floor raised waits, with the unblocked sender's one-time requests and, after a restore that isn't clean or a missed item, every re-send request, unless the shared post-loss hold stands too (`NoticeKind::AutomaticPaymentsHeld`), when they go without the raise. Billing Periods and payments without a request go on. Shown once, and again after each reopen while the hold stands; acknowledge it after showing it. |
 | `NoticeKind::FloorRaiseWaiting` | Tell the user that the wallet owes a block floor raise it can't write now, because the floor doesn't read or the Dispatch refuses the write for now: until it is written, an unblocked sender's one-time requests wait and it is asked nothing, and while the raise of a restore that isn't clean or of a missed item waits, no one is asked to re-send. Payments by hand, Billing Periods and payments without a request go on. The wallet tries again at the next receive, and from its second unwritten try in a row after a wait of one minute, doubling to ten; the wait ends early when the floor record changes, the floor becomes readable or a new raise is owed. Shown once per load while it stands, and again after a reopen while the raise stays unwritten; the notice goes when the raise is written, or when the divergence hold stands (`NoticeKind::BlockFloorHeld`). Acknowledge it after showing it. |
 | `NoticeKind::AutomaticPaymentsHeld` | Tell the user that, after a provider loss, no one-time request of the identity is paid automatically any more, on any of its wallets, and no payment of one is repeated at a resume, one the user started included; each can still be paid by hand. Billing Periods and payments without a request go on. Shown once, and again after each reopen; acknowledge it after showing it. |
-| `NoticeKind::PublicEndpointChangeNotPublished` | A change of the wallet's public endpoints saved while the Dispatch couldn't sign it wasn't published after a restart or a restore. Withdraw again each endpoint in `endpoints_withdrawn` with `remove_public_endpoint`; show `endpoints_offered`, `endpoints_changed` and the current endpoints, and make those offers and payload changes again only when the user asks; with all three lists empty, show the current endpoints. Acknowledge it; acknowledging it again is no error. |
+| `NoticeKind::PublicEndpointChangeNotPublished` | A change of the wallet's public endpoints saved while the Dispatch couldn't sign it wasn't published after a restart or a restore; each held change is a notice of its own. Withdraw again each endpoint in `endpoints_withdrawn` with `remove_public_endpoint`; show `endpoints_offered`, `endpoints_changed` and the current endpoints, and make those offers and payload changes again only when the user asks; with all three lists empty, show the current endpoints. Acknowledge it; acknowledging it again is no error. |
 | `PaykitError::Client` | Handle the enclosed Dispatch outcome. Preserve any kept batch and its ID. |
 | `PaykitError::Lib` | Use the rule error to distinguish invalid input from invalid network or shared data. |
 | `PaykitError::Rail` | Preserve any unresolved attempt unless the method established definitive refusal. |
@@ -876,6 +883,7 @@ A failure that comes once the request may have left the device comes as `Outcome
 | `scope_keys_awaited` | `NotNowReason::ScopeKeysAwaited` | `RetryLater` | The signer stores the certificate's keys when it is next online; tell the user if it stays. |
 | `value_awaits_key` | `NotNowReason::ValueAwaitsKey` | `RetryLater` | The signer stores the record's keys when it is next online; call again then. |
 | `floor_unreadable` | `NotNowReason::FloorUnreadable` | `RetryLater` | The block floor can't be read now: the payer's records not listed yet, a key awaited, a kept floor write, or the Dispatch not answering. A later `receive` clears it with no one acting. |
+| `endpoint_change_untold` | `NotNowReason::EndpointChangeUntold` | `RetryLater` | A change of the public endpoints saved earlier and not signed couldn't be told yet (its notice or its clear failed). Nothing of the app record is signed until it is; the next `receive`, or the next call that signs, tries again with no one acting. |
 | `floor_record_unreadable` | `HeldForUserReason::FloorRecordUnreadable` | `NeedsUser` | The block floor record doesn't read, and no later read clears it. This version has no call that repairs it: it reads again only once another of the user's wallets that holds a readable floor writes it. Until then an unblock is refused and the counterparty stays blocked, a block still takes effect, and one-time requests are paid by hand. Show that. |
 | `floor_raise_waiting` | `NotNowReason::FloorRaiseWaiting` | `RetryLater` | A block floor raise left unwritten waits before it is tried again: call again later. |
 | `no_service_time` | `NotNowReason::NoServiceTime` | `RetryLater` | `receive`, which verifies a service time, then call again. |
