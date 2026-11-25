@@ -175,7 +175,9 @@ impl From<paykit_sdk::MessageDelivery> for MessageDelivery {
 }
 
 // The outbox can store a formatted Dispatch answer, including the service's message.
-// Only a recognized code crosses the binding (Dispatch wire 7.6).
+// Only a recognized code crosses the binding (Dispatch wire 7.6). The pinned client keeps a
+// failure only as its text, whose error code reads `<status> <name>`; a text these bindings
+// don't recognize is `unknown`, never another code.
 fn delivery_code(error: &str) -> &'static str {
     match error {
         "the batch carrying it was dropped" => "batch_dropped",
@@ -190,11 +192,17 @@ fn delivery_code(error: &str) -> &'static str {
                 ErrorCode::parse(name)
                     .filter(|code| Some(code.status()) == status.parse::<u16>().ok())
             };
-            if let Some((name, status)) = header
+            // `<status> <name> before the body was read (status <status>)`: both statuses
+            // name the same answer.
+            if let Some((answer, status)) = header
                 .strip_suffix(')')
                 .and_then(|s| s.split_once(" before the body was read (status "))
             {
-                return checked(name, status).map_or("unknown", ErrorCode::as_str);
+                return answer
+                    .split_once(' ')
+                    .filter(|(named, _)| *named == status)
+                    .and_then(|(_, name)| checked(name, status))
+                    .map_or("unknown", ErrorCode::as_str);
             }
             let code = match header.split_once(' ') {
                 Some((status, name)) => checked(name, status),
