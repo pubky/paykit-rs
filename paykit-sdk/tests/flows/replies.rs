@@ -32,6 +32,27 @@ async fn paid_before_recorded_then(
     shop: &mut Paykit,
     before: impl AsyncFnOnce(&mut Paykit),
 ) -> SignedMessage {
+    let signed = request_sent_alone(w, wallet, shop).await;
+    let request = RequestRef {
+        payee: w.bob_id(),
+        request_hash: signed.hash(),
+    };
+    let outcome = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .outcome
+        .unwrap();
+    assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
+    let held = shop.payee_activity().await.unwrap().len();
+    before(shop).await;
+    shop.receive(None).await.unwrap();
+    assert_eq!(shop.payee_activity().await.unwrap().len(), held);
+    signed
+}
+
+/// Bob's shop signs a request to alice and sends it alone, without writing its record;
+/// alice's wallet reads it.
+async fn request_sent_alone(w: &World, wallet: &mut Paykit, shop: &mut Paykit) -> SignedMessage {
     shop.app_mut().invite(&w.alice_id()).await.unwrap();
     let body = json!({
         "amount": { "asset": "btc", "value": "1" },
@@ -50,20 +71,6 @@ async fn paid_before_recorded_then(
     shop.app_mut().queue_signed(signed.clone()).await.unwrap();
     shop.flush().await.unwrap();
     wallet.receive(None).await.unwrap();
-    let request = RequestRef {
-        payee: w.bob_id(),
-        request_hash: signed.hash(),
-    };
-    let outcome = wallet
-        .pay_request(&request, PayOptions::default())
-        .await
-        .outcome
-        .unwrap();
-    assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
-    let held = shop.payee_activity().await.unwrap().len();
-    before(shop).await;
-    shop.receive(None).await.unwrap();
-    assert_eq!(shop.payee_activity().await.unwrap().len(), held);
     signed
 }
 
@@ -1591,10 +1598,12 @@ async fn test_replies_kept_past_30_days_refused_by_the_dispatch_given_up_with_th
 }
 
 #[tokio::test]
-async fn test_replies_kept_past_30_days_over_quota_given_up_with_the_notice() {
-    // As the write-fails test, but each write placing the replies is refused for good
-    // (`429 quota_exceeded`), not unreachable, 31 days after their acceptance: a reply is kept
-    // at most 30 days (Paykit spec 8.1), so both are given up, the host told.
+async fn test_replies_kept_past_30_days_over_quota_wait_only_while_held() {
+    // As the write-fails test, but the write placing the first reply is refused for room
+    // (`429 quota_exceeded`), 31 days after their acceptance. The client keeps that batch to
+    // send again, so the first reply may still land and waits. The second reply's write waits
+    // behind that batch, nothing of it sent or kept, so it is given up at its 30 days (Paykit
+    // spec 8.1). Once room frees, the first lands.
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
@@ -1613,17 +1622,27 @@ async fn test_replies_kept_past_30_days_over_quota_given_up_with_the_notice() {
         });
     }
     shop.receive(None).await.unwrap();
+    assert_eq!(
+        shop.app()
+            .protocol_scan("paykit", b"pr/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    let notices = shop.notices().await.unwrap();
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert_eq!(notices[0].kind, paykit_sdk::NoticeKind::MessageGivenUp);
+    w.clock.advance_ms(11 * 60_000);
+    shop.receive(None).await.unwrap();
+    shop.receive(None).await.unwrap();
     assert!(shop
         .app()
         .protocol_scan("paykit", b"pr/")
         .await
         .unwrap()
         .is_empty());
-    let notices = shop.notices().await.unwrap();
-    assert_eq!(notices.len(), 2, "{notices:?}");
-    assert!(notices
-        .iter()
-        .all(|n| n.kind == paykit_sdk::NoticeKind::MessageGivenUp));
+    assert_eq!(shop.notices().await.unwrap().len(), 1);
 }
 
 #[tokio::test]
@@ -2080,6 +2099,21 @@ fn proof_of_settlement(
 
 #[tokio::test]
 async fn test_replies_proof_over_an_unread_settlement_record_writes_nothing() {
+    proofs_over_an_unread_settlement_record(false).await;
+}
+
+#[tokio::test]
+async fn test_replies_proof_naming_another_payer_kept_while_a_batch_of_its_write_is_kept() {
+    // As above, but the client still keeps a batch of the later write of alice's proof once
+    // the record reads again, naming carol: the batch may still land, so alice's proof stays
+    // kept until the client drops it, then goes, never written (Paykit spec 8.1, Stored
+    // entries, Kept batch).
+    proofs_over_an_unread_settlement_record(true).await;
+}
+
+/// Proofs of one settlement over the shop's record of it, which doesn't read, then reads
+/// naming carol; with `batch_held`, the client keeps a batch of the write of alice's proof.
+async fn proofs_over_an_unread_settlement_record(batch_held: bool) {
     // Carol's proof of a payment without a request opens the shop's record of its
     // settlement; Bob's wallet then writes there a value that doesn't read. Proofs of the same
     // settlement, alice's and carol's own, aren't written over that value: the record can't
@@ -2174,6 +2208,15 @@ async fn test_replies_proof_over_an_unread_settlement_record_writes_nothing() {
         .submit_batch(OpBatch::for_protocol("paykit").entry(op))
         .await
         .unwrap();
+    if batch_held {
+        let alices = crate::common::kept_key_of(&shop, "pr/", &from_alice).await;
+        crate::common::hold_kept_write(&w.bob, &mut shop, &alices).await;
+        shop.receive(None).await.unwrap();
+        assert!(crate::common::kept_keys(&shop, "pr/")
+            .await
+            .contains(&alices));
+        crate::common::resend_kept_batch(&w, &w.bob, ErrorCode::PermissionMissing);
+    }
     shop.receive(None).await.unwrap();
     shop.receive(None).await.unwrap();
     assert!(shop
@@ -3025,4 +3068,139 @@ async fn test_reply_loss_expiry_keeps_an_unreported_mark_and_widens_an_existing_
     assert!(shown
         .iter()
         .any(|n| n.counterparty == Some(senders[1]) && n.lost_from_ms == Some(from + 1)));
+}
+
+/// Another of bob's apps, `till`, deletes the shop's record of `request`.
+async fn delete_request_record(till: &mut Paykit, w: &World, request: &SignedMessage) {
+    let target = RecordTarget::new(
+        DispatchCollection::new(
+            Collection::PayeeActivity.name(),
+            Collection::PayeeActivity.policy(None),
+        ),
+        &natural_key::request_record(&w.bob_id(), &request.hash()),
+    );
+    let entry = till
+        .app_mut()
+        .record_op(&target, None, Vec::new())
+        .await
+        .unwrap();
+    till.app_mut()
+        .submit_batch(OpBatch::for_protocol("paykit").entry(entry))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_replies_kept_while_a_batch_of_its_write_is_kept_over_a_deleted_record() {
+    // The shop's record of the request comes, then another of bob's apps deletes it. Past
+    // the replies' 30 days the client keeps a batch of the first reply's later write: the
+    // record is gone, but the batch may still land, so that reply stays kept, while the
+    // other, with no batch kept, goes. Once the client drops the batch, the deleted record
+    // decides: the reply goes, nothing told (Paykit spec 8.1, Stored entries, Kept batch).
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = paid_before_recorded(&w, &mut wallet, &mut shop).await;
+    record_request(&w, &mut shop, &request).await;
+    let mut till = w
+        .join(
+            &w.bob,
+            "till",
+            paykit_sdk::AppScopes::new().request().build().unwrap(),
+        )
+        .await;
+    delete_request_record(&mut till, &w, &request).await;
+    w.clock
+        .advance_ms(paykit_sdk::KEPT_MESSAGE_MS + 60 * 60_000);
+    shop.app_mut().rotate().await.unwrap();
+    shop.app_mut().flush_cursor().await.unwrap();
+    let replies = crate::common::kept_keys(&shop, "pr/").await;
+    assert_eq!(replies.len(), 2);
+    crate::common::hold_kept_write(&w.bob, &mut shop, &replies[0]).await;
+    shop.receive(None).await.unwrap();
+    assert_eq!(crate::common::kept_keys(&shop, "pr/").await, replies[..1]);
+    assert_eq!(crate::common::kept_keys(&shop, "hw/").await.len(), 1);
+    crate::common::resend_kept_batch(&w, &w.bob, ErrorCode::PermissionMissing);
+    shop.receive(None).await.unwrap();
+    shop.receive(None).await.unwrap();
+    assert!(crate::common::kept_keys(&shop, "pr/").await.is_empty());
+    assert!(crate::common::kept_keys(&shop, "hw/").await.is_empty());
+    assert!(shop.notices().await.unwrap().is_empty());
+}
+
+/// Alice's proof for `request`, a request with no Billing Periods, naming one: sent to the
+/// shop before it holds the request's record, it is kept. Returns its `msg_id`.
+async fn period_proof_for_a_one_off_request(
+    w: &World,
+    wallet: &Paykit,
+    shop: &mut Paykit,
+    request: &SignedMessage,
+) -> String {
+    let body = json!({
+        "attempt_id": paykit_lib::AttemptId::from_bytes([5; 16]).to_text(),
+        "billing_period": {
+            "starts_at": "2026-01-31T00:00:00.000Z",
+            "ends_at": "2026-02-28T00:00:00.000Z"
+        },
+        "payment_endpoint_identifier": "btc-lightning-bolt11",
+        "payment_app_id": pubky_dispatch_core::enc::zbase32_encode(&shop.app_id()),
+        "proof": { "reference": "purchase" }
+    });
+    let mut message = OutgoingMessage::new(
+        w.bob_id(),
+        "paykit.payment_proof",
+        body.as_object().cloned().unwrap(),
+    );
+    message.refs.push(request.hash());
+    let signed = wallet.app().sign_message(message).unwrap();
+    w.deliver(
+        &w.alice,
+        "wallet",
+        &w.bob,
+        &[shop.app_id()],
+        signed.plaintext(),
+    );
+    shop.receive(None).await.unwrap();
+    signed.msg_id().to_string()
+}
+
+#[tokio::test]
+async fn test_replies_kept_proof_naming_a_period_of_a_one_off_request_goes() {
+    // Once the record comes, the proof is invalid against its request: it goes, never
+    // written, nothing told.
+    period_proof_for_a_one_off_request_kept(false).await;
+}
+
+#[tokio::test]
+async fn test_replies_kept_proof_invalid_against_its_request_kept_while_its_batch_is_kept() {
+    // As above, but the client still keeps a batch of the proof's later write: it may still
+    // land, so the proof stays kept until the client drops it, then goes (Paykit spec 8.1,
+    // Stored entries, Kept batch).
+    period_proof_for_a_one_off_request_kept(true).await;
+}
+
+/// A kept proof naming a Billing Period of a request with none, its record then written;
+/// with `batch_held`, the client keeps a batch of the proof's write.
+async fn period_proof_for_a_one_off_request_kept(batch_held: bool) {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_sent_alone(&w, &mut wallet, &mut shop).await;
+    let msg_id = period_proof_for_a_one_off_request(&w, &wallet, &mut shop, &request).await;
+    let proof = crate::common::kept_key_of(&shop, "pr/", &msg_id).await;
+    record_request(&w, &mut shop, &request).await;
+    if batch_held {
+        crate::common::hold_kept_write(&w.bob, &mut shop, &proof).await;
+        shop.receive(None).await.unwrap();
+        assert!(crate::common::kept_keys(&shop, "pr/")
+            .await
+            .contains(&proof));
+        crate::common::resend_kept_batch(&w, &w.bob, ErrorCode::PermissionMissing);
+        shop.receive(None).await.unwrap();
+    }
+    shop.receive(None).await.unwrap();
+    assert!(!crate::common::kept_keys(&shop, "pr/")
+        .await
+        .contains(&proof));
+    assert!(shop.notices().await.unwrap().is_empty());
 }
