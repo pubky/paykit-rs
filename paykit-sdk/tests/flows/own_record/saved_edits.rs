@@ -965,3 +965,128 @@ async fn test_own_record_each_held_change_is_told_and_acknowledged_apart() {
         .collect();
     assert_eq!(left, vec![second.id.clone()]);
 }
+
+/// Load `app_id` of bob's shop from `faulty`, whose puts of an endpoint change notice are
+/// all refused: the open can't tell the held change, so it stays held and untold.
+async fn load_untold(
+    w: &World,
+    faulty: &Arc<pubky_dispatch_client::store::FaultStore>,
+    app_id: [u8; 16],
+) -> Paykit {
+    faulty.refuse_puts_as_too_large(Some(b"p/paykit/nt/endpoint_change_not_published/"));
+    let mut shop = Paykit::load(
+        w.env(&w.bob, Arc::clone(faulty) as Arc<dyn StateStore>),
+        publishing(),
+        app_id,
+        w.rail.clone(),
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    assert!(told(&shop).await.is_none());
+    assert!(shop
+        .app_mut()
+        .held_record_edit("paykit")
+        .await
+        .unwrap()
+        .is_some());
+    shop
+}
+
+/// Bob's signer renews `shop`'s certificate for the scopes it holds; the shop takes the
+/// renewal at a receive, then the `identity.json` that lists it at the next.
+async fn renew_and_adopt(w: &World, shop: &mut Paykit) -> pubky_dispatch_core::records::AppCert {
+    let old = shop.app().cert().clone();
+    let scopes = AppScopes::new().request().build().unwrap();
+    let renewed = crate::certificate::renew_for(w, &w.bob, "shop", shop.app_id(), &scopes, 1_000);
+    shop.receive(None).await.unwrap();
+    crate::certificate::list_for(&w.bob, shop.app_id(), &old, &renewed);
+    shop.receive(None).await.unwrap();
+    assert_eq!(shop.app().cert().hash(), renewed.hash());
+    renewed
+}
+
+#[tokio::test]
+async fn test_own_record_renewal_while_a_withdrawal_is_untold_signs_the_signed_member() {
+    // The renewal callback is the one signing outside the gate (`PaykitProtocol::member_for`):
+    // while a held withdrawal is untold, a renewal and the adoption of the certificate sign
+    // the member as signed, the withdrawn endpoint still in it. The held change has no effect,
+    // stays held, and is told once it can be.
+    use pubky_dispatch_client::store::{Fault, FaultStore};
+    let w = World::new();
+    let kept = store();
+    let mut shop = shop_on(&w, false, Arc::clone(&kept)).await;
+    save_withdrawal_unsigned(&w, &mut shop).await;
+    let app_id = shop.app_id();
+    drop(shop);
+    let faulty = Arc::new(FaultStore::new(kept, Fault::None));
+    let mut shop = load_untold(&w, &faulty, app_id).await;
+    let signed = signed_endpoints(&shop);
+    assert_eq!(
+        signed,
+        vec![(a().as_str().to_owned(), "lno1tips".to_owned())]
+    );
+    let renewed = renew_and_adopt(&w, &mut shop).await;
+    let record = PaykitMember::read(&super::on_homeserver(&w, &shop).unwrap()).unwrap();
+    assert_eq!(signed_endpoints(&shop), signed);
+    assert_eq!(record.public_endpoints.len(), 1);
+    assert_eq!(
+        pubky_dispatch_core::records::AppRecord::verify(
+            shop.app().record(),
+            &w.bob.identity().public()
+        )
+        .unwrap()
+        .cert()
+        .hash(),
+        renewed.hash()
+    );
+    assert!(still_held(&mut shop).await);
+    // Told once the notice can be written; the host withdraws again.
+    faulty.refuse_puts_as_too_large(None);
+    shop.receive(None).await.unwrap();
+    let notice = told(&shop).await.unwrap();
+    assert_eq!(
+        ids(&notice.endpoints_withdrawn),
+        vec![a().as_str().to_owned()]
+    );
+    withdraw_again(&mut shop).await;
+    assert!(shop.own_public_endpoints().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_own_record_renewal_while_an_offer_is_untold_signs_the_signed_member() {
+    // As above for a held offer: the renewal and the adoption sign the member as signed, the
+    // offered endpoint still absent from it.
+    use pubky_dispatch_client::store::{Fault, FaultStore};
+    let w = World::new();
+    let kept = store();
+    let mut shop = shop_on(&w, false, Arc::clone(&kept)).await;
+    shop.set_public_endpoint(a(), payload("lno1tips"))
+        .await
+        .unwrap();
+    time_read_fails(&w, &w.bob);
+    assert!(shop
+        .set_public_endpoint(b(), payload("bc1qnew"))
+        .await
+        .is_err());
+    let app_id = shop.app_id();
+    drop(shop);
+    let faulty = Arc::new(FaultStore::new(kept, Fault::None));
+    let mut shop = load_untold(&w, &faulty, app_id).await;
+    let signed = signed_endpoints(&shop);
+    assert_eq!(
+        signed,
+        vec![(a().as_str().to_owned(), "lno1tips".to_owned())]
+    );
+    renew_and_adopt(&w, &mut shop).await;
+    assert_eq!(signed_endpoints(&shop), signed);
+    assert_eq!(published_endpoints(&w, &shop), 1);
+    assert!(still_held(&mut shop).await);
+    faulty.refuse_puts_as_too_large(None);
+    shop.receive(None).await.unwrap();
+    let notice = told(&shop).await.unwrap();
+    assert_eq!(
+        ids(&notice.endpoints_offered),
+        vec![b().as_str().to_owned()]
+    );
+}
