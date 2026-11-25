@@ -118,7 +118,10 @@ impl WalletHost {
                 return Err(WalletError::SourceDeviceUnaccountedFor);
             }
             let id = fixed(app_id, "app id")?;
-            let backup = PaykitBackup::from_bytes(&bytes)?;
+            // Bytes that don't read as a backup are the caller's input, refused before the
+            // wallet opens.
+            let backup =
+                PaykitBackup::from_bytes(&bytes).map_err(|_| WalletError::invalid("backup"))?;
             this.open_wallet(id, async |env| {
                 Ok(Paykit::restore(
                     env,
