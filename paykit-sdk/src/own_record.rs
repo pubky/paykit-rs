@@ -175,7 +175,7 @@ impl Paykit {
         self.own_record_known()?;
         on_heap(|| self.first_read_before_writing()).await?;
         // Before this call's ask is kept over a held change's.
-        on_heap(|| self.held_change_settled()).await?;
+        Box::pin(self.held_change_settled()).await?;
         self.refresh_own()?;
         on_heap(|| self.desired_record()).await
     }
@@ -246,7 +246,7 @@ impl Paykit {
         let _delivery = self.delivery_operation();
         self.own_record_known()?;
         on_heap(|| self.first_read_before_writing()).await?;
-        on_heap(|| self.held_change_settled()).await?;
+        Box::pin(self.held_change_settled()).await?;
         self.refresh_own()?;
         match on_heap(|| self.tend_own_record()).await? {
             Tended::Signed(publication) => Ok(publication),
@@ -353,7 +353,7 @@ impl Paykit {
         // A held change is told before anything of the record is signed
         // ([`Paykit::held_change_settled`]), and the held accepted kinds are worked out again.
         // A failure of either is the upkeep's.
-        if let Err(error) = on_heap(|| self.held_change_settled()).await {
+        if let Err(error) = Box::pin(self.held_change_settled()).await {
             return upkeep_outcome(error, &before, &self.own_standing());
         }
         if let Err(error) = on_heap(|| self.settle_held_accepts()).await {
@@ -408,7 +408,7 @@ impl Paykit {
     ///
     /// As [`Paykit::held_change_settled`].
     pub(crate) async fn signing_app(&mut self) -> Result<&mut pubky_dispatch_client::app::App> {
-        on_heap(|| self.held_change_settled()).await?;
+        Box::pin(self.held_change_settled()).await?;
         Ok(&mut self.app)
     }
 
@@ -416,7 +416,7 @@ impl Paykit {
     /// not the held change could be told, and a later call that would sign tries again.
     pub(crate) async fn settle_held_change_at_open(&mut self) {
         // A failure keeps the gate shut, which is what it means here.
-        let _ = on_heap(|| self.held_change_settled()).await;
+        let _ = Box::pin(self.held_change_settled()).await;
     }
 
     /// Tell the host of a change of Paykit's member the client holds aside, and clear it,
@@ -670,7 +670,7 @@ impl Paykit {
             (member != PaykitMember::default()).then(|| member.to_member())
         };
         // The gate before this change's ask is kept over a held change's.
-        on_heap(|| self.held_change_settled()).await?;
+        Box::pin(self.held_change_settled()).await?;
         // What this change asks, against the record signed now, is kept before the client is
         // asked to save it: only to tell the host exactly what a held change was.
         let signed = self.own_member()?.public_endpoints;
