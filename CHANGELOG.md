@@ -159,9 +159,10 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   stream stops before or during the check, intake drops the check's result
   without updating health, still wakes consumers for packets the check buffered
   or a pending handshake, and the next stream's startup audit settles the Linked
-  Peer. A packet that itself fills the Linked Peer's capacity reports
-  `Backpressured` at once, and no check runs. Packets written back to back are
-  buffered together.
+  Peer. A stop during the check ends it before its next slot fetch, so
+  `stop()` waits only for the fetch in flight. A packet that itself fills the
+  Linked Peer's capacity reports `Backpressured` at once, and no check runs.
+  Packets written back to back are buffered together.
   Previously health reported the Linked Peer as `Replaying` until the next
   healthy audit. A drain woken by the packet can still report the `Replaying`
   freshness it started with, and no further wakeup follows when the check
