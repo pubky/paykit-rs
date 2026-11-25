@@ -171,7 +171,12 @@ the record isn't changed or published. A change asked before it is refused with
 `Refusal::NotNow`, and the client's own publication reports
 `Publication::AwaitingRead`. When publication
 returns `Publication::AwaitingRecord`, the wallet still has a newer record
-choice to settle. Keep the change pending and continue normal receives.
+choice to settle. Keep the change pending and continue normal receives. A held
+record change of any protocol in the app makes publication wait until it is
+decided (Dispatch spec 4.2): while another protocol keeps a held change
+undecided, the Homeserver copy is not repaired, Paykit's public Payment
+Endpoints included. Have that protocol decide its change; Paykit never clears
+another protocol's held change.
 A restore carrying only the accepted offer can repair its missing public copy.
 
 Each receive also brings the app record up to date after its read. A receive

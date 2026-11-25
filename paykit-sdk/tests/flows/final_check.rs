@@ -1465,7 +1465,7 @@ async fn test_fence_unchanged_seller_cannot_authorize_a_changed_transfer() {
     // As the wallet records the seller's Dispatch confirmation, the method changes
     // what it would actually transfer for the selected endpoint.
     let key = format!(
-        "ident/{}/sw",
+        "ident/{}/dispatch_read",
         pubky_dispatch_core::enc::pubky_id(&request.payee)
     );
     *store.lookup_hook.lock().unwrap() = Some((
@@ -1474,11 +1474,17 @@ async fn test_fence_unchanged_seller_cannot_authorize_a_changed_transfer() {
             rail.set_transfer_amount(Some(crate::common::btc("2")));
         }),
     ));
-    let refusal = wallet
+    let outcome = wallet
         .pay_request(&request, PayOptions::default())
         .await
-        .outcome
-        .unwrap_err();
+        .outcome;
+    // The hook runs once, as the wallet records the confirmation: a hook that never fires
+    // would leave the transfer unchanged and this test proving nothing.
+    assert!(
+        store.lookup_hook.lock().unwrap().is_none(),
+        "the seller-confirmation hook never fired"
+    );
+    let refusal = outcome.unwrap_err();
     assert!(
         matches!(
             refusal.refusal(),
@@ -1487,7 +1493,6 @@ async fn test_fence_unchanged_seller_cannot_authorize_a_changed_transfer() {
         ),
         "{refusal:?}"
     );
-    assert!(store.lookup_hook.lock().unwrap().is_none());
     assert!(w.rail.all_pay_calls().is_empty());
 }
 

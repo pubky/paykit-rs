@@ -3451,12 +3451,13 @@ async fn test_unrequested_held_list_over_an_absent_key_never_created_over_a_forg
             break;
         }
         // The wallet sent nothing: another app's writes, never sent again, meet the faults
-        // left.
+        // left. Each is a put, which every fault left refuses: a delete at a key the app
+        // doesn't hold is malformed and never sent (Dispatch wire 6.2).
         let op = tool
             .app_mut()
             .record_op(
                 &payment_list_target(&w.bob_id(), &[7; 16]),
-                None,
+                Some(b"{}"),
                 Vec::new(),
             )
             .await

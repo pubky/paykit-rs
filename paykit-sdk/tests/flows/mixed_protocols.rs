@@ -557,7 +557,8 @@ async fn withdraw_public_offer(
         // The reload held the chat's change aside, so the record's signed policies are both
         // past: Paykit's upkeep saves the withdrawal of its endpoints at their cutoff, which
         // waits for the chat. The chat then asks its change again, which signs both, and
-        // clears it (Dispatch spec 4.2).
+        // clears it; the publication follows once the held change is cleared (Dispatch spec
+        // 4.2).
         let waiting = wallet.update_own_record().await.unwrap_err();
         assert!(
             matches!(waiting, PaykitError::PublicEndpointChangePending(_)),
@@ -569,12 +570,12 @@ async fn withdraw_public_offer(
             .await?
             .ok_or("the chat's change is held aside")?;
         assert_eq!(held.member.as_ref(), Some(&chat));
-        let published = wallet
+        wallet
             .app_mut()
             .set_protocol_member_with_expiry(CHAT, held.member, held.expiry)
             .await?;
         wallet.app_mut().clear_held_record_edit(CHAT).await?;
-        published
+        wallet.app_mut().publish_record().await?
     };
     assert_eq!(publication, Publication::Published);
     let current = AppRecord::verify(wallet.app().record(), &seller.public())?;

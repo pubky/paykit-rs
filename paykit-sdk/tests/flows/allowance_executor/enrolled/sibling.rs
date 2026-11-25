@@ -184,9 +184,11 @@ async fn funded_ledger(world: &World, proposer: AllowanceRole) -> TestResult {
         .delete_record(&ledger, vec![])
         .await
         .unwrap_err();
+    // The client refuses the write before it is sent, a usage refusal carrying only its text
+    // (Dispatch spec 10.3).
     for error in [update, delete] {
         assert!(
-            matches!(&error, AppError::Refused(Refusal::Usage(why)) if why.contains("none of the record's write scopes")),
+            matches!(&error, AppError::Refused(Refusal::Usage(why)) if why.contains("the certificate lacks the scope required for the record write")),
             "{error}"
         );
     }
