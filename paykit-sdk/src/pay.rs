@@ -4700,7 +4700,6 @@ impl Paykit {
         // wallet-wide stop met on the flush is returned. Pruning comes last, so after a stop
         // every entry this call finished is still listed by `payments`.
         if let Err(error) = self.send_outbox().await {
-            let error = PaykitError::from(error);
             if stops_resume(&error) {
                 return Err(error);
             }

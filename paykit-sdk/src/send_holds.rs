@@ -717,14 +717,12 @@ impl Paykit {
     ///
     /// # Errors
     ///
-    /// The client's errors.
+    /// The client's errors, and Paykit's own from recording what a carried list owes before
+    /// the flush.
     #[cfg(feature = "test-support")]
     pub async fn flush_outbox_in_delivery(
         &mut self,
-    ) -> std::result::Result<
-        pubky_switch_client::app::OutboxReport,
-        pubky_switch_client::app::AppError,
-    > {
+    ) -> crate::Result<pubky_switch_client::app::OutboxReport> {
         self.send_outbox().await
     }
 
