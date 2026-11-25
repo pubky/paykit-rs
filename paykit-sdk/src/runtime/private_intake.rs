@@ -907,6 +907,42 @@ where
     }
 }
 
+/// Runs [`retry_while_link_generation_moves`] over scoped acquisition
+/// attempts, each of which also returns the read folder of the snapshot it
+/// used, and returns the last attempt's folder with the outcome.
+///
+/// A retried attempt's folder came from a superseded snapshot, so only the
+/// last attempt's folder is reported, whether it is `Some` or `None`. An
+/// earlier attempt's folder is never kept in its place.
+async fn retry_scoped_while_link_generation_moves<A, Fut>(
+    mut attempt: A,
+) -> (Option<String>, Result<PrivatePacketAcquisition>)
+where
+    A: FnMut() -> Fut,
+    Fut: Future<
+        Output = (
+            Option<String>,
+            std::result::Result<PrivatePacketAcquisition, LinkAttemptError>,
+        ),
+    >,
+{
+    // Never held across `.await`.
+    let read_folder = std::sync::Mutex::new(None);
+    let outcome = retry_while_link_generation_moves(|| {
+        let read_folder = &read_folder;
+        let attempt = attempt();
+        async move {
+            let (folder, outcome) = attempt.await;
+            if let Ok(mut last) = read_folder.lock() {
+                *last = folder;
+            }
+            outcome
+        }
+    })
+    .await;
+    (read_folder.into_inner().ok().flatten(), outcome)
+}
+
 /// One connection's subscription seed: the newest event its seedless peers
 /// subscribe from, plus the peers still waiting for their one commit attempt.
 ///
@@ -2539,33 +2575,22 @@ where
     /// Live events, the probe after a live insert, and audits all acquire
     /// through this method. An attempt is retried only while the stored
     /// Encrypted Link generation moves under it, see
-    /// [`retry_while_link_generation_moves`]. The folder is `None` when the
-    /// last attempt found the peer pending an Encrypted Link Handshake, found
-    /// no snapshot, failed before deriving the slot, or derived a slot whose
-    /// path does not have the derived Encrypted Link folder shape (a
-    /// successful acquisition then leaves the peer unfiltered).
+    /// [`retry_while_link_generation_moves`], and only the last attempt's
+    /// folder is reported, see [`retry_scoped_while_link_generation_moves`].
+    /// The folder is `None` when the last attempt found the peer pending an
+    /// Encrypted Link Handshake, found no snapshot, failed before deriving the
+    /// slot, or derived a slot whose path does not have the derived Encrypted
+    /// Link folder shape (a successful acquisition then leaves the peer
+    /// unfiltered).
     async fn acquire_expected_private_packet(
         &self,
         counterparty: PubkyPublicKey,
         cursor: Option<PrivateIntakeCursorRecord>,
     ) -> (Option<String>, Result<PrivatePacketAcquisition>) {
-        // A retried attempt's folder came from a superseded snapshot, so only
-        // the last attempt's folder is reported. Never held across `.await`.
-        let read_folder = std::sync::Mutex::new(None);
-        let outcome = retry_while_link_generation_moves(|| {
-            let read_folder = &read_folder;
-            let attempt =
-                self.acquire_expected_private_packet_once(counterparty.clone(), cursor.clone());
-            async move {
-                let (folder, outcome) = attempt.await;
-                if let Ok(mut last) = read_folder.lock() {
-                    *last = folder;
-                }
-                outcome
-            }
+        retry_scoped_while_link_generation_moves(|| {
+            self.acquire_expected_private_packet_once(counterparty.clone(), cursor.clone())
         })
-        .await;
-        (read_folder.into_inner().ok().flatten(), outcome)
+        .await
     }
 
     /// One acquisition attempt; it reads the link state and buffered intake
@@ -6567,6 +6592,199 @@ mod tests {
         assert_eq!(attempts, 1);
     }
 
+    /// One scripted scoped acquisition attempt: its read folder and result.
+    type ScopedAttemptResult = (
+        Option<String>,
+        std::result::Result<PrivatePacketAcquisition, LinkAttemptError>,
+    );
+
+    /// A derived Encrypted Link read folder whose hex is `byte` repeated.
+    fn link_folder(byte: u8) -> String {
+        let folder = format!(
+            "{}/{}",
+            paykit_lib::PAYKIT_PRIVATE_PATH_PREFIX,
+            format!("{byte:02x}").repeat(32)
+        );
+        assert!(is_private_intake_link_folder(&folder));
+        folder
+    }
+
+    /// Runs [`retry_scoped_while_link_generation_moves`] over scripted
+    /// attempt results, returning its result and the number of attempts.
+    async fn run_scoped_generation_retry(
+        results: Vec<ScopedAttemptResult>,
+    ) -> ((Option<String>, Result<PrivatePacketAcquisition>), usize) {
+        let results = StdMutex::new(VecDeque::from(results));
+        let attempts = AtomicUsize::new(0);
+        let result = retry_scoped_while_link_generation_moves(|| {
+            attempts.fetch_add(1, Ordering::SeqCst);
+            let result = results
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("unexpected attempt");
+            async move { result }
+        })
+        .await;
+        (result, attempts.load(Ordering::SeqCst))
+    }
+
+    /// A scoped acquisition that retries scripted attempt results through
+    /// [`retry_scoped_while_link_generation_moves`], as
+    /// `acquire_expected_private_packet` does, and refreshes `scopes`.
+    fn scripted_scoped_retry_acquire(
+        scopes: Arc<StdMutex<PrivateIntakeEventScopes>>,
+        results: Vec<ScopedAttemptResult>,
+    ) -> PrivateIntakeAcquire {
+        let results = Arc::new(StdMutex::new(VecDeque::from(results)));
+        scoped_private_intake_acquire(scopes, move |_, _| {
+            let results = Arc::clone(&results);
+            Box::pin(retry_scoped_while_link_generation_moves(move || {
+                let result = results
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .expect("unexpected attempt");
+                async move { result }
+            }))
+        })
+    }
+
+    #[tokio::test]
+    async fn test_scoped_generation_retry_reports_last_attempt_folder() {
+        let ((folder, result), attempts) = run_scoped_generation_retry(vec![
+            (Some(link_folder(0xa0)), Err(buffered_generation_moved())),
+            (
+                Some(link_folder(0xb0)),
+                Ok(PrivatePacketAcquisition::Absent),
+            ),
+        ])
+        .await;
+
+        assert_eq!(folder, Some(link_folder(0xb0)));
+        assert!(matches!(result, Ok(PrivatePacketAcquisition::Absent)));
+        assert_eq!(attempts, 2);
+    }
+
+    #[tokio::test]
+    async fn test_scoped_generation_retry_pending_handshake_after_move_removes_read_folder() {
+        let script = || {
+            vec![
+                (Some(link_folder(0xa0)), Err(buffered_generation_moved())),
+                (None, Ok(PrivatePacketAcquisition::PendingHandshake)),
+            ]
+        };
+
+        let ((folder, result), attempts) = run_scoped_generation_retry(script()).await;
+        assert_eq!(folder, None, "the superseded attempt's folder is dropped");
+        assert!(matches!(
+            result,
+            Ok(PrivatePacketAcquisition::PendingHandshake)
+        ));
+        assert_eq!(attempts, 2);
+
+        let peer = users(1).remove(0);
+        let scopes = Arc::new(StdMutex::new(PrivateIntakeEventScopes {
+            read_folders: HashMap::from([(peer.clone(), link_folder(0xc0))]),
+        }));
+        let acquire = scripted_scoped_retry_acquire(Arc::clone(&scopes), script());
+
+        let outcome = acquire(peer.clone(), None).await;
+
+        assert!(matches!(
+            outcome,
+            Ok(PrivatePacketAcquisition::PendingHandshake)
+        ));
+        assert!(!scopes.lock().unwrap().read_folders.contains_key(&peer));
+    }
+
+    #[tokio::test]
+    async fn test_scoped_generation_retry_failure_after_move_keeps_read_folder() {
+        let script = || {
+            vec![
+                (Some(link_folder(0xa0)), Err(buffered_generation_moved())),
+                (None, Err(LinkAttemptError::Failed(recovery_required()))),
+            ]
+        };
+
+        let ((folder, result), attempts) = run_scoped_generation_retry(script()).await;
+        assert_eq!(folder, None, "the superseded attempt's folder is dropped");
+        assert!(matches!(
+            result,
+            Err(PaykitSdkError::RecoveryRequired { .. })
+        ));
+        assert_eq!(attempts, 2);
+
+        let peer = users(1).remove(0);
+        let previous = link_folder(0xc0);
+        let scopes = Arc::new(StdMutex::new(PrivateIntakeEventScopes {
+            read_folders: HashMap::from([(peer.clone(), previous.clone())]),
+        }));
+        let acquire = scripted_scoped_retry_acquire(Arc::clone(&scopes), script());
+
+        assert!(acquire(peer.clone(), None).await.is_err());
+
+        // The previous folder survives, not the superseded attempt's.
+        assert_eq!(
+            scopes.lock().unwrap().read_folders.get(&peer),
+            Some(&previous)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_scoped_generation_retry_reports_last_folder_at_bound() {
+        let folders: Vec<_> = (0..LINK_GENERATION_RETRY_ATTEMPTS)
+            .map(|attempt| link_folder(u8::try_from(attempt).unwrap()))
+            .collect();
+        let mut results: Vec<ScopedAttemptResult> = folders[..LINK_GENERATION_RETRY_ATTEMPTS - 1]
+            .iter()
+            .map(|folder| (Some(folder.clone()), Err(buffered_generation_moved())))
+            .collect();
+        results.push((
+            folders.last().cloned(),
+            Err(LinkAttemptError::GenerationMoved(PaykitSdkError::Storage {
+                context: crate::storage::PRIVATE_INTAKE_PACKET_GENERATION_MISMATCH.into(),
+                source: None,
+            })),
+        ));
+
+        let ((folder, result), attempts) = run_scoped_generation_retry(results).await;
+
+        assert_eq!(folder.as_ref(), folders.last());
+        assert!(
+            matches!(
+                &result,
+                Err(PaykitSdkError::Storage { context, .. })
+                    if context == crate::storage::PRIVATE_INTAKE_PACKET_GENERATION_MISMATCH
+            ),
+            "the last attempt's mismatch error must be returned"
+        );
+        assert_eq!(attempts, LINK_GENERATION_RETRY_ATTEMPTS);
+    }
+
+    #[tokio::test]
+    async fn test_scoped_generation_retry_returns_plain_error_folder_after_one_attempt() {
+        let ((folder, result), attempts) = run_scoped_generation_retry(vec![
+            (
+                Some(link_folder(0xa0)),
+                Err(LinkAttemptError::Failed(recovery_required())),
+            ),
+            // Left unused: a plain error is not retried.
+            (
+                Some(link_folder(0xb0)),
+                Ok(PrivatePacketAcquisition::Absent),
+            ),
+        ])
+        .await;
+
+        assert_eq!(folder, Some(link_folder(0xa0)));
+        assert!(matches!(
+            result,
+            Err(PaykitSdkError::RecoveryRequired { .. })
+        ));
+        assert_eq!(attempts, 1, "only a generation move is retried");
+    }
+
     #[tokio::test]
     async fn test_expected_slot_fetch_derives_exact_resource_and_atomically_buffers_cursor() {
         let storage = crate::storage::InMemoryStorage::new();
@@ -8572,6 +8790,62 @@ mod tests {
         assert_eq!(
             storage.inner.snapshot().unwrap().private_intake_cursors[&peer],
             seed
+        );
+    }
+
+    #[tokio::test]
+    async fn test_private_intake_group_audit_commits_seed_only_for_absent_peer() {
+        let storage = crate::storage::InMemoryStorage::new();
+        let peers = users(2);
+        let (absent, buffered) = (peers[0].clone(), peers[1].clone());
+        let group = SubscriptionGroup {
+            homeserver: pubky::Keypair::random().public_key(),
+            homeserver_name: "homeserver-a".into(),
+            peers: peers.clone(),
+        };
+        let seeds = PrivateIntakeSeeds {
+            homeserver_name: "homeserver-a".into(),
+            event_id: 42,
+            pending: StdMutex::new(HashSet::from([absent.clone(), buffered.clone()])),
+        };
+        let acquire: PrivateIntakeAcquire = Arc::new({
+            let absent = absent.clone();
+            move |requested, _| {
+                let outcome = if requested == absent {
+                    PrivatePacketAcquisition::Absent
+                } else {
+                    PrivatePacketAcquisition::AlreadyBuffered
+                };
+                Box::pin(async move { Ok(outcome) })
+            }
+        });
+        let health = Arc::new(AsyncRwLock::new(PrivateIntakeHealth::default()));
+
+        let outcome = audit_private_intake_group(
+            &storage,
+            &MutableClock::new(Utc::now()),
+            &group,
+            &health,
+            &Arc::new(Notify::new()),
+            &acquire,
+            Some(&seeds),
+        )
+        .await;
+
+        assert_eq!(outcome.absent_slot_peers, HashSet::from([absent.clone()]));
+        // Only the absent peer's seed is committed and used up.
+        let cursors = storage.snapshot().unwrap().private_intake_cursors;
+        assert_eq!(cursors.len(), 1);
+        assert_eq!(cursors[&absent], intake_seed(&absent, "homeserver-a", 42));
+        assert_eq!(
+            *seeds.pending.lock().unwrap(),
+            HashSet::from([buffered.clone()])
+        );
+        let health = health.read().await;
+        assert_eq!(health.peers[&absent], PrivateIntakeTransportState::CaughtUp);
+        assert_ne!(
+            health.peers.get(&buffered),
+            Some(&PrivateIntakeTransportState::CaughtUp)
         );
     }
 }
