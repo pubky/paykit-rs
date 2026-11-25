@@ -118,7 +118,13 @@ pub(super) async fn follow_loss(app: &mut Paykit) -> u64 {
     for _ in 1..pages.div_ceil(pubky_switch_client::app::LISTING_PAGES_PER_READ as usize) {
         let Err(error) = &reconciled else { break };
         assert!(
-            matches!(error.refusal(), Some(paykit_sdk::Refusal::NotNow(why)) if why.contains("shared records aren't listed")),
+            matches!(
+                error.refusal(),
+                Some(paykit_sdk::Refusal::NotNow(
+                    paykit_sdk::NotNowReason::RecordsUnlisted { .. }
+                        | paykit_sdk::NotNowReason::RecordsNotListed
+                ))
+            ),
             "{error}"
         );
         reconciled = app.reconcile().await;
@@ -379,6 +385,19 @@ async fn test_provider_loss_activity_with_another_write_at_its_version_survives_
         .unwrap()
         .iter()
         .any(|r| r.record == key && r.paused));
+    // Confirming the record the refusal shows ends its pause (Paykit spec 6). The request
+    // was payable before the loss and isn't SETTLED at the new service, so a payment by hand
+    // still waits on that doubt (Paykit spec 7.3): nothing is paid.
+    let (doubt, passed) = pay_until_the_loss_doubt(&mut wallet, &request).await;
+    assert_eq!(passed, [Passed::Divergent]);
+    in_doubt_of_the_loss(&mut wallet, &request, &doubt).await;
+    assert!(wallet
+        .divergent_records()
+        .await
+        .unwrap()
+        .iter()
+        .all(|r| r.record != key || !r.paused));
+    assert_eq!(executions(&w), 0);
 }
 
 #[tokio::test]
@@ -656,6 +675,26 @@ async fn test_provider_loss_restore_first_reads_the_current_activity() {
         .iter()
         .any(|r| r.record == key && r.paused));
     assert_eq!(executions(&w), 0);
+    // The user answers the restore's question, confirms the restore's hold and what the
+    // paused record shows (Switch spec 12.4; Paykit spec 6). A payment by hand then still
+    // waits on the loss's doubt (Paykit spec 7.3): nothing is paid.
+    let (doubt, passed) = pay_until_the_loss_doubt(&mut wallet, &request).await;
+    assert_eq!(
+        passed,
+        [
+            Passed::RestoreQuestion,
+            Passed::Divergent,
+            Passed::RestoreHold
+        ]
+    );
+    in_doubt_of_the_loss(&mut wallet, &request, &doubt).await;
+    assert!(wallet
+        .divergent_records()
+        .await
+        .unwrap()
+        .iter()
+        .all(|r| r.record != key || !r.paused));
+    assert_eq!(executions(&w), 0);
 }
 
 #[tokio::test]
@@ -863,6 +902,141 @@ async fn test_provider_loss_disputed_request_keeps_its_known_payers_proof() {
         .await
         .unwrap()
         .is_empty());
+    // The user's way forward for the credit: the proof predates the loss, so a plain credit
+    // asks the user first. With the user's consent, the credit is still refused once: its
+    // refusal shows the record for a credit, which the confirmations from the list didn't
+    // cover. Confirming exactly that lets it go, once (Paykit spec 6, 8.1 step 4). Nothing
+    // is receipted before.
+    assert!(matches!(
+        shop.confirm_payment(&key).await.unwrap_err().refusal(),
+        Some(Refusal::MaybeCredited)
+    ));
+    assert_eq!(
+        sale_status(&shop, &key).await,
+        paykit_sdk::PayeeStatus::ProofReceived
+    );
+    let (receipt, refused_divergent) = credit_as_a_host(&mut shop, &key).await;
+    assert_eq!(refused_divergent, 1);
+    assert_eq!(
+        sale_status(&shop, &key).await,
+        paykit_sdk::PayeeStatus::Receipted
+    );
+    assert_eq!(executions(&w), 1);
+    let again = shop
+        .confirm_payment_with(
+            &key,
+            paykit_sdk::ReceiptDetails::default()
+                .with_maybe_credited_confirmed(UserConfirmed::new()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(again, Some(receipt));
+}
+
+/// Credit `key` as a host does after a provider loss: with the user's consent that the
+/// payment may be credited already, confirming each divergent refusal as it shows its
+/// records, and reading again until their kept writes are written. Returns the receipt and
+/// how many divergent refusals, each shown for a credit, the credit went through.
+async fn credit_as_a_host(app: &mut Paykit, key: &[u8; 32]) -> (String, usize) {
+    let mut refused_divergent = 0;
+    for _ in 0..4 {
+        let consent = paykit_sdk::ReceiptDetails::default()
+            .with_maybe_credited_confirmed(UserConfirmed::new());
+        match app.confirm_payment_with(key, consent).await {
+            Ok(Some(receipt)) => return (receipt, refused_divergent),
+            Ok(None) => panic!("no receipt for the credit"),
+            Err(refused) if matches!(refused.refusal(), Some(Refusal::Divergent { .. })) => {
+                assert!(
+                    crate::divergent::shown_for_a_credit(&refused),
+                    "{refused:?}"
+                );
+                refused_divergent += 1;
+                crate::divergent::confirm_refused(app, &refused).await;
+                app.receive(None).await.unwrap();
+            }
+            Err(other) => panic!("{other:?}"),
+        }
+    }
+    panic!("the credit never went");
+}
+
+/// `doubt` is the doubt of the loss `app` followed, of `request`'s obligation, which the
+/// request reads as and `app` lists (Paykit spec 7.3).
+async fn in_doubt_of_the_loss(
+    app: &mut Paykit,
+    request: &paykit_sdk::RequestRef,
+    doubt: &PaymentDoubt,
+) {
+    assert_eq!(doubt.before_loss, Some(kept_loss(app).await));
+    assert_eq!(status(app, request).await, RequestStatus::MayBePaid);
+    assert!(loss_doubts(app)
+        .await
+        .iter()
+        .any(|d| d.request_hash == Some(request.request_hash) && d.obligation == doubt.obligation));
+}
+
+/// What a payment by hand passed through on its way to the loss's doubt, in order.
+#[derive(Debug, PartialEq, Eq)]
+enum Passed {
+    /// A divergent refusal, its records confirmed.
+    Divergent,
+    /// A restore's hold, handed back.
+    RestoreHold,
+    /// The restore's question, answered, and its reconciliation ended.
+    RestoreQuestion,
+}
+
+/// Pay `request` by hand as a host does after a provider loss, through each refusal the
+/// user is shown and decides on: it confirms what a divergent refusal shows and reads again,
+/// hands back the hold a restore set, and answers the restore's question. It stops at the
+/// loss's own doubt (Paykit spec 7.3): whatever the user confirmed before, the payment
+/// doesn't go while the obligation may have been paid before the loss. Returns that doubt and
+/// what the payment passed through, in order.
+async fn pay_until_the_loss_doubt(
+    app: &mut Paykit,
+    request: &paykit_sdk::RequestRef,
+) -> (PaymentDoubt, Vec<Passed>) {
+    use pubky_switch_client::app::Refusal as ClientRefusal;
+    let mut options = PayOptions::default();
+    let mut passed = Vec::new();
+    for _ in 0..8 {
+        let refused = match app.pay_request(request, options.clone()).await.outcome {
+            Ok(paid) => panic!("paid while the loss leaves it in doubt: {paid:?}"),
+            Err(refused) => refused,
+        };
+        match refused.refusal() {
+            Some(Refusal::Divergent { .. }) => {
+                passed.push(Passed::Divergent);
+                crate::divergent::confirm_refused(app, &refused).await;
+                app.receive(None).await.unwrap();
+            }
+            Some(Refusal::HeldAfterRestore { held }) => {
+                passed.push(Passed::RestoreHold);
+                options = options.with_possibly_cancelled_confirmed((**held).clone());
+            }
+            Some(Refusal::MayBePaid {
+                doubt: Some(doubt), ..
+            }) if doubt.before_loss.is_some() => return ((**doubt).clone(), passed),
+            _ if matches!(
+                refused,
+                PaykitError::Client(pubky_switch_client::app::AppError::Refused(
+                    ClientRefusal::RestoreQuestionOpen
+                ))
+            ) =>
+            {
+                passed.push(Passed::RestoreQuestion);
+                app.app_mut()
+                    .confirm_restored_registrations(UserConfirmed::new())
+                    .await
+                    .unwrap();
+                app.reconcile().await.unwrap();
+                app.end_reconcile(UserConfirmed::new()).await.unwrap();
+                app.receive(None).await.unwrap();
+            }
+            _ => panic!("{refused:?}"),
+        }
+    }
+    panic!("the payment never reached the loss's doubt");
 }
 
 #[tokio::test]
@@ -1087,6 +1261,58 @@ async fn test_provider_loss_credit_uses_the_signed_payer_of_a_disputed_period() 
         confirm_reported_pauses(&mut shop).await;
         // The same period can take another signed set of details after both successors.
         shop.send_period_details(&sale, details).await.unwrap();
+        if same_payer || delete_parent {
+            // The held credit's way forward. Once successors clear the view and the user
+            // confirmed what the list showed, the sale isn't listed at all. The credit goes
+            // through the refusals the host shows and the user confirms, once (Paykit spec 6,
+            // 8.1 step 4).
+            let period_key = shop.app().record_key(&period).unwrap();
+            assert!(shop
+                .divergent_records()
+                .await
+                .unwrap()
+                .iter()
+                .all(|r| r.record != sale && r.record != period_key));
+            assert_eq!(
+                sale_status(&shop, &credit).await,
+                paykit_sdk::PayeeStatus::ProofReceived
+            );
+            let consent = || {
+                paykit_sdk::ReceiptDetails::default()
+                    .with_maybe_credited_confirmed(UserConfirmed::new())
+            };
+            if same_payer {
+                // The same payer's sale still holds it: its refusal names the sale, shown
+                // for a credit. Over a delete, the successor names the other payer and lets
+                // it go at once.
+                let refused = shop
+                    .confirm_payment_with(&credit, consent())
+                    .await
+                    .unwrap_err();
+                assert!(
+                    crate::divergent::shown_for_a_credit(&refused)
+                        && matches!(refused.refusal(), Some(Refusal::Divergent { records }) if records.iter().any(|r| r.record == sale)),
+                    "{refused:?}"
+                );
+            }
+            let receipt = if same_payer {
+                let (receipt, refused_divergent) = credit_as_a_host(&mut shop, &credit).await;
+                assert_eq!(refused_divergent, 1);
+                receipt
+            } else {
+                shop.confirm_payment_with(&credit, consent())
+                    .await
+                    .unwrap()
+                    .expect("the successor names the other payer: the credit goes")
+            };
+            let again = shop.confirm_payment_with(&credit, consent()).await.unwrap();
+            assert_eq!(again, Some(receipt));
+            assert_eq!(
+                sale_status(&shop, &credit).await,
+                paykit_sdk::PayeeStatus::Receipted
+            );
+        }
+        assert_eq!(executions(&w), 1);
     }
 }
 
@@ -1162,54 +1388,76 @@ async fn test_provider_loss_restore_keeps_its_held_answer_over_a_disputed_delete
 }
 
 #[tokio::test]
-async fn test_provider_loss_restore_waits_for_the_parent_before_resending_period_details() {
+async fn test_provider_loss_restore_waits_for_the_parent_before_noting_period_details_possibly_delivered(
+) {
     use crate::periods::{january_details, monthly, queued};
     use paykit_lib::collections::Collection;
     use paykit_sdk::AppScopes;
-    let w = World::new();
-    let scopes = AppScopes::new().request().build().unwrap();
-    let mut shop = w.join(&w.alice, "shop", scopes.clone()).await;
-    let mut phone = w.join(&w.alice, "phone", scopes).await;
-    let mut buyer = w
-        .join(&w.bob, "buyer", AppScopes::new().pay().build().unwrap())
-        .await;
-    buyer.app_mut().invite(&w.alice_id()).await.unwrap();
-    let now = w.clock.now_ms();
-    let subscription = request_from(&mut shop, w.bob_id(), monthly(now, None)).await;
-    buyer.receive(None).await.unwrap();
-    buyer.accept_subscription(&subscription).await.unwrap();
-    shop.receive(None).await.unwrap();
-    let target = activity_target(&subscription, Collection::PayeeActivity);
-    let key = shop.app().record_key(&target).unwrap();
-    let details = january_details(now + crate::common::HOUR_MS);
-    let period = period_target(
-        &subscription,
-        Collection::PayeeActivity,
-        &details.billing_period,
-    );
-    let sent = shop.send_period_details(&key, details).await.unwrap();
-    let backup = shop.backup().await.unwrap();
-    drop(shop);
-    let mut shop = restored(&w, &backup).await;
-    shop.app_mut().read_record(&period).await.unwrap().unwrap();
-    recover_activity_with_phone_write(&w, &mut shop, &mut phone, &target, false).await;
-    follow_loss(&mut shop).await;
-    assert!(shop
-        .app()
-        .protocol_get("paykit", b"ro")
-        .await
-        .unwrap()
-        .is_some());
-    assert!(!queued(&shop, &sent.msg_id).await);
-    accept_activity_successor(&w, &mut shop, &mut phone, &target).await;
-    shop.receive(None).await.unwrap();
-    assert!(crate::common::possibly_delivered(&shop, &sent.msg_id).await);
-    assert!(shop
-        .app()
-        .protocol_get("paykit", b"ro")
-        .await
-        .unwrap()
-        .is_none());
+    // The restore's check of the period details it sent waits while the parent may hold a
+    // stop. Either way out ends the wait, a successor that shows no stop or the user's
+    // confirmation of what the paused parent shows, and the details are then noted possibly
+    // delivered: nothing is queued again without current evidence (Paykit spec 6, 7.2).
+    for by_confirmation in [false, true] {
+        let w = World::new();
+        let scopes = AppScopes::new().request().build().unwrap();
+        let mut shop = w.join(&w.alice, "shop", scopes.clone()).await;
+        let mut phone = w.join(&w.alice, "phone", scopes).await;
+        let mut buyer = w
+            .join(&w.bob, "buyer", AppScopes::new().pay().build().unwrap())
+            .await;
+        buyer.app_mut().invite(&w.alice_id()).await.unwrap();
+        let now = w.clock.now_ms();
+        let subscription = request_from(&mut shop, w.bob_id(), monthly(now, None)).await;
+        buyer.receive(None).await.unwrap();
+        buyer.accept_subscription(&subscription).await.unwrap();
+        shop.receive(None).await.unwrap();
+        let target = activity_target(&subscription, Collection::PayeeActivity);
+        let key = shop.app().record_key(&target).unwrap();
+        let details = january_details(now + crate::common::HOUR_MS);
+        let period = period_target(
+            &subscription,
+            Collection::PayeeActivity,
+            &details.billing_period,
+        );
+        let sent = shop.send_period_details(&key, details).await.unwrap();
+        let backup = shop.backup().await.unwrap();
+        drop(shop);
+        let mut shop = restored(&w, &backup).await;
+        shop.app_mut().read_record(&period).await.unwrap().unwrap();
+        recover_activity_with_phone_write(&w, &mut shop, &mut phone, &target, false).await;
+        follow_loss(&mut shop).await;
+        assert!(shop
+            .app()
+            .protocol_get("paykit", b"ro")
+            .await
+            .unwrap()
+            .is_some());
+        assert!(!queued(&shop, &sent.msg_id).await);
+        assert!(!crate::common::possibly_delivered(&shop, &sent.msg_id).await);
+        if by_confirmation {
+            assert!(shop
+                .divergent_records()
+                .await
+                .unwrap()
+                .iter()
+                .any(|r| r.record == key));
+            confirm_reported_pauses(&mut shop).await;
+        } else {
+            accept_activity_successor(&w, &mut shop, &mut phone, &target).await;
+        }
+        shop.receive(None).await.unwrap();
+        assert!(
+            crate::common::possibly_delivered(&shop, &sent.msg_id).await,
+            "by confirmation: {by_confirmation}"
+        );
+        assert!(!queued(&shop, &sent.msg_id).await);
+        assert!(shop
+            .app()
+            .protocol_get("paykit", b"ro")
+            .await
+            .unwrap()
+            .is_none());
+    }
 }
 
 #[tokio::test]
@@ -1278,7 +1526,8 @@ async fn test_provider_loss_kept_and_stored_details_wait_for_each_disputed_recor
     use crate::periods::{january_details, monthly};
     use pubky_switch_client::testing::Fault;
     use pubky_switch_core::http::ErrorCode;
-    for dispute_parent in [true, false] {
+    for (dispute_parent, confirmed) in [(true, false), (false, false), (true, true), (false, true)]
+    {
         let w = World::new();
         let mut wallet = w.wallet("wallet").await;
         let mut phone = w.wallet("phone").await;
@@ -1359,6 +1608,36 @@ async fn test_provider_loss_kept_and_stored_details_wait_for_each_disputed_recor
             .await
             .unwrap()
             .is_empty());
+        if confirmed {
+            // The user's way forward: once the user confirms what the divergent record
+            // shows, the details kept over it are written into the period record.
+            confirm_reported_pauses(&mut wallet).await;
+            wallet.receive(None).await.unwrap();
+            let held = wallet
+                .app_mut()
+                .read_record(&period)
+                .await
+                .unwrap()
+                .unwrap();
+            let stored = paykit_lib::records::ActivityRecord::read(
+                held.content.value().unwrap(),
+                &w.alice_id(),
+                paykit_lib::records::ActivitySide::Payer,
+            )
+            .unwrap();
+            let stored: Vec<String> = stored
+                .details()
+                .iter()
+                .map(|details| details.message().msg_id.clone())
+                .collect();
+            for msg_id in [&parked, &id] {
+                assert!(
+                    stored.contains(msg_id),
+                    "parent={dispute_parent}: the details are written once confirmed: {stored:?}"
+                );
+            }
+            continue;
+        }
         // The January record no longer takes these details. While its write is
         // disputed the original entries still have to be given up with their IDs.
         w.clock.advance_ms(paykit_sdk::KEPT_MESSAGE_MS);
@@ -1784,6 +2063,17 @@ fn shown_generation(doubt: &PaymentDoubt) -> u64 {
     doubt.before_loss.unwrap().generation()
 }
 
+/// The status of the payee activity record `record` that `shop` shows.
+async fn sale_status(shop: &Paykit, record: &[u8; 32]) -> paykit_sdk::PayeeStatus {
+    shop.payee_activity()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|sale| sale.record == *record)
+        .expect("the shop shows the sale")
+        .status
+}
+
 /// Every payment the method carried out, repeats included.
 fn executions(w: &World) -> u64 {
     w.rail.all_executions().values().sum()
@@ -2125,6 +2415,156 @@ async fn test_provider_loss_confirm_not_paid_before_loss_clears_that_obligation_
 }
 
 #[tokio::test]
+async fn test_provider_loss_consent_to_one_attempt_pays_it_once_and_states_nothing() {
+    // Paykit spec 7.3, "Consent to one attempt": shown that the request may already have
+    // been paid before the loss, the user consents to one attempt. It is made once. The
+    // consent states nothing: no statement is kept, and the doubt ends only because the
+    // claim at the new service is SETTLED. The same consent pays nothing more.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    w.clock.advance_ms(60_000);
+    declare_loss(&w);
+    follow_loss(&mut wallet).await;
+    let doubt = doubt_of(
+        &wallet
+            .pay_request(&request, PayOptions::default())
+            .await
+            .outcome,
+    );
+    in_doubt_of_the_loss(&mut wallet, &request, &doubt).await;
+    assert_eq!(executions(&w), 0);
+    let paid = wallet
+        .pay_request(
+            &request,
+            PayOptions::default().with_may_be_paid_confirmed(doubt.clone()),
+        )
+        .await
+        .outcome
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    assert_eq!(executions(&w), 1);
+    assert!(wallet
+        .app()
+        .protocol_scan("paykit", b"pn/")
+        .await
+        .unwrap()
+        .is_empty());
+    let claim = wallet
+        .app_mut()
+        .read_claim(&doubt.obligation)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(claim.view.status, ClaimStatus::Settled);
+    assert_eq!(status(&wallet, &request).await, RequestStatus::Paid);
+    let again = wallet
+        .pay_request(
+            &request,
+            PayOptions::default().with_may_be_paid_confirmed(doubt),
+        )
+        .await
+        .outcome;
+    assert!(
+        matches!(
+            again.as_ref().err().and_then(PaykitError::refusal),
+            Some(Refusal::AlreadyPaid)
+        ),
+        "{again:?}"
+    );
+    assert_eq!(executions(&w), 1);
+}
+
+#[tokio::test]
+async fn test_provider_loss_nothing_the_user_states_releases_an_automatic_payment() {
+    // Paykit spec 7.3: whatever the user confirms or states, an obligation from before the
+    // loss is never paid automatically: the shared post-loss hold refuses it (Paykit spec
+    // 8.1). A payment the method made before the loss, its answer lost, is resolved from the
+    // method's history and not paid again. The user's statement that a request wasn't paid
+    // before the loss lets a payment by hand of it go as any other.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    let in_flight = request_from(&mut shop, w.alice_id(), draft("2", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    // Before the loss, the method is called for the second request and its answer is lost;
+    // the method's history knows it was paid.
+    w.rail.set_idempotent(true);
+    w.rail.next(Behaviour::LoseAnswer);
+    let lost = wallet
+        .pay_request(&in_flight, PayOptions::default())
+        .await
+        .outcome
+        .unwrap();
+    assert!(!matches!(lost, PayOutcome::Paid { .. }), "{lost:?}");
+    assert_eq!(executions(&w), 1);
+    w.clock.advance_ms(60_000);
+    declare_loss(&w);
+    follow_loss(&mut wallet).await;
+    let doubt = doubt_of(
+        &wallet
+            .pay_request(&request, PayOptions::default())
+            .await
+            .outcome,
+    );
+    // Before any statement, the shared post-loss hold refuses an automatic payment.
+    let refused = wallet
+        .pay_request_automatically(&request, PayOptions::default())
+        .await
+        .outcome;
+    assert!(held_after_loss(&refused), "{refused:?}");
+    wallet
+        .confirm_not_paid_before_loss(
+            &doubt.obligation,
+            &doubt.before_loss.unwrap(),
+            UserConfirmed::new(),
+        )
+        .await
+        .unwrap();
+    // The statement is kept for that request alone, which reads open again.
+    assert_eq!(
+        wallet
+            .app()
+            .protocol_scan("paykit", b"pn/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(status(&wallet, &request).await, RequestStatus::Open);
+    for options in [
+        PayOptions::default(),
+        PayOptions::default().with_may_be_paid_confirmed(doubt.clone()),
+    ] {
+        let refused = wallet
+            .pay_request_automatically(&request, options)
+            .await
+            .outcome;
+        assert!(held_after_loss(&refused), "{refused:?}");
+    }
+    // The payment from before the loss is resolved from the method's history: nothing is paid
+    // again.
+    let resumed = wallet.resume_payments().await.unwrap();
+    assert!(
+        !resumed
+            .iter()
+            .any(|outcome| matches!(outcome, PayOutcome::Paid { .. })),
+        "{resumed:?}"
+    );
+    assert_eq!(executions(&w), 1);
+    let paid = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .outcome
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    assert_eq!(executions(&w), 2);
+}
+
+#[tokio::test]
 async fn test_provider_loss_settled_claim_at_the_new_service_ends_the_doubt() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
@@ -2354,7 +2794,7 @@ async fn test_provider_loss_confirm_not_paid_before_loss_refused_without_a_loss_
         .await
         .unwrap_err();
     assert!(
-        matches!(refused.refusal(), Some(Refusal::NotNow(_))),
+        matches!(refused.refusal(), Some(Refusal::Usage(_))),
         "{refused:?}"
     );
     assert!(wallet
@@ -4250,7 +4690,7 @@ async fn test_provider_loss_unblock_at_the_upload_step_waits_for_the_list_step()
         loss_interrupted_at_upload(&w, AppScopes::new().pay().manage_contacts(), true).await;
     let refused = wallet.unblock(&w.bob_id()).await.unwrap_err();
     assert!(
-        matches!(refused.refusal(), Some(Refusal::NotNow(why)) if why.contains("after the next receive")),
+        matches!(refused.refusal(), Some(Refusal::NotNow(paykit_sdk::NotNowReason::ReadAgain(why))) if why.contains("after the next receive")),
         "{refused:?}"
     );
     let (copy, _) = deny_copy(&wallet).await;

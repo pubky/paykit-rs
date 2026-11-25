@@ -548,7 +548,9 @@ async fn test_publication_expired_original_batch_still_waits_at_the_same_counter
     assert!(
         matches!(
             result.as_ref().err().and_then(|e| e.refusal()),
-            Some(paykit_sdk::Refusal::NotNow(_))
+            Some(paykit_sdk::Refusal::HeldForUser(
+                paykit_sdk::HeldForUserReason::Unresolved(_)
+            ))
         ),
         "{result:?}"
     );
@@ -875,7 +877,7 @@ async fn test_publication_later_provider_refusal_does_not_release_the_lost_origi
     let issue = shop.publish_list_to(recipient).await;
     assert!(
         matches!(issue.as_ref().err().and_then(|e|e.refusal()),
-        Some(paykit_sdk::Refusal::NotNow(reason)) if reason.contains("previous publication")),
+        Some(paykit_sdk::Refusal::HeldForUser(paykit_sdk::HeldForUserReason::Unresolved(reason))) if reason.contains("previous publication")),
         "{issue:?}"
     );
     let current = shop
@@ -941,7 +943,7 @@ async fn test_publication_older_in_place_restore_retains_the_later_unresolved_re
     shop.set_list_endpoints(offered("lno1other")).await.unwrap();
     let held = shop.publish_list_to(recipient).await.unwrap_err();
     assert!(
-        matches!(held.refusal(), Some(Refusal::NotNow(reason)) if reason.contains("previous publication")),
+        matches!(held.refusal(), Some(Refusal::HeldForUser(paykit_sdk::HeldForUserReason::Unresolved(reason))) if reason.contains("previous publication")),
         "{held}"
     );
     assert_eq!(w.record_writes(&w.bob, &first), 1);
@@ -1073,7 +1075,7 @@ async fn test_publication_restored_pending_batch_needs_its_matching_applied_writ
         .unwrap();
     let no_outcome = elsewhere.publish_list_to(recipient).await.unwrap_err();
     assert!(
-        matches!(no_outcome.refusal(),Some(Refusal::NotNow(reason)) if reason.contains("previous publication")),
+        matches!(no_outcome.refusal(),Some(Refusal::HeldForUser(paykit_sdk::HeldForUserReason::Unresolved(reason))) if reason.contains("previous publication")),
         "{no_outcome}"
     );
     drop(elsewhere);
@@ -2826,7 +2828,7 @@ async fn test_publication_keeps_an_unknown_withdrawal_and_a_failed_resend_from_a
         shop.publish_list_to(payer).await.unwrap();
         if !accepted {
             w.alice.switch().fail_next(Fault::LoseAnswer {
-                path: "inbox".into(),
+                path: "/inbox".into(),
             });
         }
         shop.withdraw_list_from(payer).await.unwrap();
@@ -2878,7 +2880,7 @@ async fn unknown_list(
 ) -> (ListPublicationRecord, [u8; 32]) {
     use pubky_switch_client::testing::Fault;
     w.alice.switch().fail_next(Fault::Unanswered {
-        path: "inbox".into(),
+        path: "/inbox".into(),
         after: 0,
     });
     send(shop).await;
@@ -3240,7 +3242,12 @@ async fn test_publication_keeps_a_confirmation_until_a_receive_sends_its_list() 
         .await
         .unwrap_err();
     assert!(
-        matches!(refused.refusal(), Some(Refusal::NotNow(_))),
+        matches!(
+            refused.refusal(),
+            Some(Refusal::HeldForUser(
+                paykit_sdk::HeldForUserReason::CounterpartyBlocked(_)
+            ))
+        ),
         "{refused:?}"
     );
     assert_eq!(w.record_writes(&w.bob, &key), 1);
@@ -3365,7 +3372,7 @@ async fn test_publication_notice_of_a_version_superseded_while_its_batch_waited_
     shop.app_mut().invite(&payer).await.unwrap();
     shop.set_list_endpoints(offered("lno1first")).await.unwrap();
     w.alice.switch().fail_next(Fault::Unanswered {
-        path: "inbox".into(),
+        path: "/inbox".into(),
         after: 0,
     });
     shop.publish_list_to(payer).await.unwrap();
@@ -3556,7 +3563,7 @@ async fn test_publication_takes_only_a_proof_naming_its_own_unknown_list_as_its_
     shop.receive(None).await.unwrap();
     shop.set_list_endpoints(offered("lno1first")).await.unwrap();
     w.alice.switch().fail_next(Fault::LoseAnswer {
-        path: "inbox".into(),
+        path: "/inbox".into(),
     });
     shop.publish_list_to(payer).await.unwrap();
     let key = shop.app().record_key(&target(&shop, &payer, 1)).unwrap();
@@ -3651,7 +3658,7 @@ async fn test_publication_takes_a_proof_paid_from_the_unknown_list_as_its_arriva
     // The inbox takes the list but its answer is lost: the payer holds it, and the shop
     // can't tell.
     w.alice.switch().fail_next(Fault::LoseAnswer {
-        path: "inbox".into(),
+        path: "/inbox".into(),
     });
     shop.publish_list_to(payer).await.unwrap();
     let key = shop.app().record_key(&target(&shop, &payer, 1)).unwrap();
@@ -3689,7 +3696,7 @@ async fn test_publication_takes_a_list_request_naming_the_unknown_withdrawal_as_
     shop.publish_list_to(payer).await.unwrap();
     // The inbox takes the withdrawal but its answer is lost: the payer holds it.
     w.alice.switch().fail_next(Fault::LoseAnswer {
-        path: "inbox".into(),
+        path: "/inbox".into(),
     });
     shop.withdraw_list_from(payer).await.unwrap();
     let key = shop.app().record_key(&target(&shop, &payer, 1)).unwrap();
@@ -4095,7 +4102,12 @@ async fn confirmed_while_blocked(
         .await
         .unwrap_err();
     assert!(
-        matches!(refused.refusal(), Some(Refusal::NotNow(_))),
+        matches!(
+            refused.refusal(),
+            Some(Refusal::HeldForUser(
+                paykit_sdk::HeldForUserReason::CounterpartyBlocked(_)
+            ))
+        ),
         "{refused:?}"
     );
     assert_eq!(shop.lists_waiting_to_send_again().await.unwrap(), [payer]);
@@ -4151,4 +4163,30 @@ async fn test_publication_waiting_confirmation_stays_after_the_earlier_list_expi
     shop.receive(None).await.unwrap();
     assert_eq!(w.record_writes(&w.bob, &key), 2);
     assert!(shop.lists_waiting_to_send_again().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_publication_to_the_own_identity_is_a_usage_error() {
+    // A publishing app chooses a counterparty: its own identity is not one, which the
+    // caller fixes, and nothing waits for it (Paykit spec 8.4).
+    let w = World::new();
+    let mut shop = w.shop().await;
+    shop.set_list_endpoints(offered("lno1own")).await.unwrap();
+    let refused = shop.publish_list_to(w.bob_id()).await.unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(paykit_sdk::Refusal::Usage(_))),
+        "{refused:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_publication_without_the_request_scope_names_the_scope() {
+    // Only an app holding `paykit_request` publishes a list (Paykit spec 8.4).
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let refused = wallet.publish_list_to(w.bob_id()).await.unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(paykit_sdk::Refusal::ScopeMissing(scope)) if scope == "paykit_request"),
+        "{refused:?}"
+    );
 }

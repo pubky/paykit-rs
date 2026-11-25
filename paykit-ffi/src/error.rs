@@ -170,8 +170,9 @@ impl WalletFailure {
     pub fn settlement_bucket(&self) -> Option<u16> {
         self.settlement_bucket
     }
-    /// For `settlement_warning_unsaved`, what became of the bucket's warning in the store:
-    /// not saved, or saved or not, unknown. `None` for every other code.
+    /// For `settlement_warning_unsaved`, what this call did to the bucket's warning in the
+    /// store: wrote none, or can't tell the outcome of its lookup or its write. `None` for
+    /// every other code.
     pub fn settlement_warning_outcome(&self) -> Option<SettlementWarningOutcome> {
         self.settlement_warning
     }
@@ -333,13 +334,18 @@ pub(crate) fn refusal_category(kind: &crate::RefusalKind) -> (Category, &'static
         K::FloorHeld => (NeedsUser, "floor_held"),
         // Confirmed with `confirm_allowance_executor` once the user has seen the Allowance.
         K::AllowanceConfirmationNeeded { .. } => (NeedsUser, "allowance_confirmation_needed"),
-        // The SDK gives its reason as text only, and the reasons span every case, from a wait
-        // to an alarm: shown to the user, it is never retried by itself.
-        K::NotNow => (NeedsUser, "not_now"),
+        // The user answers first, or is shown a hold on one record; every reason of this
+        // refusal comes as `NeedsUser`.
+        K::HeldForUser { reason } => (NeedsUser, held_for_user_code(reason)),
+        // A wait: every reason of this refusal comes as `RetryLater`.
+        K::NotNow { reason } => (RetryLater, not_now_code(reason)),
+        // A recovery step of the wallet as a whole: every reason comes as `Recovery`.
+        K::RecoveryNeeded { reason } => (Recovery, recovery_code(reason)),
         K::WaitingForList {
             device_clock_behind: false,
         } => (RetryLater, "waiting_for_list"),
-        // The list expired only by the service's time: the device clock is behind it.
+        // The list expired only by the service's time: the device clock is behind it, and the
+        // user is told so (Paykit spec 8.4), even if a newer list clears it later.
         K::WaitingForList {
             device_clock_behind: true,
         } => (NeedsUser, "waiting_for_list_clock_behind"),
@@ -381,8 +387,62 @@ pub(crate) fn refusal_category(kind: &crate::RefusalKind) -> (Category, &'static
     }
 }
 
+/// The stable code of each wait.
+fn not_now_code(reason: &crate::NotNowKind) -> &'static str {
+    use crate::NotNowKind as R;
+    match reason {
+        R::RecordsUnlisted { .. } => "records_unlisted",
+        R::RecordsNotListed => "records_not_listed",
+        R::ScopeKeysAwaited => "scope_keys_awaited",
+        R::ValueAwaitsKey => "value_awaits_key",
+        R::FloorUnreadable => "floor_unreadable",
+        R::FloorRaiseWaiting => "floor_raise_waiting",
+        R::NoServiceTime => "no_service_time",
+        R::ReadAgain => "read_again",
+        R::EarlierWriteUnresolved => "earlier_write_unresolved",
+        R::CallAgain => "call_again",
+        R::AllowanceLimit { .. } => "allowance_limit",
+        R::Unknown => "not_now",
+    }
+}
+
+/// The stable code of each answer the user gives first.
+fn held_for_user_code(reason: &crate::HeldForUserKind) -> &'static str {
+    use crate::HeldForUserKind as R;
+    match reason {
+        R::CounterpartyBlocked => "counterparty_blocked",
+        R::HeldFromAutomatic => "held_from_automatic",
+        R::ActivityBaseChanged => "activity_base_changed",
+        R::CancellationOrderUnknown => "cancellation_order_unknown",
+        R::PublicationConflict => "publication_conflict",
+        R::RecordUnreadable => "record_unreadable",
+        R::FloorRecordUnreadable => "floor_record_unreadable",
+        R::AllowanceNotResumed => "allowance_not_resumed",
+        R::AllowanceNotResumedAfterRestore => "allowance_not_resumed_after_restore",
+        R::AllowanceExecutionHeld => "allowance_execution_held",
+        R::AttemptCheck => "attempt_check",
+        R::ReloadRequired => "reload_required",
+        R::SwitchClient => "switch_client_hold",
+        R::Unresolved => "held_unresolved",
+        R::PendingProposalsFull => "pending_proposals_full",
+        R::AllowanceLedgerFull => "allowance_ledger_full",
+        R::AnswerOutcomeUnknown => "answer_outcome_unknown",
+        R::Unknown => "held_for_user",
+    }
+}
+
+/// The stable code of each recovery step.
+fn recovery_code(reason: &crate::RecoveryNeededKind) -> &'static str {
+    use crate::RecoveryNeededKind as R;
+    match reason {
+        R::PayerPassOwed => "payer_pass_owed",
+        R::Unknown => "recovery_needed",
+    }
+}
+
 /// The action a Switch service's error answer calls for, by the Retry column of Switch spec
-/// 6.4. The code is `switch_` and the wire's error code (Switch wire 7.6).
+/// 6.4. The code is `switch_` and the wire's error code (Switch wire 7.6). Every code carries
+/// its retry rule on the wire, so a code these bindings don't name takes the case of its rule.
 fn service_category(code: pubky_switch_core::http::ErrorCode) -> (Category, String) {
     use pubky_switch_core::http::{ErrorCode as E, Retry as R};
     use Category::*;
@@ -458,7 +518,8 @@ fn quota_category(limit: Option<&str>) -> (Category, String) {
         Some("connect_requests") => (NotSent, "switch_quota_connect_requests"),
         // Final for this obligation: no more attempts fit its claim.
         Some("attempts") => (Permanent, "switch_quota_final"),
-        // A limit these bindings don't know: shown, never retried by itself.
+        // A limit these bindings don't know: shown, never retried by itself, since what frees
+        // a limit differs by limit and only the user can be told which.
         _ => (NeedsUser, "switch_quota_exceeded"),
     };
     (category, code.into())
@@ -479,18 +540,76 @@ fn switch_client_category(e: &pubky_switch_client::error::ClientError) -> (Categ
         // Signed by the service and not verifying: evidence handled as a rollback.
         C::Chain(_) => CHAIN,
         C::DisplayReadPending => (RetryLater, "display_read_pending"),
-        C::Transport(_) => (RetryLater, "transport"),
-        C::BadServiceSignature { .. } => (RetryLater, "bad_service_signature"),
+        C::Transport(transport) => transport_category(transport),
+        // No answer of the service: the request went out and may have taken effect.
+        C::BadServiceSignature { .. } => SENT_UNVERIFIED,
+        // A public read outside its window: a read, so calling again is safe.
         C::StaleAnswer { .. } => (RetryLater, "stale_answer"),
-        C::BodyUnread { .. } => (RetryLater, "body_unread"),
-        C::InvalidResponse(_) => (RetryLater, "invalid_response"),
+        C::BodyUnread { code, .. } => body_unread_category(*code),
+        // The call's own answer, verified, doesn't read: the request went out.
+        C::InvalidResponse(_) => (OutcomeUnknown, "invalid_response"),
         C::BodyOverCap { .. } => (NotSent, "body_over_cap"),
         C::Unpinned => (NotSent, "unpinned"),
         C::Usage(_) => (NotSent, "client_usage"),
-        C::Core(_) => (Permanent, "invalid_data"),
+        // A document of an answer to this call that fails a check of the core: the request
+        // went out and may have taken effect.
+        C::Core(_) => (OutcomeUnknown, "invalid_data"),
         _ => CLIENT_UNCLASSIFIED,
     };
     (category, code.into())
+}
+
+// A failure that comes after the request left the device is `RetryLater` only where calling
+// again is safe whatever the first request did. Some requests the Switch client sends
+// outside a kept batch are safe to repeat only while the first is outstanding: an inbox
+// append the service no longer holds is appended again, and a late connect request can
+// reopen a declined one (Switch wire 7.4.3, 7.4.7). A failure doesn't name the request it
+// came from, so each such failure is `OutcomeUnknown`, bare as well as behind a kept batch.
+
+/// An answer whose response signature doesn't verify, or whose signed headers don't read:
+/// nothing of it was used, its status included, which proves nothing (Switch wire 7.1,
+/// "Response signature"). The request went out and may have taken effect.
+const SENT_UNVERIFIED: (Category, &str) = (Category::OutcomeUnknown, "bad_service_signature");
+
+/// The action and stable code of a failure of the host's transport: one that sent nothing
+/// keeps its cause's code, and one once the request may have gone out is `OutcomeUnknown`.
+fn transport_category(
+    error: &pubky_switch_client::error::TransportError,
+) -> (Category, &'static str) {
+    use pubky_switch_client::error::TransportError as T;
+    use Category::*;
+    match error {
+        // No connection could be made: nothing was sent, so calling again is safe.
+        T::Connect(_) => (RetryLater, "transport"),
+        // The transport has no first-handoff facility: it gives this every time.
+        T::FirstSendUnavailable => (NotSent, "transport_first_send_unavailable"),
+        // A guarded first send passed its deadline and was never released.
+        T::FirstSendExpired => (NotSent, "transport_first_send_expired"),
+        // The transport may not connect to the service's origin: nothing was sent.
+        T::Refused(_) => (NotSent, "transport_refused"),
+        // The transport couldn't build the request.
+        T::InvalidRequest(_) => (NotSent, "transport_invalid_request"),
+        // The call took longer than its timeout, or failed otherwise, once the request may
+        // have gone out.
+        T::Timeout | T::Other(_) => (OutcomeUnknown, "transport_no_answer"),
+        // The request went out and its answer was larger than the transport takes.
+        T::TooLarge(_) => (OutcomeUnknown, "transport_answer_too_large"),
+        T::UnreadableSignedHeader { .. } => SENT_UNVERIFIED,
+        // A cause these bindings don't know: the request may have gone out.
+        _ => CLIENT_UNCLASSIFIED,
+    }
+}
+
+/// An error answer the service gave before it read the request's body: it binds the request
+/// without its body, so it is final for nothing, and the call failed as when no answer comes
+/// (Switch wire 7.1). The client gives it for these three codes only.
+fn body_unread_category(code: pubky_switch_core::http::ErrorCode) -> (Category, &'static str) {
+    use pubky_switch_core::http::ErrorCode as E;
+    match code {
+        E::TooLarge | E::RateLimited | E::NotFound => (Category::OutcomeUnknown, "body_unread"),
+        // A code the client doesn't give here, so unknown to these bindings.
+        _ => CLIENT_UNCLASSIFIED,
+    }
 }
 
 /// The action and stable code of a rule of the Switch client's app layer that refused a call.
@@ -525,9 +644,14 @@ fn client_failure(e: &AppError) -> (Category, WalletFailure) {
         // Reached only behind a kept batch: the commit failed after the batch was kept.
         AppError::Store(_) => failure(OutcomeUnknown, "store_after_kept"),
         AppError::Protocol(_) => failure(OutcomeUnknown, "protocol_store"),
-        AppError::Transport(_) => failure(RetryLater, "transport"),
+        AppError::Transport(transport) => {
+            let (category, code) = transport_category(transport);
+            failure(category, code)
+        }
         AppError::NotAnsweringAsAccount { .. } => failure(RetryLater, "account_not_answering"),
-        AppError::InvalidData(_) => failure(Permanent, "invalid_data"),
+        // Data that doesn't verify, from the store or from an answer to this call, which may
+        // have taken effect: these bindings can't tell which.
+        AppError::InvalidData(_) => failure(OutcomeUnknown, "invalid_data"),
         AppError::Alarm(_) => failure(Recovery, "alarm"),
         AppError::Refused(refusal) => {
             let (category, code) = app_refusal_category(refusal);
@@ -563,6 +687,12 @@ fn client_failure(e: &AppError) -> (Category, WalletFailure) {
     // A batch kept for this call may have applied: reconcile before trying again.
     if failure.kept_batch.is_some() && !matches!(category, Recovery) {
         category = OutcomeUnknown;
+    }
+    // The resend of a batch kept from an earlier call failed first: nothing of this call was
+    // kept or sent, since no write overtakes a kept batch, whatever the resend met. A stop of
+    // the wallet as a whole keeps its case.
+    if matches!(e, AppError::Ahead { .. }) && !matches!(category, Recovery) {
+        category = NotSent;
     }
     (category, failure)
 }
@@ -666,9 +796,12 @@ impl From<PaykitError> for WalletError {
 /// (`settlement_warning_unsaved`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum SettlementWarningOutcome {
-    /// The warning wasn't saved, or its status couldn't be read: nothing of it was applied.
+    /// This call wrote no warning. When it was the lookup of an earlier warning that failed,
+    /// whether one is saved already is unverified: the host shows the bucket's warning if it
+    /// has yet to, either way.
     Failed,
-    /// The store can't tell whether the warning was saved: it may already be.
+    /// The store can't tell the outcome of this call's lookup or write of the warning: it may
+    /// be saved, by this call or an earlier one.
     OutcomeUnknown,
 }
 

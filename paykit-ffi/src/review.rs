@@ -184,9 +184,8 @@ pub enum RefusalKind {
     AllowanceConflicted,
     /// The user must confirm this Allowance again before this app pays under it, after a missed
     /// item, a restore until it is judged clean or the user confirms, or a provider loss, for one
-    /// the user confirmed before the loss. Show the Allowance and,
-    /// once the user confirms, call `confirm_allowance_executor` (Paykit spec 8.3). No Allowance
-    /// payment, resume or confirm call is bound yet, so hosts don't receive it today.
+    /// the user confirmed before the loss. Show the view from `allowance(record)`. Once the
+    /// user confirms it, pass its `hold` to `confirm_allowance_executor` (Paykit spec 8.3).
     AllowanceConfirmationNeeded {
         /// The 32-byte record key of the Allowance to confirm.
         record: Vec<u8>,
@@ -256,8 +255,21 @@ pub enum RefusalKind {
     PaymentInProgress,
     /// The current identity does not authorize this installation or attempt.
     NotCurrent,
-    /// The call doesn't apply now: the text says why.
-    NotNow,
+    /// The call waits: a later call, a read or a wait clears it, as `reason` names.
+    NotNow {
+        /// What clears it.
+        reason: NotNowKind,
+    },
+    /// The user answers first: an unblock or a paused record's confirmation.
+    HeldForUser {
+        /// What the user answers.
+        reason: HeldForUserKind,
+    },
+    /// A recovery step clears this; no wait does.
+    RecoveryNeeded {
+        /// The recovery step.
+        reason: RecoveryNeededKind,
+    },
     /// The identity's block floor is held after it was seen divergent: no unblock or widening
     /// that needs a raise goes, and retrying changes nothing until the shared post-loss hold
     /// stands too.
@@ -387,7 +399,15 @@ impl PaymentRefusal {
             Refusal::IdentityUnconfirmed => D::IdentityUnconfirmed,
             Refusal::PaymentInProgress => D::PaymentInProgress,
             Refusal::NotCurrent(_) => D::NotCurrent,
-            Refusal::NotNow(_) => D::NotNow,
+            Refusal::NotNow(reason) => D::NotNow {
+                reason: reason.into(),
+            },
+            Refusal::HeldForUser(reason) => D::HeldForUser {
+                reason: reason.into(),
+            },
+            Refusal::RecoveryNeeded(reason) => D::RecoveryNeeded {
+                reason: reason.into(),
+            },
             Refusal::FloorHeld => D::FloorHeld,
             Refusal::Usage(_) => D::Usage,
             Refusal::RecordHeld(_) => D::RecordHeld,
@@ -460,6 +480,188 @@ impl From<paykit_sdk::DivergentRecord> for Divergence {
             may_hold_credit: v.may_hold_credit,
             writes_waiting: v.writes_waiting,
             observation: Arc::new(DivergentObservation(v)),
+        }
+    }
+}
+
+/// What clears a [`RefusalKind::NotNow`]; `PaymentRefusal.reason()` gives its text.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum NotNowKind {
+    /// The shared records aren't listed yet; calling `retry` again continues the listing.
+    RecordsUnlisted {
+        /// The call that continues the listing.
+        retry: ListingRetryKind,
+    },
+    /// The shared records aren't listed since a restore or a missed item; a receive lists
+    /// them.
+    RecordsNotListed,
+    /// The certificate's scope keys aren't stored yet; the signer stores them when online.
+    ScopeKeysAwaited,
+    /// A record's value is sealed under keys not stored yet; the signer stores them when
+    /// online.
+    ValueAwaitsKey,
+    /// The block floor can't be read now; a later receive clears this, though a floor deleted
+    /// or lost keeps it: if it stays, show that blocks and unblocks wait.
+    FloorUnreadable,
+    /// A raise of the block floor left unwritten waits before it is tried again.
+    FloorRaiseWaiting,
+    /// No service time is verified yet; a read of the switch clears this.
+    NoServiceTime,
+    /// What the call relies on isn't verified or changed; a later read clears this.
+    ReadAgain,
+    /// An earlier write is unresolved; its answer clears this.
+    EarlierWriteUnresolved,
+    /// The same call made again clears this.
+    CallAgain,
+    /// An Allowance limit has no room now; its window rolling makes room.
+    AllowanceLimit {
+        /// The limit with no room.
+        limit: String,
+    },
+    /// A reason these bindings don't know.
+    Unknown,
+}
+
+/// The call [`NotNowKind::RecordsUnlisted`] names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum ListingRetryKind {
+    /// Call `receive` again.
+    Receive,
+    /// Retry the original action.
+    OriginalAction,
+    /// Call `reconcile` again.
+    Reconcile,
+    /// Call `endReconcile` again.
+    EndReconcile,
+    /// A call these bindings don't know.
+    Unknown,
+}
+
+/// What the user or the host acts on for a [`RefusalKind::HeldForUser`], which no wait
+/// clears: it holds one item, not the wallet.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum HeldForUserKind {
+    /// The deny list holds the counterparty; unblocking it clears this.
+    CounterpartyBlocked,
+    /// A block or a pause holds the request from automatic payment; unblocking or confirming
+    /// the record clears it. The user may still pay by hand.
+    HeldFromAutomatic,
+    /// After a provider loss another write sits at the held activity record's version.
+    ActivityBaseChanged,
+    /// After a provider loss the order of the request's cancellations is unknown.
+    CancellationOrderUnknown,
+    /// Writes conflict at one publication counter: publication to that recipient is held
+    /// until a write of the bound publisher replaces the other.
+    PublicationConflict,
+    /// A held record doesn't read; it is rewritten or recovered.
+    RecordUnreadable,
+    /// The block floor record doesn't read and nothing in this version repairs it: an
+    /// unblock is refused, a block still takes effect, and one-time requests are paid by
+    /// hand.
+    FloorRecordUnreadable,
+    /// After a provider loss this version doesn't resume automatic payments under the
+    /// Allowance: the user ends it and sets up a new one.
+    AllowanceNotResumed,
+    /// After a restore this installation can't establish the Allowance's ledger history: the
+    /// user ends it and sets up a new one, or pays by hand.
+    AllowanceNotResumedAfterRestore,
+    /// This app's execution of the Allowance is held until the user or the host acts, as the
+    /// message names.
+    AllowanceExecutionHeld,
+    /// A check before money moved failed, inside `AttemptFailed`: a new payment is the
+    /// user's decision once the check can pass.
+    AttemptCheck,
+    /// The host loads the wallet again before editing its record.
+    ReloadRequired,
+    /// The Switch client holds the attempt back, as the message names: reconcile mode, the
+    /// clocks apart, or a display read owed.
+    SwitchClient,
+    /// A hold on one request, publication or delivery that no wait clears, as the message
+    /// names.
+    Unresolved,
+    /// Eight own Allowance proposals to this counterparty are pending; a conflicted one counts
+    /// until the user discards or withdraws it.
+    PendingProposalsFull,
+    /// The Allowance ledger has no room for this payment; earlier outcomes may make room, or
+    /// never. The user may pay by hand.
+    AllowanceLedgerFull,
+    /// The original Allowance answer's delivery isn't known, and may never be.
+    AnswerOutcomeUnknown,
+    /// A reason these bindings don't know.
+    Unknown,
+}
+
+/// The recovery step of the wallet as a whole for a [`RefusalKind::RecoveryNeeded`].
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum RecoveryNeededKind {
+    /// `reconcile` runs the payer pass owed since a restore.
+    PayerPassOwed,
+    /// A reason these bindings don't know.
+    Unknown,
+}
+
+impl From<&paykit_sdk::NotNowReason> for NotNowKind {
+    fn from(reason: &paykit_sdk::NotNowReason) -> Self {
+        use paykit_sdk::{ListingRetry as L, NotNowReason as R};
+        match reason {
+            R::RecordsUnlisted { retry } => Self::RecordsUnlisted {
+                retry: match retry {
+                    L::Receive => ListingRetryKind::Receive,
+                    L::OriginalAction => ListingRetryKind::OriginalAction,
+                    L::Reconcile => ListingRetryKind::Reconcile,
+                    L::EndReconcile => ListingRetryKind::EndReconcile,
+                    _ => ListingRetryKind::Unknown,
+                },
+            },
+            R::RecordsNotListed => Self::RecordsNotListed,
+            R::ScopeKeysAwaited => Self::ScopeKeysAwaited,
+            R::ValueAwaitsKey => Self::ValueAwaitsKey,
+            R::FloorUnreadable => Self::FloorUnreadable,
+            R::FloorRaiseWaiting => Self::FloorRaiseWaiting,
+            R::NoServiceTime(_) => Self::NoServiceTime,
+            R::ReadAgain(_) => Self::ReadAgain,
+            R::EarlierWriteUnresolved(_) => Self::EarlierWriteUnresolved,
+            R::CallAgain(_) => Self::CallAgain,
+            R::AllowanceLimit { limit } => Self::AllowanceLimit {
+                limit: limit.clone(),
+            },
+            _ => Self::Unknown,
+        }
+    }
+}
+
+impl From<&paykit_sdk::HeldForUserReason> for HeldForUserKind {
+    fn from(reason: &paykit_sdk::HeldForUserReason) -> Self {
+        use paykit_sdk::HeldForUserReason as R;
+        match reason {
+            R::CounterpartyBlocked(_) => Self::CounterpartyBlocked,
+            R::HeldFromAutomatic => Self::HeldFromAutomatic,
+            R::ActivityBaseChanged => Self::ActivityBaseChanged,
+            R::CancellationOrderUnknown => Self::CancellationOrderUnknown,
+            R::PublicationConflict(_) => Self::PublicationConflict,
+            R::RecordUnreadable(_) => Self::RecordUnreadable,
+            R::FloorRecordUnreadable => Self::FloorRecordUnreadable,
+            R::AllowanceNotResumed => Self::AllowanceNotResumed,
+            R::AllowanceNotResumedAfterRestore => Self::AllowanceNotResumedAfterRestore,
+            R::AllowanceExecutionHeld(_) => Self::AllowanceExecutionHeld,
+            R::AttemptCheck(_) => Self::AttemptCheck,
+            R::ReloadRequired => Self::ReloadRequired,
+            R::SwitchClient(_) => Self::SwitchClient,
+            R::Unresolved(_) => Self::Unresolved,
+            R::PendingProposalsFull => Self::PendingProposalsFull,
+            R::AllowanceLedgerFull => Self::AllowanceLedgerFull,
+            R::AnswerOutcomeUnknown => Self::AnswerOutcomeUnknown,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+impl From<&paykit_sdk::RecoveryReason> for RecoveryNeededKind {
+    fn from(reason: &paykit_sdk::RecoveryReason) -> Self {
+        use paykit_sdk::RecoveryReason as R;
+        match reason {
+            R::PayerPassOwed => Self::PayerPassOwed,
+            _ => Self::Unknown,
         }
     }
 }

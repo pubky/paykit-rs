@@ -855,6 +855,27 @@ pub(crate) fn restore_paykit_layer(
             installation_stop_notices.insert(name, value);
         }
     }
+    // And its notices of payments, keyed by their attempt and kind: a restore keeps each one
+    // either side holds, the installation's where both do, so a notice the installation
+    // raised after the backup isn't lost (Paykit spec 7.2, "What a restore loses"). A
+    // `PaidAfterFailed` is raised again at its key only once an acknowledgement dropped it,
+    // and a `HeldWithoutPay` once a resume under `paykit_pay` did: either way the
+    // installation's copy is the later one. One the host acknowledged after the backup,
+    // which acknowledging deleted, can be listed again. A fresh store has none. A message's
+    // notice is the backup's: its kind, origin and kept entry can differ from the
+    // installation's at one key, and its own restore steps write it.
+    let mut notices: std::collections::BTreeMap<Vec<u8>, crate::notices::KeptNotice> =
+        std::collections::BTreeMap::new();
+    for (k, value) in restoring
+        .previous_local_scan(key::NOTICES.as_bytes())
+        .map_err(|_| "the installation's notices cannot be read")?
+    {
+        if matches!(StateKey::parse(&k), Some(StateKey::Notice { .. })) {
+            let notice = state::restored::<KeptNotice>(&k, &value, &binder)
+                .map_err(|_| "the installation holds an invalid notice")?;
+            notices.insert(k, notice);
+        }
+    }
     let mut cursor_time_ms = 0;
     let mut bounded = BoundedFamilies::default();
     // An in-place restore can retain a stop signed after the backup (Switch spec 12.4).
@@ -1495,10 +1516,18 @@ pub(crate) fn restore_paykit_layer(
                 // An acknowledged notice of an attempt is kept only while the journal holds
                 // the attempt (`Paykit::acknowledge_notice`): one without its entry is a
                 // state no run leaves.
-                if let (true, StateKey::Notice { attempt, .. }) = (notice.acknowledged, family) {
-                    acknowledged.push(attempt);
+                if let (true, StateKey::Notice { attempt, .. }) = (notice.acknowledged, &family) {
+                    acknowledged.push(*attempt);
                 }
-                writes.push(LocalWrite::Put { key, value });
+                if !matches!(family, StateKey::Notice { .. }) {
+                    writes.push(LocalWrite::Put { key, value });
+                    continue;
+                }
+                // The installation's notice at this key is the newer one, as raised or
+                // acknowledged since the backup, and wins: no flag of the backup's is merged
+                // into it, so an acknowledgement before the backup never hides a notice raised
+                // again after it. The backup's is taken only where the installation has none.
+                notices.entry(key).or_insert(notice);
                 continue;
             }
         };
@@ -1578,6 +1607,19 @@ pub(crate) fn restore_paykit_layer(
         }
     }
     for (key, value) in installation_stop_notices {
+        writes.push(LocalWrite::Put { key, value });
+    }
+    for (key, notice) in notices {
+        // An acknowledged one of a payment the restored journal doesn't hold has nothing left
+        // to keep it (`Paykit::acknowledge_notice`).
+        if let (true, Some(StateKey::Notice { attempt, .. })) =
+            (notice.acknowledged, StateKey::parse(&key))
+        {
+            if !journaled.contains(&attempt) {
+                continue;
+            }
+        }
+        let value = state::encode(&notice).map_err(|_| "a notice cannot be written")?;
         writes.push(LocalWrite::Put { key, value });
     }
     if !recordings.is_subset(&awaiting_recording) {

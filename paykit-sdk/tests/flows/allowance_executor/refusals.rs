@@ -97,11 +97,6 @@ fn terms_with(changes: serde_json::Value) -> AllowanceTerms {
     AllowanceTerms::from_json(&json).unwrap()
 }
 
-/// A temporary refusal, with its reason.
-fn not_now(reason: &str) -> Refusal {
-    Refusal::NotNow(reason.into())
-}
-
 /// Bob's app sends alice's wallet a second, different proposal of the Allowance at `key`,
 /// which conflicts it.
 async fn conflict(w: &World, payer: &mut Paykit, key: &[u8; 32]) {
@@ -347,7 +342,9 @@ async fn test_allowance_refusals_blocked_counterparty_pauses_until_unblocked() {
     assert_eq!(payer.allowance(&key).await.unwrap().blocked, Some(true));
     assert_eq!(
         refused(Box::pin(payer.pay_under_allowance(&request, &key)).await),
-        not_now("the counterparty is blocked")
+        paykit_sdk::Refusal::HeldForUser(paykit_sdk::HeldForUserReason::CounterpartyBlocked(
+            "the counterparty is blocked"
+        ))
     );
     assert!(w.rail.all_executions().is_empty());
     // Unblocked, the counterparty's next request is paid. One dated before the block stays
@@ -402,7 +399,9 @@ async fn test_allowance_refusals_unanswered_proposal_is_not_now() {
     let request = Box::pin(one_time(&w, &mut shop, &mut payer, "1")).await;
     assert_eq!(
         refused(Box::pin(payer.pay_under_allowance(&request, &second.record)).await),
-        not_now("the Allowance isn't accepted yet")
+        paykit_sdk::Refusal::HeldForUser(paykit_sdk::HeldForUserReason::AllowanceExecutionHeld(
+            "the Allowance isn't accepted yet"
+        ))
     );
     assert!(w.rail.all_executions().is_empty());
 }
@@ -416,7 +415,9 @@ async fn test_allowance_refusals_terms_not_active_yet_is_not_now() {
     let request = Box::pin(one_time(&w, &mut shop, &mut payer, "1")).await;
     assert_eq!(
         refused(Box::pin(payer.pay_under_allowance(&request, &key)).await),
-        not_now("the Allowance's terms aren't active yet")
+        paykit_sdk::Refusal::NotNow(paykit_sdk::NotNowReason::CallAgain(
+            "the Allowance's terms aren't active yet"
+        ))
     );
     assert!(w.rail.all_executions().is_empty());
 }
@@ -435,10 +436,11 @@ async fn test_allowance_refusals_payment_outside_the_per_payment_range_is_not_au
 }
 
 #[tokio::test]
-async fn test_allowance_refusals_lifetime_limit_waits_while_reserved_then_is_final() {
+async fn test_allowance_refusals_lifetime_limit_counts_a_dispatched_payment_as_spent() {
     let (w, mut payer, mut shop, key) = Box::pin(first_grant_in(store(), terms())).await;
     w.rail.set_history_payer(payer.identity());
-    // 70 of 100 in flight: its reservation holds the room.
+    // 70 of 100 dispatched and still pending: spent whether it pays or fails (Paykit spec
+    // 8.3), so 50 never fits.
     let first = Box::pin(one_time(&w, &mut shop, &mut payer, "70")).await;
     w.rail.next(Behaviour::Hang);
     let PayOutcome::Pending { attempt_id, .. } = Box::pin(payer.pay_under_allowance(&first, &key))
@@ -451,7 +453,13 @@ async fn test_allowance_refusals_lifetime_limit_waits_while_reserved_then_is_fin
     let second = Box::pin(one_time(&w, &mut shop, &mut payer, "50")).await;
     assert_eq!(
         refused(Box::pin(payer.pay_under_allowance(&second, &key)).await),
-        not_now("the lifetime limit has no room")
+        Refusal::NotAutomatic("the lifetime limit has no room".into())
+    );
+    // More than the lifetime limit alone never fits, whatever the reservation does.
+    let over = Box::pin(one_time(&w, &mut shop, &mut payer, "101")).await;
+    assert_eq!(
+        refused(Box::pin(payer.pay_under_allowance(&over, &key)).await),
+        Refusal::NotAutomatic("the lifetime limit has no room".into())
     );
     // Once the 70 are paid, nothing is reserved, and no room comes back.
     w.rail.settle(&attempt_id, true);
@@ -460,8 +468,146 @@ async fn test_allowance_refusals_lifetime_limit_waits_while_reserved_then_is_fin
         refused(Box::pin(payer.pay_under_allowance(&second, &key)).await),
         Refusal::NotAutomatic("the lifetime limit has no room".into())
     );
+    // 70 paid and 10 more dispatched: 25 and 40 never fit, whatever the 10 answer.
+    let third = Box::pin(one_time(&w, &mut shop, &mut payer, "10")).await;
+    w.rail.next(Behaviour::Hang);
+    assert!(matches!(
+        Box::pin(payer.pay_under_allowance(&third, &key))
+            .await
+            .outcome
+            .unwrap(),
+        PayOutcome::Pending { .. }
+    ));
+    let fits_later = Box::pin(one_time(&w, &mut shop, &mut payer, "25")).await;
+    assert_eq!(
+        refused(Box::pin(payer.pay_under_allowance(&fits_later, &key)).await),
+        Refusal::NotAutomatic("the lifetime limit has no room".into())
+    );
+    let never = Box::pin(one_time(&w, &mut shop, &mut payer, "40")).await;
+    assert_eq!(
+        refused(Box::pin(payer.pay_under_allowance(&never, &key)).await),
+        Refusal::NotAutomatic("the lifetime limit has no room".into())
+    );
+    assert_eq!(w.rail.all_executions().len(), 2);
+}
+#[tokio::test]
+async fn test_allowance_refusals_lifetime_limit_stays_final_once_the_method_reports_failure() {
+    let (w, mut payer, mut shop, key) = Box::pin(first_grant_in(store(), terms())).await;
+    w.rail.set_history_payer(payer.identity());
+    // 70 of 100 at the method and still pending: 50 never fits, whatever the 70 answer.
+    let first = Box::pin(one_time(&w, &mut shop, &mut payer, "70")).await;
+    w.rail.next(Behaviour::Hang);
+    let PayOutcome::Pending { attempt_id, .. } = Box::pin(payer.pay_under_allowance(&first, &key))
+        .await
+        .outcome
+        .unwrap()
+    else {
+        panic!("the first payment did not stay in flight");
+    };
+    let second = Box::pin(one_time(&w, &mut shop, &mut payer, "50")).await;
+    let never = Refusal::NotAutomatic("the lifetime limit has no room".into());
+    assert_eq!(
+        refused(Box::pin(payer.pay_under_allowance(&second, &key)).await),
+        never
+    );
+    // The method reports the failure, and its outcome isn't written yet: the attempt is
+    // still counted reserved, but it reached the method, so nothing gives its room back.
+    w.rail.settle(&attempt_id, false);
+    assert_eq!(
+        refused(Box::pin(payer.pay_under_allowance(&second, &key)).await),
+        never
+    );
+    // The failure written: an attempt that reached the method stays counted (Paykit spec
+    // 8.3), so the same payment is refused the same way.
+    let resumed = Box::pin(payer.resume_payments()).await.unwrap();
+    assert!(
+        matches!(resumed.as_slice(), [PayOutcome::Failed { .. }]),
+        "{resumed:?}"
+    );
+    assert_eq!(
+        refused(Box::pin(payer.pay_under_allowance(&second, &key)).await),
+        never
+    );
+    // What still fits beside the 70 goes.
+    let fits = Box::pin(one_time(&w, &mut shop, &mut payer, "30")).await;
+    assert!(matches!(
+        Box::pin(payer.pay_under_allowance(&fits, &key))
+            .await
+            .outcome
+            .unwrap(),
+        PayOutcome::Paid { .. }
+    ));
+    assert_eq!(w.rail.all_executions().len(), 2);
+}
+
+#[tokio::test]
+async fn test_allowance_refusals_lifetime_limit_waits_for_a_reservation_before_the_call() {
+    let (w, mut payer, mut shop, key) = Box::pin(first_grant_in(store(), terms())).await;
+    w.rail.set_history_payer(payer.identity());
+    // 70 of 100 made on the method, its history showing it paid while the claim is still
+    // open and the journal still at the call: spent.
+    let first = Box::pin(one_time(&w, &mut shop, &mut payer, "70")).await;
+    w.rail.next(Behaviour::Hang);
+    let PayOutcome::Pending { attempt_id, .. } = Box::pin(payer.pay_under_allowance(&first, &key))
+        .await
+        .outcome
+        .unwrap()
+    else {
+        panic!("the first payment did not stay in flight");
+    };
+    w.rail.settle(&attempt_id, true);
+    // 10 more reserved, by an attempt whose answer was lost before the method was called.
+    let second = Box::pin(one_time(&w, &mut shop, &mut payer, "10")).await;
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::LoseAnswer {
+            path: "/ops".into(),
+        });
+    let lost = Box::pin(payer.pay_under_allowance(&second, &key))
+        .await
+        .outcome
+        .unwrap_err();
+    assert!(lost.kept_batch().is_some(), "{lost:?}");
+    Box::pin(payer.receive(None)).await.unwrap();
+    assert_eq!(w.rail.all_executions().len(), 1);
+    // 25 fits once those 10 are released, which their own outcome does: it waits. 40 never
+    // fits, even then.
+    let fits_later = Box::pin(one_time(&w, &mut shop, &mut payer, "25")).await;
+    assert_eq!(
+        refused(Box::pin(payer.pay_under_allowance(&fits_later, &key)).await),
+        paykit_sdk::Refusal::NotNow(paykit_sdk::NotNowReason::AllowanceLimit {
+            limit: "lifetime".into()
+        })
+    );
+    let never = Box::pin(one_time(&w, &mut shop, &mut payer, "40")).await;
+    assert_eq!(
+        refused(Box::pin(payer.pay_under_allowance(&never, &key)).await),
+        Refusal::NotAutomatic("the lifetime limit has no room".into())
+    );
     assert_eq!(w.rail.all_executions().len(), 1);
 }
+
+#[tokio::test]
+async fn test_allowance_refusals_a_count_limit_of_none_is_final() {
+    // A period that admits no payment never makes room: final for automatic payment, even
+    // in an empty window.
+    let terms = terms_with(json!({
+        "period_limits": [{
+            "amount_limit": null,
+            "payment_count_limit": 0,
+            "period": {"kind": "rolling", "every": 1, "unit": "day"},
+        }],
+    }));
+    let (w, mut payer, mut shop, key) = Box::pin(first_grant_in(store(), terms)).await;
+    w.rail.set_history_payer(payer.identity());
+    let request = Box::pin(one_time(&w, &mut shop, &mut payer, "1")).await;
+    assert_eq!(
+        refused(Box::pin(payer.pay_under_allowance(&request, &key)).await),
+        Refusal::NotAutomatic("the period_count limit has no room".into())
+    );
+    assert!(w.rail.all_executions().is_empty());
+}
+
 #[tokio::test]
 async fn test_allowance_refusals_confirmation_needed_after_restore_until_confirmed() {
     let (w, mut payer, _shop, key) = Box::pin(first_grant_in(store(), terms())).await;
@@ -567,7 +713,7 @@ async fn test_allowance_refusals_view_flag_matches_the_payment_refusal() {
         "{paid:?}"
     );
 
-    // Accepted, but never taken up by this app: no flag; the payment waits.
+    // Accepted, but never taken up by this app: no flag; the payment is held for the host.
     let second = Box::pin(payer.propose_executable_allowance(
         shop.identity(),
         terms(),
@@ -595,7 +741,13 @@ async fn test_allowance_refusals_view_flag_matches_the_payment_refusal() {
     ))
     .await;
     assert!(
-        !shown && matches!(paid, Err(Refusal::NotNow(_))),
+        !shown
+            && matches!(
+                paid,
+                Err(Refusal::HeldForUser(
+                    paykit_sdk::HeldForUserReason::AllowanceExecutionHeld(_)
+                ))
+            ),
         "{paid:?}"
     );
 
@@ -793,7 +945,9 @@ async fn test_allowance_refusals_confirmation_waits_while_blocked() {
     assert!(!payer.allowance(&key).await.unwrap().confirmation_needed);
     assert_eq!(
         refusal_of(Box::pin(payer.resume_allowance_executor(&key)).await),
-        not_now("the counterparty is blocked")
+        paykit_sdk::Refusal::HeldForUser(paykit_sdk::HeldForUserReason::CounterpartyBlocked(
+            "the counterparty is blocked"
+        ))
     );
     // Unblocked, the user is asked, confirms, and the counterparty's next request is paid.
     Box::pin(payer.unblock(&shop.identity())).await.unwrap();
@@ -955,7 +1109,9 @@ async fn test_allowance_refusals_kept_grant_write_is_not_now_until_it_lands() {
         .expect_err("the grant's batch is kept");
     // While the batch can't be sent again, the resume and a payment under the Allowance
     // wait for it, and the user is asked nothing.
-    let kept = not_now("the executor grant's write waits to be sent again");
+    let kept = paykit_sdk::Refusal::NotNow(paykit_sdk::NotNowReason::EarlierWriteUnresolved(
+        "the executor grant's write waits to be sent again",
+    ));
     w.alice.switch().fail_next(unreachable());
     assert_eq!(
         refusal_of(Box::pin(payer.resume_allowance_executor(&key)).await),
@@ -1082,9 +1238,10 @@ async fn test_allowance_refusals_missed_mark_waits_with_its_reason() {
         )
         .await
         .unwrap();
-    let waits = not_now(
+    // Only the next receive marks it: a wait.
+    let waits = paykit_sdk::Refusal::NotNow(paykit_sdk::NotNowReason::ReadAgain(
         "a missed item holds every Allowance until the next receive marks it for confirmation",
-    );
+    ));
     assert_eq!(
         refusal_of(Box::pin(payer.resume_allowance_executor(&key)).await),
         waits
@@ -1368,7 +1525,9 @@ async fn test_allowance_refusals_grant_after_the_backup_asks_no_confirmation() {
     assert!(!view.consented && !view.confirmation_needed, "{view:?}");
     assert_eq!(
         refusal_of(Box::pin(payer.resume_allowance_executor(&key)).await),
-        not_now("this app's grant is held, but its consent isn't on this device")
+        paykit_sdk::Refusal::HeldForUser(paykit_sdk::HeldForUserReason::AllowanceExecutionHeld(
+            "this app's grant is held, but its consent isn't on this device"
+        ))
     );
 }
 
@@ -1476,4 +1635,50 @@ async fn test_allowance_refusals_restore_before_the_acceptance_asks_no_confirmat
         refusal_of(Box::pin(payer.resume_allowance_executor(&key)).await),
         Refusal::AllowanceConfirmationNeeded { .. }
     ));
+}
+
+#[tokio::test]
+async fn test_allowance_refusals_stale_subscription_copy_waits_for_a_read() {
+    // Another wallet of alice's rejects the subscription after this wallet last read it.
+    // Its answer under the Allowance starts from a copy older than the fresh record: a
+    // wait, not a hold for the user (Paykit spec 8.1); the next answer, read again, sees
+    // the rejection.
+    let (w, mut payer, mut shop, key) = Box::pin(first_grant_in(store(), terms())).await;
+    let start = w.clock.now_ms() / 1_000 * 1_000;
+    let schedule = Recurrence::new(
+        AnchoredRule::new(start, 1, Unit::Hour).unwrap(),
+        start,
+        None,
+    )
+    .unwrap();
+    let request = Box::pin(request_from(
+        &mut shop,
+        payer.identity(),
+        draft("1", start).with_recurrence(schedule),
+    ))
+    .await;
+    Box::pin(payer.receive(None)).await.unwrap();
+    let mut phone = w
+        .join_with(
+            &w.alice,
+            "phone",
+            paykit_sdk::AppScopes::new().pay().build().unwrap(),
+            paykit_sdk::PaykitConfig::default(),
+            store(),
+        )
+        .await;
+    Box::pin(phone.receive(None)).await.unwrap();
+    Box::pin(phone.reject_request(&request, None))
+        .await
+        .unwrap();
+    let refused =
+        refusal_of(Box::pin(payer.accept_subscription_under_allowance(&request, &key)).await);
+    assert!(
+        matches!(
+            refused,
+            Refusal::NotNow(paykit_sdk::NotNowReason::ReadAgain(_))
+        ),
+        "{refused:?}"
+    );
+    assert!(w.rail.all_executions().is_empty());
 }

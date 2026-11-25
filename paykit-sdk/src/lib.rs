@@ -32,6 +32,10 @@
 //! - Divergent records after a provider loss: paused until the user confirms
 //!   ([`Paykit::divergent_records`], [`Paykit::confirm_divergent`], [`DivergentRecord`]).
 //!
+//! Stored state and backups written by a build before the first release of v0.2 are not
+//! carried across builds: a later build may refuse them, and nothing is upgraded. From the
+//! first release on, every change to a stored format comes with a migration.
+//!
 //! The host manages scheduling and timers. It can use [`paykit_lib::periods::Recurrence::periods`]
 //! to calculate the Billing Periods of a recurring request. When the user chooses a period,
 //! [`Paykit::pay_period`] pays it on its own claim. A host whose policy authorizes payment
@@ -73,6 +77,7 @@ mod periods;
 mod protocol;
 mod publish;
 pub mod rail;
+mod refusal_reasons;
 #[cfg(feature = "test-support")]
 pub use executor::with_early_ledger_compaction;
 mod receipt_delivery;
@@ -138,6 +143,7 @@ pub use receive::{
     HeldList, KEPT_MESSAGE_MS, LISTS_REFRESH_MS, MAX_KEPT_REPLIES, MAX_KEPT_REPLIES_PER_SENDER,
 };
 pub use reconcile::{Doubtful, ReconcileReport, Resolution};
+pub use refusal_reasons::{HeldForUserReason, ListingRetry, NotNowReason, RecoveryReason};
 pub use requests::{
     AcceptOptions, MessageDelivery, PayeeActivity, PayeeStatus, RequestDraft, RequestRef,
     RequestStatus, RequestView, SentMessage, SentRequest,

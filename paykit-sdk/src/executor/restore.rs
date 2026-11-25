@@ -36,6 +36,9 @@ pub(super) struct ReconciledLedger {
     pub(super) applied_proposals: Vec<String>,
     pub(super) ledger: Ledger,
     pub(super) usage: Usage,
+    /// The entries `usage` holds reserved that the method's inventory doesn't show, with
+    /// their amounts, scaled ([`super::Accounting`]).
+    pub(super) reserved_before_call: Vec<(paykit_lib::AttemptId, u128)>,
     pub(super) evidence: KeptOp,
     pub(super) grant: Condition,
     pub(super) current: Condition,
@@ -58,6 +61,42 @@ fn compacted_transfer_matches(
         _ => return false,
     };
     saved == (obligation, &amount.asset, &amount.value)
+}
+
+/// `read` with a restored executor's refusal for being behind its own ledger read as no base.
+fn not_resumed_as_none(read: Result<Option<ReconciledLedger>>) -> Result<Option<ReconciledLedger>> {
+    match read {
+        Err(error)
+            if error.refusal()
+                == Some(&crate::Refusal::HeldForUser(
+                    crate::HeldForUserReason::AllowanceNotResumedAfterRestore,
+                )) =>
+        {
+            Ok(None)
+        }
+        other => other,
+    }
+}
+
+/// Whether a restored executor's checkpoint is behind its own ledger for good: the current
+/// write, this executor's own under its grant (`own`), is built on a version after the one
+/// the backup accepted, so a write between them is missing. Once a later write supersedes
+/// it, that write reads only as a stub, so no later read brings back what it held, and this
+/// version makes no repair (Paykit spec 8.3, "Resuming the same executor": "If it cannot
+/// establish the current complete ledger, automatic payment waits for the missing evidence,
+/// a valid handoff or a complete-authority repair"). A write built on the accepted version
+/// itself is a single step the restore checks as usual; one this installation wasn't
+/// restored into is never behind this way.
+fn restored_behind(
+    restored: bool,
+    current: &AppliedRecord,
+    accepted: &AppliedRecord,
+    own: impl Fn(&pubky_switch_core::ops::OpBody) -> bool,
+) -> bool {
+    restored
+        && !current.follows(accepted)
+        && own(current.op.body())
+        && current.pins_write_after(accepted)
 }
 
 /// A settled tombstone can outlive its signed opening. It corroborates a Done entry
@@ -296,12 +335,16 @@ impl Paykit {
     pub async fn reconcile_allowance(&mut self, record: &[u8; 32]) -> Result<Option<Usage>> {
         // A delivery operation for the whole call (Paykit spec 8.1).
         let _delivery = self.delivery_operation();
-        Ok(Box::pin(self.executor_base(record, LedgerRead::Inventory))
+        Ok(Box::pin(self.paying_base(record, LedgerRead::Inventory))
             .await?
             .map(|checked| checked.usage))
     }
 
-    pub(super) async fn executor_base(
+    /// The executor's base for deciding a payment: as [`Self::executor_base`], but an
+    /// executor restored behind its own ledger refuses for good with
+    /// [`crate::HeldForUserReason::AllowanceNotResumedAfterRestore`] instead of reading as
+    /// no base, so the user is told the ways forward.
+    pub(super) async fn paying_base(
         &mut self,
         record: &[u8; 32],
         source_kind: LedgerRead,
@@ -310,10 +353,32 @@ impl Paykit {
         let Some(history) = self.local_get::<ExecutorHistory>(&local).await? else {
             return Ok(None);
         };
-        Box::pin(self.executor_from_history(record, source_kind, history)).await
+        Box::pin(self.executor_ledger(record, source_kind, history)).await
     }
 
+    /// The executor's verified base for the Allowance at `record`, or none. An executor
+    /// restored behind its own ledger reads as none here too: writing an attempt's outcome,
+    /// a reply or a payment's proof goes on without the ledger, as for any base it can't
+    /// establish; only [`Self::paying_base`] refuses on it.
+    pub(super) async fn executor_base(
+        &mut self,
+        record: &[u8; 32],
+        source_kind: LedgerRead,
+    ) -> Result<Option<ReconciledLedger>> {
+        not_resumed_as_none(Box::pin(self.paying_base(record, source_kind)).await)
+    }
+
+    /// [`Self::executor_base`] from a history already read.
     pub(super) async fn executor_from_history(
+        &mut self,
+        record: &[u8; 32],
+        source_kind: LedgerRead,
+        history: ExecutorHistory,
+    ) -> Result<Option<ReconciledLedger>> {
+        not_resumed_as_none(Box::pin(self.executor_ledger(record, source_kind, history)).await)
+    }
+
+    async fn executor_ledger(
         &mut self,
         record: &[u8; 32],
         source_kind: LedgerRead,
@@ -465,6 +530,14 @@ impl Paykit {
         let mut reads = HashMap::new();
         let mut recovered_copy = false;
         if current.revision != accepted.application.revision {
+            if restored_behind(checkpoint.restored, &current, &accepted.application, |op| {
+                op.app_id == Some(self.app_id()) && op.conditions.contains(&exact_grant)
+            }) {
+                return Err(crate::Refusal::HeldForUser(
+                    crate::HeldForUserReason::AllowanceNotResumedAfterRestore,
+                )
+                .into());
+            }
             if !current.follows(&accepted.application)
                 || !current.cert.holds_scope("paykit_allowance_execute")
                 || current.op.body().app_id != Some(self.app_id())
@@ -599,30 +672,34 @@ impl Paykit {
         if compaction.is_some() {
             signers.retain(&ledger);
         }
-        let result = |usage, ledger, grant, compaction, facts| ReconciledLedger {
-            signers,
-            facts,
-            applied_proposals: applied_proposals.suffixes,
-            compaction,
-            at_initial_ledger: current.revision == approval.ledger.revision,
-            at,
-            terms: proposed.terms.clone(),
-            ledger,
-            usage,
-            evidence: evidence.clone(),
-            grant,
-            current: Condition::RecordCurrent {
-                key: ledger_key,
-                revision: current.revision,
-                deleted: false,
-            },
-        };
+        let result =
+            |usage, reserved_before_call, ledger, grant, compaction, facts| ReconciledLedger {
+                signers,
+                facts,
+                applied_proposals: applied_proposals.suffixes,
+                compaction,
+                at_initial_ledger: current.revision == approval.ledger.revision,
+                at,
+                terms: proposed.terms.clone(),
+                ledger,
+                usage,
+                reserved_before_call,
+                evidence: evidence.clone(),
+                grant,
+                current: Condition::RecordCurrent {
+                    key: ledger_key,
+                    revision: current.revision,
+                    deleted: false,
+                },
+            };
         if !needs_inventory {
             let Ok(counted) = usage(&proposed.terms, &ledger, &HashMap::new(), at) else {
                 return Ok(None);
             };
+            // Counted with no claim read: nothing is held reserved.
             return Ok(Some(result(
                 counted,
+                Vec::new(),
                 ledger,
                 exact_grant,
                 compaction,
@@ -798,6 +875,7 @@ impl Paykit {
         let Some(Accounting {
             counted,
             unclassified,
+            reserved_before_call,
         }) = reconciled_usage(
             inventory,
             &proposed.terms,
@@ -987,6 +1065,7 @@ impl Paykit {
         }
         Ok(Some(result(
             counted,
+            reserved_before_call,
             ledger,
             exact_grant,
             compaction,

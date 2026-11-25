@@ -60,10 +60,13 @@ fn target(publisher: &[u8; 16], recipient: &[u8; 32], generation: u64) -> Record
     )
 }
 
+/// The refusal while the recipient's counter isn't verified: one deleted, unreadable,
+/// flagged or not taken, which a later read may or may not clear, so publication to that
+/// recipient is held and the host shows it (Paykit spec 8.4.1).
 fn counter_unavailable() -> Refusal {
-    Refusal::NotNow(
-        "Paykit spec 8.4.1: the recipient's publication counter cannot be verified".into(),
-    )
+    Refusal::HeldForUser(crate::HeldForUserReason::Unresolved(
+        "Paykit spec 8.4.1: the recipient's publication counter cannot be verified",
+    ))
 }
 
 /// A native cache mark for identifying a foreign replacement of this app's counter.
@@ -90,8 +93,28 @@ pub(crate) fn foreign_publication(
     None
 }
 
+/// The conflict at a recipient's counter whose held write another write at its version
+/// replaced, or which is divergent (Paykit wire 5.8; Switch spec 12.6).
+const PUBLICATION_CONFLICTS: &str = "Paykit spec 8.4.1: the recipient's publication counter \
+    cannot be verified: another write is at its version, or the record is divergent";
+
+const PREVIOUS_UNRESOLVED: &str =
+    "Paykit spec 8.4.1: the recipient's previous publication is unresolved";
+
+/// The refusal while the recipient's previous publication waits for its batch, which the
+/// client still keeps and sends again, or for the call that changed it meanwhile (Paykit
+/// spec 8.4.1).
 fn unresolved() -> Refusal {
-    Refusal::NotNow("Paykit spec 8.4.1: the recipient's previous publication is unresolved".into())
+    Refusal::NotNow(crate::NotNowReason::EarlierWriteUnresolved(
+        PREVIOUS_UNRESOLVED,
+    ))
+}
+
+/// The refusal while the recipient's previous publication is unresolved with no batch kept
+/// to settle it: dropped with its outcome unknown, or no longer told by the client, which no
+/// answer settles, so it is shown (Paykit spec 8.4.1).
+fn unresolved_for_good() -> Refusal {
+    Refusal::HeldForUser(crate::HeldForUserReason::Unresolved(PREVIOUS_UNRESOLVED))
 }
 
 /// The revision of a reusable list is derived from its endpoints, so the same list set
@@ -333,10 +356,10 @@ impl RestoredPublications {
             std::collections::btree_map::Entry::Occupied(entry)
                 if entry.get().0 != id || entry.get().1 != hash =>
             {
-                return Err(Refusal::NotNow(format!(
+                return Err(Refusal::HeldForUser(crate::HeldForUserReason::PublicationConflict(format!(
                     "Paykit wire 5.8: different signed lists at generation {generation} counter {counter} for recipient {}",
                     pubky_switch_core::enc::zbase32_encode(&recipient),
-                )).into());
+                ))).into());
             }
             _ => {}
         }
@@ -529,23 +552,31 @@ pub(crate) fn may_send(view: &DeliveryView<'_>) -> std::result::Result<bool, Sto
 }
 
 fn current_publication(record: &SharedRecord) -> Result<ListPublicationRecord> {
-    if !record.authenticated
-        || record.flagged
-        || record.not_taken
-        || record.different_write_at_held_version
-        || record.divergent
-        || record.doubtful
-    {
+    // Another write at the version held, or a divergent record, is a conflict the user
+    // resolves (Paykit wire 5.8; Switch spec 12.6); a write not taken waits for a read.
+    if record.different_write_at_held_version || record.divergent {
+        return Err(
+            Refusal::HeldForUser(crate::HeldForUserReason::PublicationConflict(
+                PUBLICATION_CONFLICTS.into(),
+            ))
+            .into(),
+        );
+    }
+    // A write not taken lasts until a write the app takes replaces it, which no read does
+    // (Switch spec 8.2): it is held with the rest.
+    if !record.authenticated || record.flagged || record.not_taken || record.doubtful {
         return Err(counter_unavailable().into());
     }
     let bytes = record.content.value().ok_or_else(counter_unavailable)?;
     let publication = ListPublicationRecord::read(bytes)?;
     if record.writer != publication.publisher {
-        return Err(Refusal::NotNow(format!(
-            "Paykit wire 5.8: app {} wrote another publisher's counter",
-            pubky_switch_core::enc::zbase32_encode(&record.writer),
-        ))
-        .into());
+        return Err(
+            Refusal::HeldForUser(crate::HeldForUserReason::PublicationConflict(format!(
+                "Paykit wire 5.8: app {} wrote another publisher's counter",
+                pubky_switch_core::enc::zbase32_encode(&record.writer),
+            )))
+            .into(),
+        );
     }
     Ok(publication)
 }
@@ -743,26 +774,31 @@ impl Paykit {
     ///
     /// [`Refusal::ListDeliveryUnknown`] when the counterparty's current list is one the
     /// client gave up with an unknown outcome: nothing replaces it without the user's
-    /// confirmation ([`Paykit::send_list_again`]; Paykit spec 9). [`Refusal::NotNow`]
-    /// while sends are held, before the list is set, or while an earlier publication is
+    /// confirmation ([`Paykit::send_list_again`]; Paykit spec 9). [`Refusal::Usage`] for the
+    /// app's own identity, or before the list is set; [`Refusal::ScopeMissing`] without
+    /// `paykit_request`. [`Refusal::HeldForUser`] while the deny list holds the recipient;
+    /// [`Refusal::NotNow`] while its copy isn't known, or while an earlier publication is
     /// unresolved. A store or client failure.
     pub async fn publish_list_to(&mut self, recipient: [u8; 32]) -> Result<()> {
         // A delivery operation for the whole call (Paykit spec 8.1).
         let _delivery = self.delivery_operation();
         self.first_read_before_writing().await?;
         self.refresh_own()?;
-        if recipient == self.identity() || !self.holds(SCOPE) {
-            return Err(Refusal::NotNow(
+        if recipient == self.identity() {
+            return Err(Refusal::Usage(
                 "Paykit spec 8.4: a publishing app chooses a counterparty".into(),
             )
             .into());
+        }
+        if !self.holds(SCOPE) {
+            return Err(Refusal::ScopeMissing(SCOPE.into()).into());
         }
         if self
             .local_get::<ListSettings>(key::LIST_SETTINGS)
             .await?
             .is_none()
         {
-            return Err(Refusal::NotNow(
+            return Err(Refusal::Usage(
                 "Paykit spec 8.4: set the app's list before sharing it".into(),
             )
             .into());
@@ -1141,10 +1177,14 @@ impl Paykit {
 
     async fn resolve_publications(&mut self, recipient: &[u8; 32]) -> Result<()> {
         let mut pending = false;
+        // An unresolved batch the client no longer keeps, which no answer settles.
+        let mut lost = false;
         for (original, ids) in self.publication_batches(recipient).await? {
             let mut remaining = PublicationIds::new();
             for &id in &ids {
-                let resolved = match self.app.kept_batch(id).await? {
+                let status = self.app.kept_batch(id).await?;
+                let kept = matches!(status, Some(KeptBatchStatus::Kept { .. }));
+                let resolved = match status {
                     Some(KeptBatchStatus::Applied { .. }) => true,
                     Some(KeptBatchStatus::Dropped {
                         reason: KeptBatchDrop::Refused { .. } | KeptBatchDrop::Unsent,
@@ -1164,6 +1204,7 @@ impl Paykit {
                 };
                 if !resolved {
                     remaining.insert(id);
+                    lost |= !kept;
                 }
             }
             pending |= !remaining.is_empty();
@@ -1172,7 +1213,14 @@ impl Paykit {
             }
         }
         if pending {
-            return Err(unresolved().into());
+            // Batches all still kept settle by themselves; one gone with its outcome unknown
+            // doesn't, whatever the others do.
+            return Err(if lost {
+                unresolved_for_good()
+            } else {
+                unresolved()
+            }
+            .into());
         }
         Ok(())
     }
@@ -1320,6 +1368,9 @@ impl Paykit {
         };
         self.own_identity_confirmed(false).await??;
         if self.app.own_identity().generation() != generation || !self.holds(SCOPE) {
+            if !self.holds(SCOPE) {
+                return Err(Refusal::ScopeMissing(SCOPE.into()).into());
+            }
             return Err(counter_unavailable().into());
         }
         let signed = self.app.sign_message(OutgoingMessage::new(
@@ -1388,6 +1439,9 @@ impl Paykit {
             .locals(applied.into_writes());
         self.own_identity_confirmed(false).await??;
         if self.app.own_identity().generation() != generation || !self.holds(SCOPE) {
+            if !self.holds(SCOPE) {
+                return Err(Refusal::ScopeMissing(SCOPE.into()).into());
+            }
             return Err(counter_unavailable().into());
         }
         if matches!(reason, IssueFor::RetryWithdrawal | IssueFor::Confirmed) {
@@ -1567,6 +1621,73 @@ mod tests {
         assert!(foreign_publication(Some(own), None, Some(&bytes)).is_none());
         assert!(foreign_publication(Some(own), Some(&bytes), Some(&bytes)).is_none());
         assert!(foreign_publication(Some(own), Some(&mark), Some(&bytes)).is_some());
+    }
+
+    #[test]
+    fn test_publication_counter_not_verified_is_held() {
+        let issued = publication();
+        let held = record(&issued, issued.publisher);
+        for waiting in [
+            SharedRecord {
+                authenticated: false,
+                ..held.clone()
+            },
+            SharedRecord {
+                flagged: true,
+                ..held.clone()
+            },
+            SharedRecord {
+                doubtful: true,
+                ..held.clone()
+            },
+            SharedRecord {
+                content: RecordContent::Deleted,
+                ..held.clone()
+            },
+        ] {
+            let refused = current_publication(&waiting).unwrap_err();
+            assert_eq!(refused.refusal(), Some(&counter_unavailable()), "{refused}");
+        }
+        // A write not taken lasts until a write the app takes replaces it: held too.
+        let not_taken = current_publication(&SharedRecord {
+            not_taken: true,
+            ..held.clone()
+        })
+        .unwrap_err();
+        assert_eq!(
+            not_taken.refusal(),
+            Some(&counter_unavailable()),
+            "{not_taken}"
+        );
+        assert_eq!(current_publication(&held).unwrap(), issued);
+    }
+
+    #[test]
+    fn test_publication_counter_conflict_is_held_for_the_user() {
+        let issued = publication();
+        let held = record(&issued, issued.publisher);
+        for conflicted in [
+            SharedRecord {
+                different_write_at_held_version: true,
+                ..held.clone()
+            },
+            SharedRecord {
+                divergent: true,
+                ..held.clone()
+            },
+            record(&issued, [9; 16]),
+        ] {
+            let refused = current_publication(&conflicted).unwrap_err();
+            assert!(
+                matches!(
+                    refused.refusal(),
+                    Some(Refusal::HeldForUser(
+                        crate::HeldForUserReason::PublicationConflict(_)
+                    ))
+                ),
+                "{refused}"
+            );
+        }
     }
 
     #[test]

@@ -285,8 +285,39 @@ pub(crate) async fn restored_list_seller(
     let seller = host
         .restore(app_id, backup, crate::BackupDevice::InPossession)
         .await?;
-    while seller.receive().await?.more {}
-    seller.reconcile().await?;
+    // Read until the feed is done and every record the restored scopes read is listed
+    // (Paykit spec 6).
+    let mut listed = false;
+    for _ in 0..8 {
+        let report = seller.receive().await?;
+        if !report.more && report.records_unlisted.is_none() {
+            listed = true;
+            break;
+        }
+    }
+    if !listed {
+        return Err(WalletError::invalid("restored test seller listing"));
+    }
+    // A restored app may list its shared records over several reconcile passes, each refused
+    // as not now until the listing is done (Paykit spec 6, 7.3).
+    let mut reconciled = false;
+    for _ in 0..8 {
+        match seller.reconcile().await {
+            Ok(_) => {
+                reconciled = true;
+                break;
+            }
+            Err(WalletError::RetryLater { failure })
+                if failure
+                    .refusal
+                    .as_ref()
+                    .is_some_and(|r| matches!(r.0, paykit_sdk::Refusal::NotNow(_))) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    if !reconciled {
+        return Err(WalletError::invalid("restored test seller reconciliation"));
+    }
     seller.end_confirmed_reconciliation().await?;
     seller
         .set_list_endpoints(vec![ListEndpoint {

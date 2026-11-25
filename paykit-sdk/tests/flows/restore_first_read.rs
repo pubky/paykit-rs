@@ -11,7 +11,7 @@ use crate::common::{draft, request_from, store, ScriptedIdentityReads, World};
 
 async fn queued_request(w: &World, shop: &mut Paykit) -> String {
     w.alice.switch().fail_next(Fault::Error {
-        path: "inbox".into(),
+        path: "/inbox".into(),
         code: ErrorCode::Unavailable,
         current: serde_json::Value::Null,
     });
@@ -141,12 +141,12 @@ async fn test_restore_first_read_retries_a_queued_reply_after_reload() {
     let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
     wallet.receive(None).await.unwrap();
     w.bob.switch().fail_next(Fault::Error {
-        path: "inbox".into(),
+        path: "/inbox".into(),
         code: ErrorCode::Unavailable,
         current: serde_json::Value::Null,
     });
     w.bob.switch().fail_next(Fault::Error {
-        path: "inbox".into(),
+        path: "/inbox".into(),
         code: ErrorCode::Unavailable,
         current: serde_json::Value::Null,
     });

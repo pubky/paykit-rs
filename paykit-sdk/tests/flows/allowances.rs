@@ -515,10 +515,10 @@ async fn acceptance_after_generation_change(change: AcceptanceGeneration, propos
             if eligible {
                 Some(answer.unwrap())
             } else {
-                assert!(
-                    matches!(answer.unwrap_err().refusal(), Some(Refusal::NotNow(why))
-                    if why == "the proposal predates the Allower's provider loss")
-                );
+                assert!(matches!(
+                    answer.unwrap_err().refusal(),
+                    Some(Refusal::AllowanceEnded)
+                ));
                 None
             }
         }
@@ -710,7 +710,15 @@ async fn test_allowances_acceptance_generation_holds_a_future_peer_proposal() {
         .accept_executable_allowance(&view.record, UserConfirmed::new())
         .await
         .unwrap_err();
-    assert!(is_not_now(&error), "{error}");
+    assert!(
+        matches!(
+            error.refusal(),
+            Some(Refusal::HeldForUser(
+                paykit_sdk::HeldForUserReason::Unresolved(_)
+            ))
+        ),
+        "{error}"
+    );
     assert_eq!(
         payer.allowance(&view.record).await.unwrap().status,
         AllowanceStatus::Proposed
@@ -761,11 +769,15 @@ async fn acceptance_refused(
         });
     let error = app.accept_allowance(record).await.unwrap_err();
     assert!(
-        is_not_now(&error)
-            || matches!(
-                error,
-                PaykitError::Client(pubky_switch_client::app::AppError::Transport(_))
-            ),
+        matches!(
+            error.refusal(),
+            Some(Refusal::HeldForUser(
+                paykit_sdk::HeldForUserReason::Unresolved(_)
+            ))
+        ) || matches!(
+            error,
+            PaykitError::Client(pubky_switch_client::app::AppError::Transport(_))
+        ),
         "{error:?}"
     );
     assert_eq!(w.record_writes(signer, record), writes);
@@ -2459,6 +2471,25 @@ fn stored_locally(summary: &paykit_sdk::ReceiveSummary) -> bool {
 }
 
 #[tokio::test]
+async fn test_allowances_proposal_waits_while_a_pending_record_awaits_its_key() {
+    // A pending proposal sealed under a key the phone doesn't hold yet, after an ordinary
+    // rotation: the client lists it as not verified, never as absent, so the count waits
+    // for the key, which comes without the user, and says so.
+    let w = World::new();
+    let (mut phone, record, _, _) = Box::pin(sealed_pending_rejection(&w, false)).await;
+    assert_sealed_pending(&phone, &record).await;
+    let refused = phone
+        .propose_executable_allowance(w.bob_id(), terms(), UserConfirmed::new())
+        .await
+        .unwrap_err();
+    assert_eq!(
+        refusal(&refused),
+        Some(&Refusal::NotNow(paykit_sdk::NotNowReason::ValueAwaitsKey)),
+        "{refused:?}"
+    );
+}
+
+#[tokio::test]
 async fn test_allowances_answer_over_a_record_that_doesnt_read_kept_then_written() {
     let w = World::new();
     let (mut phone, record, _, rejection) = Box::pin(sealed_pending_rejection(&w, false)).await;
@@ -2565,7 +2596,12 @@ async fn test_allowances_two_own_apps_answering_at_once_send_one_response() {
     wallet.reject_allowance(&mine).await.unwrap();
     let error = phone.reject_allowance(&mine).await.unwrap_err();
     assert!(
-        matches!(refusal(&error), Some(Refusal::NotNow(_))),
+        matches!(
+            refusal(&error),
+            Some(Refusal::HeldForUser(
+                paykit_sdk::HeldForUserReason::Unresolved(_)
+            ))
+        ),
         "{error:?}"
     );
     phone.receive(None).await.unwrap();
@@ -4378,6 +4414,25 @@ enum SendsHeld {
     Unknown,
 }
 
+impl SendsHeld {
+    /// Whether `error` is the refusal sends held this way give: the user's to answer while
+    /// bob is blocked, a wait for a read while the copy isn't known.
+    fn refused(self, error: &PaykitError) -> bool {
+        match self {
+            Self::Blocked => matches!(
+                error.refusal(),
+                Some(Refusal::HeldForUser(
+                    paykit_sdk::HeldForUserReason::CounterpartyBlocked(_)
+                ))
+            ),
+            Self::Unknown => matches!(
+                error.refusal(),
+                Some(Refusal::NotNow(paykit_sdk::NotNowReason::ReadAgain(_)))
+            ),
+        }
+    }
+}
+
 /// Hold sends to bob at `app` as `how` says.
 async fn hold_sends(w: &World, app: &mut Paykit, how: SendsHeld) {
     match how {
@@ -4420,7 +4475,7 @@ async fn proposal_held(how: SendsHeld) {
         .propose_executable_allowance(w.bob_id(), terms(), UserConfirmed::new())
         .await
         .unwrap_err();
-    assert!(is_not_now(&error), "{how:?} {error:?}");
+    assert!(how.refused(&error), "{how:?} {error:?}");
     assert_eq!(wallet.allowances().await.unwrap().len(), 1);
     wallet.flush().await.unwrap();
     assert_eq!(
@@ -4440,7 +4495,7 @@ async fn proposal_held(how: SendsHeld) {
 }
 
 #[tokio::test]
-async fn test_allowances_proposal_to_a_blocked_counterparty_refused_as_not_now() {
+async fn test_allowances_proposal_to_a_blocked_counterparty_held_for_the_user() {
     Box::pin(proposal_held(SendsHeld::Blocked)).await;
 }
 
@@ -4464,7 +4519,7 @@ async fn answer_held(how: SendsHeld, kind: &str) {
     let error = Box::pin(answer(&mut wallet, kind, &mine))
         .await
         .unwrap_err();
-    assert!(is_not_now(&error), "{how:?} {kind} {error:?}");
+    assert!(how.refused(&error), "{how:?} {kind} {error:?}");
     assert_eq!(Box::pin(raw(&wallet, &physical)).await, before);
     wallet.flush().await.unwrap();
     assert_eq!(Box::pin(taken(&mut shop, kind)).await, 0);
@@ -4489,7 +4544,7 @@ async fn answer(app: &mut Paykit, kind: &str, record: &[u8; 32]) -> Result<Strin
 }
 
 #[tokio::test]
-async fn test_allowances_rejection_to_a_blocked_counterparty_refused_as_not_now() {
+async fn test_allowances_rejection_to_a_blocked_counterparty_held_for_the_user() {
     Box::pin(answer_held(
         SendsHeld::Blocked,
         "paykit.allowance_rejection",
@@ -6446,13 +6501,29 @@ async fn test_allowances_dropped_answer_asked_before_payment_and_allowance_recor
             for _ in 0..4 {
                 match wallet.reconcile().await {
                     Ok(_) => break,
-                    Err(error) => assert!(matches!(error.refusal(),Some(Refusal::NotNow(reason)) if reason.contains("continue the listing")), "{error:?}"),
+                    Err(error) => assert!(
+                        matches!(
+                            error.refusal(),
+                            Some(Refusal::NotNow(
+                                paykit_sdk::NotNowReason::RecordsUnlisted { .. }
+                            ))
+                        ),
+                        "{error:?}"
+                    ),
                 }
             }
             for _ in 0..4 {
                 match wallet.end_reconcile(paykit_sdk::UserConfirmed::new()).await {
                     Ok(()) => break,
-                    Err(error) => assert!(matches!(error.refusal(),Some(Refusal::NotNow(reason)) if reason.contains("continue the listing")), "{error:?}"),
+                    Err(error) => assert!(
+                        matches!(
+                            error.refusal(),
+                            Some(Refusal::NotNow(
+                                paykit_sdk::NotNowReason::RecordsUnlisted { .. }
+                            ))
+                        ),
+                        "{error:?}"
+                    ),
                 }
             }
             let payment =
@@ -8186,7 +8257,12 @@ async fn test_allowances_user_rejection_waits_for_a_current_pending_record() {
     let before = w.record_writes(&w.alice, &physical);
     let held = wallet.reject_allowance(&mine).await.unwrap_err();
     assert!(
-        matches!(held.refusal(), Some(Refusal::NotNow(_))),
+        matches!(
+            held.refusal(),
+            Some(Refusal::HeldForUser(
+                paykit_sdk::HeldForUserReason::Unresolved(_)
+            ))
+        ),
         "{held:?}"
     );
     assert_eq!(w.record_writes(&w.alice, &physical), before);
@@ -10199,7 +10275,7 @@ async fn test_pending_proposal_conflict_discard_checks_the_selected_record_and_s
             .await
             .unwrap_err()
             .refusal(),
-        Some(Refusal::NotNow(_))
+        Some(Refusal::HeldForUser(_))
     ));
     let current = wallet.app().shared_record(&key).await.unwrap().unwrap();
     assert_ne!(first.version, current.version);
@@ -11623,7 +11699,7 @@ async fn pending_replies_across_loss(another_loss: bool, journey: ReplyJourney) 
     );
     assert!(matches!(
         restored.allowances().await.unwrap_err().refusal(),
-        Some(Refusal::NotNow(_))
+        Some(Refusal::HeldForUser(_))
     ));
 
     assert_eq!(
@@ -13088,7 +13164,7 @@ async fn carried_loss_withdrawal(keep_key: bool) {
         "{read:?}"
     );
     recovered.fail_next(Fault::Unreachable {
-        path: "ops".into(),
+        path: "/ops".into(),
         after: 0,
     });
     Box::pin(payer.receive(None)).await.unwrap();
@@ -13253,7 +13329,7 @@ async fn kept_rejection_across_generations(lost: bool) {
     w.alice
         .switch()
         .fail_next(pubky_switch_client::testing::Fault::Unreachable {
-            path: "ops".into(),
+            path: "/ops".into(),
             after: 0,
         });
     let id = payer.reject_allowance(&canonical).await.unwrap();
@@ -13815,7 +13891,12 @@ async fn test_pending_limit_uses_the_other_wallets_completed_creates_and_withdra
         .await
         .unwrap_err();
     assert!(
-        matches!(error.refusal(), Some(Refusal::NotNow(_))),
+        matches!(
+            error.refusal(),
+            Some(Refusal::HeldForUser(
+                paykit_sdk::HeldForUserReason::PendingProposalsFull
+            ))
+        ),
         "{error:?}"
     );
     assert!(wallet
@@ -14063,7 +14144,10 @@ async fn test_pending_capacity_waits_for_the_key_of_an_earlier_proposal() {
         .propose_executable_allowance(w.bob_id(), terms(), UserConfirmed::new())
         .await
         .unwrap_err();
-    assert!(matches!(refusal.refusal(), Some(Refusal::NotNow(_))));
+    assert_eq!(
+        refusal.refusal(),
+        Some(&Refusal::NotNow(paykit_sdk::NotNowReason::ValueAwaitsKey))
+    );
     assert!(wallet
         .app()
         .queued_messages("paykit")
@@ -15857,7 +15941,12 @@ async fn prepared_answer_after_change(withdraw: bool, renew_certificate: bool) {
         let prepared = payer.app().protocol_scan("paykit", b"ap/").await.unwrap();
         let error = payer.reject_allowance(&canonical).await.unwrap_err();
         assert!(
-            matches!(error.refusal(), Some(Refusal::NotNow(reason)) if reason.contains("Call receive again")),
+            matches!(
+                error.refusal(),
+                Some(Refusal::NotNow(paykit_sdk::NotNowReason::RecordsUnlisted {
+                    retry: paykit_sdk::ListingRetry::Receive
+                }))
+            ),
             "{error}"
         );
         assert_eq!(

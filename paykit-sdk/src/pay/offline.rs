@@ -13,10 +13,23 @@ impl Paykit {
         options: &PayOptions,
     ) -> Result<PayOutcome> {
         self.own_identity_confirmed(true).await??;
-        if self.app.follow_provider().await? != ProviderStatus::Current {
-            return Err(
-                Refusal::NotNow("follow the payer's current switch before paying".into()).into(),
-            );
+        match self.app.follow_provider().await? {
+            ProviderStatus::Current => {}
+            // The app's own authority ended: a recovery, not a wait (Switch spec 12.2, 12.4).
+            ProviderStatus::RecoveryRequired { .. } | ProviderStatus::Gone => {
+                return Err(Refusal::NotCurrent(
+                    "follow the payer's current switch before paying".into(),
+                )
+                .into());
+            }
+            // A move waiting, followed or cancelled: the next call reads at the service it
+            // follows (Switch spec 12.5).
+            _ => {
+                return Err(Refusal::NotNow(crate::NotNowReason::ReadAgain(
+                    "follow the payer's current switch before paying",
+                ))
+                .into());
+            }
         }
         let mut peer = self
             .check_destination(
@@ -90,14 +103,17 @@ impl Paykit {
             );
         };
         if changed == Some(None) {
-            return Err(Refusal::NotNow("the deny list must be read again".into()).into());
+            return Err(Refusal::NotNow(crate::NotNowReason::ReadAgain(
+                "the deny list must be read again",
+            ))
+            .into());
         }
         if changed
             .flatten()
             .unwrap_or_else(|| denied.contains(&entry.payee))
         {
             let amount = entry.paid_amount()?.ok_or_else(|| {
-                Refusal::NotNow("the blocked payment's transfer amount is unknown".into())
+                Refusal::Destination("the blocked payment's transfer amount is unknown".into())
             })?;
             refuse_blocked(
                 true,
@@ -242,9 +258,11 @@ impl Paykit {
         {
             return Ok(false);
         }
-        let seen = self
-            .service_time()
-            .ok_or_else(|| Refusal::NotNow("no verified service time".into()))?;
+        let seen =
+            self.service_time()
+                .ok_or(Refusal::NotNow(crate::NotNowReason::NoServiceTime(
+                    "no verified service time",
+                )))?;
         let deadline = seen
             .checked_add(UNREQUESTED_DEADLINE_MS)
             .ok_or_else(PaykitError::corrupt)?;

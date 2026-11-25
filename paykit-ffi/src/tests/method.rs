@@ -1,5 +1,5 @@
 use crate::*;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, OptionalExtension};
 use std::{
     path::{Path, PathBuf},
     sync::{
@@ -21,9 +21,14 @@ pub(super) struct Account {
     pub throw_after_charge: AtomicBool,
     /// `transfer` and `settlement_id` throw instead of answering.
     pub throw_callbacks: AtomicBool,
+    /// A payment lookup answers that the payment hasn't settled yet.
+    pub lookup_pending: AtomicBool,
     pub park: AtomicBool,
     pub entered: Notify,
     pub finish: Notify,
+    /// Raw JSON members every proof carries after its `payment`, as written, such as
+    /// `,"fee":1.50`.
+    pub proof_members: std::sync::Mutex<String>,
     coverage: std::sync::Mutex<Coverage>,
 }
 #[derive(Clone, Copy)]
@@ -35,7 +40,7 @@ enum Coverage {
 impl Account {
     pub fn open(root: &Path, clock: Arc<dyn pubky_switch_client::clock::Clock>) -> Self {
         let file = root.join("account.sqlite");
-        Connection::open(&file).unwrap().execute_batch("CREATE TABLE IF NOT EXISTS payments(attempt TEXT PRIMARY KEY,asset TEXT NOT NULL,amount TEXT NOT NULL,endpoint TEXT NOT NULL,payload TEXT NOT NULL,paid_at INTEGER NOT NULL);").unwrap();
+        super::storage::create(&file, "CREATE TABLE IF NOT EXISTS payments(attempt TEXT PRIMARY KEY,asset TEXT NOT NULL,amount TEXT NOT NULL,endpoint TEXT NOT NULL,payload TEXT NOT NULL,paid_at INTEGER NOT NULL);");
         Self {
             file,
             clock,
@@ -44,15 +49,16 @@ impl Account {
             stall_verify: AtomicBool::new(false),
             throw_after_charge: AtomicBool::new(false),
             throw_callbacks: AtomicBool::new(false),
+            lookup_pending: AtomicBool::new(false),
             park: AtomicBool::new(true),
             entered: Notify::new(),
             finish: Notify::new(),
+            proof_members: std::sync::Mutex::new(String::new()),
             coverage: std::sync::Mutex::new(Coverage::Complete),
         }
     }
     pub fn count(&self) -> usize {
-        Connection::open(&self.file)
-            .unwrap()
+        super::storage::connect(&self.file)
             .query_row("SELECT count(*) FROM payments", [], |r| r.get(0))
             .unwrap()
     }
@@ -84,9 +90,10 @@ impl Account {
     pub fn rail_without_history(self: &Arc<Self>) -> HostRail {
         HostRail::new(self.clone(), Self::declaration(false), Self::endpoints())
     }
-    pub fn paid(id: &str) -> MethodOutcome {
+    pub fn paid(&self, id: &str) -> MethodOutcome {
+        let members = self.proof_members.lock().unwrap().clone();
         MethodOutcome::Paid {
-            proof_json: serde_json::to_vec(&serde_json::json!({"payment":id})).unwrap(),
+            proof_json: format!(r#"{{"payment":"{id}"{members}}}"#).into_bytes(),
             paid_at_ms: None,
         }
     }
@@ -122,8 +129,7 @@ impl PaymentMethod for Account {
     }
     async fn pay(&self, p: MethodPayment) -> Result<MethodOutcome, MethodError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        Connection::open(&self.file)
-            .unwrap()
+        super::storage::connect(&self.file)
             .execute(
                 "INSERT INTO payments VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(attempt) DO NOTHING",
                 params![
@@ -145,18 +151,20 @@ impl PaymentMethod for Account {
                 reason: "answer lost after the charge".into(),
             });
         }
-        Ok(Self::paid(&p.attempt_id))
+        Ok(self.paid(&p.attempt_id))
     }
     async fn payment(&self, id: String) -> Result<Option<MethodOutcome>, MethodError> {
         self.lookups.fetch_add(1, Ordering::SeqCst);
-        let paid = Connection::open(&self.file)
-            .unwrap()
+        if self.lookup_pending.load(Ordering::SeqCst) {
+            return Ok(Some(MethodOutcome::Pending));
+        }
+        let paid = super::storage::connect(&self.file)
             .query_row("SELECT attempt FROM payments WHERE attempt=?1", [id], |r| {
                 r.get::<_, String>(0)
             })
             .optional()
             .unwrap();
-        Ok(paid.as_deref().map(Self::paid))
+        Ok(paid.as_deref().map(|id| self.paid(id)))
     }
     async fn allowance_history(
         &self,
@@ -171,7 +179,7 @@ impl PaymentMethod for Account {
                 })
             }
         }
-        let db = Connection::open(&self.file).unwrap();
+        let db = super::storage::connect(&self.file);
         let mut query = db
             .prepare("SELECT attempt,asset,amount FROM payments ORDER BY attempt")
             .unwrap();
@@ -179,7 +187,7 @@ impl PaymentMethod for Account {
             .query_map([], |r| {
                 let id: String = r.get(0)?;
                 Ok(MethodDispatch {
-                    outcome: Self::paid(&id),
+                    outcome: self.paid(&id),
                     attempt_id: id,
                     amount: Amount {
                         asset: r.get(1)?,
@@ -198,7 +206,19 @@ impl PaymentMethod for Account {
         if proof["payment"].as_str() != Some(p.attempt_id.as_str()) {
             return Ok(None);
         }
-        let found=Connection::open(&self.file).unwrap().query_row("SELECT paid_at FROM payments WHERE attempt=?1 AND asset=?2 AND amount=?3 AND endpoint=?4 AND (?5 IS NULL OR payload=?5)",params![p.attempt_id,p.amount.asset,p.amount.value,p.endpoint,p.payload],|r|r.get::<_,i64>(0)).optional().unwrap();
+        // The proof the payee holds carries every member the account wrote, by value.
+        let members = self.proof_members.lock().unwrap().clone();
+        let written: serde_json::Value =
+            serde_json::from_str(&format!(r#"{{"payment":"{}"{members}}}"#, p.attempt_id)).unwrap();
+        if written
+            .as_object()
+            .unwrap()
+            .iter()
+            .any(|(k, v)| proof.get(k) != Some(v))
+        {
+            return Ok(None);
+        }
+        let found=super::storage::connect(&self.file).query_row("SELECT paid_at FROM payments WHERE attempt=?1 AND asset=?2 AND amount=?3 AND endpoint=?4 AND (?5 IS NULL OR payload=?5)",params![p.attempt_id,p.amount.asset,p.amount.value,p.endpoint,p.payload],|r|r.get::<_,i64>(0)).optional().unwrap();
         Ok(found.map(|at| u64::try_from(at).unwrap()))
     }
     /// The account names a settlement by the endpoint paid and the proof's `payment`, so
@@ -338,4 +358,32 @@ fn test_method_fraction_digits_come_from_the_declared_endpoints() {
     assert_eq!(rail.fraction_digits(&other), None);
     let (lightning, _) = Account::endpoints().remove(0);
     assert_eq!(rail.fraction_digits(&lightning), None);
+}
+
+#[test]
+fn test_method_paid_proof_settles_whatever_numbers_it_holds() {
+    let paid = |proof: &[u8]| {
+        crate::MethodOutcome::Paid {
+            proof_json: proof.to_vec(),
+            paid_at_ms: None,
+        }
+        .into_rail()
+    };
+    // The money moved: a proof that reads settles the payment and is carried, whatever its
+    // numbers, so a resume never meets a refusal for it.
+    for proof in [
+        br#"{"settlement":"a1","fee":1.50}"#.as_slice(),
+        br#"{"settlement":18446744073709551617}"#,
+    ] {
+        assert!(matches!(paid(proof), Ok(paykit_sdk::RailOutcome::Paid(_))));
+    }
+    // A repeated member is no refusal either: decoding keeps the last value, as it always has.
+    let Ok(paykit_sdk::RailOutcome::Paid(repeated)) = paid(br#"{"tx":"a","tx":"b"}"#) else {
+        panic!("a proof with a repeated member settles the payment");
+    };
+    assert_eq!(repeated.proof.get("tx"), Some(&serde_json::json!("b")));
+    assert!(matches!(
+        paid(b"not json"),
+        Err(paykit_sdk::RailError::Unavailable(_))
+    ));
 }

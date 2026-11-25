@@ -1,4 +1,7 @@
-use crate::{PaymentRefusal, RefusalKind, SwitchRefusalKind, WalletError, WalletFailure};
+use crate::{
+    HeldForUserKind, ListingRetryKind, NotNowKind, PaymentRefusal, RecoveryNeededKind, RefusalKind,
+    SwitchRefusalKind, WalletError, WalletFailure,
+};
 use paykit_sdk::{PaykitError, RailError, Refusal};
 use pubky_switch_client::{
     app::{AppError, Refusal as AppRefusal},
@@ -127,9 +130,11 @@ fn test_wallet_errors_categorize_each_failure_with_a_stable_code() {
             "identity_unconfirmed",
         ),
         (
-            PaykitError::Refused(Refusal::NotNow(reason())),
-            "needs_user",
-            "not_now",
+            PaykitError::Refused(Refusal::NotNow(paykit_sdk::NotNowReason::ReadAgain(
+                "the deny list must be read again",
+            ))),
+            "retry_later",
+            "read_again",
         ),
         (
             PaykitError::Refused(Refusal::PaymentInProgress),
@@ -167,7 +172,7 @@ fn test_wallet_errors_categorize_each_failure_with_a_stable_code() {
             "not_current",
         ),
         (
-            PaykitError::Client(AppError::Transport(TransportError::Timeout)),
+            PaykitError::Client(AppError::Transport(TransportError::Connect(reason()))),
             "retry_later",
             "transport",
         ),
@@ -178,7 +183,7 @@ fn test_wallet_errors_categorize_each_failure_with_a_stable_code() {
         ),
         (
             PaykitError::Client(AppError::InvalidData(reason())),
-            "permanent",
+            "outcome_unknown",
             "invalid_data",
         ),
         (
@@ -340,7 +345,9 @@ fn test_wallet_errors_carry_the_service_code_and_its_retry_time() {
 fn test_wallet_errors_kept_batch_makes_the_outcome_unknown() {
     let kept = AppError::Kept {
         batch_id: [7; 16],
-        error: Box::new(AppError::Transport(TransportError::Timeout)),
+        error: Box::new(AppError::Transport(TransportError::Connect(
+            "reason".into(),
+        ))),
     };
     let (category, failure) = categorized(kept.into()).unwrap();
     assert_eq!(
@@ -348,9 +355,9 @@ fn test_wallet_errors_kept_batch_makes_the_outcome_unknown() {
         ("outcome_unknown", "transport")
     );
     assert_eq!(failure.kept_batch.as_deref(), Some([7; 16].as_slice()));
-    // Without a kept batch the same failure is only a retry.
+    // Without a kept batch a failure that sent nothing is only a retry.
     let (category, failure) =
-        categorized(AppError::Transport(TransportError::Timeout).into()).unwrap();
+        categorized(AppError::Transport(TransportError::Connect("reason".into())).into()).unwrap();
     assert_eq!(category, "retry_later");
     assert_eq!(failure.kept_batch, None);
 }
@@ -487,7 +494,60 @@ fn every_refusal_kind() -> Vec<RefusalKind> {
         RefusalKind::IdentityUnconfirmed,
         RefusalKind::PaymentInProgress,
         RefusalKind::NotCurrent,
-        RefusalKind::NotNow,
+        RefusalKind::HeldForUser {
+            reason: HeldForUserKind::CounterpartyBlocked,
+        },
+        RefusalKind::HeldForUser {
+            reason: HeldForUserKind::HeldFromAutomatic,
+        },
+        RefusalKind::HeldForUser {
+            reason: HeldForUserKind::Unknown,
+        },
+        RefusalKind::HeldForUser {
+            reason: HeldForUserKind::ActivityBaseChanged,
+        },
+        RefusalKind::HeldForUser {
+            reason: HeldForUserKind::CancellationOrderUnknown,
+        },
+        RefusalKind::HeldForUser {
+            reason: HeldForUserKind::PublicationConflict,
+        },
+        RefusalKind::HeldForUser {
+            reason: HeldForUserKind::RecordUnreadable,
+        },
+        RefusalKind::HeldForUser {
+            reason: HeldForUserKind::FloorRecordUnreadable,
+        },
+        RefusalKind::HeldForUser {
+            reason: HeldForUserKind::AllowanceNotResumed,
+        },
+        RefusalKind::HeldForUser {
+            reason: HeldForUserKind::AllowanceNotResumedAfterRestore,
+        },
+        RefusalKind::HeldForUser {
+            reason: HeldForUserKind::AllowanceExecutionHeld,
+        },
+        RefusalKind::HeldForUser {
+            reason: HeldForUserKind::AttemptCheck,
+        },
+        RefusalKind::HeldForUser {
+            reason: HeldForUserKind::ReloadRequired,
+        },
+        RefusalKind::HeldForUser {
+            reason: HeldForUserKind::SwitchClient,
+        },
+        RefusalKind::HeldForUser {
+            reason: HeldForUserKind::Unresolved,
+        },
+        RefusalKind::HeldForUser {
+            reason: HeldForUserKind::PendingProposalsFull,
+        },
+        RefusalKind::HeldForUser {
+            reason: HeldForUserKind::AllowanceLedgerFull,
+        },
+        RefusalKind::HeldForUser {
+            reason: HeldForUserKind::AnswerOutcomeUnknown,
+        },
         RefusalKind::FloorHeld,
         RefusalKind::Usage,
         RefusalKind::RecordHeld,
@@ -495,6 +555,17 @@ fn every_refusal_kind() -> Vec<RefusalKind> {
         RefusalKind::SwitchUnavailable,
         RefusalKind::Unknown,
     ];
+    let mut kinds = kinds;
+    kinds.extend(
+        every_not_now_kind()
+            .into_iter()
+            .map(|reason| RefusalKind::NotNow { reason }),
+    );
+    kinds.extend(
+        every_recovery_kind()
+            .into_iter()
+            .map(|reason| RefusalKind::RecoveryNeeded { reason }),
+    );
     for kind in &kinds {
         use RefusalKind as K;
         match kind {
@@ -537,7 +608,9 @@ fn every_refusal_kind() -> Vec<RefusalKind> {
             | K::IdentityUnconfirmed
             | K::PaymentInProgress
             | K::NotCurrent
-            | K::NotNow
+            | K::NotNow { .. }
+            | K::HeldForUser { .. }
+            | K::RecoveryNeeded { .. }
             | K::FloorHeld
             | K::Usage
             | K::RecordHeld
@@ -578,6 +651,7 @@ fn every_other_failure() -> Vec<WalletError> {
     let app = [
         AppError::ExpiredUnsent,
         AppError::Transport(TransportError::Timeout),
+        AppError::Transport(TransportError::Connect(reason())),
         AppError::InvalidData(reason()),
         client(ClientError::Transport(TransportError::Timeout)),
         client(ClientError::DisplayReadPending),
@@ -586,12 +660,28 @@ fn every_other_failure() -> Vec<WalletError> {
         client(ClientError::Usage(reason())),
         client(ClientError::OwnRecoveryRequired { generation: 1 }),
         client(ClientError::BadServiceSignature { status: 404 }),
+        client(ClientError::BadServiceSignature { status: 502 }),
         client(ClientError::StaleAnswer { server_time_ms: 0 }),
         client(ClientError::BodyUnread {
             status: 429,
             code: ErrorCode::RateLimited,
             retry_after: None,
         }),
+        client(ClientError::BodyUnread {
+            status: 404,
+            code: ErrorCode::NotFound,
+            retry_after: None,
+        }),
+        client(ClientError::BodyUnread {
+            status: 413,
+            code: ErrorCode::TooLarge,
+            retry_after: None,
+        }),
+        AppError::Transport(TransportError::FirstSendUnavailable),
+        AppError::Transport(TransportError::FirstSendExpired),
+        AppError::Transport(TransportError::Refused(reason())),
+        AppError::Transport(TransportError::TooLarge(1)),
+        AppError::Transport(TransportError::InvalidRequest(reason())),
         client(ClientError::BodyOverCap { cap: 1 }),
         client(ClientError::Core(pubky_switch_core::Error::Invalid(
             reason(),
@@ -729,25 +819,29 @@ fn test_wallet_errors_match_the_host_guide_table() {
     assert_eq!(
         not_sent,
         [
-            "body_over_cap",                 // not sent: over its call's cap
-            "carried_too_large",             // nothing written by the restore
-            "client_usage",                  // not sent: breaks a Switch rule
-            "conflict",                      // nothing applied: the state changed first
-            "destination",                   // refused before the attempt was written
-            "duties_too_large",              // nothing written by the backup
-            "expired_unsent",                // retired before its first send
-            "invalid_input",                 // the caller's value breaks a Paykit rule
-            "label",                         // refused before the request was sent
-            "method_not_submitted",          // the method submitted nothing
-            "no_destination",                // refused before the attempt was written
-            "recurring",                     // refused before the attempt was written
-            "switch_conflict",               // refused by the switch, nothing applied
-            "switch_not_admitted",           // refused by the recipient's switch, nothing applied
+            "body_over_cap",                    // not sent: over its call's cap
+            "carried_too_large",                // nothing written by the restore
+            "client_usage",                     // not sent: breaks a Switch rule
+            "conflict",                         // nothing applied: the state changed first
+            "destination",                      // refused before the attempt was written
+            "duties_too_large",                 // nothing written by the backup
+            "expired_unsent",                   // retired before its first send
+            "invalid_input",                    // the caller's value breaks a Paykit rule
+            "label",                            // refused before the request was sent
+            "method_not_submitted",             // the method submitted nothing
+            "no_destination",                   // refused before the attempt was written
+            "recurring",                        // refused before the attempt was written
+            "switch_conflict",                  // refused by the switch, nothing applied
+            "switch_not_admitted", // refused by the recipient's switch, nothing applied
             "switch_quota_connect_requests", // the recipient's pending list is full
-            "switch_too_large",              // refused by the switch as over a cap, nothing applied
-            "unpinned",                      // not sent without a pinned key
-            "unsupported_endpoint",          // nothing written
-            "usage",                         // the caller's value breaks a Paykit rule
+            "switch_too_large",    // refused by the switch as over a cap, nothing applied
+            "transport_first_send_expired", // a first send never released
+            "transport_first_send_unavailable", // a first send the transport can't hand over
+            "transport_invalid_request", // the transport couldn't build the request
+            "transport_refused",   // the transport may not connect to the origin
+            "unpinned",            // not sent without a pinned key
+            "unsupported_endpoint", // nothing written
+            "usage",               // the caller's value breaks a Paykit rule
         ]
     );
     let rows = guide_rows();
@@ -845,6 +939,108 @@ fn test_wallet_errors_attempt_failed_comes_as_its_cause() {
     }
 }
 
+/// One of every wait; the match has no wildcard, so a new one needs a sample and a row.
+fn every_not_now_kind() -> Vec<NotNowKind> {
+    use NotNowKind as R;
+    let mut kinds: Vec<_> = [
+        ListingRetryKind::Receive,
+        ListingRetryKind::OriginalAction,
+        ListingRetryKind::Reconcile,
+        ListingRetryKind::EndReconcile,
+        ListingRetryKind::Unknown,
+    ]
+    .into_iter()
+    .map(|retry| R::RecordsUnlisted { retry })
+    .collect();
+    kinds.extend([
+        R::RecordsNotListed,
+        R::ScopeKeysAwaited,
+        R::ValueAwaitsKey,
+        R::FloorUnreadable,
+        R::FloorRaiseWaiting,
+        R::NoServiceTime,
+        R::ReadAgain,
+        R::EarlierWriteUnresolved,
+        R::CallAgain,
+        R::AllowanceLimit {
+            limit: "lifetime".into(),
+        },
+        R::Unknown,
+    ]);
+    for kind in &kinds {
+        match kind {
+            R::RecordsUnlisted { .. }
+            | R::RecordsNotListed
+            | R::ScopeKeysAwaited
+            | R::ValueAwaitsKey
+            | R::FloorUnreadable
+            | R::FloorRaiseWaiting
+            | R::NoServiceTime
+            | R::ReadAgain
+            | R::EarlierWriteUnresolved
+            | R::CallAgain
+            | R::AllowanceLimit { .. }
+            | R::Unknown => {}
+        }
+    }
+    kinds
+}
+
+/// One of every recovery step; the match has no wildcard.
+fn every_recovery_kind() -> Vec<RecoveryNeededKind> {
+    use RecoveryNeededKind as R;
+    let kinds = vec![R::PayerPassOwed, R::Unknown];
+    for kind in &kinds {
+        match kind {
+            R::PayerPassOwed | R::Unknown => {}
+        }
+    }
+    // Every reason a user answers or is shown; the match has no wildcard either.
+    {
+        match HeldForUserKind::CounterpartyBlocked {
+            HeldForUserKind::CounterpartyBlocked
+            | HeldForUserKind::HeldFromAutomatic
+            | HeldForUserKind::ActivityBaseChanged
+            | HeldForUserKind::CancellationOrderUnknown
+            | HeldForUserKind::PublicationConflict
+            | HeldForUserKind::RecordUnreadable
+            | HeldForUserKind::FloorRecordUnreadable
+            | HeldForUserKind::AllowanceNotResumed
+            | HeldForUserKind::AllowanceNotResumedAfterRestore
+            | HeldForUserKind::AllowanceExecutionHeld
+            | HeldForUserKind::AttemptCheck
+            | HeldForUserKind::ReloadRequired
+            | HeldForUserKind::SwitchClient
+            | HeldForUserKind::Unresolved
+            | HeldForUserKind::PendingProposalsFull
+            | HeldForUserKind::AllowanceLedgerFull
+            | HeldForUserKind::AnswerOutcomeUnknown
+            | HeldForUserKind::Unknown => {}
+        }
+    }
+    kinds
+}
+
+#[test]
+fn test_wallet_errors_each_refusal_variant_comes_as_one_case() {
+    use std::collections::HashMap;
+    // A host may branch on the refusal kind alone: every reason of a kind has its case.
+    let mut cases = HashMap::new();
+    for kind in every_refusal_kind() {
+        let (category, code) = crate::error::refusal_category(&kind);
+        // The one kind with two cases: a list expired only by the service's time is shown to
+        // the user, the device clock being behind (Paykit spec 8.4).
+        if matches!(kind, RefusalKind::WaitingForList { .. }) {
+            continue;
+        }
+        let earlier = cases.insert(std::mem::discriminant(&kind), category.case());
+        assert!(
+            earlier.is_none_or(|earlier| earlier == category.case()),
+            "{code} comes as another case than its kind's other reasons"
+        );
+    }
+}
+
 #[test]
 fn test_wallet_errors_full_quota_comes_as_what_frees_it() {
     for (limit, case, code) in [
@@ -936,7 +1132,9 @@ fn test_wallet_errors_context_carries_no_outside_text() {
         PaykitError::Refused(Refusal::SwitchUnavailable(text())),
         PaykitError::Refused(Refusal::IdentityUnavailable(text())),
         PaykitError::Refused(Refusal::CertificateRefused(text())),
-        PaykitError::Refused(Refusal::AttemptFailed(Box::new(Refusal::NotNow(text())))),
+        PaykitError::Refused(Refusal::AttemptFailed(Box::new(Refusal::HeldForUser(
+            paykit_sdk::HeldForUserReason::SwitchClient(text()),
+        )))),
         PaykitError::Client(AppError::Alarm(pubky_switch_client::app::Alarm::Rollback {
             reason: text(),
         })),
@@ -1051,7 +1249,11 @@ fn test_wallet_errors_sdk_refusals_take_the_table_code_through_the_conversion() 
             "switch_unavailable",
         ),
         (Refusal::Usage("bad".into()), "not_sent", "usage"),
-        (Refusal::NotNow("wait".into()), "needs_user", "not_now"),
+        (
+            Refusal::NotNow(paykit_sdk::NotNowReason::FloorUnreadable),
+            "retry_later",
+            "floor_unreadable",
+        ),
     ] {
         let (found, failure) = categorized(PaykitError::Refused(refusal).into()).unwrap();
         assert_eq!((found, failure.code.as_str()), (case, code));
@@ -1107,4 +1309,141 @@ fn test_wallet_errors_unsaved_settlement_warning_keeps_its_bucket_outcome_and_ke
     let (_, other) = categorized(PaykitError::Conflict("state".into()).into()).unwrap();
     assert_eq!(other.settlement_bucket(), None);
     assert_eq!(other.settlement_warning_outcome(), None);
+}
+
+/// A failure that comes after the request left the device is `OutcomeUnknown`, bare as well as
+/// behind a kept batch: a timeout, an answer whose signature doesn't verify at any status, one
+/// too large to take, one given before the body was read, and one that doesn't read or
+/// verify. Only a failure that sent nothing keeps a case that calls again (Switch wire 7.1).
+#[test]
+fn test_wallet_errors_failures_after_sending_are_outcome_unknown() {
+    use pubky_switch_client::error::{ClientError as C, TransportError as T};
+    let reason = || String::from("reason");
+    let unread = |status, code| {
+        AppError::Switch(C::BodyUnread {
+            status,
+            code,
+            retry_after: None,
+        })
+    };
+    let rows = [
+        // Nothing was sent.
+        (
+            AppError::Transport(T::Connect(reason())),
+            "retry_later",
+            "transport",
+        ),
+        (
+            AppError::Transport(T::FirstSendUnavailable),
+            "not_sent",
+            "transport_first_send_unavailable",
+        ),
+        (
+            AppError::Switch(C::Transport(T::FirstSendExpired)),
+            "not_sent",
+            "transport_first_send_expired",
+        ),
+        (
+            AppError::Transport(T::Refused(reason())),
+            "not_sent",
+            "transport_refused",
+        ),
+        (
+            AppError::Transport(T::InvalidRequest(reason())),
+            "not_sent",
+            "transport_invalid_request",
+        ),
+        // The request may have gone out.
+        (
+            AppError::Transport(T::Timeout),
+            "outcome_unknown",
+            "transport_no_answer",
+        ),
+        (
+            AppError::Switch(C::Transport(T::Timeout)),
+            "outcome_unknown",
+            "transport_no_answer",
+        ),
+        (
+            AppError::Transport(T::Other(reason())),
+            "outcome_unknown",
+            "transport_no_answer",
+        ),
+        (
+            AppError::Transport(T::TooLarge(1)),
+            "outcome_unknown",
+            "transport_answer_too_large",
+        ),
+        (
+            AppError::Transport(T::UnreadableSignedHeader { status: 503 }),
+            "outcome_unknown",
+            "bad_service_signature",
+        ),
+        (
+            AppError::Switch(C::BadServiceSignature { status: 502 }),
+            "outcome_unknown",
+            "bad_service_signature",
+        ),
+        (
+            AppError::Switch(C::BadServiceSignature { status: 200 }),
+            "outcome_unknown",
+            "bad_service_signature",
+        ),
+        (
+            unread(429, ErrorCode::RateLimited),
+            "outcome_unknown",
+            "body_unread",
+        ),
+        (
+            unread(404, ErrorCode::NotFound),
+            "outcome_unknown",
+            "body_unread",
+        ),
+        (
+            unread(413, ErrorCode::TooLarge),
+            "outcome_unknown",
+            "body_unread",
+        ),
+        (
+            unread(409, ErrorCode::Conflict),
+            "outcome_unknown",
+            "client_unclassified",
+        ),
+        (
+            AppError::Switch(C::InvalidResponse(reason())),
+            "outcome_unknown",
+            "invalid_response",
+        ),
+        (
+            AppError::Switch(C::Core(pubky_switch_core::Error::Invalid(reason()))),
+            "outcome_unknown",
+            "invalid_data",
+        ),
+        (
+            AppError::InvalidData(reason()),
+            "outcome_unknown",
+            "invalid_data",
+        ),
+    ];
+    for (error, case, code) in rows {
+        let (bare_case, bare) =
+            categorized(PaykitError::Client(error.clone()).into()).expect("categorized");
+        assert_eq!((bare_case, bare.code.as_str()), (case, code));
+        // Behind a kept batch the code stays the cause's.
+        let kept = AppError::Kept {
+            batch_id: [5; 16],
+            error: Box::new(error),
+        };
+        let (kept_case, kept) = categorized(PaykitError::Client(kept).into()).expect("kept");
+        assert_eq!((kept_case, kept.code.as_str()), ("outcome_unknown", code));
+        assert_eq!(kept.kept_batch.as_deref(), Some([5; 16].as_slice()));
+    }
+    // A delay an unread answer gives comes with the failure, in milliseconds.
+    let delayed = AppError::Switch(C::BodyUnread {
+        status: 429,
+        code: ErrorCode::RateLimited,
+        retry_after: Some(7),
+    });
+    let (_, delayed) = categorized(PaykitError::Client(delayed).into()).expect("categorized");
+    assert_eq!(delayed.retry_after_ms, Some(7_000));
 }

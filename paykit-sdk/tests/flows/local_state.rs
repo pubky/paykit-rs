@@ -815,11 +815,12 @@ async fn test_local_state_held_list_under_another_apps_key_never_placed_there() 
 
 #[tokio::test]
 async fn test_local_state_held_list_of_another_app_parks_a_list_to_hold() {
-    // The shop's record is deleted, so its next list is held; the list held at its key is
+    // The shop's record doesn't read, so its next list is held; the list held at its key is
     // another app's. The receive step neither compares the new list with it nor replaces it:
     // the list is parked.
     let w = World::new();
-    let mut wallet = w.wallet("wallet").await;
+    let marks = std::sync::Arc::new(crate::outcome_record::NoSeenMarks::default());
+    let mut wallet = w.wallet_on("wallet", marks.clone()).await;
     let mut phone = w.wallet("phone").await;
     let mut shop = w.shop().await;
     let _other = w.labelled_shop("shop2", "tips").await;
@@ -827,10 +828,12 @@ async fn test_local_state_held_list_of_another_app_parks_a_list_to_hold() {
         .await;
     wallet.receive(None).await.unwrap();
     let target = lists_of(&w, &shop.app_id());
+    // The wallet's seen mark is set aside, as by a store that lost it, so it takes the write.
+    marks.armed.store(true, std::sync::atomic::Ordering::SeqCst);
     phone.app_mut().read_record(&target).await.unwrap();
     let op = phone
         .app_mut()
-        .record_op(&target, None, Vec::new())
+        .record_op(&target, Some(b"{\"not\":\"a list record\"}"), Vec::new())
         .await
         .unwrap();
     phone

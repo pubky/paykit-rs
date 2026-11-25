@@ -1,4 +1,6 @@
-use crate::{fixed, CursorStatus, NativeWallet, SwitchAlarm, WalletError, WalletHost};
+use crate::{
+    fixed, CursorStatus, NativeWallet, ProviderLossBoundary, SwitchAlarm, WalletError, WalletHost,
+};
 use paykit_sdk::{Paykit, PaykitBackup, UserConfirmed};
 use std::sync::Arc;
 
@@ -26,6 +28,78 @@ pub struct WalletRestoreState {
     pub alarm: Option<SwitchAlarm>,
 }
 
+/// Original apps, verified reports and explicit removals for one provider loss (Paykit spec 7.3).
+#[derive(uniffi::Record)]
+pub struct RecoveryMembers {
+    /// The loss covered by the identity-signed opening (Paykit spec 7.3).
+    pub loss: ProviderLossBoundary,
+    /// The 32-byte hash of the opening identity document (Paykit wire 5.10).
+    pub opening: Vec<u8>,
+    /// The 16-byte App IDs on the opening with no verified removal (Paykit spec 7.3).
+    pub originals: Vec<Vec<u8>>,
+    /// Verified original reports, including any from apps removed later (Paykit wire 5.10).
+    pub reports: Vec<RecoveryReport>,
+    /// The 16-byte App IDs explicitly removed since the opening (Paykit spec 7.3).
+    pub removed: Vec<Vec<u8>>,
+}
+
+impl From<paykit_sdk::RecoveryMembers> for RecoveryMembers {
+    fn from(members: paykit_sdk::RecoveryMembers) -> Self {
+        Self {
+            loss: members.loss.into(),
+            opening: members.opening.into(),
+            originals: members.originals.into_iter().map(Vec::from).collect(),
+            reports: members.reports.into_iter().map(Into::into).collect(),
+            removed: members.removed.into_iter().map(Vec::from).collect(),
+        }
+    }
+}
+
+/// An original app's signed commitments and their verified publication (Paykit wire 5.10).
+#[derive(uniffi::Record)]
+pub struct RecoveryReport {
+    /// The 16-byte ID of the original app that signed the report (Paykit wire 5.10).
+    pub original: Vec<u8>,
+    /// The authorized publisher's 16-byte App ID (Paykit wire 5.10).
+    pub publisher: Vec<u8>,
+    /// The exact write accepted by the service (Switch wire 6.3).
+    pub application: ApplicationRef,
+    /// The 32-byte commitment to the original app's inventory cutoff (Paykit wire 5.10).
+    pub cutoff: Vec<u8>,
+    /// The 32-byte commitment to the inventory at the cutoff (Paykit wire 5.10).
+    pub inventory: Vec<u8>,
+    /// The 32-byte commitment to the decisions for those items (Paykit wire 5.10).
+    pub dispositions: Vec<u8>,
+}
+
+impl From<paykit_sdk::RecoveryReport> for RecoveryReport {
+    fn from(report: paykit_sdk::RecoveryReport) -> Self {
+        Self {
+            original: report.original.into(),
+            publisher: report.publisher.into(),
+            application: ApplicationRef {
+                generation: report.application.generation,
+                seq: report.application.seq,
+                item_hash: report.application.item_hash.into(),
+            },
+            cutoff: report.cutoff.into(),
+            inventory: report.inventory.into(),
+            dispositions: report.dispositions.into(),
+        }
+    }
+}
+
+/// The service's reference to an applied record write (Switch wire 6.3).
+#[derive(uniffi::Record)]
+pub struct ApplicationRef {
+    /// The generation in which the write was applied (Switch wire 6.3).
+    pub generation: u64,
+    /// The sequence of the write within that generation (Switch wire 6.3).
+    pub seq: u64,
+    /// The 32-byte hash of the full applied item (Switch wire 6.3).
+    pub item_hash: Vec<u8>,
+}
+
 #[uniffi::export]
 impl WalletHost {
     /// Ask the user about the source device first (Switch spec 12.4). A lost or stolen
@@ -44,7 +118,10 @@ impl WalletHost {
                 return Err(WalletError::SourceDeviceUnaccountedFor);
             }
             let id = fixed(app_id, "app id")?;
-            let backup = PaykitBackup::from_bytes(&bytes)?;
+            // Bytes that don't read as a backup are the caller's input, refused before the
+            // wallet opens.
+            let backup =
+                PaykitBackup::from_bytes(&bytes).map_err(|_| WalletError::invalid("backup"))?;
             this.open_wallet(id, async |env| {
                 Ok(Paykit::restore(
                     env,
@@ -63,6 +140,17 @@ impl WalletHost {
 
 #[uniffi::export]
 impl NativeWallet {
+    /// Read the opening, removals and verified reports for the loss this wallet follows,
+    /// or return none when there is no loss. The current recovery grant and key are
+    /// required. Membership alone settles no payment or credit. An unavailable grant,
+    /// key or opening gives `NotNow`. A different loss gives `LossChanged` (Paykit spec 7.3).
+    pub async fn recovery_members(&self) -> Result<Option<RecoveryMembers>, WalletError> {
+        self.with_wallet(|app| {
+            Box::pin(async move { Ok(app.recovery_members().await?.map(Into::into)) })
+        })
+        .await
+    }
+
     /// Inspect the installed state before or after a foreground read, including after reopening.
     pub async fn restore_state(&self) -> Result<WalletRestoreState, WalletError> {
         self.with_wallet(move |wallet| {

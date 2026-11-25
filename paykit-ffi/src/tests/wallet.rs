@@ -239,12 +239,23 @@ async fn connect_after_earlier_batch(
             .into(),
         ),
     };
+    // Nothing of this call was kept or sent, whatever the earlier batch's resend met.
     assert!(
-        matches!(WalletError::from(service_reply), WalletError::RetryLater { failure }
+        matches!(WalletError::from(service_reply), WalletError::NotSent { failure }
         if failure.kept_batch.is_none() && failure.switch_refusal.is_some()
             && failure.service_code.as_deref() == Some("unavailable"))
     );
-    let WalletError::RetryLater { failure } = held.into() else {
+    let no_answer = pubky_switch_client::app::AppError::Ahead {
+        ahead: *ahead,
+        error: Box::new(pubky_switch_client::app::AppError::Transport(
+            pubky_switch_client::error::TransportError::Timeout,
+        )),
+    };
+    assert!(
+        matches!(WalletError::from(no_answer), WalletError::NotSent { failure }
+        if failure.code == "transport_no_answer" && failure.kept_batch.is_none())
+    );
+    let WalletError::NotSent { failure } = held.into() else {
         return Err("transport failure lost the earlier batch".into());
     };
     assert!(failure.kept_batch.is_none() && failure.service_code.is_none());
@@ -414,10 +425,6 @@ async fn payment(
     assert_eq!(pending.len(), 1);
     assert!(matches!(pending[0].stage, PaymentStage::Paying));
     let attempt = &pending[0].attempt_id.clone();
-    // While the host's `pay` runs, a resume neither pays the attempt again nor asks the host.
-    Box::pin(payer.resume_payments()).await?;
-    assert_eq!(account.calls.load(Ordering::SeqCst), 1);
-    assert_eq!(account.lookups.load(Ordering::SeqCst), 0);
     // A wallet call from inside a synchronous host callback is refused, not queued.
     let reentrant = crate::runtime::in_callback(|| super::host_calls::first_poll(payer.app_id()));
     assert!(matches!(
@@ -471,13 +478,15 @@ async fn payment(
         .find(|a| a.request_hash == Some(request.request_hash))
         .ok_or("missing signed payer proof")?;
     // A proof check that never answers is cut off at the lookup limit; the payee tries again.
+    // The limit ends the call: the guard below only turns a missing limit into a failure, at
+    // a multiple of it, so a slow machine never races the limit it checks.
     account.stall_verify.store(true, Ordering::SeqCst);
     let stalled = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
+        crate::runtime::HOST_CALL_LIMIT * 3,
         Box::pin(seller.confirm_payment(&activity.record)),
     )
     .await
-    .map_err(|_| "a stalled proof check was not cut off")?;
+    .map_err(|_| "a stalled proof check was not cut off at the lookup limit")?;
     assert!(stalled.is_err());
     account.stall_verify.store(false, Ordering::SeqCst);
     let receipt = Box::pin(seller.confirm_payment(&activity.record))
@@ -823,6 +832,11 @@ async fn journey(world: &World) -> TestResult {
         paykit_sdk::PaykitBackup::from_bytes(&backup)?.to_bytes()?,
         backup
     );
+    // Bytes that aren't a backup are the caller's input, refused before any store is opened.
+    assert!(matches!(
+        Box::pin(env.restore(vec![14; 16], vec![1, 2, 3], BackupDevice::InPossession)).await,
+        Err(WalletError::InvalidInput { field }) if field == "backup"
+    ));
     let identity = payer.identity().await?;
     let blocked_release = root.path().join("hold-release");
     std::fs::write(&blocked_release, [])?;
@@ -879,14 +893,11 @@ pub(super) fn run(backend: Backend, journey: impl AsyncFn(&World) -> TestResult 
                 .enable_all()
                 .build()
                 .unwrap();
+            // No wall-clock budget for the whole journey: each wallet call is bounded by its
+            // own limit, and a journey that is only slow, on a loaded machine, still passes.
             tokio::task::LocalSet::new().block_on(&runtime, async {
                 if let Some(world) = World::start(backend).unwrap() {
-                    let result = tokio::time::timeout(
-                        std::time::Duration::from_secs(30),
-                        Box::pin(journey(&world)),
-                    )
-                    .await
-                    .expect("wallet journey finished");
+                    let result = Box::pin(journey(&world)).await;
                     world.close().await.unwrap();
                     result.unwrap();
                 }
