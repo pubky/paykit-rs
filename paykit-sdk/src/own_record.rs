@@ -251,7 +251,7 @@ impl Paykit {
         match on_heap(|| self.tend_own_record()).await? {
             Tended::Signed(publication) => Ok(publication),
             Tended::Held | Tended::Unchanged(_) => {
-                let app = on_heap(|| self.signing_app()).await?;
+                let app = Box::pin(self.signing_app()).await?;
                 let published = Box::pin(app.publish_record()).await;
                 self.note_own_record_write(&published);
                 Ok(published?)
@@ -303,7 +303,7 @@ impl Paykit {
                 .map(Tended::Signed);
         }
         if !held.public_endpoints.is_empty() && self.renewal_due(now)? {
-            let app = on_heap(|| self.signing_app()).await?;
+            let app = Box::pin(self.signing_app()).await?;
             let renewed = match expiry {
                 RecordExpiry::Never => app.renew_record(PROTOCOL_NAME, None).await,
                 RecordExpiry::At(at) => app.renew_record(PROTOCOL_NAME, Some(at)).await,
@@ -320,7 +320,7 @@ impl Paykit {
         }
         // The unchanged-member call retains the exact policy and optional fields. A
         // restored record never accepted by the service still gets its required new delivery.
-        let result = on_heap(|| self.signing_app())
+        let result = Box::pin(self.signing_app())
             .await?
             .set_protocol_member_with_lifetime(PROTOCOL_NAME, desired.member, None)
             .await;
@@ -569,11 +569,11 @@ impl Paykit {
         match self.app.held_accepts().await {
             Ok(None) => {}
             Ok(Some(_)) | Err(AppError::InvalidData(_)) => {
-                on_heap(|| self.signing_app())
+                Box::pin(self.signing_app())
                     .await?
                     .clear_held_accepts()
                     .await?;
-                let updated = on_heap(|| self.signing_app()).await?.update_accepts().await;
+                let updated = Box::pin(self.signing_app()).await?.update_accepts().await;
                 self.note_own_record_write(&updated);
                 if let Err(error @ (AppError::Store(_) | AppError::Alarm(_))) = updated {
                     return Err(error.into());
@@ -685,7 +685,7 @@ impl Paykit {
             classes: EndpointClasses::between(&signed, &member.public_endpoints),
         };
         self.local_put(key::ENDPOINT_CHANGE, &asked).await?;
-        let result = on_heap(|| self.signing_app())
+        let result = Box::pin(self.signing_app())
             .await?
             .set_protocol_member_with_expiry(PROTOCOL_NAME, value.clone(), expiry)
             .await;
