@@ -937,10 +937,12 @@ impl Paykit {
     /// as a hold only once the next [`Paykit::receive`] or [`Paykit::backup`] has run
     /// (Paykit spec 6). After a
     /// restore, the host must run [`Paykit::receive`] before such calls; Paykit's outgoing
-    /// methods make that first read themselves (Dispatch spec 12.4). After a restore, Paykit
-    /// decides every held message of its own kinds, a hold of one message included, which
-    /// it releases or withdraws by Paykit spec 7.2: a host holds a counterparty
-    /// (`hold_queued`), never one of Paykit's messages (`hold_message`).
+    /// methods make that first read themselves (Dispatch spec 12.4). Calls through it bypass
+    /// Paykit's gates, the telling of a held endpoint change and the decisions on messages
+    /// held at a restore included: sign or clear Paykit's member, and release or withdraw
+    /// Paykit's held messages, only through Paykit. After a restore, Paykit decides every held
+    /// message of its own kinds, a hold of one message included, by Paykit spec 7.2: a host
+    /// holds a counterparty (`hold_queued`), never one of Paykit's messages (`hold_message`).
     pub fn app_mut(&mut self) -> &mut App {
         &mut self.app
     }

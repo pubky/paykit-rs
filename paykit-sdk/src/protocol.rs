@@ -1583,6 +1583,28 @@ pub(crate) fn restore_paykit_layer(
             awaiting_recording.insert(attempt);
         }
         journaled.insert(attempt);
+        // A restore in place keeps the installation's mark that its held acceptance was
+        // withdrawn: the client keeps that give-up through the restore, so the backup's entry
+        // must not open the acceptance to a replacement (Paykit spec 7.2;
+        // `Paykit::acceptance_withdrawn_at_restore`).
+        if let Some(acceptance) = entry.acceptance_msg_id.clone() {
+            for (name, installed) in restoring
+                .previous_local_scan(&key)
+                .map_err(|_| "the installation's journal cannot be read")?
+            {
+                let withdrawn = name == key
+                    && state::restored::<JournalEntry>(&name, &installed, &binder).is_ok_and(
+                        |installed| {
+                            installed.acceptance_withdrawn
+                                && installed.acceptance_msg_id.as_deref() == Some(&acceptance)
+                        },
+                    );
+                if withdrawn {
+                    entry.acceptance_released = true;
+                    entry.acceptance_withdrawn = true;
+                }
+            }
+        }
         entry.restored = true;
         entry.never_dispatched = false;
         let value = state::encode(&entry).map_err(|_| bad())?;

@@ -536,6 +536,11 @@ impl Paykit {
                     self.keep_list_withdrawal(&q.to).await?;
                     self.note_carried_list(q).await?;
                 }
+                // Marked here too, before the withdrawal, whatever the expiry step managed:
+                // a withdrawn acceptance is never replaced.
+                if role == HeldRole::Message(Kind::PaymentRequestAcceptance) {
+                    Box::pin(self.acceptance_withdrawn_at_restore(&q.msg_id)).await?;
+                }
 
                 Ok(
                     if self.app.withdraw_message(BACKUP_NAME, &q.msg_id).await? {
@@ -604,6 +609,15 @@ impl Paykit {
                 label.as_ref(),
             );
         }
+        // A message of the counterparty's for this record kept and not placed yet, which may
+        // open it or stop it, decides first: it waits, before anything below can return, a
+        // record not written yet and a side not known yet included.
+        if self
+            .unplaced_for(&[self.activity_key(&target)?], &q.to, Records::Activity)
+            .await?
+        {
+            return Ok(Unreadable);
+        }
         let find_side = cancellation && side.is_none();
         let mut read = if find_side && !self.holds("paykit_pay") {
             Fresh::Missing
@@ -620,15 +634,14 @@ impl Paykit {
                 return Ok(Absent);
             };
             target = sale;
+            // And for the payee's record the sale names.
+            if self
+                .unplaced_for(&[self.activity_key(&target)?], &q.to, Records::Activity)
+                .await?
+            {
+                return Ok(Unreadable);
+            }
             read = self.fresh_held_activity(&target).await?;
-        }
-        // A message of the counterparty's for this record kept and not placed yet, which may
-        // open it or stop it, decides first: it waits, a record not written yet included.
-        if self
-            .unplaced_for(&[self.activity_key(&target)?], &q.to, Records::Activity)
-            .await?
-        {
-            return Ok(Unreadable);
         }
         let record = match read {
             Fresh::Held(record) => record,
@@ -1120,6 +1133,44 @@ mod tests {
             .await
             .unwrap();
         (wallet, bob)
+    }
+
+    // Every family `unplaced_for` reads has its row in the family table of
+    // `test_restore_held_unplaced_for_every_family`: a row removed, or a family read with no
+    // row, fails here, so each row keeps its family's check guarded.
+    #[test]
+    fn test_restore_held_family_table_has_a_row_per_family() {
+        let source = include_str!("restore_held.rs");
+        let start = source
+            .find("pub(crate) async fn unplaced_for(")
+            .expect("unplaced_for");
+        let body = &source[start..];
+        let body = &body[..body.find("\n    }\n").expect("its end")];
+        let table = &source[source.find("let rows = [").expect("the family table")..];
+        let table = &table[..table.find("];").expect("its end")];
+        // What `unplaced_for` calls to read each family, and the family's prefix.
+        let families = [
+            ("key::kept_replies_of(", "pr/"),
+            ("key::kept_cancellations(", "kc/"),
+            ("key::allowance_ends(", "ae/"),
+            ("key::conflict(", "cf/"),
+            ("self.unresolved_allowance(", "ax/"),
+            ("key::pending_conflict(", "pc/"),
+            ("key::stored_notes_of(", "se/"),
+        ];
+        for (call, prefix) in families {
+            assert!(body.contains(call), "unplaced_for no longer reads {prefix}");
+            assert!(
+                table.contains(&format!("(\"{prefix}\"")),
+                "the family table has no row for {prefix}"
+            );
+        }
+        // Each `key::` family `unplaced_for` reads is one of those: a new one needs its row.
+        let read = families
+            .iter()
+            .filter(|(call, _)| call.starts_with("key::"))
+            .count();
+        assert_eq!(body.matches("key::").count(), read, "a family with no row");
     }
 
     #[tokio::test]

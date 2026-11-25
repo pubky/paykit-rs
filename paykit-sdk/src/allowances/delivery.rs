@@ -265,24 +265,10 @@ impl crate::Paykit {
 
         let target = allowance_target(&q.to, id);
         let key = self.app.record_key(&target)?;
-        let read = self.app.read_record_fresh(&target).await?;
-        if let RecordRead::Kept { reason, record } = &read {
-            if let Some(error) = crate::pay::kept_read_stop(reason) {
-                return Err(error);
-            }
-            // An authenticated absence with nothing retained holds no end: withdrawn.
-            // Anything else kept waits (Paykit spec 7.2).
-            return Ok(
-                if matches!(reason, KeptReason::NotFound) && record.is_none() {
-                    Absent
-                } else {
-                    Unreadable
-                },
-            );
-        }
         // A counterparty's end, answer or conflict kept and not placed yet, for the
         // Allowance or its proposal, waits for its placing (Paykit spec 8.3, "Ends reach the
-        // executor", "Conflicted").
+        // executor", "Conflicted"): before any read decides, an Allowance record not written
+        // yet included.
         let pending = self.app.record_key(&allowance_record_target(
             Collection::AllowanceProposals,
             &q.to,
@@ -297,6 +283,21 @@ impl crate::Paykit {
             .await?
         {
             return Ok(Unreadable);
+        }
+        let read = self.app.read_record_fresh(&target).await?;
+        if let RecordRead::Kept { reason, record } = &read {
+            if let Some(error) = crate::pay::kept_read_stop(reason) {
+                return Err(error);
+            }
+            // An authenticated absence with nothing retained holds no end: withdrawn.
+            // Anything else kept waits (Paykit spec 7.2).
+            return Ok(
+                if matches!(reason, KeptReason::NotFound) && record.is_none() {
+                    Absent
+                } else {
+                    Unreadable
+                },
+            );
         }
         // The one order of every held decision: paused waits; a confirmed view is decided
         // on, divergent or not (`Paykit::held_record_paused`).
