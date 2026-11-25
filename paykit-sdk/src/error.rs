@@ -423,6 +423,15 @@ pub enum PaykitError {
 }
 
 impl PaykitError {
+    /// Whether this failure is a wait: the same call, made again later, may pass with no one
+    /// acting, neither the user, the host nor the counterparty. Any other failure comes again
+    /// until someone acts. It is the table [`crate::Paykit::resume_payments`] applies to each
+    /// entry: a failure that stops the wallet as a whole is never a wait, and the failure in a
+    /// kept batch is judged as the same failure bare (Paykit spec 7.2).
+    pub fn is_wait(&self) -> bool {
+        crate::pay::entry_waits(self)
+    }
+
     /// The Dispatch's error code, when the failure is an answer of the Dispatch, also one that
     /// left the call's batch kept ([`AppError::Kept`]).
     pub fn code(&self) -> Option<ErrorCode> {
@@ -535,5 +544,29 @@ mod tests {
         assert_eq!(refused.refusal(), Some(&Refusal::AlreadyPaid));
         assert!(PaykitError::Conflict("record".into()).refusal().is_none());
         assert!(PaykitError::corrupt().refusal().is_none());
+    }
+
+    #[test]
+    fn test_error_is_wait_follows_the_resume_table() {
+        // A batch retired before its first handoff passes later, also inside a kept batch.
+        assert!(PaykitError::from(AppError::ExpiredUnsent).is_wait());
+        let kept = AppError::Kept {
+            batch_id: [1; 16],
+            error: Box::new(AppError::ExpiredUnsent),
+        };
+        assert!(PaykitError::from(kept).is_wait());
+        // An answer that needs another step first, a refusal the user answers and data that
+        // doesn't verify are no waits.
+        let moved = AppError::Switch(ClientError::Switch {
+            status: 410,
+            code: ErrorCode::Moved,
+            message: "scripted".into(),
+            current: serde_json::Value::Null,
+            known_version: None,
+            retry_after: None,
+        });
+        assert!(!PaykitError::from(moved).is_wait());
+        assert!(!PaykitError::from(Refusal::Rejected).is_wait());
+        assert!(!PaykitError::from(AppError::InvalidData("scripted".into())).is_wait());
     }
 }
