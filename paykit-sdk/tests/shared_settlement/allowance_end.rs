@@ -557,7 +557,9 @@ async fn receive_fenced_acceptance(
         next,
         pubky_dispatch_signer::UserConfirmed::shown_and_confirmed(),
     ))?;
-    in_task!(signer.end_staged_admission())?;
+    // The signer's last step here, so it isn't handed back.
+    tokio::task::spawn_local(async move { Box::pin(signer.end_staged_admission()).await })
+        .await??;
     if case == RecoveredProposal::Missing {
         drop(payer);
         payer = Box::new(

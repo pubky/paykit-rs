@@ -157,7 +157,7 @@ async fn grant(
         (payer, seller, accepted)
     })
     .await?;
-    let (mut payer, mut seller) = (payer_back, seller_back);
+    let (mut payer, seller) = (payer_back, seller_back);
     let (key, allowance_id) = accepted?;
     let permanent = payer
         .app()
