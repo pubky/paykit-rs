@@ -196,10 +196,15 @@ impl Paykit {
                     .ops
                     .iter()
                     .any(|op| AppliedRecord::current(&self.app, &record, &fresh, op).is_some());
+                // A proof the method's history shows paid must be that payment's. A history
+                // showing the attempt failed, pending or not at all doesn't refute the payer's
+                // own signed proof, which counts the attempt spent (Paykit spec 8.3, `failed`
+                // releases).
                 let matches_method = match dispatched.get(&id).map(|d| &d.outcome) {
                     Some(crate::rail::RailOutcome::Paid(method)) => matches!(proof.body(),
                         Body::PaymentProof(paid) if paid.proof == method.proof),
-                    _ => true,
+                    Some(crate::rail::RailOutcome::Failed | crate::rail::RailOutcome::Pending)
+                    | None => true,
                 };
                 if current_write && dated && matches_method {
                     paid_attempts.push(id);

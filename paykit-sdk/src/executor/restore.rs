@@ -60,28 +60,69 @@ fn compacted_transfer_matches(
     saved == (obligation, &amount.asset, &amount.value)
 }
 
-/// Whether a verified proof that `attempt` paid contradicts the usage counted for it: the
-/// attempt is a compacted failure still in `totals.failed`, which that usage released, and no
-/// retired payment counts it already. The executor then holds rather than leave a payment
-/// uncounted (Paykit spec 8.3, `failed` releases).
-fn proof_contradicts_a_release(
-    ledger: &Ledger,
-    retired: Option<&Retired>,
-    attempt: paykit_lib::AttemptId,
-) -> bool {
-    ledger.failed.iter().any(|item| item.attempt_id == attempt)
-        && !matches!(retired, Some(Retired::Paid(_)))
+/// How the claim of an attempt the ledger holds reads for counting.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ClaimClass {
+    /// A state verified against a signed opening: a failure gives way to a later signed
+    /// `done` (Paykit spec 8.3, `failed` releases).
+    Verified(super::ReservationClaim),
+    /// No opening verifies it: what the read, or a signed `done` held without its opening,
+    /// shows.
+    Shown(super::ClaimShows),
 }
 
-/// Whether a claim read shows `attempt` done. A compacted failure whose claim shows a `done`
-/// that doesn't verify can't count as released (Paykit spec 8.3, `failed` releases).
-fn read_shows_done(
+/// [`ClaimClass`] of `attempt` on `obligation`, from its claim `read` (none when the claim is
+/// gone), the signed `openings` that bind it, each with its sequence, and `verifies`, which
+/// says whether this app holds a signed outcome for a state after an opening's sequence. A
+/// read can lag behind the claim, so a later signed `done` wins over a failure it shows, and
+/// a signed `done` counts even without its opening.
+fn classify_claim(
+    read: Option<&pubky_switch_client::app::ClaimRead>,
+    attempt: paykit_lib::AttemptId,
+    obligation: [u8; 32],
+    openings: &[(super::ReservationClaim, u64)],
+    verifies: impl Fn(super::ReservationClaim, u64) -> bool,
+) -> ClaimClass {
+    for &(claim, opened) in openings {
+        if let Some(state) = super::evidence::settled_state(claim, |state| verifies(state, opened))
+        {
+            return ClaimClass::Verified(state);
+        }
+    }
+    let signed_done = verifies(
+        super::ReservationClaim {
+            obligation,
+            state: ClaimState::Done,
+        },
+        0,
+    );
+    ClaimClass::Shown(match read {
+        Some(read) => unverified_claim(read, attempt, signed_done),
+        None if signed_done => super::ClaimShows::UnverifiedDone,
+        None => super::ClaimShows::Gone,
+    })
+}
+
+/// What a claim read shows of `attempt` when no signed opening verifies it: a `done` it shows,
+/// or a signed `done` held without its opening (`signed_done`), which counts the attempt
+/// spent; anything else leaves the failure the ledger holds as it is (Paykit spec 8.3,
+/// `failed` releases).
+fn unverified_claim(
     read: &pubky_switch_client::app::ClaimRead,
     attempt: paykit_lib::AttemptId,
-) -> bool {
-    read.view
+    signed_done: bool,
+) -> super::ClaimShows {
+    use pubky_switch_core::claims::Outcome;
+    let shown = read
+        .view
         .attempt(&attempt.to_bytes())
-        .is_some_and(|shown| shown.outcome == pubky_switch_core::claims::Outcome::Done)
+        .map(|shown| shown.outcome);
+    match (signed_done, shown) {
+        (true, _) | (false, Some(Outcome::Done)) => super::ClaimShows::UnverifiedDone,
+        (false, Some(Outcome::Open | Outcome::Unknown | Outcome::Failed) | None) => {
+            super::ClaimShows::Gone
+        }
+    }
 }
 
 /// A settled tombstone can outlive its signed opening. It corroborates a Done entry
@@ -487,6 +528,7 @@ impl Paykit {
         let mut signers = checkpoint.signers.clone();
         let mut compaction = None;
         let mut reads = HashMap::new();
+        let mut unverified = HashMap::new();
         let mut recovered_copy = false;
         if current.revision != accepted.application.revision {
             if !current.follows(&accepted.application)
@@ -530,23 +572,25 @@ impl Paykit {
                         else {
                             return Ok(None);
                         };
-                        if matches!(opening.state, ClaimState::Done | ClaimState::Failed { .. })
-                            && !super::evidence::ClaimResults::new(
-                                &self.app,
-                                &with_claim.ops,
-                                &signers,
-                                &accepted,
-                                &current,
-                            )
-                            .confirms(
-                                entry.attempt_id,
-                                opening,
-                                seq,
-                                None,
-                            )
-                        {
+                        // The state to count is the verified one: a later signed `done` wins
+                        // over a read that still shows the failure (Paykit spec 8.3, `failed`
+                        // releases), and a state that doesn't verify establishes nothing.
+                        let results = super::evidence::ClaimResults::new(
+                            &self.app,
+                            &with_claim.ops,
+                            &signers,
+                            &accepted,
+                            &current,
+                        );
+                        let ClaimClass::Verified(opening) = classify_claim(
+                            Some(&claim),
+                            entry.attempt_id,
+                            entry.obligation,
+                            &[(opening, seq)],
+                            |state, opened| results.confirms(entry.attempt_id, state, opened, None),
+                        ) else {
                             return Ok(None);
-                        }
+                        };
                         // The service proved both operations in the same reservation batch.
                         if signers
                             .keep(
@@ -716,24 +760,46 @@ impl Paykit {
                 )
             };
             for entry in entries {
-                let Some(read) = reads.get(&entry.obligation).and_then(Option::as_ref) else {
+                let read = reads.get(&entry.obligation).and_then(Option::as_ref);
+                let candidates: Vec<_> = read
+                    .map(|read| {
+                        openings()
+                            .filter_map(|(op, purpose)| {
+                                let op = checkpoint.signers.original(entry.attempt_id, op)?;
+                                accepted.application.opening_for(
+                                    &self.app,
+                                    &op,
+                                    &entry.obligation,
+                                    entry.attempt_id,
+                                    read,
+                                    Some((&exact_grant, entry.at)),
+                                    purpose,
+                                )
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let class = classify_claim(
+                    read,
+                    entry.attempt_id,
+                    entry.obligation,
+                    &candidates,
+                    |claim, seq| results.confirms(entry.attempt_id, claim, seq, None),
+                );
+                let shown = match class {
+                    ClaimClass::Verified(claim) => {
+                        claims.insert(entry.attempt_id, claim);
+                        continue;
+                    }
+                    ClaimClass::Shown(shown) => shown,
+                };
+                let Some(read) = read else {
+                    if shown != super::ClaimShows::Gone {
+                        unverified.insert(entry.attempt_id, shown);
+                    }
                     continue;
                 };
-                if let Some(opening) = openings().find_map(|(op, purpose)| {
-                    let op = checkpoint.signers.original(entry.attempt_id, op)?;
-                    let (claim, seq) = accepted.application.opening_for(
-                        &self.app,
-                        &op,
-                        &entry.obligation,
-                        entry.attempt_id,
-                        read,
-                        Some((&exact_grant, entry.at)),
-                        purpose,
-                    )?;
-                    results.confirmed(entry.attempt_id, claim, seq)
-                }) {
-                    claims.insert(entry.attempt_id, opening);
-                } else if let Some(payment) = dispatched.get(&entry.attempt_id).filter(|payment| {
+                if let Some(payment) = dispatched.get(&entry.attempt_id).filter(|payment| {
                     matches!(payment.outcome, crate::rail::RailOutcome::Paid(_))
                         && settled_after_accepted_payment(
                             read,
@@ -758,31 +824,46 @@ impl Paykit {
                     // An uncertain view or an attempt without its bound opening doesn't
                     // establish that this claim has disappeared.
                     return Ok(None);
+                } else if shown != super::ClaimShows::Gone {
+                    unverified.insert(entry.attempt_id, shown);
                 }
             }
             for entry in failed {
-                let Some(read) = reads.get(&entry.obligation).and_then(Option::as_ref) else {
-                    continue;
-                };
-                if let Some(opening) = openings().find_map(|(op, purpose)| {
-                    let op = checkpoint.signers.original(entry.attempt_id, op)?;
-                    let (claim, seq) = current.opening_for(
-                        &self.app,
-                        &op,
-                        &entry.obligation,
-                        entry.attempt_id,
-                        read,
-                        Some((&exact_grant, 0)),
-                        purpose,
-                    )?;
-                    results.confirmed(entry.attempt_id, claim, seq)
-                }) {
-                    claims.insert(entry.attempt_id, opening);
-                } else if read_shows_done(read, entry.attempt_id) {
-                    // A compacted failure its claim shows done, which doesn't verify: counting
-                    // it released could leave a payment uncounted (Paykit spec 8.3, `failed`
-                    // releases).
-                    return Ok(None);
+                let read = reads.get(&entry.obligation).and_then(Option::as_ref);
+                let candidates: Vec<_> = read
+                    .map(|read| {
+                        openings()
+                            .filter_map(|(op, purpose)| {
+                                let op = checkpoint.signers.original(entry.attempt_id, op)?;
+                                current.opening_for(
+                                    &self.app,
+                                    &op,
+                                    &entry.obligation,
+                                    entry.attempt_id,
+                                    read,
+                                    Some((&exact_grant, 0)),
+                                    purpose,
+                                )
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                // What the claim shows counts as the shared rule says; nothing is decided
+                // here, before the proofs are read and copied (Paykit spec 8.3).
+                match classify_claim(
+                    read,
+                    entry.attempt_id,
+                    entry.obligation,
+                    &candidates,
+                    |claim, seq| results.confirms(entry.attempt_id, claim, seq, None),
+                ) {
+                    ClaimClass::Verified(claim) => {
+                        claims.insert(entry.attempt_id, claim);
+                    }
+                    ClaimClass::Shown(super::ClaimShows::Gone) => {}
+                    ClaimClass::Shown(shown) => {
+                        unverified.insert(entry.attempt_id, shown);
+                    }
                 }
             }
         }
@@ -819,6 +900,7 @@ impl Paykit {
             &proposed.terms,
             &ledger,
             &claims,
+            &unverified,
             &mut retired,
             counting,
             at,
@@ -918,11 +1000,6 @@ impl Paykit {
                     .failed
                     .iter()
                     .find(|entry| entry.attempt_id == dispatch.attempt_id);
-                let contradicted = proof_contradicts_a_release(
-                    &ledger,
-                    retired.get(&dispatch.attempt_id),
-                    dispatch.attempt_id,
-                );
                 let compacted = retired.get(&dispatch.attempt_id);
                 let (compacted, failed) = match (compacted, failed) {
                     (Some(Retired::PreviouslyFailed(_)), Some(_)) => return Ok(None),
@@ -944,10 +1021,6 @@ impl Paykit {
                             )
                         })
                     {
-                        return Ok(None);
-                    }
-                    if contradicted {
-                        // Nothing is paid until a ledger counts this payment.
                         return Ok(None);
                     }
                     retired.remove(&dispatch.attempt_id);
@@ -1276,80 +1349,109 @@ mod tests {
     }
 
     #[test]
-    fn test_restore_holds_a_compacted_failure_shown_paid() {
-        use paykit_lib::allowances::CompactedFailed;
+    fn test_restore_classifies_every_claim_read_for_counting() {
+        use super::super::{ClaimShows, ReservationClaim};
         use pubky_switch_client::app::ClaimRead;
         use pubky_switch_core::claims::{AttemptView, ClaimStatus, ClaimView, Outcome};
 
         let attempt = AttemptId::from_bytes([4; 16]);
-        let mut ledger = Ledger::empty(
-            [7; 32],
-            paykit_lib::AllowanceId::new("4b3fb324-091b-47da-a7ad-46b3a07d0409").unwrap(),
-            [8; 32],
-        );
-        let item = CompactedFailed {
-            obligation: [2; 32],
-            attempt_id: attempt,
-            value: Decimal::new("70").unwrap(),
-        };
-        ledger.failed.push(item.clone());
-        // A verified proof of the compacted failure: the usage that released it is wrong.
-        assert!(proof_contradicts_a_release(&ledger, None, attempt));
-        assert!(proof_contradicts_a_release(
-            &ledger,
-            Some(&Retired::PreviouslyFailed(item)),
-            attempt
-        ));
-        // A retired payment counts it already, and another attempt is no concern of it.
-        let paid = Retired::Paid(LedgerEntry {
-            obligation: [2; 32],
-            attempt_id: attempt,
-            asset: Asset::new("btc").unwrap(),
-            value: Decimal::new("70").unwrap(),
-            at: 1000,
-            outcome: Some(EntryOutcome::Done),
-        });
-        assert!(!proof_contradicts_a_release(&ledger, Some(&paid), attempt));
-        assert!(!proof_contradicts_a_release(
-            &ledger,
-            None,
-            AttemptId::from_bytes([5; 16])
-        ));
-
-        // A claim read showing the compacted failure done; failed or open shows nothing.
-        let read = |outcome| ClaimRead {
+        let obligation = [2; 32];
+        let claim = |state| ReservationClaim { obligation, state };
+        let failed = ClaimState::Failed { by_owner: false };
+        let read = |outcome: Option<Outcome>, rebuilt: bool, divergent: bool| ClaimRead {
             entries: Vec::new(),
             view: ClaimView {
-                claim_key: [2; 32],
+                claim_key: obligation,
                 status: ClaimStatus::Settled,
                 owner: None,
                 attempt_id: None,
                 step: 2,
-                attempts: vec![AttemptView {
-                    attempt_id: attempt.to_bytes(),
-                    owner: [7; 16],
-                    outcome,
-                    opened_at: 1002,
-                    orphan_after: 60,
-                    orphaned: false,
-                    possibly_duplicate: false,
-                    duplicate: false,
-                    resolved_by: Some([9; 16]),
-                }],
+                attempts: outcome
+                    .map(|outcome| AttemptView {
+                        attempt_id: attempt.to_bytes(),
+                        owner: [7; 16],
+                        outcome,
+                        opened_at: 1002,
+                        orphan_after: 60,
+                        orphaned: false,
+                        possibly_duplicate: false,
+                        duplicate: false,
+                        resolved_by: Some([9; 16]),
+                    })
+                    .into_iter()
+                    .collect(),
                 tombstone: false,
                 deadline: None,
-                divergent: false,
-                rebuilt: false,
+                divergent,
+                rebuilt,
                 next_possibly_duplicate: false,
             },
         };
-        assert!(read_shows_done(&read(Outcome::Done), attempt));
-        assert!(!read_shows_done(&read(Outcome::Failed), attempt));
-        assert!(!read_shows_done(&read(Outcome::Open), attempt));
-        assert!(!read_shows_done(
-            &read(Outcome::Done),
-            AttemptId::from_bytes([5; 16])
-        ));
+        // `held`: the outcomes this app holds signed; an open or `unknown` state always
+        // verifies, as the real check says.
+        let class = |read: Option<&ClaimRead>,
+                     openings: &[(ReservationClaim, u64)],
+                     held: &[ClaimState]| {
+            classify_claim(read, attempt, obligation, openings, |shown, _| {
+                matches!(shown.state, ClaimState::Open | ClaimState::Unknown)
+                    || held.contains(&shown.state)
+            })
+        };
+        let shows_failed = read(Some(Outcome::Failed), false, false);
+        let opened = [(claim(failed), 3)];
+        // A lagging read shows the failure while this app holds the later signed `done`.
+        assert_eq!(
+            class(Some(&shows_failed), &opened, &[failed, ClaimState::Done]),
+            ClaimClass::Verified(claim(ClaimState::Done))
+        );
+        assert_eq!(
+            class(Some(&shows_failed), &opened, &[failed]),
+            ClaimClass::Verified(claim(failed))
+        );
+        assert_eq!(
+            class(Some(&shows_failed), &[(claim(ClaimState::Open), 3)], &[]),
+            ClaimClass::Verified(claim(ClaimState::Open))
+        );
+        // A signed `done` without its opening counts, whether the claim reads or is gone.
+        assert_eq!(
+            class(Some(&shows_failed), &[], &[ClaimState::Done]),
+            ClaimClass::Shown(ClaimShows::UnverifiedDone)
+        );
+        assert_eq!(
+            class(None, &[], &[ClaimState::Done]),
+            ClaimClass::Shown(ClaimShows::UnverifiedDone)
+        );
+        // A `done` the read shows without its opening.
+        assert_eq!(
+            class(Some(&read(Some(Outcome::Done), false, false)), &[], &[]),
+            ClaimClass::Shown(ClaimShows::UnverifiedDone)
+        );
+        // Anything else without a verified opening leaves the recorded failure as it is: a
+        // divergent or rebuilt view, or one showing the attempt open, `unknown` or failed.
+        for other in [
+            read(Some(Outcome::Failed), true, false),
+            read(Some(Outcome::Failed), false, true),
+            read(None, true, false),
+            read(Some(Outcome::Open), false, false),
+            read(Some(Outcome::Unknown), false, false),
+        ] {
+            assert_eq!(
+                class(Some(&other), &[], &[]),
+                ClaimClass::Shown(ClaimShows::Gone),
+                "{:?}",
+                other.view
+            );
+        }
+        // The failure the ledger holds, shown without its opening, or nothing at all.
+        assert_eq!(
+            class(Some(&shows_failed), &opened, &[]),
+            ClaimClass::Shown(ClaimShows::Gone)
+        );
+        assert_eq!(
+            class(Some(&read(None, false, false)), &[], &[]),
+            ClaimClass::Shown(ClaimShows::Gone)
+        );
+        assert_eq!(class(None, &[], &[]), ClaimClass::Shown(ClaimShows::Gone));
     }
 
     #[test]

@@ -240,15 +240,6 @@ impl<'a> ClaimResults<'a> {
     /// way to a later `done` this app holds signed for the same attempt, since a read can lag
     /// behind the claim, and a later `done` spends a failed attempt again (Paykit spec 8.3,
     /// `failed` releases). `None` when the state the read shows doesn't verify.
-    pub(super) fn confirmed(
-        &self,
-        id: paykit_lib::AttemptId,
-        claim: ReservationClaim,
-        opened: u64,
-    ) -> Option<ReservationClaim> {
-        settled_state(claim, |state| self.confirms(id, state, opened, None))
-    }
-
     pub(super) fn confirms(
         &self,
         id: paykit_lib::AttemptId,
@@ -288,9 +279,12 @@ impl<'a> ClaimResults<'a> {
     }
 }
 
-/// [`ClaimResults::confirmed`] over `verifies`, which says whether this app holds a signed
-/// outcome for a claim state: a failure gives way to a verified `done`.
-fn settled_state(
+/// The claim state to count for a read showing `claim`, given `verifies`, which says whether
+/// this app holds a signed outcome for a state: a failure the read shows gives way to a
+/// later signed `done`, since a read can lag behind the claim, and a later `done` spends a
+/// failed attempt again (Paykit spec 8.3, `failed` releases). `None` when the state the
+/// read shows doesn't verify.
+pub(super) fn settled_state(
     claim: ReservationClaim,
     verifies: impl Fn(ReservationClaim) -> bool,
 ) -> Option<ReservationClaim> {
@@ -878,34 +872,6 @@ impl AppliedRecord {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn test_evidence_a_verified_done_wins_over_a_lagging_failure() {
-        use super::{settled_state, ClaimState, ReservationClaim};
-        let failed = ReservationClaim {
-            obligation: [2; 32],
-            state: ClaimState::Failed { by_owner: false },
-        };
-        let state = |claim: ReservationClaim, verified: &[ClaimState]| {
-            settled_state(claim, |c| verified.contains(&c.state)).map(|c| c.state)
-        };
-        // The read lags and still shows the failure, while this app holds a later signed
-        // `done`: the attempt counts paid.
-        assert_eq!(
-            state(failed, &[failed.state, ClaimState::Done]),
-            Some(ClaimState::Done)
-        );
-        assert_eq!(state(failed, &[ClaimState::Done]), Some(ClaimState::Done));
-        // Only the failure verifies: it stands. Neither: nothing is confirmed.
-        assert_eq!(state(failed, &[failed.state]), Some(failed.state));
-        assert_eq!(state(failed, &[]), None);
-        // A read showing `done` or `open` is taken as shown.
-        let done = ReservationClaim {
-            state: ClaimState::Done,
-            ..failed
-        };
-        assert_eq!(state(done, &[ClaimState::Done]), Some(ClaimState::Done));
-    }
-
     #[test]
     fn test_evidence_authorization_admits_only_the_current_generation() {
         // An opening answered in an earlier generation authorizes no new attempt, after an

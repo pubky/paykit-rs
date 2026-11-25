@@ -292,6 +292,7 @@ mod tests {
                 &terms,
                 ledger,
                 claims,
+                &HashMap::new(),
                 retired,
                 facts.clone(),
                 now,

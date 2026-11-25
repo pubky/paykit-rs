@@ -124,9 +124,10 @@ fn lifetime_room(
         return LifetimeRoom::Now;
     };
     let used = usage.lifetime().scaled();
+    // Usage never holds more reserved than it counts; if it did, nothing fits (fails closed).
     let fits = |freed: u128| {
-        used.saturating_sub(freed)
-            .checked_add(value.scaled())
+        used.checked_sub(freed)
+            .and_then(|kept| kept.checked_add(value.scaled()))
             .is_some_and(|sum| sum <= cap.scaled())
     };
     if fits(0) {
@@ -160,11 +161,17 @@ fn limit_refusal(limit: LimitKind, period_never: bool, room: LifetimeRoom) -> cr
         LimitKind::PerPayment => not_automatic(&why),
         // Usage of other terms: no window or release mends it (Paykit spec 8.3).
         LimitKind::InconsistentUsage => execution_held(INCONSISTENT_USAGE).into(),
-        _ if period_never || room == LifetimeRoom::Never => not_automatic(&why),
+        LimitKind::PeriodAmount | LimitKind::PeriodCount | LimitKind::Lifetime
+            if period_never || room == LifetimeRoom::Never =>
+        {
+            not_automatic(&why)
+        }
         // A window rolling, or a reserved entry's outcome, gives the room back.
-        _ => waits(crate::NotNowReason::AllowanceLimit {
-            limit: limit.as_str().into(),
-        }),
+        LimitKind::PeriodAmount | LimitKind::PeriodCount | LimitKind::Lifetime => {
+            waits(crate::NotNowReason::AllowanceLimit {
+                limit: limit.as_str().into(),
+            })
+        }
     }
 }
 

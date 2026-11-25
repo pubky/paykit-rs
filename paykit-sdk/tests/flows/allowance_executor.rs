@@ -2435,6 +2435,113 @@ async fn test_compacted_failure_paid_by_receipt_survives_reopen_and_restore() {
 }
 
 #[tokio::test]
+async fn test_restored_compacted_failure_paid_by_receipt_copies_its_proof() {
+    paykit_sdk::with_early_ledger_compaction(Box::pin(restored_compacted_failure_paid())).await;
+}
+
+/// A compacted failure a restored installation holds, paid after all and receipted: the
+/// claim shows `done` and the payer record holds the payment's dated proof, which is copied
+/// into the ledger's paid totals, and the Allowance counts it (Paykit spec 8.3, `failed`
+/// releases).
+async fn restored_compacted_failure_paid() {
+    use paykit_lib::allowances::EntryOutcome;
+    use paykit_sdk::rail::Behaviour;
+
+    let (world, mut payer, mut shop, key) =
+        Box::pin(first_grant_in(crate::common::store(), terms())).await;
+    let identity = payer.identity();
+    world.rail.set_history_payer(identity);
+    let request = Box::pin(request_from(
+        &mut shop,
+        identity,
+        draft("7", world.clock.now_ms()),
+    ))
+    .await;
+    Box::pin(payer.receive(None)).await.unwrap();
+    world.rail.next(Behaviour::Fail);
+    let payment = Box::pin(payer.pay_under_allowance(&request, &key))
+        .await
+        .outcome
+        .unwrap();
+    let paykit_sdk::PayOutcome::Failed { attempt_id, .. } = payment else {
+        panic!("{payment:?}");
+    };
+    let obligation = only_ledger(&payer).await.0.entries[0].obligation;
+    assert!(world.rail.hold_history_outcome(&attempt_id));
+    world.clock.advance_ms(60_001);
+    let next = Box::pin(request_from(
+        &mut shop,
+        identity,
+        draft("1", world.clock.now_ms()),
+    ))
+    .await;
+    Box::pin(payer.receive(None)).await.unwrap();
+    assert!(matches!(
+        Box::pin(payer.pay_under_allowance(&next, &key))
+            .await
+            .outcome
+            .unwrap(),
+        paykit_sdk::PayOutcome::Paid { .. }
+    ));
+    let (compacted, compacted_version) = only_ledger(&payer).await;
+    assert_eq!(compacted.failed.len(), 1);
+    assert_eq!(compacted.failed[0].attempt_id, attempt_id);
+    let backup = Box::pin(payer.backup()).await.unwrap();
+    drop(payer);
+
+    // Restored from that backup, the installation holds the compacted failure.
+    let mut restored = Box::pin(restore_funded_wallet(
+        &world,
+        crate::common::store(),
+        &backup,
+    ))
+    .await;
+    Box::pin(finish_restored_reconciliation(&mut restored)).await;
+    assert_eq!(only_ledger(&restored).await.1, compacted_version);
+
+    // The failed payment completes after all; the seller receipts it, which marks the claim
+    // done, and the payer record holds its proof.
+    world.rail.complete_after_failure(&attempt_id);
+    Box::pin(restored.resume_payments()).await.unwrap();
+    Box::pin(crate::common::finish_listing(&mut shop)).await;
+    let sale = shop
+        .payee_activity()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|s| s.request_hash == Some(request.request_hash))
+        .unwrap();
+    Box::pin(shop.confirm_payment(&sale.record))
+        .await
+        .unwrap()
+        .expect("seller receipt for the later settlement");
+    Box::pin(crate::common::finish_listing(&mut restored)).await;
+    let claim = restored
+        .app_mut()
+        .read_claim(&obligation)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        claim.view.attempt(&attempt_id.to_bytes()).unwrap().outcome,
+        pubky_switch_core::claims::Outcome::Done
+    );
+    Box::pin(restored.resume_payments()).await.unwrap();
+    let (copied, _) = only_ledger(&restored).await;
+    assert!(copied.failed.is_empty(), "{copied:?}");
+    assert_eq!(copied.spent.as_ref().unwrap().as_str(), "7");
+    let usage = Box::pin(restored.reconcile_allowance(&key))
+        .await
+        .unwrap()
+        .expect("the copied proof establishes the ledger");
+    assert_eq!(usage.lifetime().as_str(), "8");
+    assert!(copied
+        .entries
+        .iter()
+        .all(|e| e.outcome == Some(EntryOutcome::Done)));
+}
+
+#[tokio::test]
 async fn test_executor_pays_after_copied_outcome_key_retirement() {
     paykit_sdk::with_early_ledger_compaction(Box::pin(compacted_failure_paid_by_receipt(true)))
         .await;

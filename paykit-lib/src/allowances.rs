@@ -1045,7 +1045,10 @@ fn counting(outcome: Option<EntryOutcome>, evidence: AttemptEvidence) -> Countin
     }
     match evidence.claim {
         Some(ClaimState::Open | ClaimState::Unknown) => Counting::Reserved,
-        _ => Counting::Spent,
+        // Without an outcome, a claim that is gone or doesn't hold the attempt spends.
+        None => Counting::Spent,
+        // Counted above, as spent and released.
+        Some(ClaimState::Done | ClaimState::Failed { .. }) => Counting::Spent,
     }
 }
 
@@ -1147,8 +1150,9 @@ fn in_limit(period: &LimitPeriod, entry_at: u64, t: u64) -> Result<bool> {
 
 /// Usage at time `t` (Paykit spec 8.3, Paykit wire 5.5): every entry counted by
 /// [`counts`] with its attempt's `evidence`, for every period limit and the lifetime
-/// amount. Missing evidence never releases capacity. A `totals.failed` item counts by
-/// the same failed-attempt rule, in the lifetime amount only.
+/// amount. Only a recorded or claimed failure releases capacity; missing evidence never
+/// does. A `totals.failed` item counts by the same failed-attempt rule, in the lifetime
+/// amount only.
 ///
 /// # Errors
 ///
@@ -1180,12 +1184,18 @@ pub fn usage(
     let (mut reserved, mut spent, mut released) = (0u64, 0u64, 0u64);
     let mut reserved_amount = 0u128;
     for item in &ledger.failed {
-        if counting(
+        match counting(
             Some(EntryOutcome::Failed),
             evidence.get(&item.attempt_id).copied().unwrap_or_default(),
-        ) != Counting::Released
-        {
-            lifetime = add(lifetime, item.value.scaled())?;
+        ) {
+            Counting::Released => {}
+            // A failed outcome counts as released or spent, never reserved; were it reserved,
+            // its room could come back.
+            Counting::Reserved => {
+                lifetime = add(lifetime, item.value.scaled())?;
+                reserved_amount = add(reserved_amount, item.value.scaled())?;
+            }
+            Counting::Spent => lifetime = add(lifetime, item.value.scaled())?,
         }
     }
     for entry in &ledger.entries {
