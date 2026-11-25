@@ -438,7 +438,7 @@ impl Paykit {
     /// With nothing held and nothing asked there is nothing to tell, and the gate opens
     /// whatever the record signed holds, one whose Paykit member doesn't read included.
     ///
-    /// The notice goes first, at the key of its telling ([`Telling`]), then the clear, then
+    /// The notice goes first, at the key of its telling ([`telling_id`]), then the clear, then
     /// the ask: a failure or a crash between them tells the same change again, at the same
     /// key, and never loses it. A notice the host acknowledged before the clear is kept,
     /// acknowledged, until the clear, so the change is shown once. Local only, so it needs no
@@ -488,7 +488,7 @@ impl Paykit {
                 // Told when it asked anything of the endpoints and isn't signed already, as
                 // when a crash came between the signing and the ask's delete.
                 (!asked.classes.is_empty() && Some(asked.endpoints) != signed_digest)
-                    .then(|| Telling::of(asked.base, asked.endpoints, Some(asked.classes)))
+                    .then(|| telling(asked.base, asked.endpoints, Some(asked.classes)))
             }
             Some(Some(endpoints)) => {
                 let digest = endpoints_digest(endpoints);
@@ -496,34 +496,32 @@ impl Paykit {
                     // The ask of this very change: told as asked, or not at all when it asked
                     // nothing of the endpoints.
                     (Some(asked), _) if asked.endpoints == digest => (!asked.classes.is_empty())
-                        .then(|| Telling::of(asked.base, digest, Some(asked.classes))),
+                        .then(|| telling(asked.base, digest, Some(asked.classes))),
                     // An ask made on the record signed now, but not for this change, as after
                     // a crash between a later ask and its save: this change's classes against
                     // that record.
                     (Some(asked), Some(signed)) if Some(asked.base) == signed_digest => {
                         let classes = EndpointClasses::between(signed, endpoints);
-                        (!classes.is_empty())
-                            .then(|| Telling::of(asked.base, digest, Some(classes)))
+                        (!classes.is_empty()).then(|| telling(asked.base, digest, Some(classes)))
                     }
                     // No ask to go by, and the record signed may have moved since the change
                     // was made, as after a restore in place, or doesn't read: told naming no
                     // endpoint when the endpoints differ, for the host to show the ones signed.
                     _ => (Some(digest) != signed_digest)
-                        .then(|| Telling::of(signed_digest.unwrap_or([0; 32]), digest, None)),
+                        .then(|| telling(signed_digest.unwrap_or([0; 32]), digest, None)),
                 }
             }
             // An ask is this change's only when made on the record signed now; an older one
             // could name an endpoint offered since.
             Some(None) => Some(match asked {
                 Some(asked) if !asked.classes.is_empty() && Some(asked.base) == signed_digest => {
-                    Telling::of(asked.base, asked.endpoints, Some(asked.classes))
+                    telling(asked.base, asked.endpoints, Some(asked.classes))
                 }
-                _ => Telling::of(signed_digest.unwrap_or([0; 32]), [0; 32], None),
+                _ => telling(signed_digest.unwrap_or([0; 32]), [0; 32], None),
             }),
         };
-        if let Some(telling) = told {
-            self.endpoint_change_not_published(&telling.id, telling.classes)
-                .await?;
+        if let Some((telling, classes)) = told {
+            self.endpoint_change_not_published(telling, classes).await?;
         }
         if held.is_some() {
             self.app.clear_held_record_edit(PROTOCOL_NAME).await?;
@@ -820,39 +818,54 @@ pub(crate) struct EndpointChange {
     pub(crate) classes: EndpointClasses,
 }
 
-/// A telling of a held change ([`Paykit::settle_held_endpoint_change`]): its classes, if
-/// known, and the ID of its notice, from the digest of the endpoints it was told against
-/// (`base`), the digest of the endpoints it asked (`target`) and its classes. Two tellings
-/// share an ID only when they tell the same, so the same telling tried again is the same
-/// notice, and no telling is lost under another's.
-struct Telling {
-    id: [u8; 32],
-    classes: Option<EndpointClasses>,
+/// A telling of a held change ([`Paykit::settle_held_endpoint_change`]): the digest of the
+/// endpoints it was told against (`base`), the digest of the endpoints the change asked
+/// (`target`), and its classes, if known. Its notice keeps all three, and its key is their
+/// ID ([`telling_id`]), so a restore binds each notice to its key.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Telling {
+    #[serde(with = "pubky_dispatch_core::enc::serde_b64")]
+    pub(crate) base: [u8; 32],
+    #[serde(with = "pubky_dispatch_core::enc::serde_b64")]
+    pub(crate) target: [u8; 32],
 }
 
-impl Telling {
-    fn of(base: [u8; 32], target: [u8; 32], classes: Option<EndpointClasses>) -> Self {
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&base);
-        bytes.extend_from_slice(&target);
-        match &classes {
-            None => bytes.push(0),
-            Some(classes) => {
-                bytes.push(1);
-                for list in [&classes.withdrawn, &classes.offered, &classes.changed] {
-                    bytes.extend_from_slice(&(list.len() as u64).to_be_bytes());
-                    for id in list {
-                        bytes.extend_from_slice(&(id.len() as u64).to_be_bytes());
-                        bytes.extend_from_slice(id.as_bytes());
-                    }
+/// The ID of the telling against `base` of a change asking `target`, with `classes`: two
+/// tellings share an ID only when they tell the same, so the same telling tried again is
+/// the same notice, and no telling is lost under another's. Empty classes count as none,
+/// as a notice keeps them.
+pub(crate) fn telling_id(
+    base: &[u8; 32],
+    target: &[u8; 32],
+    classes: Option<&EndpointClasses>,
+) -> [u8; 32] {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(base);
+    bytes.extend_from_slice(target);
+    match classes.filter(|classes| !classes.is_empty()) {
+        None => bytes.push(0),
+        Some(classes) => {
+            bytes.push(1);
+            for list in [&classes.withdrawn, &classes.offered, &classes.changed] {
+                bytes.extend_from_slice(&(list.len() as u64).to_be_bytes());
+                for id in list {
+                    bytes.extend_from_slice(&(id.len() as u64).to_be_bytes());
+                    bytes.extend_from_slice(id.as_bytes());
                 }
             }
         }
-        Self {
-            id: pubky_dispatch_core::enc::hash(&bytes),
-            classes,
-        }
     }
+    pubky_dispatch_core::enc::hash(&bytes)
+}
+
+/// The telling against `base` of a change asking `target`, with `classes`.
+fn telling(
+    base: [u8; 32],
+    target: [u8; 32],
+    classes: Option<EndpointClasses>,
+) -> (Telling, Option<EndpointClasses>) {
+    (Telling { base, target }, classes)
 }
 
 /// The digest of a set of public endpoints, each identifier and payload length-prefixed in
