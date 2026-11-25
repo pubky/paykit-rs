@@ -122,7 +122,7 @@ A Paykit App's certificate is the Dispatch's (Dispatch wire 3.1). Paykit fixes i
 
 **Dispatch permissions from Paykit's scopes** (spec 3.1). The table's second column is Paykit's: the signer sets `permissions` from Paykit's scopes by it, and from another protocol's scopes by that protocol's table, and Paykit's verifiers derive the list again from the scopes they know; names they don't know, and other protocols' scopes, grant nothing in it. A scope may appear in several rows. The list holds each permission that one of the scopes grants, once, in the order below.
 
-A well-formed list with a permission missing, or, in a certificate that holds no other protocol's scope, with one extra, is refused by Paykit's verifiers, while the Dispatch takes it and enforces exactly that list: the Dispatch no longer checks the signer's derivation, so a signer that grants too much is honoured by the Dispatch and refused by Paykit's apps, and the signer is trusted with everything anyway. A change to this table needs a new certificate version (`v`), since verifiers of this version would refuse a certificate carrying the new list. Vectors: `documents.json` `certificate_rejections`, which the Dispatch takes (`switch_accepts`); those every reader refuses are the Dispatch set's `permission_rejections`.
+A well-formed list with a permission missing, or, in a certificate that holds no other protocol's scope, with one extra, is refused by Paykit's verifiers, while the Dispatch takes it and enforces exactly that list: the Dispatch no longer checks the signer's derivation, so a signer that grants too much is honoured by the Dispatch and refused by Paykit's apps, and the signer is trusted with everything anyway. A change to this table needs a new certificate version (`v`), since verifiers of this version would refuse a certificate carrying the new list. Vectors: `documents.json` `certificate_rejections`, which the Dispatch takes (`dispatch_accepts`); those every reader refuses are the Dispatch set's `permission_rejections`.
 
 | Dispatch permission | Granted by any of |
 |---|---|
@@ -165,7 +165,7 @@ The example of Dispatch wire 3.2, `shop`'s record, carries both. These rules are
 - Vectors: `documents.json` `app_records`, `shop`'s record with its `paykit` member changed or removed and signed again: the stored cases include accepted Paykit members and refusals for malformed members and values that break 1.4. The accepted case `public endpoints with expires_at null` checks the endpoints the reader returns from that signed record. The form of `protocols` is the Dispatch set's [`documents.json`](https://github.com/pubky/pubky-dispatch/blob/250cd60e98eecb2a0357e55257d5b0dad2d583a4/spec/vectors/documents.json) `app_record_protocols`.
 - **Expiry** (spec 4): if `expires_at` is finite, payers refuse its public endpoints once either their device clock or their highest verified service time is at or after that instant (spec 7.2). The service doesn't check `expires_at`; the directory serves the record as delivered.
 - **Record age limit** (spec 4): a payer uses a record's public endpoints strictly before its `updated_at` plus the `record_max_age` in the identity's `identity.json`, or a finite signed deadline if earlier (Dispatch wire 3.3; 90 days when absent), by both its device clock and its highest verified service time (spec 7.2), and not at all when its `updated_at` is more than 5 minutes ahead of the payer's device clock. So a stolen app key can't sign a record that stays payable for long: the signer, which signs `identity.json`, sets the limit. An app renews its record within that limit too (Renewal, below).
-- **Path** (Dispatch spec 4.2): a payer uses a record read from `/pub/pubky-switch/v1/apps/<app_id>.json` only if its `app_id` is that `<app_id>`.
+- **Path** (Dispatch spec 4.2): a payer uses a record read from `/pub/pubky-dispatch/v1/apps/<app_id>.json` only if its `app_id` is that `<app_id>`.
 - **Renewal** (spec 4): once less than half the record's effective lifetime remains, the app renews it at its next run. Measure that lifetime from `updated_at` to the earlier of the identity age ceiling and any finite signed deadline. For a null deadline, use the age ceiling alone. Sign the current endpoints with a new `updated_at` and each protocol's current deadline request. Republishing or renewing a shared record must preserve a fixed public payment cutoff, including after reopen. Once that cutoff has passed, omit the affected endpoints from the next record unless the publisher explicitly offers them again. If no public endpoints remain, Paykit requests no deadline and any other protocol's deadline still applies. A renewed record cannot extend the validity of the underlying payment method. The app delivers the new record with `app.put` and, once the service accepts it, republishes it on the Homeserver; while a publication fails, or the Homeserver copy differs from the newest record the service accepted, it publishes that newest record again, never an older one and never over a Homeserver copy with a later `updated_at`, until it deletes that record to leave, or leaves (Dispatch spec 4.2). A record with at least half its lifetime left does not need a rewrite solely for renewal. At each receive, an app that no longer holds `paykit_request`, or no longer publishes its record, signs its next record without public endpoints; a renewal the service hasn't accepted yet stays the app's pending record and goes again at the next read, and isn't counted as done; an app offline at the half-way point renews when it next runs, and an unrenewed public record becomes unusable at the end of its effective lifetime.
 - **Withdrawing a destination:** removing an endpoint from the current record cannot recall a stale copy already within its trust window, so a payee whose destination is compromised removes it and revokes the app, or replaces it with a new one (Dispatch spec 4.2).
 
@@ -191,8 +191,8 @@ Example (`documents.json` `executor_grant`, whose write built on version (1, 12)
 {
   "app_id": "cw5ahtdkixcafna9zh1y5y5o1w",
   "cert": {
-    "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFw...",
-    "sig": "Ir-nJajpFEnwb23vssI3EeOQj5e1-q6-40FrkjXZb0f6irORauaGp_fi8YPsLbC3V153vNz1PfcjyPJI_DXODA"
+    "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktZGlzcGF0Y2gu...",
+    "sig": "uYkofomrLmnpeDcNPqSgyPTqctrVUNvUo5-8tC-M4wPu2MO3c4g1ichWgmvsPdTwpCgkq2sV40b2-BBecbqiAw"
   },
   "confirmed_generation": 1,
   "sig": "jKZ13zfRyNtQPpLEeOU2USP0AH5ryagD_QqudMVFPn2bi61kshMto6Uuqxohf38_ueLZXBivfe9V3j_CWacmBg",
@@ -892,7 +892,7 @@ Example (alice's `payer_activity` record of bob's request, certificate and plain
   "request": {
     "sender": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
     "cert": {
-      "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFw...",
+      "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktZGlzcGF0Y2gu...",
       "sig": "4bAiKsZ2ITml9GP7Nqxgz3-lJ5WB25fIqYRarBxke89Mye8URlPFAM5qGTqWMxRcPS5lWLy1aDPt6IyRVQsoDA"
     },
     "plaintext": {
@@ -1006,8 +1006,8 @@ Example entry (`documents.json` `executor_grant_history_entry`: the record was c
   "grant": {
     "app_id": "cw5ahtdkixcafna9zh1y5y5o1w",
     "cert": {
-      "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFw...",
-      "sig": "Ir-nJajpFEnwb23vssI3EeOQj5e1-q6-40FrkjXZb0f6irORauaGp_fi8YPsLbC3V153vNz1PfcjyPJI_DXODA"
+      "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktZGlzcGF0Y2gu...",
+      "sig": "uYkofomrLmnpeDcNPqSgyPTqctrVUNvUo5-8tC-M4wPu2MO3c4g1ichWgmvsPdTwpCgkq2sV40b2-BBecbqiAw"
     },
     "confirmed_generation": 1,
     "sig": "jKZ13zfRyNtQPpLEeOU2USP0AH5ryagD_QqudMVFPn2bi61kshMto6Uuqxohf38_ueLZXBivfe9V3j_CWacmBg",
