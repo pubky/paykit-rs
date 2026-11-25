@@ -1364,7 +1364,7 @@ fn open_outcome(now: &EntryFacts, turns: &Turns) -> PayOutcome {
     }
 }
 
-/// The one outcome of an entry over and not yet told, `None` only for one abandoned before
+/// The one outcome of an entry over, `None` only for one abandoned before
 /// its attempt reached the claim. Read from the entry, in this order:
 ///
 /// 1. the method's proof: paid, whatever else the entry says;
@@ -2557,21 +2557,24 @@ impl Paykit {
     /// [`Paykit::journal`], each entry with the facts laid over it ([`AttemptFacts`]): the
     /// one read of the whole journal.
     pub(crate) async fn journal_with_facts(&self) -> Result<Vec<(JournalEntry, AttemptFacts)>> {
-        let mut facts: HashMap<String, AttemptFacts> = self
-            .local_scan::<AttemptFacts>(key::ATTEMPT_FACTS)
+        let mut facts: HashMap<String, state::StoredFacts> = self
+            .local_scan::<state::StoredFacts>(key::ATTEMPT_FACTS)
             .await?
             .into_iter()
             .collect();
-        self.local_scan::<crate::journal::StoredEntry>(key::JOURNAL)
+        self.local_scan::<state::StoredEntry>(key::JOURNAL)
             .await?
             .into_iter()
             .map(|(_, stored)| {
-                let attempt = stored.as_written().attempt()?;
+                let attempt = stored.attempt()?;
                 // A scan names each value by its key past the prefix: the attempt ID.
                 let kept = facts.remove(&attempt.to_text());
                 Ok((
                     stored.with_facts(kept.as_ref()),
-                    kept.unwrap_or_else(|| AttemptFacts::of(&attempt)),
+                    kept.map_or_else(
+                        || AttemptFacts::of(&attempt),
+                        state::StoredFacts::into_facts,
+                    ),
                 ))
             })
             .collect()
@@ -2586,17 +2589,21 @@ impl Paykit {
     ///
     /// A store failure, or an entry that doesn't read or isn't the attempt its key names.
     pub(crate) async fn journal_entry(&self, attempt: &AttemptId) -> Result<Option<JournalEntry>> {
-        let facts = self.attempt_facts(attempt).await?;
+        let facts = self
+            .local_get::<state::StoredFacts>(&key::attempt_facts(attempt))
+            .await?;
         Ok(self
-            .local_get::<crate::journal::StoredEntry>(&key::journal(attempt))
+            .local_get::<state::StoredEntry>(&key::journal(attempt))
             .await?
             .map(|entry| entry.with_facts(facts.as_ref())))
     }
 
     /// What this app keeps beside `attempt`'s journal entry ([`AttemptFacts`]).
     async fn attempt_facts(&self, attempt: &AttemptId) -> Result<Option<AttemptFacts>> {
-        self.local_get::<AttemptFacts>(&key::attempt_facts(attempt))
-            .await
+        Ok(self
+            .local_get::<state::StoredFacts>(&key::attempt_facts(attempt))
+            .await?
+            .map(state::StoredFacts::into_facts))
     }
 
     /// Keep what the payment method said of `entry`'s attempt, with the entry, in one commit
@@ -5743,9 +5750,8 @@ impl Paykit {
     }
 
     /// Keep the method's word that `entry`'s payment failed, and the entry with that failure
-    /// to write (`RailFailed`) ([`Paykit::learn`]). `ask_again` for a payment the method was
-    /// called for, whose history the recheck asks again; not for a call it refused, which
-    /// submitted nothing (Paykit spec 7.2). A proof the facts hold already stands over it.
+    /// to write (`RailFailed`) ([`Paykit::learn`]). `ask_again` where the recheck asks its
+    /// history again (Paykit spec 7.2). A proof the facts hold already stands over it.
     pub(crate) async fn learn_failed(
         &mut self,
         entry: &mut JournalEntry,
@@ -6008,14 +6014,16 @@ impl Paykit {
     /// payment (Paykit spec 8.1, 8.3), so the attempt stays open and the user's payment
     /// method's history or a receipt settles it. A payment without a request has nothing a payee cancels.
     async fn repeat_withheld(&mut self, entry: &JournalEntry) -> Result<bool> {
-        // The user said an earlier restored handoff of the obligation was paid: no attempt
-        // of it is carried out again (Paykit spec 7.2, 8.4).
-        if self
-            .journal()
-            .await?
-            .iter()
-            .any(|other| other.obligation == entry.obligation && other.user_paid)
-        {
+        // The user said an earlier restored handoff of the obligation was paid, or another
+        // attempt of it holds the method's proof: the obligation is paid, and no attempt of
+        // it is carried out again (Paykit spec 7.2, "no second execution"; 8.3, 8.4). The
+        // proof counts where only the journal holds it, such as a Billing Period's whose
+        // record write is held.
+        if self.journal().await?.iter().any(|other| {
+            other.obligation == entry.obligation
+                && (other.user_paid
+                    || other.attempt_id != entry.attempt_id && other.rail_proof.is_some())
+        }) {
             return Ok(true);
         }
         // An earlier-generation handoff is never repeated after a provider loss
@@ -6068,8 +6076,8 @@ impl Paykit {
     /// Whether `fresh`, `entry`'s request record as the Dispatch holds it now, read again
     /// ([`Paykit::fresh_request`]), withholds an automatic payment of it, at a repeat's
     /// withheld check and at the last check before any automatic call
-    /// ([`Paykit::automatic_handoff_held`]): the record shows the request cancelled or
-    /// rejected, or holds `manual_only` for an attempt the user did not start; the request
+    /// ([`Paykit::automatic_handoff_held`]): the record shows the request paid, cancelled
+    /// or rejected, or holds `manual_only` for an attempt the user did not start; the request
     /// is held after a restore or a `missed` item until the user confirms it (Paykit
     /// spec 7.2); or the record, or the list's
     /// record, is divergent or paused since it was seen so, the view read after the record
@@ -6081,6 +6089,7 @@ impl Paykit {
         fresh: &ActivityRecord,
     ) -> Result<bool> {
         Ok(fresh.lost_to_delete.is_some()
+            || fresh.shows_paid()
             || cancelled(fresh)
             || rejected(fresh)
             || (fresh.manual_only && !entry.user_started)
@@ -7046,8 +7055,8 @@ mod tests {
     /// Every state the journal can hold for an entry, as a resume's result reads it: a stage
     /// that needs the method's proof only with it (`RailPaid`, `AcceptanceOwed`), a proof
     /// with and without its message, no payment started only for an entry finished, or
-    /// failed by a refused call, that the method never answered, the recheck asking only about the method's failure, and
-    /// told only for an entry over.
+    /// failed by a refused call, that the method never answered, and the recheck asking only
+    /// about the method's failure.
     fn every_entry(attempt_id: AttemptId) -> Vec<EntryFacts> {
         use crate::journal::UserResolution;
         let mut all = Vec::new();
@@ -7459,6 +7468,21 @@ mod tests {
         assert_eq!(merged.proof_msg_id.as_deref(), Some("m"));
         assert!(merged.method_failed && !merged.ask_again);
         assert!(sent.grows_to(&merged.clone().merged(asking.clone()).unwrap()));
+        // One proof in both copies, its time and message in only one: both are kept, either
+        // way round.
+        for merged in [
+            paid.clone().merged(sent.clone()).unwrap(),
+            sent.clone().merged(paid.clone()).unwrap(),
+            AttemptFacts {
+                paid_at_ms: None,
+                ..sent.clone()
+            }
+            .merged(paid.clone())
+            .unwrap(),
+        ] {
+            assert_eq!(merged.proof_msg_id.as_deref(), Some("m"));
+            assert_eq!(merged.paid_at_ms, Some(5));
+        }
         // Two attempts' facts never merge.
         assert!(sent
             .clone()

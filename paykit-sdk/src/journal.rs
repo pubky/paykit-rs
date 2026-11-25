@@ -470,8 +470,10 @@ pub(crate) struct AttemptFacts {
     pub(crate) proof: Option<Map<String, Value>>,
     /// The method's time of that payment, kept with the proof.
     pub(crate) paid_at_ms: Option<u64>,
-    /// The `msg_id` of the proof sent to the payee once its outcome was written, kept with
-    /// the proof: a proof already sent is never signed again. Never changed once set.
+    /// The `msg_id` of the proof sent to the payee, recorded once the outcome that queued it
+    /// was written, in a commit after it, and kept with the proof: an older copy of the entry
+    /// then reads finished, and that proof is not signed again. A crash between the two
+    /// commits leaves it unrecorded, as before this record. Never changed once set.
     pub(crate) proof_msg_id: Option<String>,
     /// The method said the payment failed. Never cleared: a proof that comes later says the
     /// payment was made after all, and the proof decides.
@@ -511,6 +513,12 @@ impl AttemptFacts {
             return Err(PaykitError::corrupt());
         }
         let (proof, paid_at_ms, proof_msg_id) = match (self.proof, other.proof) {
+            // One proof in both: what either copy learned of it, its time and its message.
+            (Some(proof), Some(theirs)) if proof == theirs => (
+                Some(proof),
+                self.paid_at_ms.or(other.paid_at_ms),
+                self.proof_msg_id.or(other.proof_msg_id),
+            ),
             (Some(proof), _) => (Some(proof), self.paid_at_ms, self.proof_msg_id),
             (None, Some(proof)) => (Some(proof), other.paid_at_ms, other.proof_msg_id),
             (None, None) => (None, None, None),
@@ -553,7 +561,7 @@ impl JournalEntry {
     /// that failure only where no proof answers it and the entry can hold it: never over one
     /// abandoned before its attempt reached the claim, which stays abandoned, nothing paid.
     /// A payment the method's word says reached the method is never one that ended before
-    /// its call. Whatever the copy, the entry read holds as the journal's writers leave one
+    /// its call. Whatever the copy, the entry read holds the journal's member rules
     /// ([`members_hold`]).
     pub(crate) fn with_facts(mut self, facts: Option<&AttemptFacts>) -> Self {
         let Some(facts) = facts else {
@@ -575,8 +583,19 @@ impl JournalEntry {
                 } else {
                     Stage::Finished
                 };
-            } else if self.proof_msg_id.is_none() {
+            } else if self.proof_msg_id.is_none() && facts.proof_msg_id.is_some() {
+                // A copy from before its outcome was written, which the record says sent its
+                // proof: finished as that outcome left it, nothing held for it any more.
                 self.proof_msg_id = facts.proof_msg_id.clone();
+                if self.stage == Stage::RailPaid {
+                    self.step = None;
+                    self.record_held = false;
+                    self.stage = if self.owes_acceptance().unwrap_or(false) {
+                        Stage::AcceptanceOwed
+                    } else {
+                        Stage::Finished
+                    };
+                }
             }
         } else if facts.method_failed
             && matches!(
@@ -609,27 +628,6 @@ impl JournalEntry {
             user_paid: self.user_paid,
             restored: self.restored,
         }
-    }
-}
-
-/// A journal entry as the store holds it (`j/<attempt_id>`), before the method's word is laid
-/// over it: the only form a read of the journal gives ([`crate::state::Stored`]). It becomes
-/// an entry to decide from only through [`StoredEntry::with_facts`], so no read can skip the
-/// method's word.
-#[derive(Deserialize)]
-#[serde(transparent)]
-pub(crate) struct StoredEntry(JournalEntry);
-
-impl StoredEntry {
-    /// The entry as written, for what is judged of the store itself before the overlay: its
-    /// binding to its key, and the restore's one payment in progress per obligation.
-    pub(crate) fn as_written(&self) -> &JournalEntry {
-        &self.0
-    }
-
-    /// The entry through what the method said of its attempt ([`JournalEntry::with_facts`]).
-    pub(crate) fn with_facts(self, facts: Option<&AttemptFacts>) -> JournalEntry {
-        self.0.with_facts(facts)
     }
 }
 
@@ -1512,6 +1510,23 @@ mod tests {
             (done.stage, done.proof_msg_id.as_deref()),
             (Stage::Finished, Some("sent"))
         );
+        // A copy holding its own proof from before its outcome was written, which the record
+        // says sent that proof: finished, nothing held for it, the message kept.
+        let mut unwritten = an_entry(Stage::RailPaid);
+        unwritten.rail_proof = Some(proof.clone());
+        unwritten.paid_at_ms = Some(5);
+        unwritten.record_held = true;
+        unwritten.step = Some(4);
+        let read = unwritten.with_facts(Some(&delivered));
+        assert_eq!(
+            (
+                read.stage,
+                read.proof_msg_id.as_deref(),
+                read.record_held,
+                read.step
+            ),
+            (Stage::Finished, Some("sent"), false, None)
+        );
         // The user's `done` off the claim stays beside a proof laid over it.
         let mut paid_off_claim = an_entry(Stage::Finished);
         paid_off_claim.restored = true;
@@ -1595,7 +1610,7 @@ mod tests {
             Stage::Finished,
             Stage::Abandoned,
         ] {
-            for bits in 0u32..(1 << 7) {
+            for bits in 0u32..(1 << 10) {
                 let bit = |n: u32| bits & (1 << n) != 0;
                 for user_resolved in [None, Some(Done), Some(Unknown), Some(Failed)] {
                     let members = EntryMembers {
@@ -1621,7 +1636,21 @@ mod tests {
                     entry.user_resolved = user_resolved;
                     entry.user_paid = members.user_paid;
                     entry.restored = members.restored;
-                    entry.acceptance_owed = stage == Stage::AcceptanceOwed;
+                    // Owed by a payment of a request, at any stage; required at AcceptanceOwed.
+                    entry.request_hash = bit(7).then(|| pubky_dispatch_core::enc::b64(&[3; 32]));
+                    entry.acceptance_owed = stage == Stage::AcceptanceOwed || bit(8);
+                    // Only an Allowance attempt ended before the method's call is
+                    // `never_dispatched`; the member rule this test walks doesn't name it.
+                    entry.never_dispatched = bit(9)
+                        && matches!(stage, Stage::Finished | Stage::Abandoned)
+                        && !members.proof
+                        && !members.failed_by_method;
+                    if members.proof {
+                        entry.paid_at_ms = Some(1);
+                        entry.proof_msg_id = (stage == Stage::Finished).then(|| "own".into());
+                    } else if bit(9) {
+                        continue;
+                    }
                     entry.step = Some(4);
                     entries.push(entry);
                 }
@@ -1663,6 +1692,27 @@ mod tests {
                     read.members()
                 );
                 assert!(read.stage != Stage::AcceptanceOwed || read.acceptance_owed);
+                // A payment time and a message only with a proof; never_dispatched never
+                // beside the method's word; a proof laid over a copy without one rebuilds its
+                // outcome (no step kept); one with its message recorded is finished or owes
+                // its acceptance.
+                assert!(read.paid_at_ms.is_none() || read.rail_proof.is_some());
+                assert!(read.proof_msg_id.is_none() || read.rail_proof.is_some());
+                assert!(
+                    !read.never_dispatched || read.rail_proof.is_none() && !read.failed_by_method
+                );
+                if entry.rail_proof.is_none() && facts.proof.is_some() {
+                    assert_eq!(read.step, None);
+                    if facts.proof_msg_id.is_some() {
+                        assert!(
+                            matches!(read.stage, Stage::Finished | Stage::AcceptanceOwed),
+                            "{:?}",
+                            read.stage
+                        );
+                    } else {
+                        assert_eq!(read.stage, Stage::RailPaid);
+                    }
+                }
                 // An attempt abandoned before it reached the method stays so, whatever the
                 // record says of a method failure: never asked about again, never counted as
                 // handed off, so never as spent.

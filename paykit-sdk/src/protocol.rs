@@ -863,34 +863,52 @@ pub(crate) fn restore_paykit_layer(
             notices.insert(k, notice);
         }
     }
-    // What the method said of each attempt, and whether a resume reported it over
-    // (`AttemptFacts`): the backup's, merged with the installation's where an in-place
+    // What the method said of each attempt (`AttemptFacts`): the backup's, merged with the installation's where an in-place
     // restore replaces one, by the same rule that only lets them grow, so a backup taken
     // before the method's word never drops it. Laid over each restored entry as every read
     // lays it, and written for the attempts the restored journal holds.
-    let mut facts: std::collections::BTreeMap<paykit_lib::AttemptId, crate::journal::AttemptFacts> =
+    let mut facts: std::collections::BTreeMap<paykit_lib::AttemptId, state::StoredFacts> =
         std::collections::BTreeMap::new();
     for (key, value) in state.iter() {
         if let Some(StateKey::AttemptFacts(attempt)) = StateKey::parse(key) {
-            let kept = state::restored::<crate::journal::AttemptFacts>(key, value, &binder)
-                .map_err(|_| {
-                    "Paykit spec 7.2: a payment's method facts in the backup don't read"
+            let kept =
+                state::restored::<state::StoredFacts>(key, value, &binder).map_err(|_| {
+                    format!(
+                    "Paykit spec 7.2: what the method said of attempt {} in the backup doesn't \
+                     read{}",
+                    attempt.to_text(),
+                    " (restore into an empty store, or from another backup)"
+                )
                 })?;
             facts.insert(attempt, kept);
         }
     }
     for (key, value) in restoring
         .previous_local_scan(key::ATTEMPT_FACTS.as_bytes())
-        .map_err(|_| "the installation's payment method facts cannot be read")?
+        .map_err(|_| {
+            "the installation's payment method facts cannot be read (restore into an empty \
+             store, or from another backup)"
+        })?
     {
-        let Some(StateKey::AttemptFacts(attempt)) = StateKey::parse(&key) else {
-            return Err("the installation holds an invalid payment method fact".into());
+        let invalid = || {
+            String::from(
+                "the installation holds an invalid payment method fact (restore into an empty \
+                 store, or from another backup)",
+            )
         };
-        let kept = state::restored::<crate::journal::AttemptFacts>(&key, &value, &binder)
-            .map_err(|_| "the installation holds an invalid payment method fact")?;
+        let Some(StateKey::AttemptFacts(attempt)) = StateKey::parse(&key) else {
+            return Err(invalid());
+        };
+        let kept =
+            state::restored::<state::StoredFacts>(&key, &value, &binder).map_err(|_| invalid())?;
         let merged = match facts.remove(&attempt) {
             Some(backup) => backup.merged(kept).map_err(|_| {
-                "Paykit spec 7.2: a payment's facts in the backup and the installation disagree"
+                format!(
+                    "Paykit spec 7.2: what the method said of attempt {} differs between the \
+                     backup and the installation{}",
+                    attempt.to_text(),
+                    " (restore into an empty store, or from another backup)"
+                )
             })?,
             None => kept,
         };
@@ -1529,15 +1547,14 @@ pub(crate) fn restore_paykit_layer(
         // restore context gives (Paykit spec 7.1, Paykit wire 1.5), its record the one its
         // request or attempt names, and every message it keeps verified for this app
         // ([`JournalEntry::check_restored`]): checked here, before anything is written.
-        let stored = state::restored::<crate::journal::StoredEntry>(&key, &value, &binder)
-            .map_err(|_| bad())?;
-        let written = stored.as_written();
+        let stored =
+            state::restored::<state::StoredEntry>(&key, &value, &binder).map_err(|_| bad())?;
         // An app has one payment of an obligation in progress at a time; an entry an earlier
         // restore left open beside it is that payment's doubt, which the user paid over, and
         // is never handed off again (Paykit spec 7.2, 12.4). Judged on the backup's entries as
-        // written: an attempt the installation since learned paid is read with its proof
-        // below, and a paid attempt is no second payment in progress.
-        if written.open() && !written.restored && !open.insert(written.obligation) {
+        // written, counting only those holding no proof: a paid attempt, its outcome to write
+        // or learned since by the installation, is no second payment in progress.
+        if stored.in_progress() && !stored.restored() && !open.insert(stored.obligation()) {
             return Err("Paykit spec 7.2: two open journal entries for one obligation".into());
         }
         let mut entry = stored.with_facts(facts.get(&attempt));
@@ -1557,7 +1574,8 @@ pub(crate) fn restore_paykit_layer(
         entry.check().map_err(|_| {
             format!(
                 "Paykit spec 7.2: the journal entry of attempt {} and what the method said of \
-                 it don't hold together as the journal's rules require",
+                 it don't hold together as the journal's rules require (restore into an empty \
+                 store, or from another backup)",
                 attempt.to_text()
             )
         })?;
@@ -1580,7 +1598,7 @@ pub(crate) fn restore_paykit_layer(
         // Facts go only with their entry, as pruning deletes them only with it.
         if journaled.contains(&attempt) {
             writes.push(
-                state::local_put(&key::attempt_facts(&attempt), &kept)
+                state::local_put(&key::attempt_facts(&attempt), kept.facts())
                     .map_err(|_| "a payment's method facts cannot be written")?,
             );
         }

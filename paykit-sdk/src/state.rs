@@ -32,7 +32,7 @@
 //! | `mi/<from>` | entries missed while lagging, a `missed` item's: the counterparties of open requests and unfinished payments are asked to re-send; kept, with those asked already, while a record whose counterparty it may ask is sealed | |
 //! | `off/<attempt_id>` | the original batch ID for an unresolved offline recording, committed with its signed operations before first submission (Paykit spec 8.4) | yes |
 //! | `j/<attempt_id>` | the payment journal: one payment, from before its `attempt` | yes |
-//! | `jf/<attempt_id>` | what the payment method said of that payment (its proof, its failure, the recheck's flag) and whether a resume reported it over (`AttemptFacts`): written only beside the entry, no batch carries it, it only grows, and it is laid over every read of the entry; deleted with the entry; an in-place restore merges both copies | yes |
+//! | `jf/<attempt_id>` | what the payment method said of that payment (`AttemptFacts`): its proof and the message it was sent under, its failure, and the recheck's flag; of the attempt its key names; written only beside the entry, by `Paykit::learn`; no batch carries it; it only grows, and it is laid over every read of the entry; deleted with the entry; an in-place restore merges both copies | yes |
 //! | `side/<msg_id>` | the side a cancellation is sent from, kept with the batch that queues it | |
 //! | `ex/<msg_id>` | why an acceptance this app sent may go while sends to its payee are held: a payment handed off, or the user's confirmation of that blocked subscription, bound to its payee and request; kept before or with the batch that queues it (`send_holds.rs`) | |
 //! | `qs/<msg_id>` | a held message this app queued (a rejection or payer's cancellation, a payment request, period details, a list request or a subscription acceptance): its kind, counterparty, request, signed hash, `created_at` and the activity record that holds it, written in the commit that queues it, so the receive step ends its outbox copy past 30 days, telling the host as its request record decides, with that decision; gone once neither the outbox nor a report of its end the host hasn't acknowledged names it (`send_holds.rs`); restored whole, since a restored outbox can hold the copy and a restored client an unacknowledged report of its end | |
@@ -110,6 +110,8 @@ use paykit_lib::bodies::ResendRequest;
 use paykit_lib::derive::natural_key;
 use paykit_lib::scopes::verify_certificate;
 use paykit_lib::{AttemptId, Body};
+
+use crate::journal::JournalEntry;
 use pubky_dispatch_client::app::{LocalView, LocalWrite, ReceiveContext, RecordTarget};
 use pubky_dispatch_core::ident::record_key_from_blinded;
 use pubky_dispatch_core::records::AppCert;
@@ -1364,7 +1366,69 @@ impl BoundRead for BoundNote {
     }
 }
 
-impl sealed::Sealed for crate::journal::StoredEntry {}
+/// A journal entry as the store holds it (`j/<attempt_id>`), before the method's word is laid
+/// over it: the only form a read of the journal gives. It becomes an entry to decide from only
+/// through [`StoredEntry::with_facts`], with what a store read gave of its attempt
+/// ([`StoredFacts`]), so no read can skip the method's word; before that, only what the store
+/// itself is judged by can be asked of it.
+#[derive(Deserialize)]
+#[serde(transparent)]
+pub(crate) struct StoredEntry(JournalEntry);
+
+impl StoredEntry {
+    /// The attempt the entry names.
+    pub(crate) fn attempt(&self) -> Result<AttemptId> {
+        self.0.attempt()
+    }
+
+    /// The claim the entry pays.
+    pub(crate) fn obligation(&self) -> [u8; 32] {
+        self.0.obligation
+    }
+
+    /// Whether the entry came from a restore.
+    pub(crate) fn restored(&self) -> bool {
+        self.0.restored
+    }
+
+    /// Whether the entry, as written, is a payment in progress: open, and holding no proof of
+    /// a payment made.
+    pub(crate) fn in_progress(&self) -> bool {
+        self.0.open() && self.0.rail_proof.is_none()
+    }
+
+    /// The entry through what the method said of its attempt
+    /// ([`JournalEntry::with_facts`]).
+    pub(crate) fn with_facts(self, facts: Option<&StoredFacts>) -> JournalEntry {
+        self.0.with_facts(facts.map(StoredFacts::facts))
+    }
+}
+
+/// What the method said of an attempt, as a read of the store gave it (`jf/<attempt_id>`):
+/// the only form an entry's overlay takes from the store ([`StoredEntry::with_facts`]).
+#[derive(Deserialize)]
+#[serde(transparent)]
+pub(crate) struct StoredFacts(crate::journal::AttemptFacts);
+
+impl StoredFacts {
+    /// The facts.
+    pub(crate) fn facts(&self) -> &crate::journal::AttemptFacts {
+        &self.0
+    }
+
+    /// The facts, to grow ([`crate::journal::AttemptFacts::grows_to`]).
+    pub(crate) fn into_facts(self) -> crate::journal::AttemptFacts {
+        self.0
+    }
+
+    /// Both copies' facts of one attempt, for an in-place restore
+    /// ([`crate::journal::AttemptFacts::merged`]).
+    pub(crate) fn merged(self, other: Self) -> Result<Self> {
+        Ok(Self(self.0.merged(other.0)?))
+    }
+}
+
+impl sealed::Sealed for StoredEntry {}
 
 /// A journal entry (Paykit spec 7.2), checked as a restore checks it
 /// ([`crate::journal::JournalEntry::check_restored`]): of the attempt its key names; its claim key the one
@@ -1375,9 +1439,9 @@ impl sealed::Sealed for crate::journal::StoredEntry {}
 /// that request, or, for a payment without a request, of this app's attempt the key names.
 /// An entry naming another attempt, claim, record or message would read and write one
 /// payment while its key names another.
-impl Stored for crate::journal::StoredEntry {
+impl Stored for StoredEntry {
     fn bind(&self, _: &str, family: &StateKey, binder: &Binder<'_>) -> Result<()> {
-        let entry = self.as_written();
+        let entry = &self.0;
         let StateKey::Journal(attempt) = family else {
             return corrupt();
         };
@@ -1401,15 +1465,17 @@ impl Stored for crate::journal::StoredEntry {
     }
 }
 
-impl sealed::Sealed for crate::journal::AttemptFacts {}
+impl sealed::Sealed for StoredFacts {}
 
 /// What the payment method said of an attempt ([`crate::journal::AttemptFacts`]): of the
 /// attempt its key names (`jf/<attempt_id>`), so a value moved to another attempt's key never
 /// becomes that attempt's word, holding only what can be held.
-impl Stored for crate::journal::AttemptFacts {
+impl Stored for StoredFacts {
     fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
         match family {
-            StateKey::AttemptFacts(attempt) if self.attempt_id == attempt.to_text() => self.check(),
+            StateKey::AttemptFacts(attempt) if self.0.attempt_id == attempt.to_text() => {
+                self.0.check()
+            }
             _ => corrupt(),
         }
     }

@@ -1949,10 +1949,9 @@ fn receipt_effect(
     );
     // And through what the method said of it, as every read of an entry lays it over
     // ([`JournalEntry::with_facts`]).
-    let facts =
-        state::cx_get::<crate::journal::AttemptFacts>(cx, &key::attempt_facts(&attempt_id))?;
+    let facts = state::cx_get::<state::StoredFacts>(cx, &key::attempt_facts(&attempt_id))?;
     let journaled = JournalEntry::on_claim(
-        state::cx_get::<crate::journal::StoredEntry>(cx, &key::journal(&attempt_id))?
+        state::cx_get::<state::StoredEntry>(cx, &key::journal(&attempt_id))?
             .map(|entry| entry.with_facts(facts.as_ref())),
         &claim,
     )

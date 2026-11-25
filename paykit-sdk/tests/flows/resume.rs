@@ -1094,7 +1094,15 @@ async fn failed_then_retried(
     w: &World,
     storage: Arc<dyn pubky_dispatch_client::store::StateStore>,
 ) -> (Paykit, paykit_sdk::RequestRef, AttemptId, AttemptId) {
-    let mut wallet = w.wallet_on("wallet", storage).await;
+    let wallet = w.wallet_on("wallet", storage).await;
+    failed_then_retried_by(w, wallet).await
+}
+
+/// [`failed_then_retried`], by `wallet`.
+async fn failed_then_retried_by(
+    w: &World,
+    mut wallet: Paykit,
+) -> (Paykit, paykit_sdk::RequestRef, AttemptId, AttemptId) {
     let mut shop = w.shop().await;
     let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
     wallet.receive(None).await.unwrap();
@@ -1268,4 +1276,48 @@ async fn test_resume_keeps_the_message_a_proof_was_sent_under() {
         facts["d"]["attempt_id"],
         serde_json::json!(attempt_id.to_text())
     );
+}
+
+#[tokio::test]
+async fn test_resume_never_repeats_a_retry_once_another_attempt_holds_a_proof() {
+    // The first attempt was reported failed and its retry handed off. A resume finds the
+    // first made after all, while the retry's history still shows it running. Later the
+    // method keeps no history of the retry any more, but would still take a repeat under
+    // its key: once an attempt of the obligation holds a proof, no other attempt of it is
+    // handed to the method again (Paykit spec 7.2, "no second execution"; 8.3).
+    const DAY_MS: u64 = 24 * crate::common::HOUR_MS;
+    let w = World::new();
+    w.rail.set_declaration(
+        paykit_sdk::RailDeclaration::new(
+            paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
+            paykit_sdk::rail::FAKE_PAYMENT_TIME_TOLERANCE_MS,
+        )
+        .with_history(true)
+        .with_history_retention_ms(10 * 60_000)
+        .with_idempotent(true)
+        .with_idempotency_retention_ms(10 * DAY_MS),
+    );
+    // A slow method's host keeps attempts open long enough for a repeat to complete.
+    let wallet = w
+        .wallet_with(
+            "wallet",
+            store(),
+            PaykitConfig::default().with_orphan_after_s(10 * DAY_MS / 1000),
+        )
+        .await;
+    let (mut wallet, _, first, retry) = failed_then_retried_by(&w, wallet).await;
+    w.rail.complete_after_failure(&first);
+    let outcomes = wallet.resume_payments().await.unwrap();
+    assert!(
+        outcomes
+            .iter()
+            .any(|o| matches!(o, PayOutcome::Paid { attempt_id, .. } if *attempt_id == first)),
+        "{outcomes:?}"
+    );
+    w.rail.forget_history(&retry);
+    w.clock.advance_ms(20 * 60_000);
+    wallet.receive(None).await.unwrap();
+    wallet.resume_payments().await.unwrap();
+    assert_eq!(w.rail.pay_calls(&retry), 1);
+    assert_eq!(w.rail.executions(&first), 1);
 }
