@@ -340,7 +340,7 @@ mod tests {
         )
     }
     #[test]
-    fn test_the_verdict_counts_and_writes_as_the_table_says() {
+    fn test_allowance_verdict_counts_and_writes_as_the_table_says() {
         use paykit_lib::allowances::{record_outcomes, CompactedFailed, EntryOutcome, LedgerEntry};
         use Claim::*;
         use Held::*;
@@ -644,7 +644,7 @@ mod tests {
     }
 
     #[test]
-    fn test_compacted_method_failure_releases_and_requires_its_original_claim() {
+    fn test_executor_compacted_method_failure_releases_and_requires_its_original_claim() {
         use paykit_lib::allowances::CompactedFailed;
         let terms = AllowanceTerms::from_json(&serde_json::json!({
             "asset":"btc","lifetime_amount_limit":"100","period_limits":[],

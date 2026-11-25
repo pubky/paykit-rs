@@ -2008,7 +2008,7 @@ async fn only_ledger(
 }
 
 #[tokio::test]
-async fn test_a_method_proof_in_the_journal_keeps_the_payment_counted() {
+async fn test_allowance_release_keeps_a_journaled_method_proof_counted() {
     use paykit_lib::allowances::EntryOutcome;
     use pubky_dispatch_client::testing::Fault;
 
@@ -2062,7 +2062,7 @@ async fn test_a_method_proof_in_the_journal_keeps_the_payment_counted() {
 }
 
 #[tokio::test]
-async fn test_a_confirmed_failure_is_refused_once_paid_history_was_seen() {
+async fn test_allowance_resolution_refuses_a_failure_once_paid_history_was_seen() {
     let (world, mut payer, mut shop, key) = Box::pin(first_grant()).await;
     world.rail.set_history_payer(payer.identity());
     let request = Box::pin(request_from(
@@ -2114,7 +2114,7 @@ async fn test_a_confirmed_failure_is_refused_once_paid_history_was_seen() {
 }
 
 #[tokio::test]
-async fn test_a_proof_seen_once_keeps_the_payment_counted_after_its_record_is_gone() {
+async fn test_allowance_release_keeps_a_proof_seen_once_counted_after_its_record_is_gone() {
     use paykit_lib::allowances::EntryOutcome;
     use pubky_dispatch_client::app::{Collection, RecordTarget};
     use pubky_dispatch_client::testing::Fault;
@@ -2620,7 +2620,7 @@ async fn test_compacted_failure_paid_by_receipt_survives_reopen_and_restore() {
 }
 
 #[tokio::test]
-async fn test_restored_compacted_failure_paid_by_receipt_copies_its_proof() {
+async fn test_restore_copies_a_compacted_failures_late_proof() {
     paykit_sdk::with_early_ledger_compaction(Box::pin(restored_compacted_failure_paid())).await;
 }
 
@@ -3010,7 +3010,7 @@ async fn compacted_failure_paid_by_receipt(retire_copy_key: bool) {
 }
 
 #[tokio::test]
-async fn test_a_pending_attempt_that_fails_gives_its_amount_and_count_back() {
+async fn test_allowance_release_gives_back_a_pending_attempt_that_fails() {
     // One payment a day, 10 in all.
     let terms = AllowanceTerms::from_json(&json!({
         "asset": "btc", "lifetime_amount_limit": "10",
@@ -3102,7 +3102,7 @@ async fn test_a_pending_attempt_that_fails_gives_its_amount_and_count_back() {
 }
 
 #[tokio::test]
-async fn test_a_proof_the_payer_record_cant_be_read_for_keeps_the_payment_counted() {
+async fn test_allowance_release_keeps_a_proof_the_record_cant_be_read_for_counted() {
     use paykit_lib::allowances::EntryOutcome;
     use pubky_dispatch_client::testing::Fault;
 
@@ -3298,7 +3298,7 @@ async fn test_executor_copies_another_wallets_confirmed_failure_after_handoff() 
 }
 
 #[tokio::test]
-async fn test_released_room_fits_a_payment_a_period_limit_refused_first() {
+async fn test_allowance_release_fits_a_payment_a_period_limit_refused_first() {
     // Both caps 100: the period limit refuses 95 first while the other wallet's 9 are
     // reserved; once their failure is copied, 95 fits both limits and 105 neither.
     let terms = AllowanceTerms::from_json(&json!({
