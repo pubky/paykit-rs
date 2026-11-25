@@ -431,6 +431,8 @@ mod tests {
                 (Recorded, NotListed, VDone, Absent, false),
                 Some(("70", "0", Done_)),
             ),
+            // The read shows `failed`, but a sighting is held: a later read (the copied
+            // successor's) showed `done`. It ends counted, never released.
             (
                 (Recorded, HistFailed, VFailed, Absent, true),
                 Some(("70", "0", Failed_)),

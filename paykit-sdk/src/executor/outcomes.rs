@@ -301,11 +301,8 @@ impl Paykit {
             if let Some(read) = self.app.read_claim(&obligation).await? {
                 // A `done` this read shows is a payment seen made, kept as any other, so a
                 // count that relies on an earlier read can't miss it (Paykit spec 8.3).
-                if read.view.attempt(&id.to_bytes()).is_some_and(|shown| {
-                    shown.outcome == pubky_dispatch_core::claims::Outcome::Done
-                }) {
-                    self.saw_paid(&id, obligation, crate::journal::PaidSource::ClaimShowsDone)
-                        .await?;
+                if let Some(source) = read_sighting(&read, id) {
+                    self.saw_paid(&id, obligation, source).await?;
                 }
                 claims.push((id, obligation, at, outcome, read));
             }
@@ -428,5 +425,75 @@ impl Paykit {
             facts.entry(id).or_default().paid = true;
         }
         Ok((facts, undated))
+    }
+}
+
+/// The payment sighting a claim read gives for `attempt`: a `done` it shows, whatever an
+/// earlier read of the same claim showed, so a later read that shows the payment made is
+/// never discarded for an earlier one that showed it failed (Paykit spec 8.3, `failed`
+/// releases).
+fn read_sighting(
+    read: &pubky_dispatch_client::app::ClaimRead,
+    attempt: AttemptId,
+) -> Option<crate::journal::PaidSource> {
+    use pubky_dispatch_core::claims::Outcome;
+    match read
+        .view
+        .attempt(&attempt.to_bytes())
+        .map(|shown| shown.outcome)
+    {
+        Some(Outcome::Done) => Some(crate::journal::PaidSource::ClaimShowsDone),
+        Some(Outcome::Open | Outcome::Unknown | Outcome::Failed) | None => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::read_sighting;
+    use paykit_lib::AttemptId;
+    use pubky_dispatch_client::app::ClaimRead;
+    use pubky_dispatch_core::claims::{AttemptView, ClaimStatus, ClaimView, Outcome};
+
+    #[test]
+    fn test_outcomes_a_later_read_showing_done_is_kept_over_an_earlier_failed_one() {
+        let attempt = AttemptId::from_bytes([4; 16]);
+        let read = |outcome| ClaimRead {
+            entries: Vec::new(),
+            view: ClaimView {
+                claim_key: [2; 32],
+                status: ClaimStatus::Settled,
+                owner: None,
+                attempt_id: None,
+                step: 2,
+                attempts: vec![AttemptView {
+                    attempt_id: attempt.to_bytes(),
+                    owner: [7; 16],
+                    outcome,
+                    opened_at: 1002,
+                    orphan_after: 60,
+                    orphaned: false,
+                    possibly_duplicate: false,
+                    duplicate: false,
+                    resolved_by: Some([9; 16]),
+                }],
+                tombstone: true,
+                deadline: None,
+                divergent: false,
+                rebuilt: false,
+                next_possibly_duplicate: false,
+            },
+        };
+        // The restore's first read showed the failure; the copied successor's second read
+        // shows the payment made, which is kept as a sighting and counts it spent.
+        assert_eq!(read_sighting(&read(Outcome::Failed), attempt), None);
+        assert_eq!(
+            read_sighting(&read(Outcome::Done), attempt),
+            Some(crate::journal::PaidSource::ClaimShowsDone)
+        );
+        assert_eq!(read_sighting(&read(Outcome::Open), attempt), None);
+        assert_eq!(
+            read_sighting(&read(Outcome::Done), AttemptId::from_bytes([5; 16])),
+            None
+        );
     }
 }
