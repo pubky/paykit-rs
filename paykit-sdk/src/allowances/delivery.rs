@@ -266,10 +266,29 @@ impl crate::Paykit {
         let target = allowance_target(&q.to, id);
         let key = self.app.record_key(&target)?;
         let read = self.app.read_record_fresh(&target).await?;
-        if let RecordRead::Kept { reason, .. } = &read {
+        if let RecordRead::Kept { reason, record } = &read {
             if let Some(error) = crate::pay::kept_read_stop(reason) {
                 return Err(error);
             }
+            // An authenticated absence with nothing retained holds no end: withdrawn.
+            // Anything else kept waits (Paykit spec 7.2).
+            return Ok(
+                if matches!(reason, KeptReason::NotFound) && record.is_none() {
+                    Absent
+                } else {
+                    Unreadable
+                },
+            );
+        }
+        // A counterparty's end or a conflict kept and not placed yet waits for its placing
+        // (Paykit spec 8.3, "Ends reach the executor", "Conflicted").
+        let ends = key::allowance_ends(&key);
+        if !self.local_scan::<KeptMessage>(&ends).await?.is_empty()
+            || self
+                .local_get::<KeptMessage>(&key::conflict(&key))
+                .await?
+                .is_some()
+        {
             return Ok(Unreadable);
         }
         // The one order of every held decision: paused waits; a confirmed view is decided
@@ -281,7 +300,10 @@ impl crate::Paykit {
             RecordRead::Fresh(r) if super::replies::qualified_confirmed(r, &target, &key) => {
                 match &r.content {
                     RecordContent::Value(v) => v.as_slice(),
-                    _ => return Ok(Absent),
+                    RecordContent::Deleted => return Ok(Absent),
+                    // Sealed under a key not held yet, or not read for another reason: the
+                    // next read may verify it, so it waits.
+                    RecordContent::Unreadable(_) => return Ok(Unreadable),
                 }
             }
             _ => return Ok(Unreadable),

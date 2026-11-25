@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::{PaykitError, Refusal, Result};
 use crate::journal::JournalEntry;
 use crate::paykit::Paykit;
-use crate::state::{key, StateKey, Tx};
+use crate::state::{key, StateKey};
 
 /// What a notice tells the user.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -413,8 +413,8 @@ pub(crate) enum GivenUpOrigin {
     HeldAnswer,
     /// A held stop absent from its current active record (Paykit spec 7.2).
     UnrecordedStop,
-    /// The same, written before the stop's withdrawal and shown only once the client tells
-    /// that withdrawal: a crash between leaves no notice for a stop still held.
+    /// The same, written before the stop's withdrawal and shown once the client no longer
+    /// holds the stop: a crash between leaves no notice for a stop still held.
     UnrecordedStopPending,
     /// This app's own payment request, period details or subscription acceptance, held in
     /// the outbox while sends to its counterparty were held (`qs/`), passed its replay
@@ -720,7 +720,7 @@ impl KeptNotice {
     /// names: one that doesn't is a corrupt store.
     pub(crate) fn check_message(&self, sender: &[u8; 32], msg_id: &str) -> Result<()> {
         // A message notice is deleted at its acknowledgement, after its entry is forgotten,
-        // so a valid run keeps none acknowledged. It holds its entry's handle exactly when it
+        // so a valid run keeps none acknowledged but a stop's. It holds its entry's handle exactly when it
         // names no origin: one raised for a stored entry always has it, and one with no
         // entry stored (a key wait's, a kept reply's) names where it came from instead.
         if self.kind == NoticeKind::AllowanceWithdrawalConfirmed {
@@ -746,7 +746,8 @@ impl KeptNotice {
             || self.counterparty.as_deref() != Some(&b64(sender))
             || self.stored.is_some() == self.origin.is_some()
             || self.lost.is_some()
-            || self.acknowledged
+            // A stop's notice alone stays once acknowledged (`Paykit::acknowledge_notice`).
+            || (self.acknowledged && self.kind != NoticeKind::StopNotRecorded)
         {
             return Err(PaykitError::corrupt());
         }
@@ -980,24 +981,6 @@ impl Paykit {
         Ok(out)
     }
 
-    /// Show, in `tx`, the pending notice of the stop `msg_id` whose withdrawal the client
-    /// told: written before the withdrawal, it is shown in the commit that takes that duty
-    /// (Paykit spec 7.2). Whether there was one.
-    pub(crate) async fn show_pending_stop(&self, tx: &mut Tx, msg_id: &str) -> Result<bool> {
-        let prefix = key::unrecorded_stop_prefix();
-        let mut shown = false;
-        for (rest, mut kept) in self.local_scan::<KeptNotice>(&prefix).await? {
-            if kept.origin == Some(GivenUpOrigin::UnrecordedStopPending)
-                && kept.msg_id.as_deref() == Some(msg_id)
-            {
-                kept.origin = Some(GivenUpOrigin::UnrecordedStop);
-                tx.put(&format!("{prefix}{rest}"), &kept)?;
-                shown = true;
-            }
-        }
-        Ok(shown)
-    }
-
     /// Acknowledge `id` once the user has seen the notice. The wallet stops listing it.
     /// A payment notice keeps its acknowledgment while the journal holds the payment.
     /// For a possibly delivered message, the acknowledgment survives repeated imports
@@ -1055,7 +1038,13 @@ impl Paykit {
                 self.identity_told.push(kind);
             }
         }
-        if !held && kept.settlement.is_none() && !kept.kind.names_outgoing_message() {
+        // A stop's notice stays, acknowledged, so a restore in place keeps that over an
+        // older backup's copy (`protocol.rs`, `installation_stop_notices`).
+        if !held
+            && kept.settlement.is_none()
+            && !kept.kind.names_outgoing_message()
+            && kept.kind != NoticeKind::StopNotRecorded
+        {
             return self.local_delete(&key).await;
         }
         kept.acknowledged = true;

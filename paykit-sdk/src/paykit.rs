@@ -225,8 +225,9 @@ pub struct HeldMessages {
     /// `DeliveryUnknown`, or as `MessageUndelivered` for a re-send of a message the
     /// counterparty already accepted.
     pub withdrawn: u32,
-    /// Messages still held after this receive, to decide at a later one.
-    pub still_held: u32,
+    /// Messages still held after this receive, to decide at a later one; `None` when the
+    /// client couldn't list them now. Then the host does nothing: the next receive reports.
+    pub still_held: Option<u32>,
 }
 
 /// What a [`Paykit::receive`] did.
@@ -393,9 +394,6 @@ pub struct Paykit {
     pub(crate) first_read_done: bool,
     /// A read made before a public write, to include in the host's next receive summary.
     pub(crate) first_read_summary: Option<Box<ReceiveSummary>>,
-    /// The held messages released and withdrawn since the last summary returned: a
-    /// receive that fails after deciding some keeps them for the next (Paykit spec 7.2).
-    pub(crate) held_counts: HeldMessages,
     /// Whether a write of the app's own record ended with the store unable to tell whether
     /// it was applied: the record this handle holds may not be the stored one, so no
     /// public endpoint edit builds on it until the app is loaded again
@@ -493,7 +491,6 @@ impl Paykit {
             config,
             first_read_done: false,
             first_read_summary: None,
-            held_counts: HeldMessages::default(),
             own_record_unknown: false,
             capability_snapshot: None,
             identity_told: Vec::new(),
@@ -1079,9 +1076,6 @@ impl Paykit {
 
     async fn receive_inner(&mut self, wait: Option<u32>) -> Result<ReceiveSummary> {
         self.lists_read_this_pass = false;
-        // A held message's deadline waits for nothing Paykit reads: one too old is given up
-        // and told before the read, whatever it finds (Paykit spec 7.2, Switch spec 12.4).
-        Box::pin(self.give_up_expired_held()).await?;
         let read = Box::pin(self.read_before_effects(wait)).await?;
         Box::pin(self.after_read(read)).await
     }
@@ -1089,6 +1083,14 @@ impl Paykit {
     /// Complete the client's read before a caller's already-recorded block is sent.
     /// That block must precede the outgoing recovery work in `after_read`.
     pub(crate) async fn read_before_effects(&mut self, wait: Option<u32>) -> Result<ReadResult> {
+        // A held message's deadline waits for nothing Paykit reads: one too old is given up
+        // and told before the read, whatever it finds (Paykit spec 7.2, Switch spec 12.4). A
+        // stop of the wallet is left for the read, which returns it typed.
+        if let Err(error) = Box::pin(self.give_up_expired_held()).await {
+            if !crate::pay::stops_resume(&error) {
+                return Err(error);
+            }
+        }
         // Each step's future goes on the heap: built in this future's poll, every one of them
         // would otherwise take its size of the stack there, beside the client's read, and a
         // host thread of 2 MiB would not hold a deep read in a debug build.
@@ -1227,7 +1229,7 @@ impl Paykit {
             return Ok(ReceiveSummary {
                 report,
                 account_gone,
-                held_messages: self.held_messages_now().await?,
+                held_messages: self.held_messages_now((0, 0)).await,
                 divergent,
                 ..ReceiveSummary::default()
             });
@@ -1240,7 +1242,7 @@ impl Paykit {
             return Ok(ReceiveSummary {
                 report,
                 certificate_refused: Some(refused),
-                held_messages: self.held_messages_now().await?,
+                held_messages: self.held_messages_now((0, 0)).await,
                 divergent,
                 ..ReceiveSummary::default()
             });
@@ -1264,7 +1266,7 @@ impl Paykit {
             return Ok(ReceiveSummary {
                 report,
                 applied,
-                held_messages: self.held_messages_now().await?,
+                held_messages: self.held_messages_now((0, 0)).await,
                 records_unlisted: self
                     .unlisted()
                     .await?
@@ -1375,8 +1377,13 @@ impl Paykit {
         // Held messages are decided once Paykit's own first read is complete, after this
         // read's stops are placed, so a counterparty's stop it brought counts (Paykit spec
         // 7.2). The gate is the one predicate every decision goes through.
+        // Again after the read, at the service time it verified, before anything decides a
+        // held message (`Paykit::give_up_expired_held`). A stopped wallet returned above,
+        // its stop typed in the summary, before this step could meet it.
+        Box::pin(self.give_up_expired_held()).await?;
+        let mut decided = (0, 0);
         if Box::pin(self.held_decisions_open(&report)).await? {
-            Box::pin(self.decide_held_messages(&report)).await?;
+            decided = Box::pin(self.decide_held_messages(&report)).await?;
         }
         // Open records resolve re-send requests and locally held answers. After a restore,
         // signed records also identify outgoing messages whose outcome the host must check.
@@ -1401,7 +1408,7 @@ impl Paykit {
         Ok(ReceiveSummary {
             report,
             applied,
-            held_messages: self.held_messages_now().await?,
+            held_messages: self.held_messages_now(decided).await,
             resends: answered.saturating_add(asked).saturating_add(marked),
             resend_refused,
             certificate_refused: None,
@@ -1413,14 +1420,15 @@ impl Paykit {
         })
     }
 
-    /// The held messages for the summary a receive returns: the counts decided since the
-    /// last summary, which it takes, and those still held now.
-    async fn held_messages_now(&mut self) -> Result<HeldMessages> {
-        let still_held = self.still_held().await?.unwrap_or_default();
-        Ok(HeldMessages {
-            still_held,
-            ..std::mem::take(&mut self.held_counts)
-        })
+    /// The held messages for the summary a receive returns: what this receive released
+    /// and withdrawn, best effort, and those still held now, `None` when the client can't
+    /// list them (Paykit spec 7.2).
+    async fn held_messages_now(&self, (released, withdrawn): (u32, u32)) -> HeldMessages {
+        HeldMessages {
+            released,
+            withdrawn,
+            still_held: self.still_held().await.ok().flatten(),
+        }
     }
 
     /// Try every queued message once (Switch spec 11).

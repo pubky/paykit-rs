@@ -839,6 +839,22 @@ pub(crate) fn restore_paykit_layer(
         }
         stop_notices.insert(at.into_bytes(), held);
     }
+    // The installation's notices of stops the restore pass withdrew, shown or pending, win
+    // over the backup's: a restore in place neither brings back one the host acknowledged
+    // nor strands a pending one (Paykit spec 7.2). One that doesn't read is left out.
+    let mut installation_stop_notices = std::collections::BTreeMap::new();
+    for (name, value) in restoring
+        .previous_local_scan(key::unrecorded_stop_prefix().as_bytes())
+        .map_err(|_| "the installation's notices cannot be read")?
+    {
+        if matches!(
+            StateKey::parse(&name),
+            Some(StateKey::UnrecordedStop { .. })
+        ) && state::restored::<KeptNotice>(&name, &value, &binder).is_ok()
+        {
+            installation_stop_notices.insert(name, value);
+        }
+    }
     let mut cursor_time_ms = 0;
     let mut bounded = BoundedFamilies::default();
     // An in-place restore can retain a stop signed after the backup (Switch spec 12.4).
@@ -1471,8 +1487,9 @@ pub(crate) fn restore_paykit_layer(
             | StateKey::BlockedLost { .. } => {
                 let notice =
                     state::restored::<KeptNotice>(&key, &value, &binder).map_err(|_| unread())?;
-                // The installation's notice of a stop it told wins (`stop_notices`).
-                if stop_notices.contains_key(&key) {
+                // The installation's notice of a stop it told wins (`stop_notices`), and so
+                // does its notice of a stop the restore pass withdrew.
+                if stop_notices.contains_key(&key) || installation_stop_notices.contains_key(&key) {
                     continue;
                 }
                 // An acknowledged notice of an attempt is kept only while the journal holds
@@ -1559,6 +1576,9 @@ pub(crate) fn restore_paykit_layer(
         if let Some(value) = value {
             writes.push(LocalWrite::Put { key, value });
         }
+    }
+    for (key, value) in installation_stop_notices {
+        writes.push(LocalWrite::Put { key, value });
     }
     if !recordings.is_subset(&awaiting_recording) {
         return Err("an offline recording has no matching payment journal entry".into());

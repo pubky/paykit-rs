@@ -152,6 +152,14 @@ impl Paykit {
 
     pub(crate) async fn send_outbox(&mut self) -> std::result::Result<OutboxReport, AppError> {
         self.require_first_read()?;
+        // The flush can expire a carried list: what it owes is recorded first (Paykit spec
+        // 7.2, `Paykit::carried_lists_owed`).
+        Box::pin(self.carried_lists_owed())
+            .await
+            .map_err(|error| match error {
+                crate::error::PaykitError::Client(error) => error,
+                _ => AppError::Store(pubky_switch_client::store::StoreError::Corrupt),
+            })?;
         let _delivery = self.delivery_operation();
         self.service_time_for_delivery().await?;
         Box::pin(self.app.flush_outbox()).await

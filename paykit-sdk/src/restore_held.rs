@@ -13,6 +13,7 @@ use pubky_switch_core::message::Message;
 use crate::activity::{family, ActivityTarget, KeptSide, SideTag};
 use crate::notices::{GivenUpFrom, GivenUpOrigin, KeptNotice};
 use crate::protocol::BACKUP_NAME;
+use crate::records::KeptMessage;
 use crate::requests::{expiry_deadline, payment_ended, request_of, Fresh};
 use crate::state::key;
 use crate::{Paykit, Result};
@@ -169,63 +170,54 @@ fn paykit_kind(kind: &str) -> bool {
 // - A stop's routing marks (its side, an end's origin) are written while its evidence is
 //   read, before the release. They only route; a replay reads them and decides again.
 // - A stop the open record no longer shows: its `StopNotRecorded` notice is written
-//   pending (not listed), then the client withdraws it. The commit that takes that
-//   withdrawal's give-up duty shows the notice (`show_pending_stop`), so it is shown once,
-//   only for a stop that went. A crash before the withdrawal leaves the message held and the
-//   notice pending; the next pass decides again, and any other decision removes it.
+//   pending (not listed), then the client withdraws it. A pass shows each pending notice
+//   whose message the client no longer holds (`show_pending_stops`), at its end and again
+//   at the next one's start, so it is shown once, only for a stop that went. A crash before
+//   the withdrawal leaves the message held and the notice pending; the next pass decides
+//   again, and any other decision removes it. A restore in place keeps the installation's
+//   notices over the backup's.
 // - A carried list: the withdrawal owed to its recipient and, while its outcome matters,
 //   its unknown-delivery notice are written first, then the withdrawal, and before any
-//   held list can expire (`give_up_expired_held`). Both are kept once, so a replay writes
-//   nothing twice.
+//   path can expire it, the expiry step and the outbox's flush (`carried_lists_owed`). Both
+//   are kept once, so a replay writes nothing twice.
 // - The client's withdrawal tells its give-up as a duty event the host acknowledges. A
 //   withdrawal in this pass reaches the host in the next receive's report, since this
 //   report's events were taken right after the read.
 // - The owed mark (`hm`) is lowered or removed last, once the client lists nothing it
 //   covers; while the client can't list them, it stays. A crash before it only runs the
 //   pass again, which finds nothing left to decide.
-// - The counts of each release and withdrawal go on the Paykit value as each is made, and
-//   the next summary returned takes them, so an error that stops the pass loses none.
+// - The counts are this receive's, best effort: a receive that fails reports none, and what
+//   it decided is told by the client's give-up events and the notices.
 // One message that can't be decided now, for an error other than a stop of the app,
-// waits for the next receive; it never fails the pass for the others.
+// waits for the next receive, never past its window (`held_window_open`); it never fails
+// the pass for the others.
 impl Paykit {
     /// The one gate for deciding held messages: Paykit's own first read is complete, its
     /// records are listed and their scope keys held, and nothing stops the app (Paykit
-    /// spec 7.2, Switch spec 12.4). It is asked only in a Paykit receive, after that
-    /// receive's own read succeeded and its stops were placed, so another protocol's read
-    /// never decides a Paykit message. Every listing Paykit owes is in `unlisted()`; a
-    /// listing the client owes while those marks are clear comes from a data epoch whose
-    /// key is missing, which `holds_scope_keys()` refuses.
+    /// spec 7.2, Switch spec 12.4). It is asked only after a read Paykit made, once that
+    /// read's stops were placed, so another protocol's read never decides a Paykit message;
+    /// what that read can't yet show waits: more pages, a listing owed by Paykit's marks, a
+    /// scope key not held. The client reports more work while it owes a listing by its own
+    /// measure, such as an upload over its record marks, so `more` covers that one.
     pub(crate) async fn held_decisions_open(&self, report: &ReceiveReport) -> Result<bool> {
         Ok(!report.stopped
             && self.certificate_refused().is_none()
             && self.app.recovery_required().is_none()
             && self.app.alarm().is_none()
-            && self.confirmed_first_read()
+            && !report.more
             && self.unlisted().await?.is_none()
             && self.holds_scope_keys())
     }
 
     /// Let the client give up each held Paykit message past its replay deadline, telling
     /// the host, whatever the gate: the deadline doesn't wait for Paykit's first read.
+    /// A non-stop error makes the step best effort, tried again at the next call; a stop of
+    /// the wallet is returned, typed.
     pub(crate) async fn give_up_expired_held(&mut self) -> Result<()> {
-        if self
-            .local_get::<HeldPass>(key::HELD_MESSAGES_OWED)
-            .await?
-            .is_none()
-        {
+        let Some(queued) = Box::pin(self.carried_lists_owed()).await? else {
             return Ok(());
-        }
-        let queued = match self.app.queued_messages(BACKUP_NAME).await {
-            Ok(queued) => queued,
-            Err(error) => return crate::pay::unless_stop(error),
         };
         for q in queued.iter().filter(|q| q.held && paykit_kind(&q.kind)) {
-            // What is owed is recorded before anything can expire: a carried list's fresh
-            // withdrawal and its unknown-delivery notice (Paykit spec 7.2, 8.4).
-            if q.kind == Kind::PrivatePaymentList.as_str() {
-                self.keep_list_withdrawal(&q.to).await?;
-                self.note_carried_list(q).await?;
-            }
             // A held message isn't tried: the flush only gives it up once it is too old. A
             // stopped client gives up nothing, and delivers nothing, until it can act.
             if let Err(error) = self.app.flush_message(&q.msg_id).await {
@@ -233,6 +225,52 @@ impl Paykit {
             }
         }
         Ok(())
+    }
+
+    /// Record what each carried list owes before anything can expire it: its recipient's
+    /// fresh withdrawal and, while its outcome matters, its unknown-delivery notice
+    /// (Paykit spec 7.2, 8.4). Every path that can expire a message, the expiry step and
+    /// the outbox's flush, runs it first. The messages listed, or `None` with no restore's
+    /// messages to decide.
+    pub(crate) async fn carried_lists_owed(&mut self) -> Result<Option<Vec<QueuedMessage>>> {
+        let Some(pass) = self.local_get::<HeldPass>(key::HELD_MESSAGES_OWED).await? else {
+            return Ok(None);
+        };
+        let queued = match self.app.queued_messages(BACKUP_NAME).await {
+            Ok(queued) => queued,
+            Err(error) => {
+                crate::pay::unless_stop(error)?;
+                return Ok(None);
+            }
+        };
+        for q in queued
+            .iter()
+            .filter(|q| q.kind == Kind::PrivatePaymentList.as_str())
+        {
+            // A list the installation and backup both owed isn't held: carried all the same
+            // in the first pass, unless the host's choice since made it current.
+            let carried = q.held
+                || (pass == HeldPass::CarriedLists && !self.list_has_current_choice(q).await?);
+            if carried {
+                self.keep_list_withdrawal(&q.to).await?;
+                self.note_carried_list(q).await?;
+            }
+        }
+        Ok(Some(queued))
+    }
+
+    /// Whether a held original may still be decided: past its 30 days, or with no
+    /// original to read its time from, it is withdrawn and told. "A copy reconstructed
+    /// from stored plaintext may go only until 30 days after its `created_at`, less the
+    /// clock tolerance" (Paykit spec 7.2). The client gives a carried copy up by its own
+    /// deadline too, so the earlier of the two applies. Judged on the service time the
+    /// reads verified, never the device clock; with none verified yet, it isn't past.
+    fn held_window_open(&self, original: Option<&Message>) -> bool {
+        original.is_some_and(|message| {
+            self.service_time().is_none_or(|now| {
+                !crate::send_holds::past_replay_window(message.created_at_ms, now)
+            })
+        })
     }
 
     /// The Paykit messages the client still holds after a restore; `None` when the client
@@ -260,22 +298,41 @@ impl Paykit {
         }
     }
 
-    /// Decide each held message once the gate is open (Paykit spec 7.2), counting each
-    /// release and withdrawal on the Paykit value as it is made, so an error that stops
-    /// the pass loses none of them (`Paykit::held_counts`).
-    pub(crate) async fn decide_held_messages(&mut self, report: &ReceiveReport) -> Result<()> {
+    /// Decide each held message once the gate is open (Paykit spec 7.2): the messages
+    /// released and withdrawn in this pass.
+    pub(crate) async fn decide_held_messages(
+        &mut self,
+        report: &ReceiveReport,
+    ) -> Result<(u32, u32)> {
+        let (mut released, mut withdrawn) = (0u32, 0u32);
         let Some(pass) = self.local_get::<HeldPass>(key::HELD_MESSAGES_OWED).await? else {
-            return Ok(());
+            return Ok((0, 0));
         };
-        let ids = self.app.held_messages(BACKUP_NAME).await?;
+        let ids = match self.app.held_messages(BACKUP_NAME).await {
+            Ok(ids) => ids,
+            Err(error) => {
+                crate::pay::unless_stop(error)?;
+                return Ok((0, 0));
+            }
+        };
+        // A stop's notice is shown once its message is no longer held: withdrawn, or given
+        // up at its deadline (`note_unrecorded_stop`).
+        Box::pin(self.show_pending_stops(&ids)).await?;
         // A carried list the installation and backup both owed isn't held, and is
         // decided in the first pass only.
         let mut lists_left = false;
         if !ids.is_empty() || pass == HeldPass::CarriedLists {
             let read = self.protocol.held_inventory.begin(&ids);
-            let queued = self.app.queued_messages(BACKUP_NAME).await?;
+            let queued = self.app.queued_messages(BACKUP_NAME).await;
             let originals = read.0.lock().take().unwrap_or_default();
             drop(read);
+            let queued = match queued {
+                Ok(queued) => queued,
+                Err(error) => {
+                    crate::pay::unless_stop(error)?;
+                    return Ok((released, withdrawn));
+                }
+            };
             for q in &queued {
                 if !paykit_kind(&q.kind) {
                     continue;
@@ -297,12 +354,8 @@ impl Paykit {
                 }
                 let msg = originals.get(&q.msg_id).and_then(Option::as_ref);
                 match Box::pin(self.check_held_message(report, q, msg)).await {
-                    Ok(Outcome::Released) => {
-                        self.held_counts.released = self.held_counts.released.saturating_add(1);
-                    }
-                    Ok(Outcome::Withdrawn) => {
-                        self.held_counts.withdrawn = self.held_counts.withdrawn.saturating_add(1);
-                    }
+                    Ok(Outcome::Released) => released = released.saturating_add(1),
+                    Ok(Outcome::Withdrawn) => withdrawn = withdrawn.saturating_add(1),
                     Ok(Outcome::Waiting) => lists_left |= carried_list,
                     Ok(Outcome::Gone) => {}
                     Err(error) => {
@@ -311,6 +364,10 @@ impl Paykit {
                     }
                 }
             }
+        }
+        // The withdrawals of this pass show their notices before the mark can go.
+        if let Ok(left) = self.app.held_messages(BACKUP_NAME).await {
+            Box::pin(self.show_pending_stops(&left)).await?;
         }
         if !lists_left {
             match self.still_held().await? {
@@ -323,7 +380,7 @@ impl Paykit {
                 Some(_) | None => {}
             }
         }
-        Ok(())
+        Ok((released, withdrawn))
     }
 
     async fn check_held_message(
@@ -340,13 +397,23 @@ impl Paykit {
             Err(_) => HeldRole::Unknown,
         };
         let mut decision = decide(role, StopEvidence::Unreadable);
+        // Every wait ends: past its 30 days, with no original read, or with a body that
+        // doesn't parse, a stop or proof is withdrawn and told (`held_window_open`).
         if decision == Decision::Wait {
-            if let Some(original) = msg {
-                match self.stop_evidence(report, q, original).await {
-                    Ok(evidence) => decision = decide(role, evidence),
-                    Err(error) => crate::pay::unless_stop(error)?,
+            decision = match msg {
+                Some(original)
+                    if self.held_window_open(Some(original)) && Body::parse(original).is_ok() =>
+                {
+                    match self.stop_evidence(report, q, original).await {
+                        Ok(evidence) => decide(role, evidence),
+                        Err(error) => {
+                            crate::pay::unless_stop(error)?;
+                            Decision::Wait
+                        }
+                    }
                 }
-            }
+                Some(_) | None => Decision::Withdraw,
+            };
         }
         let notice = key::unrecorded_stop(&q.to, &q.msg_id);
         match decision {
@@ -461,6 +528,9 @@ impl Paykit {
             Fresh::Missing => return Ok(Absent),
             Fresh::Unreadable => return Ok(Unreadable),
         };
+        if self.kept_unplaced(&target, &q.to).await? {
+            return Ok(Unreadable);
+        }
         let stop = if cancellation {
             &record.cancellation
         } else {
@@ -520,14 +590,15 @@ impl Paykit {
             // Period details with no period, or more references, name no record.
             ([_, _], None) | ([_, _, _, ..], _) => return Ok(Absent),
         };
-        let record = match self
-            .fresh_held_activity(&ActivityTarget::payer(key))
-            .await?
-        {
+        let target = ActivityTarget::payer(key);
+        let record = match self.fresh_held_activity(&target).await? {
             Fresh::Held(record) => record,
             Fresh::Missing => return Ok(Absent),
             Fresh::Unreadable => return Ok(Unreadable),
         };
+        if self.kept_unplaced(&target, &q.to).await? {
+            return Ok(Unreadable);
+        }
         let receipted = record.receipt.as_ref().is_some_and(|receipt| {
             matches!(receipt.body(), Body::PaymentReceipt(r) if r.attempt_id == proof.attempt_id)
         });
@@ -545,6 +616,54 @@ impl Paykit {
                 Absent
             },
         )
+    }
+
+    /// Whether a counterparty's message for this record is kept and not placed in it yet:
+    /// a payee's cancellation kept for the payer's record, or a reply, a stop or a receipt
+    /// the counterparty sent kept before its record (Paykit spec 8.1, "Replies before their
+    /// record", "Messages that cross"). The record can't show what it doesn't hold yet, so
+    /// a held stop or proof waits for its placing (Paykit spec 7.2).
+    async fn kept_unplaced(
+        &self,
+        target: &ActivityTarget,
+        counterparty: &[u8; 32],
+    ) -> Result<bool> {
+        let record = self.activity_key(target)?;
+        let mut prefixes = vec![format!(
+            "{}{}/",
+            key::kept_replies_of(counterparty),
+            pubky_switch_core::enc::b64(&record)
+        )];
+        if target.side == SideTag::Payer {
+            prefixes.push(key::kept_cancellations(&record));
+        }
+        for prefix in prefixes {
+            if !self.local_scan::<KeptMessage>(&prefix).await?.is_empty() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Show the pending stop notices whose message the client no longer holds (Paykit spec
+    /// 7.2): written before the withdrawal, each is shown once its message is withdrawn or
+    /// given up, whatever crash or restore came between.
+    async fn show_pending_stops(&mut self, held: &[String]) -> Result<()> {
+        let prefix = key::unrecorded_stop_prefix();
+        let mut tx = crate::state::Tx::default();
+        let mut any = false;
+        for (rest, mut kept) in self.local_scan::<KeptNotice>(&prefix).await? {
+            let pending = kept.origin == Some(GivenUpOrigin::UnrecordedStopPending);
+            if pending && kept.msg_id.as_ref().is_some_and(|id| !held.contains(id)) {
+                kept.origin = Some(GivenUpOrigin::UnrecordedStop);
+                tx.put(&format!("{prefix}{rest}"), &kept)?;
+                any = true;
+            }
+        }
+        if any {
+            self.local_commit(tx).await?;
+        }
+        Ok(())
     }
 
     async fn held_sale(

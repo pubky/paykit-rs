@@ -200,6 +200,10 @@ impl Paykit {
         &mut self,
         queued: &pubky_switch_client::app::QueuedMessage,
     ) -> Result<()> {
+        // A re-send of a list the recipient accepted is told undelivered, not unknown.
+        if queued.resend {
+            return Ok(());
+        }
         let issue = self
             .local_get::<ListReservation>(&key::list_reservation(&queued.to))
             .await?
