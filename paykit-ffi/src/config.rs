@@ -94,7 +94,7 @@ pub struct WalletConfig {
     /// Extension kinds the wallet accepts within its approved prefixes (Paykit spec 3.3).
     #[uniffi(default = [])]
     pub extension_kinds: Vec<String>,
-    /// Whether to publish the signed app record on the Homeserver (Switch spec 4.2).
+    /// Whether to publish the signed app record on the Homeserver (Dispatch spec 4.2).
     #[uniffi(default = None)]
     pub publishes_record: Option<bool>,
 }

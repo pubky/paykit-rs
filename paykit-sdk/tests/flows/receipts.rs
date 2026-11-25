@@ -6,7 +6,7 @@ use paykit_lib::PaymentReference;
 use paykit_sdk::{
     PayOptions, PayOutcome, PayeeStatus, ReceiptDetails, ReceiptsOf, RequestRef, UnrequestedPayment,
 };
-use pubky_switch_client::clock::Clock;
+use pubky_dispatch_client::clock::Clock;
 use serde_json::json;
 
 use crate::common::{btc, draft, endpoint, list_version, request_from, World};
@@ -26,11 +26,11 @@ pub(crate) fn requested_proof(
     request: &RequestRef,
     attempt: paykit_lib::AttemptId,
 ) -> paykit_lib::records::StoredMessage {
-    use pubky_switch_client::app::OutgoingMessage;
+    use pubky_dispatch_client::app::OutgoingMessage;
     let body = json!({
         "attempt_id": attempt.to_text(),
         "payment_endpoint_identifier": "btc-lightning-bolt11",
-        "payment_app_id": pubky_switch_core::enc::zbase32_encode(&shop.app_id()),
+        "payment_app_id": pubky_dispatch_core::enc::zbase32_encode(&shop.app_id()),
         "proof": { "reference": "purchase" }
     });
     let mut message = OutgoingMessage::new(
@@ -320,7 +320,7 @@ async fn test_receipts_of_a_billing_period_carry_the_requests_reference() {
     let body = json!({
         "amount": { "asset": "btc", "value": "1" },
         "payment_reference": "plan-7",
-        "proposal_expires_at": pubky_switch_core::time::rfc3339(w.clock.now_ms() + 3_600_000),
+        "proposal_expires_at": pubky_dispatch_core::time::rfc3339(w.clock.now_ms() + 3_600_000),
         "payment_endpoints": { "btc-lightning-bolt11": "lnbc1invoice" },
         "recurrence": {
             "anchor": "2026-01-31T00:00:00.000Z",
@@ -379,8 +379,8 @@ async fn test_receipts_of_a_billing_period_carry_the_requests_reference() {
     record.billing_period = Some(period);
     record.receipt = Some(stored);
     let collection = paykit_lib::collections::Collection::PayerActivity;
-    let target = pubky_switch_client::app::RecordTarget::new(
-        pubky_switch_client::app::Collection::new(collection.name(), collection.policy(None)),
+    let target = pubky_dispatch_client::app::RecordTarget::new(
+        pubky_dispatch_client::app::Collection::new(collection.name(), collection.policy(None)),
         &paykit_lib::derive::natural_key::period_record(
             &w.bob_id(),
             &request.request_hash,
@@ -419,9 +419,9 @@ impl ReceiptClaimState {
         attempt: paykit_lib::AttemptId,
         proof_hash: [u8; 32],
         deadline: u64,
-    ) -> Option<pubky_switch_core::claims::ClaimView> {
-        use pubky_switch_client::app::{ClaimOp, OpBatch};
-        use pubky_switch_core::claims::{Basis, ClaimStatus, RECONCILIATION_MS};
+    ) -> Option<pubky_dispatch_core::claims::ClaimView> {
+        use pubky_dispatch_client::app::{ClaimOp, OpBatch};
+        use pubky_dispatch_core::claims::{Basis, ClaimStatus, RECONCILIATION_MS};
         if self != Self::Absent {
             let id = if self == Self::OtherAttempt {
                 [4; 16]
@@ -515,7 +515,7 @@ async fn requested_receipt_without_proof(state: ReceiptClaimState) {
     let value: serde_json::Value = serde_json::from_slice(&kept[0].1).unwrap();
     assert_eq!(
         value["d"]["plaintext"],
-        pubky_switch_core::enc::b64(&receipt.plaintext().encode())
+        pubky_dispatch_core::enc::b64(&receipt.plaintext().encode())
     );
     assert_eq!(
         value["d"]["cert"],

@@ -3,7 +3,7 @@ use super::storage::DeviceStore;
 use crate::*;
 use paykit_lib::AttemptId;
 use paykit_sdk::{Rail, RailError};
-use pubky_switch_client::transport::TransportError;
+use pubky_dispatch_client::transport::TransportError;
 use std::{
     future::Future,
     sync::Arc,
@@ -60,7 +60,7 @@ impl PaymentMethod for Stalled {
     async fn allowance_history(
         &self,
         _: Vec<u8>,
-    ) -> Result<Option<Vec<MethodDispatch>>, MethodError> {
+    ) -> Result<Option<Vec<MethodHandoff>>, MethodError> {
         std::future::pending().await
     }
     async fn verify(&self, _: MethodProof) -> Result<Option<u64>, MethodError> {
@@ -153,7 +153,7 @@ async fn test_host_calls_running_pay_stops_counting_as_in_flight() {
     // record can't be built outside it. The host's `pay` never answers: past its limit the
     // wallet stops waiting, possibly sent.
     let never = std::future::pending::<Result<MethodOutcome, MethodError>>();
-    let waited = within(rail.flights().dispatch(id.to_text(), None, never, limit)).await;
+    let waited = within(rail.flights().handoff(id.to_text(), None, never, limit)).await;
     assert!(matches!(waited, Waited::StillRunning));
     // Until its bound, the running attempt's lookup is pending without asking the host,
     // whose lookup would never answer here.
@@ -185,7 +185,7 @@ async fn kept_after_limit(app: Option<[u8; 16]>, answer: MethodOutcome) -> Optio
             reason: "gone".into(),
         })
     };
-    let waited = within(flights.dispatch("late-attempt".into(), app, pay, limit)).await;
+    let waited = within(flights.handoff("late-attempt".into(), app, pay, limit)).await;
     assert!(matches!(waited, Waited::StillRunning));
     let _ = answered.send(answer);
     for _ in 0..100 {
@@ -224,12 +224,7 @@ async fn test_host_calls_payments_in_flight_are_shared_by_every_host() {
     let attempt = AttemptId::from_bytes([6; 16]).to_text();
     let never = std::future::pending::<Result<MethodOutcome, MethodError>>();
     let limit = std::time::Duration::from_secs(1);
-    within(
-        first
-            .flights()
-            .dispatch(attempt.clone(), None, never, limit),
-    )
-    .await;
+    within(first.flights().handoff(attempt.clone(), None, never, limit)).await;
     // Another host in the same process sees the attempt in flight and never asks its method.
     assert!(second.flights().in_flight(&attempt));
     assert!(matches!(

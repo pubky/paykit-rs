@@ -14,9 +14,9 @@ use paykit_sdk::{
     AppScopes, PayOptions, PayOutcome, PayeeStatus, Paykit, PaykitConfig, PaykitError, PaymentMode,
     Refusal, UnrequestedPayment,
 };
-use pubky_switch_client::app::{AppConfig, UserConfirmed};
-use pubky_switch_client::clock::Clock;
-use pubky_switch_core::records::{app_record_path, AppRecord};
+use pubky_dispatch_client::app::{AppConfig, UserConfirmed};
+use pubky_dispatch_client::clock::Clock;
+use pubky_dispatch_core::records::{app_record_path, AppRecord};
 
 use crate::common::{btc, endpoint, store, World, HOUR_MS};
 
@@ -74,7 +74,7 @@ async fn test_own_record_public_endpoint_published_paid_and_credited() {
     shop.set_public_endpoint(endpoint("btc-lightning-bolt12"), payload("lno1tips"))
         .await
         .unwrap();
-    // Delivered to bob's switch and written to his Homeserver, in the same bytes.
+    // Delivered to bob's Dispatch and written to his Homeserver, in the same bytes.
     let published = on_homeserver(&w, &shop).expect("published");
     assert_eq!(published.signed(), shop.app().record());
     let member = PaykitMember::read(&published).unwrap();
@@ -447,13 +447,13 @@ async fn test_own_record_upkeep_without_publishing_withdraws_every_endpoint() {
 /// answers that its result is unknown, as a store that can't tell may. Paykit's own state
 /// (`p/paykit/`) commits as it is.
 pub(crate) struct UnknownOnce {
-    pub(crate) inner: Arc<dyn pubky_switch_client::store::StateStore>,
+    pub(crate) inner: Arc<dyn pubky_dispatch_client::store::StateStore>,
     pub(crate) armed: std::sync::atomic::AtomicBool,
 }
 
 impl UnknownOnce {
-    fn clients(batch: &pubky_switch_client::store::WriteBatch) -> bool {
-        use pubky_switch_client::store::Write;
+    fn clients(batch: &pubky_dispatch_client::store::WriteBatch) -> bool {
+        use pubky_dispatch_client::store::Write;
         batch.writes().iter().any(|write| {
             !matches!(write, Write::Put { key, .. } | Write::Delete { key, .. } if key.starts_with(b"p/paykit/"))
         })
@@ -463,28 +463,28 @@ impl UnknownOnce {
         &self,
         clients: bool,
         result: Result<
-            pubky_switch_client::store::CommitOutcome,
-            pubky_switch_client::error::StoreError,
+            pubky_dispatch_client::store::CommitOutcome,
+            pubky_dispatch_client::error::StoreError,
         >,
-    ) -> Result<pubky_switch_client::store::CommitOutcome, pubky_switch_client::error::StoreError>
+    ) -> Result<pubky_dispatch_client::store::CommitOutcome, pubky_dispatch_client::error::StoreError>
     {
         let applied = result?;
-        if applied == pubky_switch_client::store::CommitOutcome::Applied
+        if applied == pubky_dispatch_client::store::CommitOutcome::Applied
             && clients
             && self.armed.swap(false, std::sync::atomic::Ordering::SeqCst)
         {
-            return Err(pubky_switch_client::error::StoreError::Unknown);
+            return Err(pubky_dispatch_client::error::StoreError::Unknown);
         }
         Ok(applied)
     }
 }
 
-impl pubky_switch_client::store::StateStore for UnknownOnce {
+impl pubky_dispatch_client::store::StateStore for UnknownOnce {
     fn get(
         &self,
         ns: &str,
         key: &[u8],
-    ) -> Result<Option<Vec<u8>>, pubky_switch_client::error::StoreError> {
+    ) -> Result<Option<Vec<u8>>, pubky_dispatch_client::error::StoreError> {
         self.inner.get(ns, key)
     }
 
@@ -494,38 +494,40 @@ impl pubky_switch_client::store::StateStore for UnknownOnce {
         prefix: &[u8],
         after: Option<&[u8]>,
         limit: u32,
-    ) -> Result<Vec<pubky_switch_client::store::KeyValue>, pubky_switch_client::error::StoreError>
+    ) -> Result<Vec<pubky_dispatch_client::store::KeyValue>, pubky_dispatch_client::error::StoreError>
     {
         self.inner.scan(ns, prefix, after, limit)
     }
 
     fn commit(
         &self,
-        batch: pubky_switch_client::store::WriteBatch,
-    ) -> Result<(), pubky_switch_client::error::StoreError> {
+        batch: pubky_dispatch_client::store::WriteBatch,
+    ) -> Result<(), pubky_dispatch_client::error::StoreError> {
         let clients = Self::clients(&batch);
         let result = self
             .inner
             .commit(batch)
-            .map(|()| pubky_switch_client::store::CommitOutcome::Applied);
+            .map(|()| pubky_dispatch_client::store::CommitOutcome::Applied);
         self.after(clients, result).map(|_| ())
     }
 
     fn acquire(
         &self,
         ns: &str,
-        owner: pubky_switch_client::store::StoreOwner,
-    ) -> Result<pubky_switch_client::store::AcquireOutcome, pubky_switch_client::error::StoreError>
-    {
+        owner: pubky_dispatch_client::store::StoreOwner,
+    ) -> Result<
+        pubky_dispatch_client::store::AcquireOutcome,
+        pubky_dispatch_client::error::StoreError,
+    > {
         self.inner.acquire(ns, owner)
     }
 
     fn commit_if(
         &self,
         ns: &str,
-        owner: pubky_switch_client::store::StoreOwner,
-        batch: pubky_switch_client::store::WriteBatch,
-    ) -> Result<pubky_switch_client::store::CommitOutcome, pubky_switch_client::error::StoreError>
+        owner: pubky_dispatch_client::store::StoreOwner,
+        batch: pubky_dispatch_client::store::WriteBatch,
+    ) -> Result<pubky_dispatch_client::store::CommitOutcome, pubky_dispatch_client::error::StoreError>
     {
         let clients = Self::clients(&batch);
         self.after(clients, self.inner.commit_if(ns, owner, batch))
@@ -546,7 +548,7 @@ async fn test_own_record_edit_after_an_unknown_store_result_waits_for_a_load() {
             "shop",
             AppScopes::new().request().build().unwrap(),
             publishing(),
-            Arc::clone(&faulty) as Arc<dyn pubky_switch_client::store::StateStore>,
+            Arc::clone(&faulty) as Arc<dyn pubky_dispatch_client::store::StateStore>,
         )
         .await;
     let a = endpoint("btc-lightning-bolt12");
@@ -562,8 +564,8 @@ async fn test_own_record_edit_after_an_unknown_store_result_waits_for_a_load() {
     assert!(
         matches!(
             error,
-            PaykitError::Client(pubky_switch_client::app::AppError::Store(
-                pubky_switch_client::error::StoreError::Unknown
+            PaykitError::Client(pubky_dispatch_client::app::AppError::Store(
+                pubky_dispatch_client::error::StoreError::Unknown
             ))
         ),
         "{error:?}"
@@ -632,7 +634,7 @@ async fn test_own_record_edit_after_an_unknown_read_result_waits_for_a_load() {
             "shop",
             AppScopes::new().request().build().unwrap(),
             publishing(),
-            Arc::clone(&faulty) as Arc<dyn pubky_switch_client::store::StateStore>,
+            Arc::clone(&faulty) as Arc<dyn pubky_dispatch_client::store::StateStore>,
         )
         .await;
     shop.app_mut().invite(&w.alice_id()).await.unwrap();
@@ -653,8 +655,8 @@ async fn test_own_record_edit_after_an_unknown_read_result_waits_for_a_load() {
     assert!(
         matches!(
             error,
-            PaykitError::Client(pubky_switch_client::app::AppError::Store(
-                pubky_switch_client::error::StoreError::Unknown
+            PaykitError::Client(pubky_dispatch_client::app::AppError::Store(
+                pubky_dispatch_client::error::StoreError::Unknown
             ))
         ),
         "{error:?}"
@@ -712,7 +714,7 @@ async fn test_own_record_unknown_identity_refresh_stops_edits_and_upkeep() {
     let mut restored = Paykit::restore(
         w.env(
             &w.bob,
-            Arc::clone(&faulty) as Arc<dyn pubky_switch_client::store::StateStore>,
+            Arc::clone(&faulty) as Arc<dyn pubky_dispatch_client::store::StateStore>,
         ),
         publishing(),
         &backup,
@@ -739,8 +741,8 @@ async fn test_own_record_unknown_identity_refresh_stops_edits_and_upkeep() {
     assert!(
         matches!(
             error,
-            PaykitError::Client(pubky_switch_client::app::AppError::Store(
-                pubky_switch_client::error::StoreError::Unknown
+            PaykitError::Client(pubky_dispatch_client::app::AppError::Store(
+                pubky_dispatch_client::error::StoreError::Unknown
             ))
         ),
         "{error:?}"
@@ -779,7 +781,7 @@ async fn test_own_record_withdrawal_reports_its_unanswered_delivery() {
     // previous offer on the Homeserver until the next read.
     w.bob
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+        .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
             path: "/ops".into(),
             after: 0,
         });
@@ -787,7 +789,7 @@ async fn test_own_record_withdrawal_reports_its_unanswered_delivery() {
     assert!(
         matches!(
             error,
-            PaykitError::Client(pubky_switch_client::app::AppError::Transport(_))
+            PaykitError::Client(pubky_dispatch_client::app::AppError::Transport(_))
         ),
         "{error:?}"
     );
@@ -856,7 +858,7 @@ async fn test_own_record_restored_withdrawal_finishes_delivery_after_the_first_r
     // The backup retains the signed withdrawal whose delivery failed.
     w.bob
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+        .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
             path: "/ops".into(),
             after: 0,
         });
@@ -877,9 +879,9 @@ async fn test_own_record_restored_withdrawal_finishes_delivery_after_the_first_r
     let restored_record = restored.app().record().clone();
     w.bob
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::Error {
+        .fail_next(pubky_dispatch_client::testing::Fault::Error {
             path: "/feed".into(),
-            code: pubky_switch_core::http::ErrorCode::Unavailable,
+            code: pubky_dispatch_core::http::ErrorCode::Unavailable,
             current: serde_json::Value::Null,
         });
     assert!(restored.receive(None).await.is_err());
@@ -895,7 +897,7 @@ async fn test_own_record_restored_withdrawal_finishes_delivery_after_the_first_r
     );
 }
 
-/// Bob's publishing shop whose withdrawal of its last endpoint reached no switch, backed up
+/// Bob's publishing shop whose withdrawal of its last endpoint reached no Dispatch, backed up
 /// then, and restored on a new store.
 async fn restored_after_an_undelivered_withdrawal(w: &World) -> Paykit {
     let mut shop = publishing_shop(w).await;
@@ -905,7 +907,7 @@ async fn restored_after_an_undelivered_withdrawal(w: &World) -> Paykit {
         .unwrap();
     w.bob
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+        .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
             path: "/ops".into(),
             after: 0,
         });
@@ -964,7 +966,7 @@ async fn test_own_record_capabilities_updated_at_once_on_request() {
 
 #[tokio::test]
 async fn test_own_record_update_returns_where_the_record_stands() {
-    use pubky_switch_client::app::Publication;
+    use pubky_dispatch_client::app::Publication;
     let w = World::new();
     let mut shop = w
         .join_with(
@@ -997,7 +999,7 @@ async fn test_own_record_update_returns_where_the_record_stands() {
 
 #[tokio::test]
 async fn test_own_record_update_returns_the_renewal_and_publication_status() {
-    use pubky_switch_client::app::Publication;
+    use pubky_dispatch_client::app::Publication;
     let w = World::new();
     let mut shop = publishing_shop(&w).await;
     shop.set_public_endpoint(endpoint("btc-lightning-bolt12"), payload("lno1tips"))
@@ -1082,7 +1084,7 @@ async fn test_own_record_oversized_capabilities_left_owed_at_the_receive() {
 }
 
 /// A list of Payment Endpoint Identifiers no app record can carry: its `app.put` is over
-/// the Switch's cap on a signed operation (Switch wire 6.1).
+/// the Dispatch's cap on a signed operation (Dispatch wire 6.1).
 /// A payment method whose list of what it pays is a different one at each reading, the last
 /// repeated.
 struct ShiftingRail {
@@ -1128,7 +1130,7 @@ impl paykit_sdk::Rail for ShiftingRail {
     fn pay(
         &self,
         payment: paykit_sdk::rail::RailPayment,
-    ) -> pubky_switch_client::transport::BoxFuture<
+    ) -> pubky_dispatch_client::transport::BoxFuture<
         '_,
         Result<paykit_sdk::rail::RailOutcome, paykit_sdk::rail::RailError>,
     > {
@@ -1138,7 +1140,7 @@ impl paykit_sdk::Rail for ShiftingRail {
     fn payment(
         &self,
         idempotency_key: paykit_lib::AttemptId,
-    ) -> pubky_switch_client::transport::BoxFuture<
+    ) -> pubky_dispatch_client::transport::BoxFuture<
         '_,
         Result<Option<paykit_sdk::rail::RailOutcome>, paykit_sdk::rail::RailError>,
     > {
@@ -1148,7 +1150,7 @@ impl paykit_sdk::Rail for ShiftingRail {
     fn verify(
         &self,
         check: paykit_sdk::rail::ProofCheck,
-    ) -> pubky_switch_client::transport::BoxFuture<
+    ) -> pubky_dispatch_client::transport::BoxFuture<
         '_,
         Result<Option<u64>, paykit_sdk::rail::RailError>,
     > {
@@ -1197,15 +1199,15 @@ pub(crate) fn oversized_capabilities() -> Vec<paykit_lib::PaymentEndpointIdentif
 fn is_usage(error: &PaykitError) -> bool {
     matches!(
         error,
-        PaykitError::Client(pubky_switch_client::app::AppError::Refused(
-            pubky_switch_client::app::Refusal::Usage(_)
+        PaykitError::Client(pubky_dispatch_client::app::AppError::Refused(
+            pubky_dispatch_client::app::Refusal::Usage(_)
         ))
     )
 }
 
 #[tokio::test]
 async fn test_own_record_oversized_capabilities_refuse_the_join() {
-    use pubky_switch_client::store::{Fault, FaultStore, StateStore};
+    use pubky_dispatch_client::store::{Fault, FaultStore, StateStore};
 
     let w = World::new();
     w.rail.set_endpoint_identifiers(oversized_capabilities());
@@ -1224,7 +1226,7 @@ async fn test_own_record_oversized_capabilities_refuse_the_join() {
     .await;
     let error = joined.expect_err("a record over the cap was joined with");
     assert!(is_usage(&error), "{error:?}");
-    // Refused before the client's join: no commit, nothing at the switch or the Homeserver.
+    // Refused before the client's join: no commit, nothing at the Dispatch or the Homeserver.
     assert_eq!(fault.commits(), 0);
     assert_eq!(w.alice.switch().tip_seq(), tip);
     assert!(w.alice.switch().app(&app_id).record.is_none());
@@ -1244,8 +1246,8 @@ async fn test_own_record_oversized_capabilities_refuse_the_join() {
         matches!(
             loaded,
             Err(PaykitError::Client(
-                pubky_switch_client::app::AppError::Refused(
-                    pubky_switch_client::app::Refusal::NotJoined
+                pubky_dispatch_client::app::AppError::Refused(
+                    pubky_dispatch_client::app::Refusal::NotJoined
                 )
             ))
         ),
@@ -1272,17 +1274,17 @@ async fn test_own_record_oversized_capabilities_refuse_the_join() {
 }
 
 /// Alice's wallet, publishing its record, joined while the delivery of the record carrying
-/// its capabilities fails: the switch takes the join's registration, then is unreachable
+/// its capabilities fails: the Dispatch takes the join's registration, then is unreachable
 /// for the `app.put` that follows. Returns the wallet and the record it kept.
 async fn joined_with_failed_delivery(
     w: &World,
     supported: &paykit_lib::PaymentEndpointIdentifier,
-) -> (Paykit, pubky_switch_core::sig::SignedDoc) {
+) -> (Paykit, pubky_dispatch_core::sig::SignedDoc) {
     w.rail.set_endpoint_identifiers(vec![supported.clone()]);
     let request = w.approve(&w.alice, "wallet", &AppScopes::new().pay().build().unwrap());
     w.alice
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+        .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
             path: "/ops".into(),
             after: 1,
         });
@@ -1295,7 +1297,7 @@ async fn joined_with_failed_delivery(
     ))
     .await
     .expect("the joined app is returned");
-    // The record with the capabilities is kept and owed: the switch and the Homeserver
+    // The record with the capabilities is kept and owed: the Dispatch and the Homeserver
     // hold the join's record, without them.
     let kept = wallet.app().record().clone();
     assert_eq!(
@@ -1304,10 +1306,10 @@ async fn joined_with_failed_delivery(
             .endpoint_identifiers,
         vec![supported.clone()]
     );
-    let at_switch = w.alice.switch().app(&wallet.app_id()).record.unwrap();
-    assert_ne!(at_switch, kept);
+    let at_dispatch = w.alice.switch().app(&wallet.app_id()).record.unwrap();
+    assert_ne!(at_dispatch, kept);
     assert_eq!(
-        PaykitMember::read(&AppRecord::verify(&at_switch, &w.alice_id()).unwrap()).unwrap(),
+        PaykitMember::read(&AppRecord::verify(&at_dispatch, &w.alice_id()).unwrap()).unwrap(),
         PaykitMember::default()
     );
     let published = w
@@ -1315,14 +1317,14 @@ async fn joined_with_failed_delivery(
         .file(w.alice_id(), &app_record_path(&wallet.app_id()))
         .unwrap();
     assert_eq!(
-        serde_json::from_slice::<pubky_switch_core::sig::SignedDoc>(&published).unwrap(),
-        at_switch
+        serde_json::from_slice::<pubky_dispatch_core::sig::SignedDoc>(&published).unwrap(),
+        at_dispatch
     );
     (wallet, kept)
 }
 
-/// The record `wallet` kept is the one at alice's switch and on her Homeserver.
-fn delivered(w: &World, wallet: &Paykit, kept: &pubky_switch_core::sig::SignedDoc) {
+/// The record `wallet` kept is the one at alice's Dispatch and on her Homeserver.
+fn delivered(w: &World, wallet: &Paykit, kept: &pubky_dispatch_core::sig::SignedDoc) {
     assert_eq!(wallet.app().record(), kept);
     assert_eq!(
         w.alice.switch().app(&wallet.app_id()).record.as_ref(),
@@ -1333,7 +1335,7 @@ fn delivered(w: &World, wallet: &Paykit, kept: &pubky_switch_core::sig::SignedDo
         .file(w.alice_id(), &app_record_path(&wallet.app_id()))
         .unwrap();
     assert_eq!(
-        &serde_json::from_slice::<pubky_switch_core::sig::SignedDoc>(&bytes).unwrap(),
+        &serde_json::from_slice::<pubky_dispatch_core::sig::SignedDoc>(&bytes).unwrap(),
         kept
     );
 }
@@ -1374,7 +1376,7 @@ async fn test_own_record_failed_update_stays_owed_until_delivery() {
     w.rail.set_endpoint_identifiers(vec![supported.clone()]);
     w.alice
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+        .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
             path: "/ops".into(),
             after: 0,
         });
@@ -1382,7 +1384,7 @@ async fn test_own_record_failed_update_stays_owed_until_delivery() {
     assert!(
         matches!(
             error,
-            PaykitError::Client(pubky_switch_client::app::AppError::Transport(_))
+            PaykitError::Client(pubky_dispatch_client::app::AppError::Transport(_))
         ),
         "{error:?}"
     );
@@ -1448,7 +1450,7 @@ async fn test_own_record_failed_publication_retries_the_newest_record_after_rest
     assert!(
         matches!(
             publication,
-            pubky_switch_client::app::Publication::Owed { .. }
+            pubky_dispatch_client::app::Publication::Owed { .. }
         ),
         "{publication:?}"
     );
@@ -1484,7 +1486,7 @@ async fn test_own_record_withdrawal_waits_for_delivery_before_publication() {
     let published = on_homeserver(&w, &shop).unwrap();
     w.bob
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+        .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
             path: "/ops".into(),
             after: 0,
         });
@@ -1492,7 +1494,7 @@ async fn test_own_record_withdrawal_waits_for_delivery_before_publication() {
     assert!(
         matches!(
             error,
-            PaykitError::Client(pubky_switch_client::app::AppError::Transport(_))
+            PaykitError::Client(pubky_dispatch_client::app::AppError::Transport(_))
         ),
         "{error:?}"
     );
@@ -1584,7 +1586,8 @@ async fn test_own_record_restored_changes_wait_for_confirmed_first_read() {
             Arc::clone(&w.clock),
         ));
         let mut env = w.env(&w.bob, store());
-        env.homeserver = Arc::clone(&reads) as Arc<dyn pubky_switch_client::app::HomeserverReader>;
+        env.homeserver =
+            Arc::clone(&reads) as Arc<dyn pubky_dispatch_client::app::HomeserverReader>;
         let mut restored = Paykit::restore(
             env,
             publishing(),
@@ -1619,8 +1622,8 @@ async fn test_own_record_restored_changes_wait_for_confirmed_first_read() {
         assert!(
             matches!(
                 pending,
-                PaykitError::Client(pubky_switch_client::app::AppError::Refused(
-                    pubky_switch_client::app::Refusal::NotNow(_)
+                PaykitError::Client(pubky_dispatch_client::app::AppError::Refused(
+                    pubky_dispatch_client::app::Refusal::NotNow(_)
                 ))
             ),
             "{pending:?}"
@@ -1666,9 +1669,9 @@ async fn test_own_record_restored_upkeep_waits_for_a_completed_read() {
     w.clock.advance_ms(46 * DAY_MS);
     w.bob
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::Error {
+        .fail_next(pubky_dispatch_client::testing::Fault::Error {
             path: "/feed".into(),
-            code: pubky_switch_core::http::ErrorCode::Unavailable,
+            code: pubky_dispatch_core::http::ErrorCode::Unavailable,
             current: serde_json::Value::Null,
         });
     assert!(restored.receive(None).await.is_err());
@@ -2016,7 +2019,7 @@ async fn test_own_record_member_another_device_changed_is_taken() {
     assert!(
         !events.iter().any(|event| matches!(
             event,
-            pubky_switch_client::app::AppEvent::MemberChanged { .. }
+            pubky_dispatch_client::app::AppEvent::MemberChanged { .. }
         )),
         "{events:?}"
     );
@@ -2033,14 +2036,14 @@ async fn test_own_record_failed_renewal_keeps_exact_bytes_until_delivery() {
     w.clock.advance_ms(46 * DAY_MS);
     w.bob
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::Error {
+        .fail_next(pubky_dispatch_client::testing::Fault::Error {
             path: "/ops".into(),
-            code: pubky_switch_core::http::ErrorCode::Unavailable,
+            code: pubky_dispatch_core::http::ErrorCode::Unavailable,
             current: serde_json::Value::Null,
         });
     let error = shop.update_own_record().await.unwrap_err();
     assert!(
-        matches!(&error, PaykitError::Client(client) if client.code() == Some(pubky_switch_core::http::ErrorCode::Unavailable)),
+        matches!(&error, PaykitError::Client(client) if client.code() == Some(pubky_dispatch_core::http::ErrorCode::Unavailable)),
         "{error:?}"
     );
     let pending = shop.app().record().clone();
@@ -2283,7 +2286,7 @@ async fn test_own_record_restored_endpoint_after_clock_rollback_stays_payable() 
         .unwrap();
     w.bob
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+        .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
             path: "/ops".into(),
             after: 0,
         });

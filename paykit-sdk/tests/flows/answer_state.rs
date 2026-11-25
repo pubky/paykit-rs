@@ -1,12 +1,12 @@
 //! Stored re-send answers and cancellation sides (Paykit spec 3.4, 9;
-//! Paykit wire 4.12; Switch spec 12.4).
+//! Paykit wire 4.12; Dispatch spec 12.4).
 
 use std::sync::Arc;
 
 use paykit_sdk::{AppScopes, Paykit, PaykitBackup, PaykitConfig, Rail, ResendSelection};
-use pubky_switch_client::app::{AppError, AppEvent, Delivery, LocalWrite};
-use pubky_switch_client::clock::Clock;
-use pubky_switch_client::store::{Fault, FaultStore, StateStore};
+use pubky_dispatch_client::app::{AppError, AppEvent, Delivery, LocalWrite};
+use pubky_dispatch_client::clock::Clock;
+use pubky_dispatch_client::store::{Fault, FaultStore, StateStore};
 use serde_json::{json, Value};
 
 use crate::common::{draft, is_corrupt, store, World, HOUR_MS};
@@ -218,7 +218,7 @@ async fn held_with_contacts(w: &World, family: Family, contacts: bool) -> Held {
         assert_eq!(body.as_object().unwrap().len(), 5);
         assert_eq!(
             body["requester"],
-            pubky_switch_core::enc::b64(&result.peer.identity())
+            pubky_dispatch_core::enc::b64(&result.peer.identity())
         );
         assert_eq!(
             body["cert"],
@@ -262,11 +262,12 @@ fn extra(bytes: &[u8]) -> Vec<u8> {
 
 fn replace(backup: &PaykitBackup, key: &[u8], bytes: Vec<u8>) -> PaykitBackup {
     let mut value: Value = serde_json::from_slice(&backup.to_bytes().unwrap()).unwrap();
-    let data = pubky_switch_core::enc::unb64(value["layers"][0]["data"].as_str().unwrap()).unwrap();
-    let mut layer = pubky_switch_client::app::decode_local_state(&data).unwrap();
+    let data =
+        pubky_dispatch_core::enc::unb64(value["layers"][0]["data"].as_str().unwrap()).unwrap();
+    let mut layer = pubky_dispatch_client::app::decode_local_state(&data).unwrap();
     layer.iter_mut().find(|(k, _)| k == key).unwrap().1 = bytes;
-    value["layers"][0]["data"] = Value::String(pubky_switch_core::enc::b64(
-        &pubky_switch_client::app::encode_local_state(&layer),
+    value["layers"][0]["data"] = Value::String(pubky_dispatch_core::enc::b64(
+        &pubky_dispatch_client::app::encode_local_state(&layer),
     ));
     PaykitBackup::from_bytes(&serde_json::to_vec(&value).unwrap()).unwrap()
 }
@@ -475,7 +476,7 @@ async fn current_reload_restore_and_resend(family: Family) {
     value.app.receive(None).await.unwrap();
     let stamp = format!(
         "rs/{}/{}",
-        pubky_switch_core::enc::b64(&value.peer.identity()),
+        pubky_dispatch_core::enc::b64(&value.peer.identity()),
         value.sent_id
     );
     let stamp: Value = serde_json::from_slice(
@@ -575,9 +576,9 @@ async fn test_answer_state_unknown_deny_preserves_queued_answer() {
     w.clock.advance_ms(paykit_sdk::LISTS_REFRESH_MS);
     w.bob
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::Error {
+        .fail_next(pubky_dispatch_client::testing::Fault::Error {
             path: "/allow".into(),
-            code: pubky_switch_core::http::ErrorCode::Unavailable,
+            code: pubky_dispatch_core::http::ErrorCode::Unavailable,
             current: Value::Null,
         });
     value.app.receive(None).await.unwrap();

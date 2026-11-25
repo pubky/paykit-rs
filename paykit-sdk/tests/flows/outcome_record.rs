@@ -8,11 +8,11 @@ use paykit_lib::derive::natural_key;
 use paykit_lib::AttemptId;
 use paykit_sdk::rail::Behaviour;
 use paykit_sdk::{PayOptions, PayOutcome, Paykit, RequestRef};
-use pubky_switch_client::app::{Collection as SwitchCollection, OpBatch, RecordTarget};
-use pubky_switch_client::clock::Clock;
-use pubky_switch_client::error::StoreError;
-use pubky_switch_client::store::{KeyValue, MemoryStore, StateStore};
-use pubky_switch_core::claims::Outcome;
+use pubky_dispatch_client::app::{Collection as DispatchCollection, OpBatch, RecordTarget};
+use pubky_dispatch_client::clock::Clock;
+use pubky_dispatch_client::error::StoreError;
+use pubky_dispatch_client::store::{KeyValue, MemoryStore, StateStore};
+use pubky_dispatch_core::claims::Outcome;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -25,14 +25,14 @@ pub(crate) const INVALID: &[u8] = b"{\"not\":\"an activity record\"}";
 pub(crate) fn payer_record(request: &RequestRef) -> RecordTarget {
     let collection = Collection::PayerActivity;
     RecordTarget::new(
-        SwitchCollection::new(collection.name(), collection.policy(None)),
+        DispatchCollection::new(collection.name(), collection.policy(None)),
         &natural_key::request_record(&request.payee, &request.request_hash),
     )
 }
 
 /// A store that, once armed, shows no mark of what the app has seen in any record (the
 /// client's `hw/` keys): an app that never took a value of the record that reads, so a
-/// later value that doesn't read isn't refused as a regression of one it saw (Switch spec
+/// later value that doesn't read isn't refused as a regression of one it saw (Dispatch spec
 /// 8.2, Paykit wire 5.3 "Seen roles"), and is held as the record's content.
 #[derive(Default)]
 pub(crate) struct NoSeenMarks {
@@ -63,12 +63,12 @@ impl StateStore for NoSeenMarks {
 
     fn commit(
         &self,
-        batch: pubky_switch_client::store::WriteBatch,
-    ) -> Result<(), pubky_switch_client::error::StoreError> {
+        batch: pubky_dispatch_client::store::WriteBatch,
+    ) -> Result<(), pubky_dispatch_client::error::StoreError> {
         self.commit_with(batch, |batch| {
             self.inner
                 .commit(batch)
-                .map(|()| pubky_switch_client::store::CommitOutcome::Applied)
+                .map(|()| pubky_dispatch_client::store::CommitOutcome::Applied)
         })
         .map(|_| ())
     }
@@ -76,18 +76,20 @@ impl StateStore for NoSeenMarks {
     fn acquire(
         &self,
         ns: &str,
-        owner: pubky_switch_client::store::StoreOwner,
-    ) -> Result<pubky_switch_client::store::AcquireOutcome, pubky_switch_client::error::StoreError>
-    {
+        owner: pubky_dispatch_client::store::StoreOwner,
+    ) -> Result<
+        pubky_dispatch_client::store::AcquireOutcome,
+        pubky_dispatch_client::error::StoreError,
+    > {
         self.inner.acquire(ns, owner)
     }
 
     fn commit_if(
         &self,
         ns: &str,
-        owner: pubky_switch_client::store::StoreOwner,
-        batch: pubky_switch_client::store::WriteBatch,
-    ) -> Result<pubky_switch_client::store::CommitOutcome, pubky_switch_client::error::StoreError>
+        owner: pubky_dispatch_client::store::StoreOwner,
+        batch: pubky_dispatch_client::store::WriteBatch,
+    ) -> Result<pubky_dispatch_client::store::CommitOutcome, pubky_dispatch_client::error::StoreError>
     {
         self.commit_with(batch, |batch| self.inner.commit_if(ns, owner, batch))
     }
@@ -95,17 +97,17 @@ impl StateStore for NoSeenMarks {
 impl NoSeenMarks {
     fn commit_with(
         &self,
-        batch: pubky_switch_client::store::WriteBatch,
+        batch: pubky_dispatch_client::store::WriteBatch,
         apply: impl FnOnce(
-            pubky_switch_client::store::WriteBatch,
+            pubky_dispatch_client::store::WriteBatch,
         ) -> Result<
-            pubky_switch_client::store::CommitOutcome,
-            pubky_switch_client::error::StoreError,
+            pubky_dispatch_client::store::CommitOutcome,
+            pubky_dispatch_client::error::StoreError,
         >,
-    ) -> Result<pubky_switch_client::store::CommitOutcome, pubky_switch_client::error::StoreError>
+    ) -> Result<pubky_dispatch_client::store::CommitOutcome, pubky_dispatch_client::error::StoreError>
     {
         let queues = batch.writes().iter().any(|write| {
-            matches!(write, pubky_switch_client::store::Write::Put { key, .. } if key.starts_with(b"out/"))
+            matches!(write, pubky_dispatch_client::store::Write::Put { key, .. } if key.starts_with(b"out/"))
         });
         if queues && self.refuse_queue.load(Ordering::SeqCst) {
             return Err(StoreError::Unavailable);
@@ -157,7 +159,7 @@ pub(crate) async fn phone_writes(phone: &mut Paykit, request: &RequestRef, value
         .unwrap();
 }
 
-/// The attempt's outcome on its claim, read from the switch.
+/// The attempt's outcome on its claim, read from the dispatch.
 async fn claim_outcome(wallet: &mut Paykit, attempt_id: &AttemptId) -> Outcome {
     let obligation = wallet
         .payments()
@@ -176,7 +178,7 @@ async fn claim_outcome(wallet: &mut Paykit, attempt_id: &AttemptId) -> Outcome {
     read.view.attempt(&attempt_id.to_bytes()).unwrap().outcome
 }
 
-/// The payer record the switch holds, as JSON, read again from the switch.
+/// The payer record the Dispatch holds, as JSON, read again from the dispatch.
 pub(crate) async fn record_value(
     wallet: &mut Paykit,
     request: &RequestRef,
@@ -215,7 +217,7 @@ async fn test_outcome_record_deleted_is_rebuilt_with_done() {
 #[tokio::test]
 async fn test_outcome_record_invalid_value_over_one_seen_is_written_over_with_done() {
     // The wallet saw the record read: the phone's value that doesn't read is refused as a
-    // regression of it (Switch spec 8.2), the wallet keeps what it saw, and its outcome
+    // regression of it (Dispatch spec 8.2), the wallet keeps what it saw, and its outcome
     // builds on the refused write's version, so `done` goes with the record's update,
     // which replaces the value.
     let w = World::new();
@@ -281,7 +283,7 @@ async fn resolve_done(wallet: &mut Paykit, attempt_id: AttemptId) -> paykit_sdk:
             &obligation,
             attempt_id,
             paykit_sdk::Resolution::Done,
-            pubky_switch_client::app::UserConfirmed::new(),
+            pubky_dispatch_client::app::UserConfirmed::new(),
         )
         .await
 }
@@ -382,7 +384,7 @@ async fn test_outcome_record_user_cant_fail_a_payment_the_method_reported_made()
                 &obligation,
                 attempt_id,
                 resolution,
-                pubky_switch_client::app::UserConfirmed::new(),
+                pubky_dispatch_client::app::UserConfirmed::new(),
             )
             .await
             .unwrap_err();
@@ -424,7 +426,7 @@ async fn made_without_its_acceptance(
         matches!(
             &refused,
             Err(paykit_sdk::PaykitError::Client(
-                pubky_switch_client::app::AppError::Store(_)
+                pubky_dispatch_client::app::AppError::Store(_)
             ))
         ),
         "{refused:?}"
@@ -447,7 +449,7 @@ async fn made_without_its_acceptance(
 
 #[tokio::test]
 async fn test_outcome_record_repair_places_the_acceptance_with_the_proof() {
-    // The acceptance couldn't be queued when the payment was dispatched, and the outcome
+    // The acceptance couldn't be queued when the payment was handed off, and the outcome
     // waited on the record: the repair that settles the outcome places the acceptance with
     // the proof.
     let w = World::new();
@@ -477,20 +479,20 @@ async fn test_outcome_record_user_done_places_the_acceptance_with_the_proof() {
 }
 
 /// Pay `attempt_id` through, with the outcome batch's first try failing as `first` says and
-/// the switch refusing it for good when it is sent again: the resume reports the payment
+/// the Dispatch refusing it for good when it is sent again: the resume reports the payment
 /// made and its outcome unwritten.
 async fn outcome_refused_when_sent_again(
     w: &World,
     wallet: &mut Paykit,
     attempt_id: &AttemptId,
-    first: pubky_switch_client::testing::Fault,
+    first: pubky_dispatch_client::testing::Fault,
 ) {
     w.rail.settle(attempt_id, true);
-    let switch = w.alice.switch();
-    switch.fail_next(first);
-    switch.fail_next(pubky_switch_client::testing::Fault::Error {
+    let dispatch = w.alice.switch();
+    dispatch.fail_next(first);
+    dispatch.fail_next(pubky_dispatch_client::testing::Fault::Error {
         path: "/ops".into(),
-        code: pubky_switch_core::http::ErrorCode::Conflict,
+        code: pubky_dispatch_core::http::ErrorCode::Conflict,
         current: serde_json::Value::Null,
     });
     let resumed = wallet.resume_payments().await.unwrap();
@@ -530,12 +532,12 @@ async fn outcome_written_again(
 #[tokio::test]
 async fn test_outcome_record_batch_refused_when_sent_again_is_written_again() {
     // The outcome's batch (`done`, the record and the proof) can't connect and is kept. The
-    // resume's last flush sends it again and the switch refuses it for good, so the client
+    // resume's last flush sends it again and the Dispatch refuses it for good, so the client
     // drops it with its local writes, the journal's move to `Finished` included, and reports
     // it (`BatchRefused`).
     let w = World::new();
     let (mut wallet, _phone, request, attempt_id) = in_flight(&w).await;
-    let unreachable = pubky_switch_client::testing::Fault::Unreachable {
+    let unreachable = pubky_dispatch_client::testing::Fault::Unreachable {
         path: "/ops".into(),
         after: 0,
     };
@@ -546,7 +548,7 @@ async fn test_outcome_record_batch_refused_when_sent_again_is_written_again() {
             .report
             .events
             .iter()
-            .any(|e| matches!(e, pubky_switch_client::app::AppEvent::BatchRefused { .. })),
+            .any(|e| matches!(e, pubky_dispatch_client::app::AppEvent::BatchRefused { .. })),
         "{summary:?}"
     );
     outcome_written_again(&w, &mut wallet, &request, &attempt_id).await;
@@ -560,14 +562,14 @@ async fn test_outcome_record_kept_after_a_refusal_about_the_caller_stays_unwritt
     let w = World::new();
     let (mut wallet, _phone, request, attempt_id) = in_flight(&w).await;
     w.rail.settle(&attempt_id, true);
-    let switch = w.alice.switch();
-    switch.fail_next(pubky_switch_client::testing::Fault::Unreachable {
+    let dispatch = w.alice.switch();
+    dispatch.fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
         path: "/ops".into(),
         after: 0,
     });
-    switch.fail_next(pubky_switch_client::testing::Fault::Error {
+    dispatch.fail_next(pubky_dispatch_client::testing::Fault::Error {
         path: "/ops".into(),
-        code: pubky_switch_core::http::ErrorCode::NotCurrent,
+        code: pubky_dispatch_core::http::ErrorCode::NotCurrent,
         current: serde_json::Value::Null,
     });
     let resumed = wallet.resume_payments().await.unwrap();
@@ -582,9 +584,9 @@ async fn test_outcome_record_kept_after_a_refusal_about_the_caller_stays_unwritt
         wallet.payments().await.unwrap()[0].stage,
         paykit_sdk::Stage::RailPaid
     );
-    switch.fail_next(pubky_switch_client::testing::Fault::Error {
+    dispatch.fail_next(pubky_dispatch_client::testing::Fault::Error {
         path: "/ops".into(),
-        code: pubky_switch_core::http::ErrorCode::Conflict,
+        code: pubky_dispatch_core::http::ErrorCode::Conflict,
         current: serde_json::Value::Null,
     });
     outcome_written_again(&w, &mut wallet, &request, &attempt_id).await;
@@ -677,8 +679,8 @@ async fn record_awaiting_its_epoch_key(
     assert!(
         matches!(
             held.content,
-            pubky_switch_client::app::RecordContent::Unreadable(
-                pubky_switch_client::app::Unopened::KeyNotHeld { .. }
+            pubky_dispatch_client::app::RecordContent::Unreadable(
+                pubky_dispatch_client::app::Unopened::KeyNotHeld { .. }
             )
         ),
         "{:?}",
@@ -754,8 +756,8 @@ async fn test_outcome_record_receipt_over_a_value_awaiting_its_epoch_key_is_held
     assert!(
         matches!(
             held.content,
-            pubky_switch_client::app::RecordContent::Unreadable(
-                pubky_switch_client::app::Unopened::KeyNotHeld { .. }
+            pubky_dispatch_client::app::RecordContent::Unreadable(
+                pubky_dispatch_client::app::Unopened::KeyNotHeld { .. }
             )
         ),
         "{:?}",

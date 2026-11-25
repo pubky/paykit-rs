@@ -3,8 +3,8 @@
 use super::*;
 use crate::common::{btc, draft, request_from};
 use paykit_sdk::{rail::FakeRail, PayOutcome, PayeeStatus, RequestRef};
-use pubky_switch_client::app::{
-    AppError, AppEvent, Collection as SwitchCollection, RecordRead, RecordTarget, Refusal,
+use pubky_dispatch_client::app::{
+    AppError, AppEvent, Collection as DispatchCollection, RecordRead, RecordTarget, Refusal,
 };
 
 struct Wallets {
@@ -58,8 +58,12 @@ async fn wallets(world: &World, proposer: AllowanceRole) -> TestResult<Wallets> 
     assert_eq!(view.executor_app_id, Some(payer.app_id()));
     assert!(view.consented);
     let natural = paykit_lib::derive::natural_key::allowance(&seller.identity(), &id);
-    let [grant, ledger] = [Collection::Allowances, Collection::AllowanceLedgers]
-        .map(|c| RecordTarget::new(SwitchCollection::new(c.name(), c.fixed_policy()), &natural));
+    let [grant, ledger] = [Collection::Allowances, Collection::AllowanceLedgers].map(|c| {
+        RecordTarget::new(
+            DispatchCollection::new(c.name(), c.fixed_policy()),
+            &natural,
+        )
+    });
     assert_eq!(payer.app().record_key(&grant)?, key);
     rail.set_history_payer(payer.identity());
     Ok(Wallets {
@@ -271,11 +275,11 @@ async fn check(backend: Backend) -> TestResult {
 }
 
 #[tokio::test]
-async fn test_sibling_cannot_change_funded_ledger_on_scripted_switch() -> TestResult {
+async fn test_sibling_cannot_change_funded_ledger_on_scripted_dispatch() -> TestResult {
     check(Backend::Scripted).await
 }
 
 #[tokio::test]
-async fn test_sibling_cannot_change_funded_ledger_on_switch_service() -> TestResult {
+async fn test_sibling_cannot_change_funded_ledger_on_dispatch_service() -> TestResult {
     check(Backend::Service).await
 }

@@ -5,7 +5,7 @@ use crate::error::Result;
 use crate::state::{self, key};
 use crate::Paykit;
 use paykit_lib::records::{ListPublicationRecord, UnknownMembers};
-use pubky_switch_client::app::{LocalWrite, ReceiveContext, RecordObservation, StoreFailure};
+use pubky_dispatch_client::app::{LocalWrite, ReceiveContext, RecordObservation, StoreFailure};
 use serde::{Deserialize, Serialize};
 
 /// A conflicting counter signed by this publishing app. Both issues name the same
@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 #[non_exhaustive]
 pub struct PublicationConflict {
     /// Hash of the authenticated service application that showed the refused issue.
-    #[serde(with = "pubky_switch_core::enc::serde_b64")]
+    #[serde(with = "pubky_dispatch_core::enc::serde_b64")]
     pub application_hash: [u8; 32],
     /// Another distinct conflicting application at this key was also observed before
     /// acknowledgment. The report identifies one exact application and its two issues.
@@ -257,7 +257,7 @@ fn observed_local<T: state::Stored>(
 ) -> std::result::Result<Option<T>, StoreFailure> {
     state::cx_get(cx, at).map_err(|error| match error {
         crate::receive::Fail::Store(error) => error,
-        _ => StoreFailure::of_entry(pubky_switch_client::error::StoreError::Corrupt),
+        _ => StoreFailure::of_entry(pubky_dispatch_client::error::StoreError::Corrupt),
     })
 }
 
@@ -381,7 +381,7 @@ mod tests {
             "publisher",
             &["paykit_request", "paykit_settlements", "paykit_contacts"],
         );
-        let blind = |natural: &[u8]| pubky_switch_core::enc::hash(natural);
+        let blind = |natural: &[u8]| pubky_dispatch_core::enc::hash(natural);
         let binder = state::Binder::new(publisher.id(), &publisher.cert, &blind);
         let mut held = issue(8, false);
         held.publisher = publisher.cert.app_id();
@@ -418,7 +418,7 @@ mod tests {
             "publisher",
             &["paykit_request", "paykit_settlements", "paykit_contacts"],
         );
-        let blind = |input: &[u8]| pubky_switch_core::enc::hash(input);
+        let blind = |input: &[u8]| pubky_dispatch_core::enc::hash(input);
         let binder = state::Binder::new(publisher.id(), &publisher.cert, &blind);
         let mut actual = issue(9, false);
         actual.publisher = publisher.cert.app_id();

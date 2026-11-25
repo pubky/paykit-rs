@@ -5,8 +5,8 @@ use paykit_lib::records::ListPublicationRecord as Publication;
 use paykit_lib::{PaymentEndpointIdentifier, PaymentEndpointPayload};
 use paykit_sdk::PublicationConflict;
 use paykit_sdk::Refusal;
-use pubky_switch_client::app::UserConfirmed;
-use pubky_switch_core::enc::b64;
+use pubky_dispatch_client::app::UserConfirmed;
+use pubky_dispatch_core::enc::b64;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use std::{collections::BTreeMap, fmt};
@@ -114,14 +114,14 @@ impl From<Publication> for ListPublicationRecord {
 impl ListPublicationRecord {
     fn into_wire_value(self, field: &str) -> Result<Value, WalletError> {
         let member = |name: &str| format!("{field}.{name}");
-        // A reservation names a positive Switch integer for each part of its version
+        // A reservation names a positive Dispatch integer for each part of its version
         // and a lower-case UUID v4 for its message (Paykit wire 5.8).
         for (name, value) in [("generation", self.generation), ("counter", self.counter)] {
-            if !(1..=pubky_switch_core::json::MAX_INT).contains(&value) {
+            if !(1..=pubky_dispatch_core::json::MAX_INT).contains(&value) {
                 return Err(WalletError::invalid(&member(name)));
             }
         }
-        pubky_switch_core::json::check_uuid_v4(&self.msg_id)
+        pubky_dispatch_core::json::check_uuid_v4(&self.msg_id)
             .map_err(|_| WalletError::invalid(&member("msg_id")))?;
         let record = Publication {
             publisher: fixed(self.publisher, &member("publisher"))?,
@@ -273,10 +273,10 @@ impl NativeWallet {
 }
 
 /// Restore the test seller and give up its first list after the recipient's inbox accepts
-/// it and the answer is lost (Paykit spec 8.4.1, 9, Switch spec 11, 12.4).
+/// it and the answer is lost (Paykit spec 8.4.1, 9, Dispatch spec 11, 12.4).
 #[cfg(any(test, feature = "test-wallet"))]
 pub(crate) async fn restored_list_seller(
-    world: &pubky_switch_harness::World,
+    world: &pubky_dispatch_harness::World,
     host: &crate::WalletHost,
     app_id: Vec<u8>,
     backup: Vec<u8>,

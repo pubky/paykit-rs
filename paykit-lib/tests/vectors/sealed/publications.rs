@@ -3,11 +3,11 @@
 use paykit_lib::derive::natural_key;
 use paykit_lib::records::{ListPublicationRecord, StoredMessage};
 use paykit_lib::Body;
-use pubky_switch_core::enc::{b64, hash, lp, u64be};
-use pubky_switch_core::ident::{collection_id, record_key_from_blinded, Policy};
-use pubky_switch_core::labels;
-use pubky_switch_core::ops::{BatchRef, OpBody, OpKind, RecordPut, RecordVersion, SignedOp};
-use pubky_switch_core::sealed::{aad, SealedValue};
+use pubky_dispatch_core::enc::{b64, hash, lp, u64be};
+use pubky_dispatch_core::ident::{collection_id, record_key_from_blinded, Policy};
+use pubky_dispatch_core::labels;
+use pubky_dispatch_core::ops::{BatchRef, OpBody, OpKind, RecordPut, RecordVersion, SignedOp};
+use pubky_dispatch_core::sealed::{aad, SealedValue};
 use serde_json::{json, Value};
 
 use crate::common::{
@@ -195,7 +195,7 @@ fn later_writes(keys: &Keys, held: &ListPublicationRecord) -> Vec<Value> {
 }
 
 pub(super) fn check(keys: &Keys, cases: &Value) {
-    use pubky_switch_core::sealed::RecordValue;
+    use pubky_dispatch_core::sealed::RecordValue;
 
     let owner = keys.identity_named("bob");
     let held = ListPublicationRecord::read(st(cases, "plaintext").as_bytes()).unwrap();

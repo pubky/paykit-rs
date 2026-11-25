@@ -2,8 +2,8 @@ use paykit_lib::PaymentEndpointPayload;
 use paykit_sdk::{
     AppScopes, PayOptions, PayOutcome, PayeeStatus, PaykitConfig, PaymentMode, Stage,
 };
-use pubky_switch_client::app::{AppConfig, UserConfirmed};
-use pubky_switch_core::claims::Outcome;
+use pubky_dispatch_client::app::{AppConfig, UserConfirmed};
+use pubky_dispatch_core::claims::Outcome;
 
 use crate::common::{btc, endpoint, store, World};
 
@@ -20,7 +20,7 @@ async fn test_offline_public_same_selection_pays_once_while_connected() {
 }
 
 #[tokio::test]
-async fn test_offline_public_payment_rechecks_the_selected_transfer_before_dispatch() {
+async fn test_offline_public_payment_rechecks_the_selected_transfer_before_handoff() {
     let world = World::new();
     let mut wallet = world
         .wallet_with("wallet", store(), PaykitConfig::default())
@@ -28,7 +28,7 @@ async fn test_offline_public_payment_rechecks_the_selected_transfer_before_dispa
     let _shop = shop_with_endpoint(&world).await;
     wallet.receive(None).await.unwrap();
     world.router.remove(world.alice.origin());
-    // Planned at the amount paid, the method would transfer another just before dispatch.
+    // Planned at the amount paid, the method would transfer another just before handoff.
     world
         .rail
         .next_transfer_amounts(vec![Some(btc("0.001")), Some(btc("0.002"))]);
@@ -82,8 +82,9 @@ async fn pay_public(disconnect: bool) {
     let mut wallet = world.wallet("wallet").await;
     let chosen = endpoint("btc-lightning-bolt12");
     let mut shop = shop_with_endpoint(&world).await;
-    let offer = pubky_switch_core::records::AppRecord::verify(shop.app().record(), &world.bob_id())
-        .unwrap();
+    let offer =
+        pubky_dispatch_core::records::AppRecord::verify(shop.app().record(), &world.bob_id())
+            .unwrap();
     assert_eq!(offer.expires_at(), None);
     wallet.receive(None).await.unwrap();
     if disconnect {
@@ -205,7 +206,7 @@ async fn test_offline_public_late_success_records_original_attempt() {
         .router
         .add_switch(world.alice.origin(), world.alice.switch());
     let obligation = wallet.payments().await.unwrap()[0].obligation;
-    // The claim the payment would have written through the switch: its attempt ID blinded
+    // The claim the payment would have written through the dispatch: its attempt ID blinded
     // with the payer's naming key (Paykit wire 1.5).
     assert_eq!(
         obligation,
@@ -237,7 +238,7 @@ async fn test_offline_public_late_success_records_original_attempt() {
 
 #[tokio::test]
 async fn test_offline_public_existing_claim_keeps_its_original_deadline() {
-    use pubky_switch_client::app::{ClaimOp, OpBatch};
+    use pubky_dispatch_client::app::{ClaimOp, OpBatch};
     let world = World::new();
     let mut wallet = world.wallet("wallet").await;
     let _shop = shop_with_endpoint(&world).await;
@@ -279,8 +280,8 @@ async fn test_offline_public_existing_claim_keeps_its_original_deadline() {
 
 #[tokio::test]
 async fn test_offline_public_lost_provider_does_not_release_an_unanswered_recording() {
-    use pubky_switch_client::app::ClaimAttempt;
-    use pubky_switch_client::testing::Fault;
+    use pubky_dispatch_client::app::ClaimAttempt;
+    use pubky_dispatch_client::testing::Fault;
     let world = World::new();
     let mut wallet = world.wallet("wallet").await;
     let _shop = shop_with_endpoint(&world).await;
@@ -325,7 +326,7 @@ async fn test_offline_public_lost_provider_does_not_release_an_unanswered_record
 
 #[tokio::test]
 async fn test_offline_public_applied_recording_with_lost_answer_finishes_after_expiry() {
-    use pubky_switch_client::testing::Fault;
+    use pubky_dispatch_client::testing::Fault;
     let world = World::new();
     let mut wallet = world.wallet("wallet").await;
     let _shop = shop_with_endpoint(&world).await;

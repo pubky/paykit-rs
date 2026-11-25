@@ -6,9 +6,9 @@ use std::sync::Arc;
 
 use paykit_sdk::rail::Behaviour;
 use paykit_sdk::{NoticeKind, PayOptions, PayOutcome, Paykit, PaykitConfig, Rail, RailDeclaration};
-use pubky_switch_client::app::UserConfirmed;
-use pubky_switch_client::clock::Clock;
-use pubky_switch_core::records::Inbox;
+use pubky_dispatch_client::app::UserConfirmed;
+use pubky_dispatch_client::clock::Clock;
+use pubky_dispatch_core::records::Inbox;
 
 use super::{declare_loss, declare_second_loss, doubt_of, executions, follow_loss};
 use crate::common::{draft, request_from, store, World};
@@ -250,13 +250,13 @@ async fn test_shared_hold_kept_through_a_key_change_and_a_second_loss() {
     // A key change in place after the loss keeps `recovery_from` below `generation - 1`.
     let changed = next.change_key_into([75; 32]);
     w.router
-        .add_switch(pubky_switch_client::testing::SWITCH_ORIGIN, &changed);
+        .add_switch(pubky_dispatch_client::testing::SWITCH_ORIGIN, &changed);
     let current = w
         .alice
         .sign_next(|body| {
             body.generation += 1;
             body.inbox = Inbox::new(
-                pubky_switch_client::testing::SWITCH_ORIGIN,
+                pubky_dispatch_client::testing::SWITCH_ORIGIN,
                 changed.service_key(),
             );
         })
@@ -391,8 +391,8 @@ async fn test_shared_hold_with_a_divergent_floor_unblocks_without_a_raise() {
     let next = declare_loss(&w);
     follow_loss(&mut wallet).await;
     follow_loss(&mut phone).await;
-    let target = pubky_switch_client::app::RecordTarget::new(
-        pubky_switch_client::app::Collection::new(
+    let target = pubky_dispatch_client::app::RecordTarget::new(
+        pubky_dispatch_client::app::Collection::new(
             "block_floor",
             paykit_lib::collections::Collection::BlockFloor.fixed_policy(),
         ),
@@ -447,8 +447,8 @@ async fn test_shared_hold_lets_an_owed_unblock_go_once_it_stands() {
         .await;
     wallet.app_mut().invite(&w.carol_id()).await.unwrap();
     wallet.block(&w.carol_id()).await.unwrap();
-    let target = pubky_switch_client::app::RecordTarget::new(
-        pubky_switch_client::app::Collection::new(
+    let target = pubky_dispatch_client::app::RecordTarget::new(
+        pubky_dispatch_client::app::Collection::new(
             "block_floor",
             paykit_lib::collections::Collection::BlockFloor.fixed_policy(),
         ),
@@ -528,8 +528,8 @@ async fn test_shared_hold_unblocks_under_both_holds_while_the_floor_cant_be_read
     let me = wallet.app_id();
     wallet.app_mut().invite(&w.carol_id()).await.unwrap();
     wallet.block(&w.carol_id()).await.unwrap();
-    let target = pubky_switch_client::app::RecordTarget::new(
-        pubky_switch_client::app::Collection::new(
+    let target = pubky_dispatch_client::app::RecordTarget::new(
+        pubky_dispatch_client::app::Collection::new(
             "block_floor",
             paykit_lib::collections::Collection::BlockFloor.fixed_policy(),
         ),
@@ -565,14 +565,14 @@ async fn test_shared_hold_unblocks_under_both_holds_while_the_floor_cant_be_read
         .build()
         .unwrap();
     let names: Vec<&str> = scopes.scopes.iter().map(String::as_str).collect();
-    let wider = pubky_switch_client::testing::issue_cert(
+    let wider = pubky_dispatch_client::testing::issue_cert(
         w.alice.identity().key(),
         &w.alice.identity().app_keys("wallet"),
-        &pubky_switch_client::testing::AppSpec::new(&names).with_permissions(&scopes.permissions),
+        &pubky_dispatch_client::testing::AppSpec::new(&names).with_permissions(&scopes.permissions),
         w.clock.now_ms() + 1_000,
     )
     .unwrap();
-    next.signer_op(pubky_switch_core::ops::OpKind::CertPut {
+    next.signer_op(pubky_dispatch_core::ops::OpKind::CertPut {
         target_app_id: me,
         cert: wider.signed().clone(),
     })
@@ -582,15 +582,16 @@ async fn test_shared_hold_unblocks_under_both_holds_while_the_floor_cant_be_read
         .alice
         .sign_next(|body| {
             body.apps.retain(|listed| listed.app_id != me);
-            body.apps.push(pubky_switch_core::records::ListedApp {
+            body.apps.push(pubky_dispatch_core::records::ListedApp {
                 app_id: me,
                 cert: wider.hash(),
             });
-            body.renewed.push(pubky_switch_core::records::RenewedCert {
-                app_id: me,
-                cert: first.hash(),
-                until: None,
-            });
+            body.renewed
+                .push(pubky_dispatch_core::records::RenewedCert {
+                    app_id: me,
+                    cert: first.hash(),
+                    until: None,
+                });
         })
         .unwrap();
     next.deliver_identity(&doc).unwrap();
@@ -631,8 +632,8 @@ async fn test_shared_hold_applies_a_restore_widening_without_the_raise() {
         .await;
     wallet.app_mut().invite(&w.carol_id()).await.unwrap();
     wallet.block(&w.carol_id()).await.unwrap();
-    let target = pubky_switch_client::app::RecordTarget::new(
-        pubky_switch_client::app::Collection::new(
+    let target = pubky_dispatch_client::app::RecordTarget::new(
+        pubky_dispatch_client::app::Collection::new(
             "block_floor",
             paykit_lib::collections::Collection::BlockFloor.fixed_policy(),
         ),
@@ -716,21 +717,21 @@ async fn test_shared_hold_recorded_loss_kept_across_a_scope_change() {
         .build()
         .unwrap();
     let names: Vec<&str> = scopes.scopes.iter().map(String::as_str).collect();
-    let wider = pubky_switch_client::testing::issue_cert(
+    let wider = pubky_dispatch_client::testing::issue_cert(
         w.alice.identity().key(),
         &w.alice.identity().app_keys("wallet"),
-        &pubky_switch_client::testing::AppSpec::new(&names).with_permissions(&scopes.permissions),
+        &pubky_dispatch_client::testing::AppSpec::new(&names).with_permissions(&scopes.permissions),
         w.clock.now_ms() + 1_000,
     )
     .unwrap();
-    next.signer_op(pubky_switch_core::ops::OpKind::CertPut {
+    next.signer_op(pubky_dispatch_core::ops::OpKind::CertPut {
         target_app_id: me,
         cert: wider.signed().clone(),
     })
     .unwrap();
     // The signer stores a bundle with the scope keys the renewed certificate needs.
     let epoch = next.identity_doc().unwrap().data_epoch();
-    for part in pubky_switch_core::records::seal_bundle_parts(
+    for part in pubky_dispatch_core::records::seal_bundle_parts(
         w.alice.identity().key(),
         &wider,
         1,
@@ -739,8 +740,8 @@ async fn test_shared_hold_recorded_loss_kept_across_a_scope_change() {
     )
     .unwrap()
     {
-        next.signer_op(pubky_switch_core::ops::OpKind::KeyBundlePut(
-            pubky_switch_core::ops::KeyBundlePut {
+        next.signer_op(pubky_dispatch_core::ops::OpKind::KeyBundlePut(
+            pubky_dispatch_core::ops::KeyBundlePut {
                 target_app_id: me,
                 bundle: part.bundle,
                 first_epoch: part.first_epoch,
@@ -754,15 +755,16 @@ async fn test_shared_hold_recorded_loss_kept_across_a_scope_change() {
         .alice
         .sign_next(|body| {
             body.apps.retain(|listed| listed.app_id != me);
-            body.apps.push(pubky_switch_core::records::ListedApp {
+            body.apps.push(pubky_dispatch_core::records::ListedApp {
                 app_id: me,
                 cert: wider.hash(),
             });
-            body.renewed.push(pubky_switch_core::records::RenewedCert {
-                app_id: me,
-                cert: first.hash(),
-                until: None,
-            });
+            body.renewed
+                .push(pubky_dispatch_core::records::RenewedCert {
+                    app_id: me,
+                    cert: first.hash(),
+                    until: None,
+                });
         })
         .unwrap();
     next.deliver_identity(&doc).unwrap();

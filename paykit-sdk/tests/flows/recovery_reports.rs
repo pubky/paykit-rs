@@ -5,21 +5,21 @@ use std::sync::Arc;
 use paykit_lib::collections::Collection;
 use paykit_lib::recovery::{RecoveryCommitments, RECOVERY_UPLOAD_LABEL};
 use paykit_sdk::{AppScopes, PaykitConfig};
-use pubky_switch_client::app::{
-    App, Collection as SwitchCollection, RecordApplication, RecordTarget,
+use pubky_dispatch_client::app::{
+    App, Collection as DispatchCollection, RecordApplication, RecordTarget,
 };
-use pubky_switch_client::testing::{
+use pubky_dispatch_client::testing::{
     issue_cert, AppSpec, ProtocolSpec, ScriptedSwitch, TestProtocol,
 };
-use pubky_switch_core::enc::{b64, lp};
-use pubky_switch_core::ops::OpKind;
-use pubky_switch_core::records::{RemovedApp, RenewedCert};
+use pubky_dispatch_core::enc::{b64, lp};
+use pubky_dispatch_core::ops::OpKind;
+use pubky_dispatch_core::records::{RemovedApp, RenewedCert};
 
 use crate::common::{spec, store, World};
 use crate::provider_loss::{declare_loss, follow_loss};
 
 /// Every party has the contacts scope. A certificate missing its list permission
-/// still verifies under Switch rules (Paykit spec 3.2).
+/// still verifies under Dispatch rules (Paykit spec 3.2).
 async fn party(w: &World, name: &str, scopes: AppScopes, lists_read: bool) -> App {
     let mut grant = scopes.contacts().build().unwrap();
     if !lists_read {
@@ -178,7 +178,7 @@ async fn reads_report(
     .unwrap();
     let family = Collection::RecoveryUploads;
     let target = RecordTarget::new(
-        SwitchCollection::new(family.name(), family.fixed_policy()),
+        DispatchCollection::new(family.name(), family.fixed_policy()),
         &lp(&[&id, &opening.hash()]),
     );
     w.clock.advance_ms(3_000);

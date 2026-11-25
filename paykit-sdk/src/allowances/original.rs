@@ -10,14 +10,14 @@ use crate::error::{PaykitError, Refusal, Result};
 use crate::records::KeptMessage;
 use crate::state::{self, key, Binder, StateKey, Tx};
 use paykit_lib::{bodies::ProposerRole, AllowanceId, Collection};
-use pubky_switch_client::app::{
+use pubky_dispatch_client::app::{
     KeptOp, LocalWrite, RecordApplication, RestoreContext, SharedRecord,
 };
-use pubky_switch_core::chain::TransitionProof;
-use pubky_switch_core::enc::serde_b64;
-use pubky_switch_core::ops::{Condition, OpKind, RecordVersion, SignedOp};
-use pubky_switch_core::sealed::SealedValue;
-use pubky_switch_core::shared::ApplicationRef;
+use pubky_dispatch_core::chain::TransitionProof;
+use pubky_dispatch_core::enc::serde_b64;
+use pubky_dispatch_core::ops::{Condition, OpKind, RecordVersion, SignedOp};
+use pubky_dispatch_core::sealed::SealedValue;
+use pubky_dispatch_core::shared::ApplicationRef;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -69,7 +69,7 @@ pub(crate) struct OriginalAllowance {
 struct Opening {
     selected: KeptOp,
     version: SeenVersion,
-    /// The exact installed application in its canonical Switch wire encoding when the
+    /// The exact installed application in its canonical Dispatch wire encoding when the
     /// deletion names record_current. A recovery upload can install an older signed write.
     current_revision: Option<Vec<u8>>,
     #[serde(with = "serde_b64")]

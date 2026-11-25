@@ -3,7 +3,7 @@
 use crate::{fixed, Amount, MessageDelivery, NativeWallet, WalletError};
 use paykit_lib::{allowances as rules, periods::Unit, Asset, Decimal, PaymentEndpointIdentifier};
 use paykit_sdk::{self as sdk, UserConfirmed};
-use pubky_switch_core::time::parse_rfc3339;
+use pubky_dispatch_core::time::parse_rfc3339;
 use serde_json::json;
 use std::sync::Arc;
 
@@ -243,9 +243,9 @@ pub struct SentAllowance {
     pub record: Vec<u8>,
     /// The fresh Allowance ID (Paykit wire 4.15).
     pub allowance_id: String,
-    /// The signed proposal's message ID (Switch wire 5.1).
+    /// The signed proposal's message ID (Dispatch wire 5.1).
     pub msg_id: String,
-    /// Where the proposal is in delivery (Switch spec 11).
+    /// Where the proposal is in delivery (Dispatch spec 11).
     pub delivery: MessageDelivery,
 }
 

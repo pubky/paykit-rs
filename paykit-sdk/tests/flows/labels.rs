@@ -6,8 +6,8 @@ use paykit_lib::Label;
 use paykit_sdk::{
     AppScopes, PayOptions, PayOutcome, PayeeStatus, Paykit, PaykitConfig, Refusal, RequestRef,
 };
-use pubky_switch_client::clock::Clock;
-use pubky_switch_core::message::MessagePlaintext;
+use pubky_dispatch_client::clock::Clock;
+use pubky_dispatch_core::message::MessagePlaintext;
 
 use crate::common::{draft, request_from, store, World};
 
@@ -111,8 +111,8 @@ async fn renew_seller_wallet(w: &World, seller_wallet: &mut Paykit, label: &str)
 
 fn sale(
     w: &World,
-    issuer: &pubky_switch_client::testing::TestSigner,
-    payer: &pubky_switch_client::testing::TestSigner,
+    issuer: &pubky_dispatch_client::testing::TestSigner,
+    payer: &pubky_dispatch_client::testing::TestSigner,
 ) -> MessagePlaintext {
     w.sign_as(
         issuer,
@@ -241,12 +241,12 @@ async fn early_stops_after_renewal(restore: bool) {
         crate::common::finish_listing(&mut payer).await;
         payer.reconcile().await.unwrap();
         payer
-            .end_reconcile(pubky_switch_client::app::UserConfirmed::new())
+            .end_reconcile(pubky_dispatch_client::app::UserConfirmed::new())
             .await
             .unwrap();
     }
     w.deliver(&w.alice, "issuer", &w.bob, &[app_id], &request);
-    let id = pubky_switch_core::message::Message::parse(request.json(), &[])
+    let id = pubky_dispatch_core::message::Message::parse(request.json(), &[])
         .unwrap()
         .msg_id;
     Box::pin(crate::common::receive_message(&mut payer, &id)).await;
@@ -339,7 +339,8 @@ async fn test_labels_protected_cancellation_outlives_ordinary_bounds() {
         "custody of the owed payer request leaves the full ordinary reply pool intact"
     );
 
-    w.clock.advance_ms(22 * pubky_switch_core::records::DAY_MS);
+    w.clock
+        .advance_ms(22 * pubky_dispatch_core::records::DAY_MS);
     payer.receive(None).await.unwrap();
     let purchase = RequestRef {
         payee: w.alice_id(),
@@ -409,8 +410,8 @@ async fn test_labels_payment_proceeds_when_every_early_cancellation_is_excluded(
 /// Two originals from the same certificate and millisecond belong to different feeds.
 /// Use the known loss boundary or retain both if a subsequent loss obscures it.
 async fn stops_across_loss(another_loss: bool) {
-    use pubky_switch_client::app::FeedPosition;
-    use pubky_switch_client::testing::ScriptedSwitch;
+    use pubky_dispatch_client::app::FeedPosition;
+    use pubky_dispatch_client::testing::ScriptedSwitch;
     let w = World::new();
     let mut payer = w.wallet("wallet").await;
     let issuer = w.join(&w.bob, "issuer", selling("shop1")).await;
@@ -428,7 +429,7 @@ async fn stops_across_loss(another_loss: bool) {
         service
             .send_plaintext(w.bob_id(), issuer.app().cert(), &stop, &[target])
             .unwrap();
-        pubky_switch_core::message::Message::parse(stop.json(), &[])
+        pubky_dispatch_core::message::Message::parse(stop.json(), &[])
             .unwrap()
             .msg_id
     };
@@ -471,7 +472,7 @@ async fn stops_across_loss(another_loss: bool) {
         .app()
         .record_key(&crate::outcome_record::payer_record(&purchase))
         .unwrap();
-    let prefix = format!("kc/{}/", pubky_switch_core::enc::b64(&key));
+    let prefix = format!("kc/{}/", pubky_dispatch_core::enc::b64(&key));
     let originals = payer
         .app()
         .protocol_scan("paykit", prefix.as_bytes())

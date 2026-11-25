@@ -1,6 +1,6 @@
-//! An own account that may have been erased (Switch spec 12.7): the switch answers as for an
+//! An own account that may have been erased (Dispatch spec 12.7): the Dispatch answers as for an
 //! account it doesn't host, unsigned, and the identity publishes no `identity.json`. The
-//! client waits 24 hours before it takes the account as gone; meanwhile the switch counts as
+//! client waits 24 hours before it takes the account as gone; meanwhile the Dispatch counts as
 //! not answering, and once gone the user is told, nothing is done by itself and the journal
 //! stays for the recovery.
 
@@ -8,25 +8,25 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use paykit_sdk::{PayOptions, PayOutcome, Refusal};
-use pubky_switch_client::clock::Clock;
-use pubky_switch_client::testing::Router;
-use pubky_switch_client::transport::{BoxFuture, Request, Response, Transport};
+use pubky_dispatch_client::clock::Clock;
+use pubky_dispatch_client::testing::Router;
+use pubky_dispatch_client::transport::{BoxFuture, Request, Response, Transport};
 
 use crate::common::{draft, request_from, store, World, ALICE_ORIGIN, HOUR_MS};
 
-/// A transport whose requests to alice's switch are answered, once armed, as an erased
+/// A transport whose requests to alice's Dispatch are answered, once armed, as an erased
 /// account answers: `404`, signed with no key the app pins. Every other request goes through
 /// the world's router.
-pub(crate) struct ErasedSwitch {
+pub(crate) struct ErasedDispatch {
     pub(crate) inner: Arc<Router>,
     pub(crate) erased: AtomicBool,
 }
 
-impl Transport for ErasedSwitch {
+impl Transport for ErasedDispatch {
     fn send(
         &self,
         request: Request,
-    ) -> BoxFuture<'_, Result<Response, pubky_switch_client::error::TransportError>> {
+    ) -> BoxFuture<'_, Result<Response, pubky_dispatch_client::error::TransportError>> {
         if request.origin == ALICE_ORIGIN && self.erased.load(Ordering::SeqCst) {
             return Box::pin(async {
                 Ok(Response {
@@ -41,7 +41,7 @@ impl Transport for ErasedSwitch {
 }
 
 #[tokio::test]
-async fn test_erasure_wait_is_the_switch_not_answering_then_the_account_gone() {
+async fn test_erasure_wait_is_the_dispatch_not_answering_then_the_account_gone() {
     let w = World::new();
     let base = store();
     let mut wallet = w.wallet_on("wallet", Arc::clone(&base)).await;
@@ -56,7 +56,7 @@ async fn test_erasure_wait_is_the_switch_not_answering_then_the_account_gone() {
         .unwrap();
     assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
     drop(wallet);
-    let transport = Arc::new(ErasedSwitch {
+    let transport = Arc::new(ErasedDispatch {
         inner: Arc::clone(&w.router),
         erased: AtomicBool::new(false),
     });
@@ -71,17 +71,17 @@ async fn test_erasure_wait_is_the_switch_not_answering_then_the_account_gone() {
     // The signer erased the account and deleted its identity.json from the Homeserver.
     transport.erased.store(true, Ordering::SeqCst);
     w.homeserver
-        .remove(w.alice_id(), pubky_switch_core::records::IDENTITY_PATH);
-    // Until the wait ends, every read is the switch not answering.
+        .remove(w.alice_id(), pubky_dispatch_core::records::IDENTITY_PATH);
+    // Until the wait ends, every read is the Dispatch not answering.
     for _ in 0..4 {
         let error = wallet.receive(None).await.unwrap_err();
         assert!(
-            matches!(error.refusal(), Some(Refusal::SwitchUnavailable(_))),
+            matches!(error.refusal(), Some(Refusal::DispatchUnavailable(_))),
             "{error:?}"
         );
         w.clock.advance_ms(6 * HOUR_MS);
     }
-    // The last try, 24 hours on: the account is gone at this switch, and the user is told.
+    // The last try, 24 hours on: the account is gone at this Dispatch, and the user is told.
     let summary = wallet.receive(None).await.unwrap();
     assert!(summary.account_gone, "{summary:?}");
     assert!(summary.report.stopped);
@@ -99,7 +99,7 @@ async fn test_erasure_wait_is_the_switch_not_answering_then_the_account_gone() {
         .unwrap()
         .into_iter()
         .find_map(|event| match event {
-            pubky_switch_client::app::AppEvent::AccountGone { id, .. } => Some(id),
+            pubky_dispatch_client::app::AppEvent::AccountGone { id, .. } => Some(id),
             _ => None,
         })
         .unwrap();
@@ -110,7 +110,7 @@ async fn test_erasure_wait_is_the_switch_not_answering_then_the_account_gone() {
     assert!(
         matches!(
             refused,
-            paykit_sdk::PaykitError::Client(pubky_switch_client::app::AppError::Refused(_))
+            paykit_sdk::PaykitError::Client(pubky_dispatch_client::app::AppError::Refused(_))
         ),
         "{refused:?}"
     );

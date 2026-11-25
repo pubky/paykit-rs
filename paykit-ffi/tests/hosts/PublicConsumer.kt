@@ -2,7 +2,7 @@ package com.synonym.paykit.tests
 
 import com.synonym.paykit.*
 
-// The payer's public Payment Endpoints and outbox (Paykit spec 4, Switch spec 11).
+// The payer's public Payment Endpoints and outbox (Paykit spec 4, Dispatch spec 11).
 internal suspend fun checkPublic(fixture: CheckoutFixture, wallet: NativeWallet) {
     check(wallet.ownPublicEndpoints().isEmpty())
     val endpoint = PublicEndpoint(identifier = "btc-lightning-bolt11", payload = "lnbc1public")

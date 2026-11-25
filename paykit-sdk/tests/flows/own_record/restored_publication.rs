@@ -9,13 +9,13 @@ use paykit_sdk::{
     AppScopes, PayOptions, Paykit, PaykitBackup, PaykitConfig, PaykitError, PaymentMode, Refusal,
     UnrequestedPayment,
 };
-use pubky_switch_client::app::{AppError, HomeserverWriter, Publication, UserConfirmed};
-use pubky_switch_client::error::TransportError;
-use pubky_switch_client::testing::TestHomeserver;
-use pubky_switch_client::transport::BoxFuture;
-use pubky_switch_core::records::{app_record_path, AppRecord};
-use pubky_switch_core::sig::SignedDoc;
-use pubky_switch_harness::{Backend, World};
+use pubky_dispatch_client::app::{AppError, HomeserverWriter, Publication, UserConfirmed};
+use pubky_dispatch_client::error::TransportError;
+use pubky_dispatch_client::testing::TestHomeserver;
+use pubky_dispatch_client::transport::BoxFuture;
+use pubky_dispatch_core::records::{app_record_path, AppRecord};
+use pubky_dispatch_core::sig::SignedDoc;
+use pubky_dispatch_harness::{Backend, World};
 use serde::Deserialize;
 
 use super::{payload, publishing};
@@ -219,7 +219,7 @@ async fn restore_shop(world: &World, copy: RestoredCopy) -> TestResult {
     if copy == RestoredCopy::BeforeOffer {
         let publication = match restored.update_own_record().await {
             Err(PaykitError::Client(AppError::Refused(
-                pubky_switch_client::app::Refusal::NotNow(_),
+                pubky_dispatch_client::app::Refusal::NotNow(_),
             ))) if restored.app().restore_held_cursor().is_none() => {
                 assert!(observer.writes.lock().unwrap().is_empty());
                 finish_listing(&mut restored).await;

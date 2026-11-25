@@ -1,12 +1,12 @@
 //! Reading and writing Paykit's shared records through the client (Paykit spec 6, Paykit
 //! wire 5): every record is bound before it is acted on, its key recomputed from what its
-//! messages name through the client, which blinds with the identity's naming key (Switch
+//! messages name through the client, which blinds with the identity's naming key (Dispatch
 //! wire 1.5), and every write is the client's compare-and-swap.
 //!
 //! A message whose sending changes a record is signed first, then the record's next value
 //! is built from the signed message, holding its stored copy, and the record write and the
 //! message go in one batch ([`Paykit::send_with_record`]): the message is queued only if
-//! the write is applied, and the write is never made without the message (Switch spec 8.2).
+//! the write is applied, and the write is never made without the message (Dispatch spec 8.2).
 //!
 //! A request, reply or proof records original delivery intent when its batch queues it.
 //! For a rejection or cancellation held locally, the batch writes a held answer
@@ -20,15 +20,15 @@ use paykit_lib::kinds::{check_sender_for_request, may_send, Kind, Side};
 use paykit_lib::records::{ActivityRecord, ActivitySide, PaymentListRecord, StoredMessage};
 use paykit_lib::scopes::CertificateMemo;
 use paykit_lib::Label;
-use pubky_switch_client::app::{
+use pubky_dispatch_client::app::{
     LocalWrite, OpBatch, OutgoingMessage, ReceivedMessage, RecordTarget, SharedRecord,
     SignedMessage,
 };
-use pubky_switch_core::enc::{serde_b64, serde_b64_vec};
-use pubky_switch_core::http::ErrorCode;
-use pubky_switch_core::message::{Message, MessagePlaintext, VerifiedSender};
-use pubky_switch_core::ops::{Condition, OpKind, RecordVersion};
-use pubky_switch_core::sig::SignedDoc;
+use pubky_dispatch_core::enc::{serde_b64, serde_b64_vec};
+use pubky_dispatch_core::http::ErrorCode;
+use pubky_dispatch_core::message::{Message, MessagePlaintext, VerifiedSender};
+use pubky_dispatch_core::ops::{Condition, OpKind, RecordVersion};
+use pubky_dispatch_core::sig::SignedDoc;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -41,7 +41,7 @@ use crate::receive::Settlement;
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct PendingCreate {
-    pub(crate) proposal_at: pubky_switch_client::app::FeedPosition,
+    pub(crate) proposal_at: pubky_dispatch_client::app::FeedPosition,
     #[serde(with = "serde_b64")]
     pub(crate) operation: [u8; 32],
 }
@@ -90,7 +90,7 @@ pub(crate) struct KeptMessage {
 
 /// The order the inbox accepted a kept message in (Paykit spec 8.1): by acceptance time,
 /// then, within one millisecond, by the feed `seq` its entry was read at, the position the
-/// inbox gives each entry as it accepts it, whoever sent it (Switch spec 8.3), never by its
+/// inbox gives each entry as it accepts it, whoever sent it (Dispatch spec 8.3), never by its
 /// `msg_id`, which its sender chooses, nor by the store that keeps it. A stored entry keeps
 /// the `seq` it was read at when the client tries it again, so a message keeps its position
 /// whichever store keeps it and however often it is taken. Pending Allowance replies and payment-request
@@ -98,15 +98,15 @@ pub(crate) struct KeptMessage {
 pub(crate) type KeptOrder = (u64, u64);
 
 /// The authenticated acceptance time and original position of a received message.
-pub(crate) type ReceivedAt = (u64, pubky_switch_client::app::FeedPosition);
+pub(crate) type ReceivedAt = (u64, pubky_dispatch_client::app::FeedPosition);
 
 /// Compare inbox acceptance times, using the verified feed order to break a tie.
 pub(crate) fn compare_received(
     a: ReceivedAt,
     b: ReceivedAt,
     order: impl Fn(
-        pubky_switch_client::app::FeedPosition,
-        pubky_switch_client::app::FeedPosition,
+        pubky_dispatch_client::app::FeedPosition,
+        pubky_dispatch_client::app::FeedPosition,
     ) -> Option<std::cmp::Ordering>,
 ) -> Option<std::cmp::Ordering> {
     match a.0.cmp(&b.0) {
@@ -172,7 +172,7 @@ impl KeptMessage {
         }
     }
 
-    /// Verify the remote app's signed message for this recipient (Switch wire 5.1,
+    /// Verify the remote app's signed message for this recipient (Dispatch wire 5.1,
     /// Paykit wire 4.3). An extension's body has only the common message checks.
     pub(crate) fn extension_for(&self, recipient: &[u8; 32]) -> Result<Message> {
         let (accepted, _) = self.order()?;
@@ -227,15 +227,15 @@ impl KeptMessage {
 
     pub(crate) fn taken_at(
         stored: &StoredMessage,
-        at: pubky_switch_client::app::FeedPosition,
+        at: pubky_dispatch_client::app::FeedPosition,
     ) -> Self {
         let mut held = Self::taken(stored, at.seq);
         held.generation = Some(at.generation);
         held
     }
 
-    pub(crate) fn position(&self) -> Option<pubky_switch_client::app::FeedPosition> {
-        Some(pubky_switch_client::app::FeedPosition {
+    pub(crate) fn position(&self) -> Option<pubky_dispatch_client::app::FeedPosition> {
+        Some(pubky_dispatch_client::app::FeedPosition {
             generation: self.generation?,
             seq: self.seq?,
         })
@@ -348,10 +348,10 @@ impl KeptMessage {
 }
 
 /// Whether the record's current content is disputed, so nothing Paykit reads there shows what
-/// the record holds until a later write settles it (Switch spec 12.6):
+/// the record holds until a later write settles it (Dispatch spec 12.6):
 /// - a recovery upload left the app's accepted contents and its next write at different
 ///   signed operations of the same version (`different_write_at_held_version`);
-/// - or the client reports another write at the record's version, divergent (Switch wire
+/// - or the client reports another write at the record's version, divergent (Dispatch wire
 ///   7.4.14, as an honest lost service's recovery leaves it), over a delete or a value the
 ///   app can't read. Such a record shows the user nothing to confirm, so it is held as the
 ///   first case is. A divergent value it can read is shown instead, and paused until the
@@ -367,12 +367,12 @@ pub(crate) fn content_disputed(record: &SharedRecord) -> bool {
         || (record.divergent
             && !matches!(
                 record.content,
-                pubky_switch_client::app::RecordContent::Value(_)
+                pubky_dispatch_client::app::RecordContent::Value(_)
             ))
 }
 
 /// A recovery upload can leave the app's accepted contents and its next write at
-/// different signed operations of the same version (Switch spec 12.6). A record seen
+/// different signed operations of the same version (Dispatch spec 12.6). A record seen
 /// divergent is paused instead, for the user's confirmation ([`crate::divergent`]).
 pub(crate) fn activity_base_changed(held: Option<&SharedRecord>) -> bool {
     held.is_some_and(|record| record.different_write_at_held_version)
@@ -491,7 +491,7 @@ impl Paykit {
             .verifications()
     }
 
-    /// The activity record at `target`, read from the switch when the app holds none.
+    /// The activity record at `target`, read from the Dispatch when the app holds none.
     pub(crate) async fn activity(
         &mut self,
         target: &ActivityTarget,
@@ -592,7 +592,7 @@ impl Paykit {
 
     /// Whether `destination`, an attempt's to `payee`, is an endpoint of a Private Payment
     /// List whose key the gate closes ([`list_key_open`]): such an attempt is never
-    /// dispatched, first or repeat, by hand or automatically. What the payment method shows
+    /// handed off, first or repeat, by hand or automatically. What the payment method shows
     /// of it, its history or a receipt, still settles it (Paykit spec 6; wire 5).
     pub(crate) async fn list_destination_held(
         &self,
@@ -611,7 +611,7 @@ impl Paykit {
     }
 
     /// As [`Paykit::lists_of`], each with the version of the write whose content it is: the
-    /// write the app took, never one it refused (Switch spec 8.2). Only a list the gate
+    /// write the app took, never one it refused (Dispatch spec 8.2). Only a list the gate
     /// admits ([`list_key_open`]).
     pub(crate) async fn lists_read_of(
         &self,
@@ -640,7 +640,7 @@ impl Paykit {
     }
 
     /// Sign `body` once as a message of `kind` to `to`, keeping nothing and sending nothing
-    /// (Switch spec 8.2): its hash is known before anything that names it is written.
+    /// (Dispatch spec 8.2): its hash is known before anything that names it is written.
     pub(crate) fn sign(
         &self,
         to: [u8; 32],
@@ -686,7 +686,7 @@ impl Paykit {
     }
 
     /// Place `signed` in its `role` of the record at `target` and queue it, in one batch with
-    /// `conditions` on the record write and the local writes `local` (Switch spec 8.2): the
+    /// `conditions` on the record write and the local writes `local` (Dispatch spec 8.2): the
     /// message goes out only if the record write is applied. Returns the `msg_id`. Nothing is
     /// sent: the caller flushes. The way an own message goes into a record: never stored
     /// without being queued, so one in a record is one to be sent (module docs).
@@ -694,7 +694,7 @@ impl Paykit {
     /// # Errors
     ///
     /// The client's errors. After `409 conflict` the record is read again first, so the
-    /// caller decides again on what the switch holds; nothing was queued.
+    /// caller decides again on what the Dispatch holds; nothing was queued.
     pub(crate) async fn send_with_record(
         &mut self,
         signed: SignedMessage,
@@ -809,7 +809,7 @@ impl Paykit {
 }
 
 /// Bind an activity record value held at `key` under the policy of `label` (Paykit wire
-/// 5.1, 5.3, Switch spec 8.2): it reads as `own` holds it, its labels are its policy's, and
+/// 5.1, 5.3, Dispatch spec 8.2): it reads as `own` holds it, its labels are its policy's, and
 /// `key` is the one its messages name, as `record_key` derives it, a payee's settlement read
 /// by `settlement`, the app's rail. `None`: the reader doesn't act on it.
 pub(crate) fn bind_activity(
@@ -838,7 +838,7 @@ fn bind_read(
     record.check_label(label).ok()?;
     let natural = record.natural_key_with(own, settlement).ok()?;
     let target = RecordTarget::new(
-        activity::switch_collection(side.collection(), label),
+        activity::dispatch_collection(side.collection(), label),
         &natural,
     );
     (record_key(&target)? == *key).then_some(record)
@@ -895,8 +895,8 @@ pub(crate) fn bind_list(
 /// The gate every use of a `payment_lists` key passes: none once this app saw the record
 /// deleted, or read a value there naming a delete (`lost`, [`crate::state::LostListRecord`]).
 /// No value at the key is then taken as a list, placed or written over, and no attempt to
-/// one of its endpoints is dispatched, whatever the value's version or marks: the current
-/// Switch proves no record's lineage after a delete, so every later authorization of the
+/// one of its endpoints is handed off, whatever the value's version or marks: the current
+/// Dispatch proves no record's lineage after a delete, so every later authorization of the
 /// record, and every endpoint use that depends on it, is withheld (Paykit spec 6, "Visible
 /// deletion without a copy"; wire 5, "Incomplete protected-record contract"). The payee is
 /// still paid through a request's own destination and its public endpoints.
@@ -904,8 +904,8 @@ pub(crate) fn bind_list(
 /// Where each use passes it:
 /// - a new selection, and the reconstruction of an attempt's destination from its
 ///   single-use mark ([`Paykit::lists_read_of`]);
-/// - every dispatch, first or repeat, by hand or automatic, a resumed attempt's included
-///   ([`Paykit::list_destination_held`], from `Paykit::dispatch_held`);
+/// - every handoff, first or repeat, by hand or automatic, a resumed attempt's included
+///   ([`Paykit::list_destination_held`], from `Paykit::handoff_held`);
 /// - a list received, taken into the record or held (`receive::list_effect`);
 /// - a held list placed (`Paykit::place_held_list`).
 pub(crate) fn list_key_open(lost: Option<&crate::state::LostListRecord>) -> bool {
@@ -930,7 +930,7 @@ pub(crate) fn usable_list(
 /// The client's target of the `payment_lists` record of a payee app.
 pub(crate) fn list_target(payee: &[u8; 32], app_id: &[u8; 16]) -> RecordTarget {
     RecordTarget::new(
-        activity::switch_collection(Collection::PaymentLists, None),
+        activity::dispatch_collection(Collection::PaymentLists, None),
         &natural_key::payment_list(payee, app_id),
     )
 }
@@ -948,15 +948,15 @@ pub(crate) fn conflict(error: PaykitError) -> PaykitError {
 mod extension_tests {
     use super::*;
     use crate::testkit::{object, Party, NOW};
-    use pubky_switch_core::message::Sender;
+    use pubky_dispatch_core::message::Sender;
     use serde_json::json;
 
     /// The stored value of `plaintext` from `sender`'s app, as a record holds it.
     fn stored_value(
         sender: &Party,
-        plaintext: &pubky_switch_core::message::MessagePlaintext,
+        plaintext: &pubky_dispatch_core::message::MessagePlaintext,
     ) -> serde_json::Value {
-        use pubky_switch_core::enc::{b64, pubky_id};
+        use pubky_dispatch_core::enc::{b64, pubky_id};
         json!({
             "sender": pubky_id(&sender.id()),
             "cert": { "body": sender.cert.signed().body, "sig": sender.cert.signed().sig },
@@ -1009,7 +1009,7 @@ mod extension_tests {
         let mut signature = plaintext.signature();
         signature[0] ^= 1;
         let mut tampered = good.clone();
-        tampered["plaintext"]["signature"] = json!(pubky_switch_core::enc::b64(&signature));
+        tampered["plaintext"]["signature"] = json!(pubky_dispatch_core::enc::b64(&signature));
         let not_its_kind = stored_value(&bob, &signed("paykit.payment_proof", json!({})));
         for bad in [expired, tampered, not_its_kind] {
             assert!(StoredMessage::read(&bad, &alice.id()).is_err());
@@ -1035,7 +1035,7 @@ mod extension_tests {
         .unwrap();
         let signed = original.sign(&sender.keys).unwrap();
         let received = ReceivedMessage {
-            receipt: pubky_switch_client::app::EntryReceipt {
+            receipt: pubky_dispatch_client::app::EntryReceipt {
                 entry_id: [1; 16],
                 service_key: [2; 32],
                 read_at_ms: NOW,
@@ -1048,7 +1048,7 @@ mod extension_tests {
             message: original.clone(),
             plaintext: signed.clone(),
             cert: sender.cert.clone(),
-            standing: pubky_switch_core::records::Standing::Listed,
+            standing: pubky_dispatch_core::records::Standing::Listed,
             parked: false,
             released: false,
             conflict: None,
@@ -1374,14 +1374,14 @@ mod send_tests {
     use paykit_lib::derive::natural_key;
 
     use super::*;
-    use crate::testkit::Switches;
+    use crate::testkit::Dispatches;
 
     /// A labelled app reaching the write of its own cancellation about a request of another
     /// label, or an unlabelled one, at a record target built here: refused before anything
     /// is written or queued.
     #[tokio::test]
     async fn test_records_send_with_record_refuses_a_request_outside_the_labels() {
-        let w = Switches::new();
+        let w = Dispatches::new();
         let mut shop2 = w.labelled("shop2", "shop2").await;
         let alice = w.alice.identity().public();
         let bob = w.bob.identity().public();
