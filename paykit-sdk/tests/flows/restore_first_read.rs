@@ -246,6 +246,45 @@ async fn test_restore_first_read_retries_after_feed_failure() {
 }
 
 #[tokio::test]
+async fn test_restore_first_read_releases_a_held_message_only_once_it_is_complete() {
+    // The restore holds the request queued before the backup (Switch spec 12.4, "The
+    // outbox"). A flush whose first read fails releases nothing; once the first read is
+    // complete, the next flush releases and delivers it, and nothing is left held.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let msg_id = queued_request(&w, &mut shop).await;
+    let reads = Arc::new(ScriptedIdentityReads::new(
+        Arc::clone(&w.homeserver),
+        Arc::clone(&w.clock),
+    ));
+    let mut restored = restore_shop(&w, &mut shop, &reads).await;
+    assert_eq!(
+        restored.app().held_messages("paykit").await.unwrap(),
+        vec![msg_id.clone()]
+    );
+    w.bob.switch().fail_next(Fault::Error {
+        path: "/feed".into(),
+        code: ErrorCode::Unavailable,
+        current: serde_json::Value::Null,
+    });
+    assert!(restored.flush().await.is_err());
+    assert_eq!(
+        restored.app().held_messages("paykit").await.unwrap(),
+        vec![msg_id.clone()]
+    );
+    restored.flush().await.unwrap();
+    assert!(restored
+        .app()
+        .held_messages("paykit")
+        .await
+        .unwrap()
+        .is_empty());
+    let summary = wallet.receive(None).await.unwrap();
+    assert!(summary.applied.contains(&msg_id));
+}
+
+#[tokio::test]
 async fn test_restore_first_read_preserves_the_implicit_report_through_an_error() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;

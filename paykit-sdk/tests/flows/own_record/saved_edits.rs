@@ -178,18 +178,17 @@ async fn test_own_record_restored_saved_offer_never_signed_over_a_later_withdraw
         .unwrap();
     assert!(shop.own_public_endpoints().unwrap().is_empty());
     drop(shop);
-    let mut restored = Paykit::restore(
-        w.env(&w.bob, store()),
-        publishing(),
-        &backup,
-        w.rail.clone(),
-        w.timer(),
-    )
-    .await
-    .unwrap();
+    // Everything the restored app sends, through the restore and its first read.
+    let recorded = Recorded::over(Arc::clone(&w.router) as Arc<dyn Transport>);
+    let mut env = w.env(&w.bob, store());
+    env.transport = Arc::clone(&recorded) as Arc<dyn Transport>;
+    let mut restored = Paykit::restore(env, publishing(), &backup, w.rail.clone(), w.timer())
+        .await
+        .unwrap();
     restored.receive(None).await.unwrap();
     let published = PaykitMember::read(&super::on_homeserver(&w, &restored).unwrap()).unwrap();
     assert!(published.public_endpoints.is_empty());
+    assert!(!recorded.sent("lno1tips"));
     assert!(told_not_published(&restored).await);
 }
 

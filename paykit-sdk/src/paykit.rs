@@ -788,23 +788,12 @@ impl Paykit {
         Box::pin(self.sweep_divergent()).await?;
         // The host hears again, at each load, of what holds the identity for good.
         self.tell_identity_notices().await?;
-        // Changes of the record a load held aside are decided before anything else signs the
-        // record; after a restore, the client takes none until the first read, and the
-        // receive's upkeep decides them then (Paykit spec 4, "Changes saved and not yet
-        // signed").
-        // Only a store failure or an alarm stops the load; anything else is left to the receive.
         if self.certificate_refused().is_none() {
-            if let Err(error) = Box::pin(self.settle_held_record_edits()).await {
-                if matches!(
-                    error,
-                    crate::PaykitError::Client(
-                        pubky_switch_client::app::AppError::Store(_)
-                            | pubky_switch_client::app::AppError::Alarm(_)
-                    )
-                ) {
-                    return Err(error);
-                }
-            }
+            // Changes of the record a load held aside are decided before anything else signs
+            // the record; after a restore, the client takes none until the first read, and the
+            // receive's upkeep decides them then (Paykit spec 4, "Changes saved and not yet
+            // signed").
+            load_step(Box::pin(self.settle_held_record_edits()).await)?;
         }
         // A crash between the restore's commit and clock clamp leaves the clamp for the
         // next load. Nothing is written under a certificate Paykit refuses.
@@ -1173,6 +1162,10 @@ impl Paykit {
         if report.held_cursor.is_some() && self.app.identity_confirmed_at().is_some() {
             self.first_read_done = true;
         }
+        // What a restore holds goes once its first read is complete (`outbound.rs`).
+        if self.require_first_read().is_ok() {
+            self.release_restore_holds().await?;
+        }
         Ok(ReadResult {
             report,
             paused_before,
@@ -1448,6 +1441,20 @@ impl Paykit {
         // once Paykit has verified the applied operation and its service result.
         Box::pin(self.recover_pending_replies()).await?;
         Ok(())
+    }
+}
+
+/// The outcome of an own-record step at a load: only a store failure or an alarm stops the
+/// load; any other failure leaves the step to the next receive's upkeep.
+fn load_step(result: Result<()>) -> Result<()> {
+    match result {
+        Err(
+            error @ crate::PaykitError::Client(
+                pubky_switch_client::app::AppError::Store(_)
+                | pubky_switch_client::app::AppError::Alarm(_),
+            ),
+        ) => Err(error),
+        _ => Ok(()),
     }
 }
 

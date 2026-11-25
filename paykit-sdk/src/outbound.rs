@@ -148,9 +148,68 @@ impl Paykit {
 
     pub(crate) async fn send_outbox(&mut self) -> std::result::Result<OutboxReport, AppError> {
         self.require_first_read()?;
+        // What a restore holds goes once its first read is complete, also when the host read
+        // through the client itself.
+        self.release_restore_holds().await?;
         let _delivery = self.delivery_operation();
         self.service_time_for_delivery().await?;
         Box::pin(self.app.flush_outbox()).await
+    }
+
+    /// Release every message of Paykit's that a restore holds, at each read and each flush once
+    /// the restore's first read is complete ([`Paykit::require_first_read`]), with the reply
+    /// grant each asks for
+    /// (Switch spec 12.4, "The outbox"). Paykit delivered these messages at that point before
+    /// the client held them, and this head keeps that: the decisions of Paykit spec 7.2,
+    /// "What a restore loses", for a message carried through a restore are not made here. A
+    /// message whose release fails stays held for the next read, and the others are
+    /// released; one past its replay deadline is the client's to give up. The client's
+    /// `MessagesHeldAtRestore` duty is acknowledged for Paykit once none is held.
+    ///
+    /// # Errors
+    ///
+    /// A store failure or an alarm, after every other message was tried.
+    pub(crate) async fn release_restore_holds(&mut self) -> std::result::Result<(), AppError> {
+        use pubky_switch_client::app::{AppEvent, ReplyGrantOnRelease};
+        let protocol = crate::protocol::BACKUP_NAME;
+        let mut failed = None;
+        for msg_id in self.app.held_messages(protocol).await? {
+            match self
+                .app
+                .release_message(protocol, &msg_id, ReplyGrantOnRelease::IfOwed)
+                .await
+            {
+                Ok(()) => {}
+                Err(error @ (AppError::Store(_) | AppError::Alarm(_))) => {
+                    failed.get_or_insert(error);
+                }
+                Err(_) => {}
+            }
+        }
+        if let Some(error) = failed {
+            return Err(error);
+        }
+        if !self.app.held_messages(protocol).await?.is_empty() {
+            return Ok(());
+        }
+        let told: Vec<_> = self
+            .app
+            .pending_duty_events()
+            .await?
+            .into_iter()
+            .filter(|duty| {
+                matches!(duty.event, AppEvent::MessagesHeldAtRestore { .. })
+                    && duty.owners.iter().any(|owner| owner == protocol)
+            })
+            .filter_map(|duty| duty.event.id())
+            .collect();
+        for id in told {
+            self.ack_taken(id).await.map_err(|error| match error {
+                crate::error::PaykitError::Client(error) => error,
+                _ => AppError::Store(pubky_switch_client::store::StoreError::Corrupt),
+            })?;
+        }
+        Ok(())
     }
 
     /// Before the client delivers, keep the highest verified service time as `sv` and make
