@@ -362,11 +362,10 @@ impl Paykit {
             Ok(Some(_)) | Err(AppError::InvalidData(_)) => {
                 self.app.clear_held_accepts().await?;
                 if !self.record_holds_owed_removal().await? {
-                    match self.app.update_accepts().await {
-                        Err(error @ (AppError::Store(_) | AppError::Alarm(_))) => {
-                            return Err(error.into())
-                        }
-                        Ok(_) | Err(_) => {}
+                    if let Err(error @ (AppError::Store(_) | AppError::Alarm(_))) =
+                        self.app.update_accepts().await
+                    {
+                        return Err(error.into());
                     }
                 }
             }
