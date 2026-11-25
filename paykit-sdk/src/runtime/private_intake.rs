@@ -1015,7 +1015,9 @@ impl PrivateIntakeSeeds {
 /// the peer out of `seeds`, whether the commit then succeeds or is rejected.
 /// Any other outcome leaves it in place. A later audit on the same connection
 /// also runs after the seed read, so it may still persist it; otherwise the
-/// next connect seeds again behind a fresh audit.
+/// next connect seeds again behind a fresh audit. Audits that run while the
+/// seed lookup is still pending started before the seed read finished, so
+/// they get no seeds and never persist one.
 ///
 /// Unlike stream-event cursors, a seed commits only on `Absent` and best
 /// effort: it skips history wholesale rather than covering one processed
@@ -1212,21 +1214,63 @@ where
     }
 }
 
-/// Runs `future` unless the stop signal fires first; `None` means stopped.
-async fn run_until_private_intake_stop<F: Future>(
+/// How [`audit_until_private_intake_seed_lookup`] ended.
+#[derive(Debug, PartialEq, Eq)]
+enum PrivateIntakeSeedLookupExit<T> {
+    /// The stop signal fired or its sender was dropped.
+    Stopped,
+    /// The seed lookup finished with this output.
+    Completed(T),
+    /// An audit reported a backpressured peer.
+    Backpressured,
+}
+
+/// Drives the seed lookup `lookup` to completion and, while it is pending,
+/// runs `audit`: first `first_audit_after` from now, then every
+/// `audit_interval`.
+///
+/// Paykit sets no request deadline, so a homeserver can accept the seed
+/// query and then stall. These audits keep fetching expected slots for the
+/// group meanwhile. `lookup` is pinned once and polled across audits, never
+/// dropped or restarted. The stop signal ends it as soon as it fires, except
+/// while an audit runs, which is the same for every audit in this file.
+///
+/// Security: these audits start before the seed read finishes, so the caller
+/// must give them no seeds; see [`audit_seeded_private_intake_peer`].
+async fn audit_until_private_intake_seed_lookup<L, A, AFut>(
     stop: &mut watch::Receiver<bool>,
-    future: F,
-) -> Option<F::Output> {
-    let mut future = std::pin::pin!(future);
+    lookup: L,
+    first_audit_after: Duration,
+    audit_interval: Duration,
+    mut audit: A,
+) -> PrivateIntakeSeedLookupExit<L::Output>
+where
+    L: Future,
+    A: FnMut() -> AFut,
+    AFut: Future<Output = PrivateIntakeAuditOutcome>,
+{
+    let mut lookup = std::pin::pin!(lookup);
+    let mut audits = tokio::time::interval_at(
+        tokio::time::Instant::now() + first_audit_after,
+        audit_interval,
+    );
+    audits.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         if *stop.borrow() {
-            return None;
+            return PrivateIntakeSeedLookupExit::Stopped;
         }
         tokio::select! {
-            output = &mut future => return Some(output),
+            output = &mut lookup => return PrivateIntakeSeedLookupExit::Completed(output),
             changed = stop.changed() => {
                 if changed.is_err() {
-                    return None;
+                    return PrivateIntakeSeedLookupExit::Stopped;
+                }
+            }
+            _ = audits.tick() => {
+                // `handshake_pending` is left to the next audit here or to
+                // the connected stream's retry.
+                if audit().await.backpressured {
+                    return PrivateIntakeSeedLookupExit::Backpressured;
                 }
             }
         }
@@ -2418,16 +2462,17 @@ where
                     continue;
                 }
             };
-            // A stalled seed query must not delay stop or an epoch restart.
+            // A stalled seed query must not delay stop or an epoch restart,
+            // and must not leave the group unaudited: while it is pending the
+            // group runs expected-slot audits, first after `RECONNECT_DELAY`
+            // and then at the healthy audit cadence. Those audits start
+            // before the seed read finishes, so they get no seeds; the
+            // startup audit below and in-stream audits persist them.
             // The seed query doubles as the event-stream support probe: when
             // it is rejected as unsupported, the live subscribe below is not
             // attempted, so a homeserver without SSE sees one failing request
             // per retry.
-            let Some(SeededPrivateIntakeSubscription {
-                cursors,
-                seeds,
-                unsupported,
-            }) = run_until_private_intake_stop(
+            let lookup = audit_until_private_intake_seed_lookup(
                 &mut stop,
                 private_intake_subscription_cursors(
                     stored_cursors,
@@ -2449,10 +2494,35 @@ where
                         }
                     },
                 ),
+                RECONNECT_DELAY,
+                config.healthy_audit_interval,
+                || {
+                    audit_private_intake_group(
+                        &self.storage,
+                        &self.clock,
+                        &active_group,
+                        &health,
+                        &work,
+                        &acquire,
+                        None,
+                    )
+                },
             )
-            .await
-            else {
-                break;
+            .await;
+            let SeededPrivateIntakeSubscription {
+                cursors,
+                seeds,
+                unsupported,
+            } = match lookup {
+                PrivateIntakeSeedLookupExit::Completed(subscription) => subscription,
+                PrivateIntakeSeedLookupExit::Stopped => break,
+                PrivateIntakeSeedLookupExit::Backpressured => {
+                    topology_changed.notify_one();
+                    if wait_reconnect_or_stop(&mut stop).await {
+                        break;
+                    }
+                    continue;
+                }
             };
             let seeds = seeds.map(Arc::new);
             let builder = match private_intake_event_query(
@@ -8574,7 +8644,9 @@ mod tests {
         let (stop_tx, mut stop_rx) = watch::channel(false);
         let mut known_newest = None;
 
-        let query = run_until_private_intake_stop(
+        let audits = AtomicUsize::new(0);
+
+        let query = audit_until_private_intake_seed_lookup(
             &mut stop_rx,
             private_intake_subscription_cursors(
                 with_keys(vec![(peers[0].clone(), None)]),
@@ -8582,6 +8654,12 @@ mod tests {
                 &mut known_newest,
                 |_| std::future::pending(),
             ),
+            RECONNECT_DELAY,
+            RECONNECT_DELAY,
+            || {
+                audits.fetch_add(1, Ordering::SeqCst);
+                async { PrivateIntakeAuditOutcome::default() }
+            },
         );
         let stop = async {
             tokio::task::yield_now().await;
@@ -8592,17 +8670,129 @@ mod tests {
                 .await
                 .expect("stop should end a stalled seed query");
 
-        assert!(stopped.is_none());
+        assert!(matches!(stopped, PrivateIntakeSeedLookupExit::Stopped));
         assert!(known_newest.is_none());
+        assert_eq!(audits.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
-    async fn test_private_intake_run_until_stop_returns_completed_output() {
-        let (_stop_tx, mut stop_rx) = watch::channel(false);
-        assert_eq!(
-            run_until_private_intake_stop(&mut stop_rx, async { 7 }).await,
-            Some(7)
+    async fn test_private_intake_seed_lookup_audit_ends_when_stop_sender_dropped() {
+        let (stop_tx, mut stop_rx) = watch::channel(false);
+        let lookup = audit_until_private_intake_seed_lookup(
+            &mut stop_rx,
+            std::future::pending::<()>(),
+            RECONNECT_DELAY,
+            RECONNECT_DELAY,
+            || async { PrivateIntakeAuditOutcome::default() },
         );
+        let drop_sender = async {
+            tokio::task::yield_now().await;
+            drop(stop_tx);
+        };
+        let (stopped, ()) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(lookup, drop_sender)
+        })
+        .await
+        .expect("a dropped stop sender should end a stalled seed query");
+
+        assert_eq!(stopped, PrivateIntakeSeedLookupExit::Stopped);
+    }
+
+    #[tokio::test]
+    async fn test_private_intake_seed_lookup_audit_completed_lookup_runs_no_audit() {
+        let (_stop_tx, mut stop_rx) = watch::channel(false);
+        let audits = AtomicUsize::new(0);
+
+        let exit = audit_until_private_intake_seed_lookup(
+            &mut stop_rx,
+            async { 7 },
+            RECONNECT_DELAY,
+            RECONNECT_DELAY,
+            || {
+                audits.fetch_add(1, Ordering::SeqCst);
+                async { PrivateIntakeAuditOutcome::default() }
+            },
+        )
+        .await;
+
+        assert_eq!(exit, PrivateIntakeSeedLookupExit::Completed(7));
+        assert_eq!(audits.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn test_private_intake_seed_lookup_audit_runs_on_cadence_while_pending() {
+        const AUDITS: usize = 3;
+        let grace = Duration::from_millis(200);
+        let interval = Duration::from_millis(50);
+        let (_stop_tx, mut stop_rx) = watch::channel(false);
+        // The lookup resolves only through this channel, after the last
+        // audit, so completing proves the one lookup future was polled
+        // across every audit.
+        let (lookup_tx, lookup_rx) = tokio::sync::oneshot::channel();
+        let mut lookup_tx = Some(lookup_tx);
+        let mut audited_at = Vec::new();
+        let started = tokio::time::Instant::now();
+
+        let exit = tokio::time::timeout(
+            Duration::from_secs(5),
+            audit_until_private_intake_seed_lookup(
+                &mut stop_rx,
+                async move { lookup_rx.await.unwrap() },
+                grace,
+                interval,
+                || {
+                    audited_at.push(tokio::time::Instant::now());
+                    if audited_at.len() == AUDITS {
+                        lookup_tx.take().unwrap().send(42).unwrap();
+                    }
+                    async { PrivateIntakeAuditOutcome::default() }
+                },
+            ),
+        )
+        .await
+        .expect("a pending seed lookup should be audited until it completes");
+
+        assert_eq!(exit, PrivateIntakeSeedLookupExit::Completed(42));
+        assert_eq!(audited_at.len(), AUDITS);
+        // The audits follow a fixed schedule from the grace, so audit `n`
+        // never runs before `grace + n * interval`.
+        for (n, at) in (0u32..).zip(&audited_at) {
+            assert!(
+                *at >= started + grace + interval * n,
+                "audit {n} ran before its slot"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_private_intake_seed_lookup_audit_reports_backpressure() {
+        let (_stop_tx, mut stop_rx) = watch::channel(false);
+        let audits = AtomicUsize::new(0);
+
+        let exit = tokio::time::timeout(
+            Duration::from_secs(5),
+            audit_until_private_intake_seed_lookup(
+                &mut stop_rx,
+                std::future::pending::<()>(),
+                Duration::from_millis(10),
+                Duration::from_millis(10),
+                || {
+                    audits.fetch_add(1, Ordering::SeqCst);
+                    async {
+                        PrivateIntakeAuditOutcome {
+                            handshake_pending: false,
+                            backpressured: true,
+                            ..PrivateIntakeAuditOutcome::default()
+                        }
+                    }
+                },
+            ),
+        )
+        .await
+        .expect("a backpressured audit should end the seed lookup");
+
+        assert_eq!(exit, PrivateIntakeSeedLookupExit::Backpressured);
+        assert_eq!(audits.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -8798,6 +8988,29 @@ mod tests {
             // The seed stays available for a later audit on the connection.
             assert!(seeds.pending.lock().unwrap().contains(&peer));
         }
+    }
+
+    #[tokio::test]
+    async fn test_private_intake_audit_without_seeds_persists_no_cursor() {
+        // Audits run while the seed lookup is pending get no seeds, so even
+        // an `Absent` outcome stores no cursor.
+        let storage = crate::storage::InMemoryStorage::new();
+        let peer = users(1).remove(0);
+
+        let audit = audit_seeded_private_intake_peer(&storage, peer.clone(), None, |_, _| async {
+            Ok(PrivatePacketAcquisition::Absent)
+        })
+        .await;
+
+        assert!(matches!(
+            audit.outcome,
+            Ok(PrivatePacketAcquisition::Absent)
+        ));
+        assert!(storage
+            .snapshot()
+            .unwrap()
+            .private_intake_cursors
+            .is_empty());
     }
 
     #[tokio::test]

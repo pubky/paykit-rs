@@ -185,7 +185,9 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   succeeds; otherwise it replays from the beginning as before. Intake starts
   from the newest event found by a recent request (reused across reconnects
   within one topology epoch), and the startup audit reconciles earlier slots.
-  The storage format is unchanged.
+  While that request is pending, the group keeps running expected-slot audits
+  (first after one second, then at the healthy audit cadence), which never
+  store a cursor. The storage format is unchanged.
 - In the Rust-only SSE-assisted private intake API (`start_private_intake` and
   `PrivateIntakeSupervisor`), files a Linked Peer writes under its private
   directory for other Encrypted Links (except Encrypted Link Handshake slots),
