@@ -1569,6 +1569,11 @@ pub(crate) enum Written {
     /// The outcome waits for the user's confirmation of the payer's activity record, which is
     /// divergent (Paykit spec 6): nothing was written.
     Divergent([u8; 32]),
+    /// The method answered that the payment failed, but this installation saw it made
+    /// ([`Paykit::paid_seen`]): nothing was written, so no `failed` goes over a payment that
+    /// may have been made; the method's history or the user settles it (Paykit spec 7.2,
+    /// "Failed means definitively not paid").
+    PaidSeen,
 }
 
 /// A new proof for the outcome, or the original already held for this payment.
@@ -2543,6 +2548,12 @@ impl Paykit {
                     record,
                 })
             }
+            // Only a failure is refused this way; this writes a payment made.
+            Written::PaidSeen => {
+                return Ok(PayOutcome::Uncertain {
+                    attempt_id: *attempt_id,
+                })
+            }
         }
         if let Some(msg_id) = entry.proof_msg_id.clone() {
             // The outcome is written and the proof queued with it: the payment is reported
@@ -2605,6 +2616,111 @@ impl Paykit {
     async fn attempt_facts(&self, attempt: &AttemptId) -> Result<Option<AttemptFacts>> {
         self.local_get::<AttemptFacts>(&key::attempt_facts(attempt))
             .await
+    }
+
+    /// Keep that this installation saw `attempt`'s payment made, for `obligation`, where
+    /// `source` shows it ([`AttemptFacts::paid_seen`]), whether this installation journaled
+    /// the attempt or not: one local commit, never touching a journal entry. The first
+    /// sighting stays; a later one changes nothing.
+    ///
+    /// # Errors
+    ///
+    /// A store failure; a corrupt store for a sighting of another obligation than the one
+    /// held.
+    pub(crate) async fn saw_paid(
+        &mut self,
+        attempt: &AttemptId,
+        obligation: [u8; 32],
+        source: crate::journal::PaidSource,
+    ) -> Result<()> {
+        let held = self.attempt_facts(attempt).await?.unwrap_or_default();
+        if let Some(seen) = &held.paid_seen {
+            return if seen.obligation == obligation {
+                Ok(())
+            } else {
+                Err(PaykitError::corrupt())
+            };
+        }
+        let next = AttemptFacts {
+            paid_seen: Some(crate::journal::PaidSeen {
+                source,
+                obligation,
+                first_seen_ms: self.now(),
+            }),
+            ..held.clone()
+        };
+        next.check()?;
+        if !held.grows_to(&next) {
+            return Err(PaykitError::corrupt());
+        }
+        let mut tx = state::Tx::default();
+        tx.put(&key::attempt_facts(attempt), &next)?;
+        self.local_commit(tx).await
+    }
+
+    /// Where `attempt`'s payment was first seen made, `None` where nothing showed it: the
+    /// sighting kept ([`Paykit::saw_paid`]), or the method's proof its journal entry holds.
+    pub(crate) async fn paid_seen(
+        &self,
+        attempt: &AttemptId,
+    ) -> Result<Option<crate::journal::PaidSeen>> {
+        if let Some(seen) = self
+            .attempt_facts(attempt)
+            .await?
+            .and_then(|facts| facts.paid_seen)
+        {
+            return Ok(Some(seen));
+        }
+        Ok(self
+            .journal_entry(attempt)
+            .await?
+            .filter(|entry| entry.rail_proof.is_some())
+            .map(|entry| crate::journal::PaidSeen {
+                source: crate::journal::PaidSource::MethodProof,
+                obligation: entry.obligation,
+                first_seen_ms: entry.paid_at_ms.unwrap_or(entry.journaled_at_ms),
+            }))
+    }
+
+    /// [`Paykit::paid_seen`] for each of `attempts`, those seen paid only.
+    pub(crate) async fn paid_seen_of(
+        &self,
+        attempts: &[AttemptId],
+    ) -> Result<std::collections::BTreeMap<AttemptId, crate::journal::PaidSeen>> {
+        let mut seen = std::collections::BTreeMap::new();
+        for attempt in attempts {
+            if let Some(sighting) = self.paid_seen(attempt).await? {
+                seen.insert(*attempt, sighting);
+            }
+        }
+        Ok(seen)
+    }
+
+    /// The local writes that go in the same commit as an Allowance ledger write that drops
+    /// `attempt`: its facts deleted where no journal entry is left beside them, and marked
+    /// dropped where one is, so the journal's pruning deletes them with the entry
+    /// ([`AttemptFacts::ledger_dropped`]). None where nothing is kept for it.
+    pub(crate) async fn ledger_dropped_writes(
+        &self,
+        attempt: &AttemptId,
+    ) -> Result<Vec<pubky_switch_client::app::LocalWrite>> {
+        let Some(held) = self.attempt_facts(attempt).await? else {
+            return Ok(Vec::new());
+        };
+        let key = key::attempt_facts(attempt);
+        if self.journal_entry(attempt).await?.is_none() {
+            return Ok(vec![pubky_switch_client::app::LocalWrite::Delete {
+                key: key.into_bytes(),
+            }]);
+        }
+        let next = AttemptFacts {
+            ledger_dropped: true,
+            ..held.clone()
+        };
+        if !held.grows_to(&next) {
+            return Err(PaykitError::corrupt());
+        }
+        Ok(vec![state::local_put(&key, &next)?])
     }
 
     /// Keep what the payment method said of `entry`'s attempt, with the entry, in one commit
@@ -4775,6 +4891,9 @@ impl Paykit {
             Ok(Written::Divergent(record)) => {
                 return Ok(PayOutcome::RecordDivergent { attempt_id, record })
             }
+            // The method's failure over a payment this installation saw made: it may have
+            // been paid, and stays open for the history or the user to settle.
+            Ok(Written::PaidSeen) => return Ok(PayOutcome::Uncertain { attempt_id }),
             // A batch the client kept, refused about the caller before it was sent, still goes
             // once the app is current again: the entry stays, as for any outcome unwritten,
             // so a refusal of that batch later leaves it for a resume to write again.
@@ -4831,6 +4950,9 @@ impl Paykit {
         paid: bool,
         overwrite: bool,
     ) -> Result<Written> {
+        if !paid && self.paid_seen(&entry.attempt()?).await?.is_some() {
+            return Ok(Written::PaidSeen);
+        }
         if paid && !self.payment_base_changed(entry).await? {
             // A payment made waits for the user's confirmation of a paused payer record,
             // before its acceptance is released: nothing of it goes over that record until

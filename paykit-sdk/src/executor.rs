@@ -105,6 +105,9 @@ struct Seen {
     /// A payer proof of the attempt that can't be dated now: only this app's copy of the
     /// record holds it, or its write isn't held.
     undated_proof: bool,
+    /// This installation saw the payment made before, from any source, and keeps that
+    /// sighting ([`Paykit::paid_seen`]).
+    sighted: bool,
     method: MethodShows,
 }
 
@@ -138,7 +141,11 @@ fn attempt_verdict(seen: Seen) -> Verdict {
         MethodShows::Paid => true,
         MethodShows::Nothing | MethodShows::Failed | MethodShows::Pending => false,
     };
-    let paid = provable || seen.undated_proof || seen.claim == ClaimShows::ShownDone || method_paid;
+    let paid = provable
+        || seen.undated_proof
+        || seen.sighted
+        || seen.claim == ClaimShows::ShownDone
+        || method_paid;
     let counts = AttemptEvidence { claim, paid };
     let writes = match (paid, provable) {
         // Counted paid on evidence another installation can't check: nothing is written.
@@ -163,6 +170,7 @@ fn reconciled_usage(
     retired: &mut HashMap<AttemptId, compaction::Retired>,
     dated: HashMap<AttemptId, AttemptEvidence>,
     undated: &HashSet<AttemptId>,
+    sighted: &HashSet<AttemptId>,
     at: u64,
 ) -> Option<Accounting> {
     let mut unclassified = Vec::new();
@@ -179,6 +187,7 @@ fn reconciled_usage(
     let proved = |id: &AttemptId| {
         dated.get(id).is_some_and(|fact| fact.paid)
             || undated.contains(id)
+            || sighted.contains(id)
             || matches!(
                 unverified.get(id),
                 Some(ClaimShows::SignedDone | ClaimShows::ShownDone)
@@ -276,6 +285,7 @@ fn reconciled_usage(
             claim,
             dated_proof: dated.get(&id).is_some_and(|fact| fact.paid),
             undated_proof: undated.contains(&id),
+            sighted: sighted.contains(&id),
             method: methods.get(&id).copied().unwrap_or(MethodShows::Nothing),
         });
         counts.insert(id, verdict.counts);
@@ -325,13 +335,187 @@ mod tests {
             &mut HashMap::new(),
             HashMap::new(),
             &HashSet::new(),
+            &HashSet::new(),
             at,
         )
     }
     #[test]
-    fn test_a_failure_counts_alike_held_as_an_entry_or_compacted() {
-        use paykit_lib::allowances::LedgerEntry;
-        use paykit_lib::allowances::{CompactedFailed, EntryOutcome};
+    fn test_the_verdict_counts_and_writes_as_the_table_says() {
+        use paykit_lib::allowances::{record_outcomes, CompactedFailed, EntryOutcome, LedgerEntry};
+        use Claim::*;
+        use Held::*;
+        use Method::*;
+        use Proof::*;
+        use Written::*;
+
+        #[derive(Clone, Copy, Debug)]
+        enum Held {
+            Recorded,
+            Unset,
+            Compacted,
+        }
+        #[derive(Clone, Copy, Debug)]
+        enum Method {
+            NotListed,
+            HistFailed,
+            HistPending,
+            HistPaid,
+        }
+        #[derive(Clone, Copy, Debug)]
+        enum Claim {
+            Gone,
+            VFailed,
+            VDone,
+            VOpen,
+            VUnknown,
+            SignedDone,
+            ShownDone,
+        }
+        #[derive(Clone, Copy, Debug)]
+        enum Proof {
+            NoProof,
+            Dated,
+            Undated,
+        }
+        /// What the ledger holds for the attempt after the copy.
+        #[derive(Clone, Copy, Debug, PartialEq)]
+        enum Written {
+            /// An entry with no outcome.
+            Unset_,
+            /// An entry, or a compacted item, holding `failed`.
+            Failed_,
+            /// An entry holding `done`, or a compacted item moved into the paid totals.
+            Done_,
+        }
+        /// The whole ledger holds: no usage.
+        const HOLD: Option<(&str, &str, Written)> = None;
+
+        // (held, method, claim, proof, sighted) => (lifetime, reserved amount, written)
+        let rows: &[(
+            (Held, Method, Claim, Proof, bool),
+            Option<(&str, &str, Written)>,
+        )] = &[
+            // An entry's own `failed`: it releases unless something says the money moved.
+            (
+                (Recorded, NotListed, Gone, NoProof, false),
+                Some(("0", "0", Failed_)),
+            ),
+            (
+                (Recorded, HistFailed, Gone, NoProof, false),
+                Some(("0", "0", Failed_)),
+            ),
+            (
+                (Recorded, HistPending, VFailed, NoProof, false),
+                Some(("0", "0", Failed_)),
+            ),
+            (
+                (Recorded, HistPaid, VFailed, NoProof, false),
+                Some(("70", "0", Failed_)),
+            ),
+            (
+                (Recorded, NotListed, VFailed, Dated, false),
+                Some(("70", "0", Done_)),
+            ),
+            (
+                (Recorded, NotListed, VFailed, Undated, false),
+                Some(("70", "0", Failed_)),
+            ),
+            (
+                (Recorded, NotListed, SignedDone, NoProof, false),
+                Some(("70", "0", Done_)),
+            ),
+            (
+                (Recorded, NotListed, ShownDone, NoProof, false),
+                Some(("70", "0", Failed_)),
+            ),
+            (
+                (Recorded, NotListed, VDone, NoProof, false),
+                Some(("70", "0", Done_)),
+            ),
+            (
+                (Recorded, HistFailed, VFailed, NoProof, true),
+                Some(("70", "0", Failed_)),
+            ),
+            // No outcome yet: a verified failed claim writes `failed` only when nothing says paid.
+            (
+                (Unset, NotListed, VFailed, NoProof, false),
+                Some(("0", "0", Failed_)),
+            ),
+            (
+                (Unset, HistPending, VFailed, NoProof, false),
+                Some(("0", "0", Failed_)),
+            ),
+            (
+                (Unset, NotListed, VFailed, Undated, false),
+                Some(("70", "0", Unset_)),
+            ),
+            (
+                (Unset, HistPaid, VFailed, NoProof, false),
+                Some(("70", "0", Unset_)),
+            ),
+            (
+                (Unset, NotListed, VFailed, NoProof, true),
+                Some(("70", "0", Unset_)),
+            ),
+            (
+                (Unset, NotListed, VFailed, Dated, false),
+                Some(("70", "0", Done_)),
+            ),
+            (
+                (Unset, NotListed, VOpen, NoProof, false),
+                Some(("70", "70", Unset_)),
+            ),
+            (
+                (Unset, NotListed, VUnknown, NoProof, false),
+                Some(("70", "70", Unset_)),
+            ),
+            (
+                (Unset, NotListed, Gone, NoProof, false),
+                Some(("70", "0", Unset_)),
+            ),
+            ((Unset, HistFailed, Gone, NoProof, false), HOLD),
+            (
+                (Unset, NotListed, SignedDone, NoProof, false),
+                Some(("70", "0", Done_)),
+            ),
+            (
+                (Unset, NotListed, ShownDone, NoProof, false),
+                Some(("70", "0", Unset_)),
+            ),
+            // A compacted failure: v0.2's holds kept; a proven payment moves into the totals.
+            (
+                (Compacted, NotListed, Gone, NoProof, false),
+                Some(("0", "0", Failed_)),
+            ),
+            (
+                (Compacted, HistFailed, VFailed, NoProof, false),
+                Some(("0", "0", Failed_)),
+            ),
+            ((Compacted, HistFailed, Gone, NoProof, false), HOLD),
+            ((Compacted, HistPending, VFailed, NoProof, false), HOLD),
+            ((Compacted, HistPaid, Gone, NoProof, false), HOLD),
+            (
+                (Compacted, NotListed, VFailed, Dated, false),
+                Some(("70", "0", Done_)),
+            ),
+            (
+                (Compacted, NotListed, SignedDone, NoProof, false),
+                Some(("70", "0", Done_)),
+            ),
+            (
+                (Compacted, NotListed, ShownDone, NoProof, false),
+                Some(("70", "0", Failed_)),
+            ),
+            (
+                (Compacted, NotListed, VFailed, Undated, false),
+                Some(("70", "0", Failed_)),
+            ),
+            (
+                (Compacted, NotListed, VFailed, NoProof, true),
+                Some(("70", "0", Failed_)),
+            ),
+        ];
+
         let terms = AllowanceTerms::from_json(&serde_json::json!({
             "asset":"btc","lifetime_amount_limit":"100","period_limits":[],
             "per_payment_amount":null,"active_from":null,"expires_at":null,
@@ -341,38 +525,25 @@ mod tests {
         let id = AttemptId::from_bytes([5; 16]);
         let obligation = [6; 32];
         let value = Decimal::new("70").unwrap();
-        let paid = || {
-            RailOutcome::Paid(crate::rail::RailPaid {
-                proof: serde_json::Map::new(),
-                paid_at_ms: None,
-            })
-        };
-        let failed = ClaimState::Failed { by_owner: false };
-        let claims_shown = [
-            ClaimShows::Gone,
-            ClaimShows::Verified(failed),
-            ClaimShows::Verified(ClaimState::Done),
-            ClaimShows::Verified(ClaimState::Open),
-            ClaimShows::Verified(ClaimState::Unknown),
-            ClaimShows::SignedDone,
-            ClaimShows::ShownDone,
-        ];
-        // An entry holding its own `failed`, an entry without an outcome, and a compacted
-        // failure.
-        #[derive(Clone, Copy, Debug, PartialEq)]
-        enum Held {
-            Recorded,
-            Unset,
-            Compacted,
-        }
-        for held in [Held::Recorded, Held::Unset, Held::Compacted] {
+        for &((held, method, claim, proof, sighted), expected) in rows {
+            let case = format!("{held:?} {method:?} {claim:?} {proof:?} sighted {sighted}");
             let mut ledger = Ledger::empty(
                 [7; 32],
                 AllowanceId::new("4b3fb324-091b-47da-a7ad-46b3a07d0409").unwrap(),
                 [8; 32],
             );
+            let entry = |outcome| LedgerEntry {
+                obligation,
+                attempt_id: id,
+                value: value.clone(),
+                asset: terms.asset.clone(),
+                at: 1_000,
+                outcome,
+            };
             match held {
-                Held::Compacted => {
+                Recorded => ledger.entries.push(entry(Some(EntryOutcome::Failed))),
+                Unset => ledger.entries.push(entry(None)),
+                Compacted => {
                     ledger.failed.push(CompactedFailed {
                         obligation,
                         attempt_id: id,
@@ -380,158 +551,96 @@ mod tests {
                     });
                     ledger.spent = Some(Decimal::new("0").unwrap());
                 }
-                Held::Recorded | Held::Unset => ledger.entries.push(LedgerEntry {
-                    obligation,
+            }
+            let verified = |state| HashMap::from([(id, ReservationClaim { obligation, state })]);
+            let failed = ClaimState::Failed { by_owner: false };
+            let (claims, unverified) = match claim {
+                Gone => (HashMap::new(), HashMap::new()),
+                VFailed => (verified(failed), HashMap::new()),
+                VDone => (verified(ClaimState::Done), HashMap::new()),
+                VOpen => (verified(ClaimState::Open), HashMap::new()),
+                VUnknown => (verified(ClaimState::Unknown), HashMap::new()),
+                SignedDone => (
+                    HashMap::new(),
+                    HashMap::from([(id, ClaimShows::SignedDone)]),
+                ),
+                ShownDone => (HashMap::new(), HashMap::from([(id, ClaimShows::ShownDone)])),
+            };
+            let outcome = match method {
+                NotListed => None,
+                HistFailed => Some(RailOutcome::Failed),
+                HistPending => Some(RailOutcome::Pending),
+                HistPaid => Some(RailOutcome::Paid(crate::rail::RailPaid {
+                    proof: serde_json::Map::new(),
+                    paid_at_ms: None,
+                })),
+            };
+            let inventory = outcome
+                .map(|outcome| AllowanceDispatch {
                     attempt_id: id,
-                    value: value.clone(),
-                    asset: terms.asset.clone(),
-                    at: 1_000,
-                    outcome: (held == Held::Recorded).then_some(EntryOutcome::Failed),
-                }),
-            }
-            for method in [
-                None,
-                Some(RailOutcome::Failed),
-                Some(RailOutcome::Pending),
-                Some(paid()),
-            ] {
-                for claim in claims_shown {
-                    for proof in [None, Some(true), Some(false)] {
-                        let (claims, unverified) = match claim {
-                            ClaimShows::Verified(state) => (
-                                HashMap::from([(id, ReservationClaim { obligation, state })]),
-                                HashMap::new(),
-                            ),
-                            ClaimShows::Gone => (HashMap::new(), HashMap::new()),
-                            shown => (HashMap::new(), HashMap::from([(id, shown)])),
-                        };
-                        let inventory = method
-                            .clone()
-                            .map(|outcome| AllowanceDispatch {
-                                attempt_id: id,
-                                amount: PaymentAmount {
-                                    asset: terms.asset.clone(),
-                                    value: value.clone(),
-                                },
-                                outcome,
-                            })
-                            .into_iter()
-                            .collect();
-                        // A proof: dated (`Some(true)`) or one that can't be dated now.
-                        let dated = match proof {
-                            Some(true) => HashMap::from([(
-                                id,
-                                AttemptEvidence {
-                                    paid: true,
-                                    ..Default::default()
-                                },
-                            )]),
-                            Some(false) | None => HashMap::new(),
-                        };
-                        let undated = match proof {
-                            Some(false) => HashSet::from([id]),
-                            Some(true) | None => HashSet::new(),
-                        };
-                        let accounting = reconciled_usage(
-                            inventory,
-                            &terms,
-                            &ledger,
-                            &claims,
-                            &unverified,
-                            &mut HashMap::new(),
-                            dated,
-                            &undated,
-                            1_000_000,
-                        );
-                        let written = accounting.as_ref().map(|accounting| {
-                            accounting.writes.get(&id).copied().unwrap_or_default()
-                        });
-                        let counted = accounting.map(|accounting| {
-                            let usage = accounting.counted;
-                            (
-                                usage.lifetime().as_str().to_owned(),
-                                usage.reserved_amount().as_str().to_owned(),
-                            )
-                        });
-                        let case = format!(
-                            "{held:?}, method {method:?}, claim {claim:?}, proof {proof:?}"
-                        );
-                        // Evidence another installation can check: a dated proof or a signed
-                        // `done`.
-                        let provable = proof == Some(true)
-                            || matches!(
-                                claim,
-                                ClaimShows::Verified(ClaimState::Done) | ClaimShows::SignedDone
-                            );
-                        // The money moved: spent.
-                        let moved = provable
-                            || proof.is_some()
-                            || matches!(method, Some(RailOutcome::Paid(_)))
-                            || claim == ClaimShows::ShownDone;
-                        // A recorded failure: the entry's own `failed`, a compacted one, or a
-                        // claim showing it (Paykit spec 8.3, `failed` releases).
-                        let failure = held != Held::Unset
-                            || matches!(claim, ClaimShows::Verified(ClaimState::Failed { .. }));
-                        // A history listing the attempt, with no claim, proof, `done` or
-                        // entry's own recorded failure to account for it, holds the whole
-                        // ledger, as before the release; a compacted one keeps v0.2's check.
-                        let unaccounted = held != Held::Recorded
-                            && method.is_some()
-                            && proof.is_none()
-                            && claim == ClaimShows::Gone;
-                        // v0.2's check on a compacted failure, kept: a pending history, or a
-                        // failed one with no failed claim, holds unless it is shown paid.
-                        let compacted_holds = held == Held::Compacted
-                            && !moved
-                            && match &method {
-                                Some(RailOutcome::Pending) => true,
-                                Some(RailOutcome::Failed) => !matches!(
-                                    claim,
-                                    ClaimShows::Verified(ClaimState::Failed { .. })
-                                ),
-                                Some(RailOutcome::Paid(_)) | None => false,
-                            };
-                        let spent = Some(("70".to_owned(), "0".to_owned()));
-                        let expected = if unaccounted || compacted_holds {
-                            None
-                        } else if moved {
-                            spent
-                        } else if failure {
-                            Some(("0".to_owned(), "0".to_owned()))
-                        } else if matches!(
-                            claim,
-                            ClaimShows::Verified(ClaimState::Open | ClaimState::Unknown)
-                        ) {
-                            Some(("70".to_owned(), "70".to_owned()))
-                        } else {
-                            // Without an outcome, a claim that is gone spends.
-                            spent
-                        };
-                        assert_eq!(counted, expected, "{case}");
-                        // The write takes the same verdict: never `failed` for a payment
-                        // counted spent, and `done` where another installation can check it.
-                        if let Some(written) = written {
-                            if moved {
-                                // A failure is written only where the payment proved paid
-                                // too, which the copy writes as `done`.
-                                assert!(
-                                    written.paid
-                                        || !matches!(
-                                            written.claim,
-                                            Some(ClaimState::Failed { .. })
-                                        ),
-                                    "{case}: {written:?}"
-                                );
-                            }
-                            assert_eq!(
-                                written.paid || written.claim == Some(ClaimState::Done),
-                                provable,
-                                "{case}: {written:?}"
-                            );
-                        }
-                    }
-                }
-            }
+                    amount: PaymentAmount {
+                        asset: terms.asset.clone(),
+                        value: value.clone(),
+                    },
+                    outcome,
+                })
+                .into_iter()
+                .collect();
+            let dated = match proof {
+                Dated => HashMap::from([(
+                    id,
+                    AttemptEvidence {
+                        paid: true,
+                        ..Default::default()
+                    },
+                )]),
+                NoProof | Undated => HashMap::new(),
+            };
+            let undated = match proof {
+                Undated => HashSet::from([id]),
+                NoProof | Dated => HashSet::new(),
+            };
+            let seen = match sighted {
+                true => HashSet::from([id]),
+                false => HashSet::new(),
+            };
+            let accounting = reconciled_usage(
+                inventory,
+                &terms,
+                &ledger,
+                &claims,
+                &unverified,
+                &mut HashMap::new(),
+                dated,
+                &undated,
+                &seen,
+                1_000_000,
+            );
+            let got = accounting.map(|accounting| {
+                // The actual write: what the ledger holds after the outcomes are copied.
+                let next = record_outcomes(&terms, &ledger, &accounting.writes)
+                    .unwrap()
+                    .unwrap_or_else(|| ledger.clone());
+                let written = match (next.entries.first(), next.failed.is_empty()) {
+                    (Some(entry), _) => match entry.outcome {
+                        None => Unset_,
+                        Some(EntryOutcome::Failed) => Failed_,
+                        Some(EntryOutcome::Done) => Done_,
+                    },
+                    (None, false) => Failed_,
+                    (None, true) => Done_,
+                };
+                let usage = accounting.counted;
+                (
+                    usage.lifetime().as_str().to_owned(),
+                    usage.reserved_amount().as_str().to_owned(),
+                    written,
+                )
+            });
+            let expected = expected.map(|(lifetime, reserved, written)| {
+                (lifetime.to_owned(), reserved.to_owned(), written)
+            });
+            assert_eq!(got, expected, "{case}");
         }
     }
 
@@ -581,6 +690,7 @@ mod tests {
                 &HashMap::new(),
                 &mut HashMap::new(),
                 HashMap::new(),
+                &HashSet::new(),
                 &HashSet::new(),
                 100_000_000,
             )
@@ -665,6 +775,7 @@ mod tests {
                 &HashMap::new(),
                 &mut HashMap::new(),
                 HashMap::new(),
+                &HashSet::new(),
                 &HashSet::new(),
                 1_001,
             )

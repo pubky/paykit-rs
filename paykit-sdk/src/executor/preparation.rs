@@ -104,13 +104,24 @@ impl super::restore::ReconciledLedger {
     pub(super) async fn stage(
         self,
         app: &mut Paykit,
-        batch: OpBatch,
+        mut batch: OpBatch,
         extra: Vec<Condition>,
         standalone: bool,
     ) -> Result<OpBatch> {
         let Condition::RecordCurrent { key, .. } = self.grant else {
             return Err(PaykitError::corrupt());
         };
+        // What this installation keeps of an attempt the write drops goes in the same
+        // commit, never on a read.
+        let kept: std::collections::HashSet<_> = super::restore::ledger_attempts(&self.ledger)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        for dropped in self.read_attempts.iter().filter(|id| !kept.contains(id)) {
+            for write in app.ledger_dropped_writes(dropped).await? {
+                batch = batch.local(write);
+            }
+        }
         let target = ledger_target(&self.ledger.counterparty, &self.ledger.allowance_id);
         let value = self.ledger.to_json()?;
         let mut conditions = vec![self.grant, self.current];

@@ -299,6 +299,16 @@ impl Paykit {
                 payments.insert(id, (obligation, value));
             }
             if let Some(read) = self.app.read_claim(&obligation).await? {
+                // A `done` this read shows is a payment seen made, kept as any other, so a
+                // count that relies on an earlier read can't miss it (Paykit spec 8.3).
+                if read
+                    .view
+                    .attempt(&id.to_bytes())
+                    .is_some_and(|shown| shown.outcome == pubky_switch_core::claims::Outcome::Done)
+                {
+                    self.saw_paid(&id, obligation, crate::journal::PaidSource::ClaimShowsDone)
+                        .await?;
+                }
                 claims.push((id, obligation, at, outcome, read));
             }
         }

@@ -2008,6 +2008,183 @@ async fn only_ledger(
 }
 
 #[tokio::test]
+async fn test_a_method_proof_in_the_journal_keeps_the_payment_counted() {
+    use paykit_lib::allowances::EntryOutcome;
+    use pubky_switch_client::testing::Fault;
+
+    let (world, mut payer, mut shop, key) = Box::pin(first_grant()).await;
+    world.rail.set_history_payer(payer.identity());
+    let request = Box::pin(request_from(
+        &mut shop,
+        payer.identity(),
+        draft("7", world.clock.now_ms()),
+    ))
+    .await;
+    Box::pin(payer.receive(None)).await.unwrap();
+    world.rail.next(paykit_sdk::rail::Behaviour::Fail);
+    let failed = Box::pin(payer.pay_under_allowance(&request, &key))
+        .await
+        .outcome
+        .unwrap();
+    let paykit_sdk::PayOutcome::Failed { attempt_id, .. } = failed else {
+        panic!("{failed:?}");
+    };
+    // The account's history keeps showing the failure; the payment completes after all,
+    // and its outcome can't be written: the method's proof is in the journal alone.
+    assert!(world.rail.hold_history_outcome(&attempt_id));
+    world.rail.complete_after_failure(&attempt_id);
+    world.alice.switch().fail_next(Fault::Unreachable {
+        path: "/ops".into(),
+        after: 0,
+    });
+    // The payer record can't be read either, so its write is held.
+    let records = payer.app().records_of("payer_activity").await.unwrap();
+    for _ in 0..4 {
+        world.alice.switch().fail_next(Fault::Unreachable {
+            path: format!("/records/{}", pubky_switch_core::enc::b64(&records[0].key)),
+            after: 0,
+        });
+    }
+    let _ = Box::pin(payer.resume_payments()).await;
+    let (ledger, _) = only_ledger(&payer).await;
+    assert_eq!(ledger.entries[0].outcome, Some(EntryOutcome::Failed));
+    // The journal's proof counts the payment spent over the failure the ledger holds.
+    let usage = Box::pin(payer.reconcile_allowance(&key))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!((usage.lifetime().as_str(), usage.released()), ("7", 0));
+    // Its outcome waits for the held payer record, as before; nothing paid twice.
+    assert_eq!(world.rail.executions(&attempt_id), 1);
+}
+
+#[tokio::test]
+async fn test_a_confirmed_failure_is_refused_once_paid_history_was_seen() {
+    let (world, mut payer, mut shop, key) = Box::pin(first_grant()).await;
+    world.rail.set_history_payer(payer.identity());
+    let request = Box::pin(request_from(
+        &mut shop,
+        payer.identity(),
+        draft("7", world.clock.now_ms()),
+    ))
+    .await;
+    Box::pin(payer.receive(None)).await.unwrap();
+    world.rail.next(paykit_sdk::rail::Behaviour::Hang);
+    let id = Box::pin(payer.pay_under_allowance(&request, &key))
+        .await
+        .outcome
+        .unwrap()
+        .attempt_id();
+    let (opened, revision) = only_ledger(&payer).await;
+    let obligation = opened.entries[0].obligation;
+    // The account's history shows the payment made before this app resumes it; the
+    // reconciliation sees it.
+    world.rail.settle(&id, true);
+    let usage = Box::pin(payer.reconcile_allowance(&key))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(usage.lifetime().as_str(), "7");
+    // The user's confirmation that it failed is refused as already paid; nothing is written.
+    let refused = Box::pin(payer.resolve_attempt(
+        &obligation,
+        id,
+        paykit_sdk::Resolution::Failed,
+        UserConfirmed::new(),
+    ))
+    .await
+    .unwrap_err();
+    assert_eq!(
+        refused.refusal(),
+        Some(&paykit_sdk::Refusal::AlreadyPaid),
+        "{refused:?}"
+    );
+    assert_eq!(only_ledger(&payer).await.1, revision);
+    // The resume records it paid, once.
+    Box::pin(payer.resume_payments()).await.unwrap();
+    let usage = Box::pin(payer.reconcile_allowance(&key))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!((usage.lifetime().as_str(), usage.spent()), ("7", 1));
+    assert_eq!(world.rail.executions(&id), 1);
+}
+
+#[tokio::test]
+async fn test_a_proof_seen_once_keeps_the_payment_counted_after_its_record_is_gone() {
+    use paykit_lib::allowances::EntryOutcome;
+    use pubky_switch_client::app::{Collection, RecordTarget};
+    use pubky_switch_client::testing::Fault;
+
+    let (world, mut payer, mut shop, key) = Box::pin(first_grant()).await;
+    world.rail.set_history_payer(payer.identity());
+    let request = Box::pin(request_from(
+        &mut shop,
+        payer.identity(),
+        draft("7", world.clock.now_ms()),
+    ))
+    .await;
+    Box::pin(payer.receive(None)).await.unwrap();
+    world.rail.next(paykit_sdk::rail::Behaviour::Fail);
+    let failed = Box::pin(payer.pay_under_allowance(&request, &key))
+        .await
+        .outcome
+        .unwrap();
+    let paykit_sdk::PayOutcome::Failed { attempt_id, .. } = failed else {
+        panic!("{failed:?}");
+    };
+    let obligation = only_ledger(&payer).await.0.entries[0].obligation;
+    // The account's history keeps showing the failure; the payment completes after all, and
+    // its outcome can't be written yet.
+    assert!(world.rail.hold_history_outcome(&attempt_id));
+    world.rail.complete_after_failure(&attempt_id);
+    world.alice.switch().fail_next(Fault::Unreachable {
+        path: "/ops".into(),
+        after: 0,
+    });
+    Box::pin(payer.resume_payments()).await.unwrap();
+    assert_eq!(
+        only_ledger(&payer).await.0.entries[0].outcome,
+        Some(EntryOutcome::Failed)
+    );
+    // This installation sees the payment made.
+    let seen = Box::pin(payer.reconcile_allowance(&key))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!((seen.lifetime().as_str(), seen.released()), ("7", 0));
+    // The payer record goes and the claim expires before `done` is copied.
+    let collection = paykit_lib::Collection::PayerActivity;
+    let target = RecordTarget::new(
+        Collection::new(collection.name(), collection.fixed_policy()),
+        &paykit_lib::derive::natural_key::request_record(&shop.identity(), &request.request_hash),
+    );
+    payer
+        .app_mut()
+        .delete_record(&target, Vec::new())
+        .await
+        .unwrap();
+    world
+        .clock
+        .advance_ms(32 * pubky_switch_core::records::DAY_MS);
+    Box::pin(payer.receive(None)).await.unwrap();
+    assert!(payer
+        .app_mut()
+        .read_claim(&obligation)
+        .await
+        .unwrap()
+        .is_none());
+    // What it saw stays: the payment is still counted, not released by the failure the
+    // ledger holds.
+    let after = Box::pin(payer.reconcile_allowance(&key))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!((after.lifetime().as_str(), after.released()), ("7", 0));
+    assert_eq!(world.rail.executions(&attempt_id), 1);
+}
+
+#[tokio::test]
 async fn test_receive_copies_a_later_owner_failure_once() {
     use paykit_lib::allowances::EntryOutcome;
     use pubky_switch_client::app::{ClaimOp, OpBatch};

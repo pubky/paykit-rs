@@ -34,6 +34,9 @@ pub(super) struct ReconciledLedger {
     pub(super) facts: HashMap<paykit_lib::AttemptId, paykit_lib::allowances::AttemptEvidence>,
     pub(super) signers: super::checkpoint::ReservationSigners,
     pub(super) applied_proposals: Vec<String>,
+    /// The attempts the ledger listed as read: a write that drops one also drops what this
+    /// installation keeps of it ([`Paykit::ledger_dropped_writes`]).
+    pub(super) read_attempts: Vec<paykit_lib::AttemptId>,
     pub(super) ledger: Ledger,
     pub(super) usage: Usage,
     pub(super) evidence: KeptOp,
@@ -101,6 +104,42 @@ fn classify_claim(
         None if signed_done => super::ClaimShows::SignedDone,
         None => super::ClaimShows::Gone,
     })
+}
+
+/// Each attempt the ledger lists, an entry or a compacted failure, with its obligation.
+pub(super) fn ledger_attempts(ledger: &Ledger) -> Vec<(paykit_lib::AttemptId, [u8; 32])> {
+    ledger
+        .entries
+        .iter()
+        .map(|entry| (entry.attempt_id, entry.obligation))
+        .chain(
+            ledger
+                .failed
+                .iter()
+                .map(|item| (item.attempt_id, item.obligation)),
+        )
+        .collect()
+}
+
+impl Paykit {
+    /// The attempts `ledger` lists that this installation ever saw paid, for the obligation
+    /// the ledger holds ([`Paykit::paid_seen`]).
+    async fn sighted_of(
+        &self,
+        ledger: &Ledger,
+    ) -> Result<std::collections::HashSet<paykit_lib::AttemptId>> {
+        let attempts = ledger_attempts(ledger);
+        let ids: Vec<_> = attempts.iter().map(|(id, _)| *id).collect();
+        let seen = self.paid_seen_of(&ids).await?;
+        Ok(attempts
+            .into_iter()
+            .filter(|(id, obligation)| {
+                seen.get(id)
+                    .is_some_and(|sighting| sighting.obligation == *obligation)
+            })
+            .map(|(id, _)| id)
+            .collect())
+    }
 }
 
 /// What a claim read shows of `attempt` when no signed opening verifies it: a `done` it shows,
@@ -746,6 +785,10 @@ impl Paykit {
             at_initial_ledger: current.revision == approval.ledger.revision,
             at,
             terms: proposed.terms.clone(),
+            read_attempts: ledger_attempts(&ledger)
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect(),
             ledger,
             usage,
             evidence: evidence.clone(),
@@ -757,7 +800,20 @@ impl Paykit {
             },
         };
         if !needs_inventory {
-            let Ok(counted) = usage(&proposed.terms, &ledger, &HashMap::new(), at) else {
+            // Counted with no claim read, but never without a payment this installation saw.
+            let seen: HashMap<_, _> = self
+                .sighted_of(&ledger)
+                .await?
+                .into_iter()
+                .map(|id| {
+                    let paid = paykit_lib::allowances::AttemptEvidence {
+                        paid: true,
+                        ..Default::default()
+                    };
+                    (id, paid)
+                })
+                .collect();
+            let Ok(counted) = usage(&proposed.terms, &ledger, &seen, at) else {
                 return Ok(None);
             };
             return Ok(Some(result(
@@ -941,6 +997,36 @@ impl Paykit {
         let (facts, undated) =
             Box::pin(self.allowance_outcomes(&ledger, &claims, &dispatched)).await?;
         let undated: std::collections::HashSet<_> = undated.into_iter().collect();
+        // Every payment seen made, from any source, is kept the moment it is seen, and the
+        // count reads first what was ever seen: a later read, an expired claim or a deleted
+        // record can't take it back (Paykit spec 8.3, `failed` releases).
+        for (id, obligation) in ledger_attempts(&ledger) {
+            use crate::journal::PaidSource;
+            let source = if facts.get(&id).is_some_and(|fact| fact.paid) {
+                Some(PaidSource::PayerProof { dated: true })
+            } else if undated.contains(&id) {
+                Some(PaidSource::PayerProof { dated: false })
+            } else if claims
+                .get(&id)
+                .is_some_and(|claim| claim.state == ClaimState::Done)
+                || unverified.get(&id) == Some(&super::ClaimShows::SignedDone)
+            {
+                Some(PaidSource::SignedDone)
+            } else if unverified.get(&id) == Some(&super::ClaimShows::ShownDone) {
+                Some(PaidSource::ClaimShowsDone)
+            } else if dispatched
+                .get(&id)
+                .is_some_and(|d| matches!(d.outcome, crate::rail::RailOutcome::Paid(_)))
+            {
+                Some(PaidSource::PaidHistory)
+            } else {
+                None
+            };
+            if let Some(source) = source {
+                self.saw_paid(&id, obligation, source).await?;
+            }
+        }
+        let sighted = self.sighted_of(&ledger).await?;
         let mut retired = if ledger.count == 0 {
             HashMap::new()
         } else {
@@ -971,6 +1057,7 @@ impl Paykit {
             &mut retired,
             facts,
             &undated,
+            &sighted,
             at,
         )
         else {

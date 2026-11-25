@@ -675,6 +675,11 @@ impl Paykit {
         let Some(under) = &entry.allowance else {
             return Ok(batch);
         };
+        // No `failed` goes into the ledger for a payment this installation saw made (Paykit
+        // spec 8.3, `failed` releases).
+        if !paid && self.paid_seen(&entry.attempt()?).await?.is_some() {
+            return Ok(batch);
+        }
         let id = under.id()?;
         let key = self.app.record_key(&allowance_target(&entry.payee, &id))?;
         let Some(mut checked) = Box::pin(self.executor_base(&key, LedgerRead::Outcome)).await?

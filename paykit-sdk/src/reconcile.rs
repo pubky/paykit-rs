@@ -761,6 +761,12 @@ impl Paykit {
         {
             return Err(Refusal::AlreadyPaid.into());
         }
+        // A payment this installation saw made, from any source and whichever app made the
+        // attempt, is never confirmed `failed` (Paykit spec 7.2, "Failed means definitively
+        // not paid"; 8.3, `failed` releases).
+        if resolution == Resolution::Failed && self.paid_seen(&attempt).await?.is_some() {
+            return Err(Refusal::AlreadyPaid.into());
+        }
         if resolution == Resolution::Done {
             // An own payment the method reported paid: its outcome, with the proof.
             if let Some(mut paid) = entry
@@ -776,6 +782,8 @@ impl Paykit {
                     Written::Divergent(record) => {
                         Err(Box::pin(self.divergent_refusal(record)).await?)
                     }
+                    // Only a failure is refused this way; this writes a payment made.
+                    Written::PaidSeen => Err(Refusal::AlreadyPaid.into()),
                 };
             }
         }

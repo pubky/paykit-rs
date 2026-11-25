@@ -296,6 +296,7 @@ mod tests {
                 retired,
                 facts.clone(),
                 &HashSet::new(),
+                &HashSet::new(),
                 now,
             )
         };
