@@ -89,7 +89,7 @@ pub(super) fn categorized(
 }
 
 fn dispatch_answer(code: ErrorCode, retry_after: Option<u64>) -> AppError {
-    AppError::Switch(ClientError::Switch {
+    AppError::Dispatch(ClientError::Dispatch {
         status: code.status(),
         code,
         message: String::new(),
@@ -227,7 +227,7 @@ fn test_wallet_errors_categorize_each_failure_with_a_stable_code() {
             "dispatch_recovery_required",
         ),
         (
-            PaykitError::Client(AppError::Switch(ClientError::Usage(reason()))),
+            PaykitError::Client(AppError::Dispatch(ClientError::Usage(reason()))),
             "not_sent",
             "client_usage",
         ),
@@ -534,7 +534,7 @@ fn every_refusal_kind() -> Vec<RefusalKind> {
             reason: HeldForUserKind::ReloadRequired,
         },
         RefusalKind::HeldForUser {
-            reason: HeldForUserKind::SwitchClient,
+            reason: HeldForUserKind::DispatchClient,
         },
         RefusalKind::HeldForUser {
             reason: HeldForUserKind::Unresolved,
@@ -626,7 +626,7 @@ fn every_refusal_kind() -> Vec<RefusalKind> {
 /// payment refusals.
 fn every_other_failure() -> Vec<WalletError> {
     let reason = || String::from("reason");
-    let client = |e: ClientError| AppError::Switch(e);
+    let client = |e: ClientError| AppError::Dispatch(e);
     let mut errors: Vec<PaykitError> = ErrorCode::ALL
         .into_iter()
         .map(|code| PaykitError::Client(dispatch_answer(code, None)))
@@ -640,7 +640,7 @@ fn every_other_failure() -> Vec<WalletError> {
         "attempts",
     ] {
         let mut answer = dispatch_answer(ErrorCode::QuotaExceeded, None);
-        if let AppError::Switch(ClientError::Switch { current, .. }) = &mut answer {
+        if let AppError::Dispatch(ClientError::Dispatch { current, .. }) = &mut answer {
             *current = serde_json::json!({ "limit": limit });
         }
         errors.push(PaykitError::Client(answer));
@@ -1010,7 +1010,7 @@ fn every_recovery_kind() -> Vec<RecoveryNeededKind> {
             | HeldForUserKind::AllowanceExecutionHeld
             | HeldForUserKind::AttemptCheck
             | HeldForUserKind::ReloadRequired
-            | HeldForUserKind::SwitchClient
+            | HeldForUserKind::DispatchClient
             | HeldForUserKind::Unresolved
             | HeldForUserKind::PendingProposalsFull
             | HeldForUserKind::AllowanceLedgerFull
@@ -1078,7 +1078,7 @@ fn test_wallet_errors_full_quota_comes_as_what_frees_it() {
         (None, "needs_user", "dispatch_quota_exceeded"),
     ] {
         let mut answer = dispatch_answer(ErrorCode::QuotaExceeded, None);
-        if let (AppError::Switch(ClientError::Switch { current, .. }), Some(limit)) =
+        if let (AppError::Dispatch(ClientError::Dispatch { current, .. }), Some(limit)) =
             (&mut answer, limit)
         {
             *current = serde_json::json!({ "limit": limit });
@@ -1117,7 +1117,7 @@ fn test_wallet_errors_context_carries_no_outside_text() {
     let sentinel = "SENTINEL-outside-text";
     let text = || String::from(sentinel);
     let mut service = dispatch_answer(ErrorCode::Unavailable, None);
-    if let AppError::Switch(ClientError::Switch { message, .. }) = &mut service {
+    if let AppError::Dispatch(ClientError::Dispatch { message, .. }) = &mut service {
         *message = text();
     }
     let errors = [
@@ -1137,14 +1137,14 @@ fn test_wallet_errors_context_carries_no_outside_text() {
         PaykitError::Refused(Refusal::IdentityUnavailable(text())),
         PaykitError::Refused(Refusal::CertificateRefused(text())),
         PaykitError::Refused(Refusal::AttemptFailed(Box::new(Refusal::HeldForUser(
-            paykit_sdk::HeldForUserReason::SwitchClient(text()),
+            paykit_sdk::HeldForUserReason::DispatchClient(text()),
         )))),
         PaykitError::Client(AppError::Alarm(
             pubky_dispatch_client::app::Alarm::Rollback { reason: text() },
         )),
-        PaykitError::Client(AppError::Switch(ClientError::InvalidResponse(text()))),
-        PaykitError::Client(AppError::Switch(ClientError::Usage(text()))),
-        PaykitError::Client(AppError::Switch(ClientError::Transport(
+        PaykitError::Client(AppError::Dispatch(ClientError::InvalidResponse(text()))),
+        PaykitError::Client(AppError::Dispatch(ClientError::Usage(text()))),
+        PaykitError::Client(AppError::Dispatch(ClientError::Transport(
             TransportError::Connect(text()),
         ))),
         PaykitError::Client(AppError::Refused(AppRefusal::Approval(text()))),
@@ -1268,7 +1268,7 @@ fn test_wallet_errors_sdk_refusals_take_the_table_code_through_the_conversion() 
 /// for `storage`.
 fn unsaved_settlement_warning(storage: PaykitError) -> PaykitError {
     let mut answer = dispatch_answer(ErrorCode::QuotaExceeded, None);
-    if let AppError::Switch(ClientError::Switch { current, .. }) = &mut answer {
+    if let AppError::Dispatch(ClientError::Dispatch { current, .. }) = &mut answer {
         *current = serde_json::json!({ "limit": "record_keys" });
     }
     PaykitError::SettlementNoticeUnavailable {
@@ -1324,7 +1324,7 @@ fn test_wallet_errors_failures_after_sending_are_outcome_unknown() {
     use pubky_dispatch_client::error::{ClientError as C, TransportError as T};
     let reason = || String::from("reason");
     let unread = |status, code| {
-        AppError::Switch(C::BodyUnread {
+        AppError::Dispatch(C::BodyUnread {
             status,
             code,
             retry_after: None,
@@ -1343,7 +1343,7 @@ fn test_wallet_errors_failures_after_sending_are_outcome_unknown() {
             "transport_first_send_unavailable",
         ),
         (
-            AppError::Switch(C::Transport(T::FirstSendExpired)),
+            AppError::Dispatch(C::Transport(T::FirstSendExpired)),
             "not_sent",
             "transport_first_send_expired",
         ),
@@ -1364,7 +1364,7 @@ fn test_wallet_errors_failures_after_sending_are_outcome_unknown() {
             "transport_no_answer",
         ),
         (
-            AppError::Switch(C::Transport(T::Timeout)),
+            AppError::Dispatch(C::Transport(T::Timeout)),
             "outcome_unknown",
             "transport_no_answer",
         ),
@@ -1384,12 +1384,12 @@ fn test_wallet_errors_failures_after_sending_are_outcome_unknown() {
             "bad_service_signature",
         ),
         (
-            AppError::Switch(C::BadServiceSignature { status: 502 }),
+            AppError::Dispatch(C::BadServiceSignature { status: 502 }),
             "outcome_unknown",
             "bad_service_signature",
         ),
         (
-            AppError::Switch(C::BadServiceSignature { status: 200 }),
+            AppError::Dispatch(C::BadServiceSignature { status: 200 }),
             "outcome_unknown",
             "bad_service_signature",
         ),
@@ -1414,12 +1414,12 @@ fn test_wallet_errors_failures_after_sending_are_outcome_unknown() {
             "client_unclassified",
         ),
         (
-            AppError::Switch(C::InvalidResponse(reason())),
+            AppError::Dispatch(C::InvalidResponse(reason())),
             "outcome_unknown",
             "invalid_response",
         ),
         (
-            AppError::Switch(C::Core(pubky_dispatch_core::Error::Invalid(reason()))),
+            AppError::Dispatch(C::Core(pubky_dispatch_core::Error::Invalid(reason()))),
             "outcome_unknown",
             "invalid_data",
         ),
@@ -1443,7 +1443,7 @@ fn test_wallet_errors_failures_after_sending_are_outcome_unknown() {
         assert_eq!(kept.kept_batch.as_deref(), Some([5; 16].as_slice()));
     }
     // A delay an unread answer gives comes with the failure, in milliseconds.
-    let delayed = AppError::Switch(C::BodyUnread {
+    let delayed = AppError::Dispatch(C::BodyUnread {
         status: 429,
         code: ErrorCode::RateLimited,
         retry_after: Some(7),

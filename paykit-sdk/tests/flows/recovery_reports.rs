@@ -9,7 +9,7 @@ use pubky_dispatch_client::app::{
     App, Collection as DispatchCollection, RecordApplication, RecordTarget,
 };
 use pubky_dispatch_client::testing::{
-    issue_cert, AppSpec, ProtocolSpec, ScriptedSwitch, TestProtocol,
+    issue_cert, AppSpec, ProtocolSpec, ScriptedDispatch, TestProtocol,
 };
 use pubky_dispatch_core::enc::{b64, lp};
 use pubky_dispatch_core::ops::OpKind;
@@ -58,7 +58,7 @@ enum Change {
 /// Publish signed successors on the recovered service after the report's write.
 fn change_standing(
     w: &World,
-    service: &ScriptedSwitch,
+    service: &ScriptedDispatch,
     app: &App,
     name: &str,
     change: Change,

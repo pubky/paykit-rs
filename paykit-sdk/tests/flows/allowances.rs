@@ -260,21 +260,21 @@ fn signer_of<'a>(w: &'a World, pubky: &[u8; 32]) -> &'a pubky_dispatch_client::t
 async fn accept_elsewhere(w: &World, app: &mut Paykit, record: &[u8; 32]) -> StoredMessage {
     let acceptance = Box::pin(own_acceptance_recorded(app, record)).await;
     let to = signer_of(w, &acceptance.message().to);
-    let doc = to.switch().identity_doc().unwrap();
+    let doc = to.dispatch().identity_doc().unwrap();
     let targets: Vec<[u8; 16]> = doc
         .body()
         .apps
         .iter()
         .map(|listed| listed.app_id)
         .filter(|id| {
-            to.switch().app(id).cert.is_some_and(|cert| {
+            to.dispatch().app(id).cert.is_some_and(|cert| {
                 cert.scopes()
                     .iter()
                     .any(|scope| scope == "paykit_allowance")
             })
         })
         .collect();
-    to.switch()
+    to.dispatch()
         .send_plaintext(
             app.identity(),
             app.app().cert(),
@@ -379,13 +379,13 @@ enum AcceptanceGeneration {
 pub(crate) async fn advance_allowance_generation(
     w: &World,
     payer: &mut Paykit,
-) -> std::sync::Arc<pubky_dispatch_client::testing::ScriptedSwitch> {
+) -> std::sync::Arc<pubky_dispatch_client::testing::ScriptedDispatch> {
     use crate::common::ALICE_ORIGIN;
     use pubky_dispatch_core::records::{Inbox, ServiceKeyEntry};
 
     let previous = payer.app().own_identity().clone();
-    let service = w.alice.switch().change_key_into([74; 32]);
-    w.router.add_switch(ALICE_ORIGIN, &service);
+    let service = w.alice.dispatch().change_key_into([74; 32]);
+    w.router.add_dispatch(ALICE_ORIGIN, &service);
     let doc = w
         .alice
         .sign_next(|body| {
@@ -764,7 +764,7 @@ async fn acceptance_refused(
     let writes = w.record_writes(signer, record);
     let local = app.app().protocol_scan("paykit", b"").await.unwrap();
     signer
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
             path: format!("records/{}", b64_of(record)),
             after: 0,
@@ -847,7 +847,7 @@ async fn receive_without_allowance_view(
 ) -> paykit_sdk::ReceiveSummary {
     let path = format!("records/{}", b64_of(record));
     let before = w.router.log().len();
-    signer_of(w, &app.identity()).switch().fail_next(
+    signer_of(w, &app.identity()).dispatch().fail_next(
         pubky_dispatch_client::testing::Fault::Unreachable {
             path: path.clone(),
             after: 0,
@@ -1868,7 +1868,7 @@ async fn test_allowances_executor_notice_from_another_identity_dropped() {
 fn refuse_writes(w: &World, n: usize) {
     for _ in 0..n {
         w.alice
-            .switch()
+            .dispatch()
             .fail_next(pubky_dispatch_client::testing::Fault::Error {
                 path: "/ops".into(),
                 code: pubky_dispatch_core::http::ErrorCode::PermissionMissing,
@@ -1923,7 +1923,7 @@ async fn sealed_allowance(
     phone.receive(None).await.unwrap();
     Box::pin(accepted(w, phone, &mine, shop, &theirs)).await;
     w.alice.next_doc(|body| body.data_epoch += 1).unwrap();
-    let newest = w.alice.switch().identity_doc().unwrap().data_epoch();
+    let newest = w.alice.dispatch().identity_doc().unwrap().data_epoch();
     let cert = wallet.app().cert().clone();
     crate::unrequested::store_bundle_from(w, wallet.app_id(), &cert, newest);
     wallet.receive(None).await.unwrap();
@@ -2216,7 +2216,7 @@ async fn test_allowances_stop_over_a_readable_record_counted_in_the_bound() {
 /// her apps read them (Dispatch spec 8.2).
 fn missed(w: &World) {
     let now = w.clock.now_ms();
-    w.alice.switch().push_missed(1, now - 1_000, now);
+    w.alice.dispatch().push_missed(1, now - 1_000, now);
 }
 
 #[tokio::test]
@@ -2470,7 +2470,7 @@ async fn sealed_pending_rejection(
         }
     };
     w.alice.next_doc(|doc| doc.data_epoch += 1).unwrap();
-    let epoch = w.alice.switch().identity_doc().unwrap().data_epoch();
+    let epoch = w.alice.dispatch().identity_doc().unwrap().data_epoch();
     crate::unrequested::store_bundle_from(w, phone.app_id(), &phone.app().cert().clone(), epoch);
     phone.receive(None).await.unwrap();
     phone.receive(None).await.unwrap();
@@ -2686,7 +2686,7 @@ async fn test_allowances_restore_withdraws_an_undelivered_proposal() {
     let mut shop = Box::pin(shop(&w)).await;
     let mut wallet = Box::pin(paying_wallet(&w)).await;
     w.bob
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::Error {
             path: "/inbox".into(),
             code: pubky_dispatch_core::http::ErrorCode::Unavailable,
@@ -2812,7 +2812,7 @@ fn competing_proposal(
 ) -> StoredMessage {
     let second = signed_pending_proposal(shop, w.alice_id(), id, "allowee");
     w.alice
-        .switch()
+        .dispatch()
         .send_plaintext(
             w.bob_id(),
             second.cert(),
@@ -3239,7 +3239,7 @@ fn fail_paykit_listing(party: &pubky_dispatch_client::testing::TestSigner, colle
     // would interrupt the next native read instead of Paykit's subsequent listing.
     if collections <= pubky_dispatch_client::app::LISTING_PAGES_PER_READ as usize {
         party
-            .switch()
+            .dispatch()
             .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
                 path: "records?collection".into(),
                 after: collections,
@@ -3300,7 +3300,7 @@ async fn test_allowances_kept_answer_past_30_days_kept_while_unlisted() {
         .advance_ms(paykit_sdk::KEPT_MESSAGE_MS + pubky_dispatch_core::records::DAY_MS);
     shop.app_mut().invite(&w.alice_id()).await.unwrap();
     let now = w.clock.now_ms();
-    w.bob.switch().push_missed(1, now - 1_000, now);
+    w.bob.dispatch().push_missed(1, now - 1_000, now);
     fail_paykit_listing(
         &w.bob,
         crate::certificate::client_listing_requests(shop.app().cert()),
@@ -3594,7 +3594,7 @@ async fn test_allowances_earliest_withdrawal_waits_outside_the_bound_for_its_pen
     let canonical = writer.allowances().await.unwrap()[0].record;
     let writes = w.record_writes(&w.alice, &physical);
     w.alice.next_doc(|doc| doc.data_epoch += 1).unwrap();
-    let newest = w.alice.switch().identity_doc().unwrap().data_epoch();
+    let newest = w.alice.dispatch().identity_doc().unwrap().data_epoch();
     crate::unrequested::store_bundle_from(&w, phone.app_id(), &phone.app().cert().clone(), newest);
     for _ in 0..3 {
         phone.receive(None).await.unwrap();
@@ -3669,7 +3669,7 @@ async fn test_allowances_rejection_whose_proposal_ended_kept_while_a_batch_of_it
 /// keeps its batch to send again.
 fn fill_alices_account(w: &World) {
     w.alice
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::Error {
             path: "/ops".into(),
             code: pubky_dispatch_core::http::ErrorCode::QuotaExceeded,
@@ -4620,7 +4620,7 @@ async fn keeper(w: &World) -> Paykit {
 /// The next read of alice's lists fails.
 fn fail_list_read(w: &World) {
     w.alice
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::Error {
             path: "/allow".into(),
             code: pubky_dispatch_core::http::ErrorCode::Unavailable,
@@ -5043,11 +5043,11 @@ async fn test_allowances_crossing_end_after_an_unanswered_write_reports_its_unkn
     // The withdrawal reaches Alice before the block, and she processes it afterwards.
     shop.end_allowance(&theirs).await.unwrap();
     wallet.block(&w.bob_id()).await.unwrap();
-    w.alice.switch().fail_next(Fault::LoseAnswer {
+    w.alice.dispatch().fail_next(Fault::LoseAnswer {
         path: "/ops".into(),
     });
     for _ in 0..4 {
-        w.alice.switch().fail_next(Fault::Unreachable {
+        w.alice.dispatch().fail_next(Fault::Unreachable {
             path: "/ops".into(),
             after: 0,
         });
@@ -5198,7 +5198,7 @@ async fn backed_up_with_its_answer_unqueued(
     // The Dispatch applies the batch and its answer is lost, so the batch stays kept: the
     // client sends it again only at a later call.
     w.alice
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::LoseAnswer {
             path: "/ops".into(),
         });
@@ -5275,7 +5275,7 @@ async fn restored_unreceived(w: &World, backup: &paykit_sdk::PaykitBackup) -> Pa
 
 async fn queued_rejection(w: &World, wallet: &mut Paykit, canonical: &[u8; 32]) -> String {
     w.bob
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
             path: "/inbox".into(),
             after: 0,
@@ -5330,9 +5330,9 @@ async fn restored_answer(kind: &str) {
             .iter()
             .any(|notice| notice.kind == paykit_sdk::NoticeKind::PossiblyDelivered));
     }
-    let before = w.bob.switch().entries_from(&w.alice_id());
+    let before = w.bob.dispatch().entries_from(&w.alice_id());
     wallet.receive(None).await.unwrap();
-    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), before);
+    assert_eq!(w.bob.dispatch().entries_from(&w.alice_id()), before);
 }
 
 #[tokio::test]
@@ -5450,7 +5450,7 @@ async fn test_allowances_restore_own_rejection_in_a_record_sealed_under_a_key_no
     ))
     .await;
     w.alice.next_doc(|body| body.data_epoch += 1).unwrap();
-    let newest = w.alice.switch().identity_doc().unwrap().data_epoch();
+    let newest = w.alice.dispatch().identity_doc().unwrap().data_epoch();
     crate::unrequested::store_bundle_from(&w, wallet_app, &cert, newest);
     let mut wallet = Box::pin(super::restore_held::restore(&w, &w.alice, storage, &backup)).await;
     let kind = "paykit.allowance_rejection";
@@ -6176,12 +6176,12 @@ async fn test_allowances_restore_sends_no_proposal_after_the_counterpartys_answe
     let mut shop = Box::pin(shop(&w)).await;
     let mut wallet = Box::pin(paying_wallet(&w)).await;
     w.alice
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::LoseAnswer {
             path: "/ops".into(),
         });
     w.alice
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
             path: "/ops".into(),
             after: 0,
@@ -6245,7 +6245,7 @@ async fn test_allowances_end_dropped_for_the_bound_taken_again_from_a_resend() {
     // The proposal never reached Alice. Bob withdraws that queued delivery and ends
     // the Allowance through Paykit, which retains the signed end's producer origin.
     w.alice
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
             path: "/inbox".into(),
             after: 0,
@@ -6392,7 +6392,7 @@ async fn rejection_before_its_pending(
         .clone();
     responder.receive(None).await.unwrap();
     let theirs = responder.allowances().await.unwrap()[0].record;
-    own.switch().fail_next(Fault::Unreachable {
+    own.dispatch().fail_next(Fault::Unreachable {
         path: "/inbox".into(),
         after: 0,
     });
@@ -6402,7 +6402,7 @@ async fn rejection_before_its_pending(
         Some(pubky_dispatch_client::app::Delivery::Queued { .. })
     ));
 
-    peer.switch().fail_next(Fault::Unreachable {
+    peer.dispatch().fail_next(Fault::Unreachable {
         path: "/inbox".into(),
         after: 0,
     });
@@ -6446,7 +6446,7 @@ async fn rejection_before_its_pending(
         accepted,
         1,
         "original {rejected} delivery {delivery_state:?}, recipient tip {}, reads {observed:?}",
-        own.switch().tip_seq()
+        own.dispatch().tip_seq()
     );
     assert_eq!(Box::pin(kept_under(proposer, b"pr/")).await, 1);
     (proposal, sent.allowance_id, rejected)
@@ -6915,7 +6915,7 @@ async fn test_allowances_restore_own_rejection_waits_until_the_current_permanent
     }
     // While the current permanent key can't be read, a try inside a Paykit delivery operation
     // fails and the rejection stays queued, nothing taken.
-    w.alice.switch().fail_next(Fault::Unreachable {
+    w.alice.dispatch().fail_next(Fault::Unreachable {
         path: format!("records/{}", pubky_dispatch_core::enc::b64(&a)),
         after: 0,
     });
@@ -7178,7 +7178,7 @@ async fn test_allowances_expired_response_is_resolved_against_its_original_propo
         );
         if repeat_first {
             w.alice
-                .switch()
+                .dispatch()
                 .send_plaintext(
                     w.bob_id(),
                     accepted.cert(),
@@ -7332,7 +7332,7 @@ async fn test_allowances_discard_with_expired_evidence_requires_the_observed_lif
         if repeat_original {
             let original = pending.proposal();
             w.alice
-                .switch()
+                .dispatch()
                 .send_plaintext(
                     w.bob_id(),
                     original.cert(),
@@ -7674,7 +7674,7 @@ fn inject_with_id(
     msg_id: &str,
 ) {
     let keys = signer.identity().app_keys(app);
-    let cert = signer.switch().app(&keys.app_id_bytes()).cert.unwrap();
+    let cert = signer.dispatch().app(&keys.app_id_bytes()).cert.unwrap();
     let mut message = pubky_dispatch_core::message::Message::new(
         kind,
         pubky_dispatch_core::message::Sender::of_app(signer.identity().public(), &keys),
@@ -7687,7 +7687,7 @@ fn inject_with_id(
     message.msg_id = msg_id.to_owned();
     let plaintext = message.sign(&keys).unwrap();
     w.alice
-        .switch()
+        .dispatch()
         .send_plaintext(signer.identity().public(), &cert, &plaintext, targets)
         .unwrap();
 }
@@ -8088,12 +8088,12 @@ pub(super) async fn dave_app(
             &pubky_dispatch_client::testing::Seeds::default(),
             "dave",
         ),
-        "https://dave-switch.example",
+        "https://dave-dispatch.example",
         std::sync::Arc::clone(&w.clock),
         std::sync::Arc::clone(&w.homeserver),
         crate::common::spec(),
     );
-    w.router.add_switch(dave.origin(), dave.switch());
+    w.router.add_dispatch(dave.origin(), dave.dispatch());
     let app = w.join(&dave, name, scopes).await;
     (dave, app)
 }
@@ -8944,7 +8944,7 @@ async fn test_allowances_refused_answers_of_one_millisecond_placed_in_acceptance
 fn fail_writes_with(w: &World, n: usize, code: pubky_dispatch_core::http::ErrorCode) {
     for _ in 0..n {
         w.alice
-            .switch()
+            .dispatch()
             .fail_next(pubky_dispatch_client::testing::Fault::Error {
                 path: "/ops".into(),
                 code,
@@ -10632,7 +10632,7 @@ async fn discard_after_restore(feed_available: bool) {
     let mut restored = Box::pin(restored_unreceived(&w, &backup)).await;
     if !feed_available {
         w.alice
-            .switch()
+            .dispatch()
             .fail_next(pubky_dispatch_client::testing::Fault::Error {
                 path: "/feed".into(),
                 code: pubky_dispatch_core::http::ErrorCode::Unavailable,
@@ -10774,7 +10774,7 @@ async fn test_pending_record_keeps_the_first_proposal_and_conflict_until_its_ver
     );
 
     // A network interruption does not end the lifetime of either signed role.
-    w.alice.switch().fail_next(Fault::Unreachable {
+    w.alice.dispatch().fail_next(Fault::Unreachable {
         path: "/records/".into(),
         after: 0,
     });
@@ -10801,7 +10801,7 @@ async fn test_pending_record_keeps_the_first_proposal_and_conflict_until_its_ver
     ))
     .await;
     w.alice.next_doc(|doc| doc.data_epoch += 1).unwrap();
-    let epoch = w.alice.switch().identity_doc().unwrap().data_epoch();
+    let epoch = w.alice.dispatch().identity_doc().unwrap().data_epoch();
     crate::unrequested::store_bundle_from(&w, wallet.app_id(), &wallet.app().cert().clone(), epoch);
     wallet.receive(None).await.unwrap();
     wallet.receive(None).await.unwrap();
@@ -11071,7 +11071,7 @@ async fn queued_allowance_after_renewal(
         _ => unreachable!(),
     };
     w.bob
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
             path: "/inbox".into(),
             after: 0,
@@ -11595,7 +11595,7 @@ async fn accept_signed_proposal(
     let offer = signed_pending_proposal(wallet, world.bob_id(), &id, "allower");
     world
         .bob
-        .switch()
+        .dispatch()
         .send_plaintext(
             world.alice_id(),
             wallet.app().cert(),
@@ -11644,7 +11644,7 @@ async fn test_pending_reply_stop_consumes_an_older_stored_answer_at_the_bound() 
     let deliver =
         |wallet: &Paykit, shop: &Paykit, reply: &pubky_dispatch_client::app::SignedMessage| {
             w.alice
-                .switch()
+                .dispatch()
                 .send_plaintext(
                     w.bob_id(),
                     shop.app().cert(),
@@ -11755,7 +11755,7 @@ enum ReplyJourney {
 async fn pending_replies_across_loss(another_loss: bool, journey: ReplyJourney) {
     use paykit_lib::records::PendingAllowanceRecord;
     use pubky_dispatch_client::app::{Collection, FeedPosition, RecordTarget};
-    use pubky_dispatch_client::testing::ScriptedSwitch;
+    use pubky_dispatch_client::testing::ScriptedDispatch;
     use std::sync::Arc;
     let w = World::new();
     let store: Arc<dyn pubky_dispatch_client::store::StateStore> =
@@ -11836,7 +11836,7 @@ async fn pending_replies_across_loss(another_loss: bool, journey: ReplyJourney) 
         .await;
     }
     Box::pin(read_listed_records(&mut wallet)).await;
-    let send = |app: &Paykit, service: &ScriptedSwitch, kind: &str, target: [u8; 16]| {
+    let send = |app: &Paykit, service: &ScriptedDispatch, kind: &str, target: [u8; 16]| {
         let mut message = OutgoingMessage::new(
             w.alice_id(),
             kind,
@@ -13083,7 +13083,7 @@ async fn test_pending_proposal_received_again_after_its_signed_acceptance_stays_
     let mut counter = w.join(&w.bob, "counter", scopes).await;
     counter.app_mut().invite(&w.alice_id()).await.unwrap();
     w.bob
-        .switch()
+        .dispatch()
         .send_plaintext(
             w.alice_id(),
             original.cert(),
@@ -13140,11 +13140,11 @@ fn change_payer_service_key(
     generation: u64,
     old: [u8; 32],
     retain_key: bool,
-) -> std::sync::Arc<pubky_dispatch_client::testing::ScriptedSwitch> {
+) -> std::sync::Arc<pubky_dispatch_client::testing::ScriptedDispatch> {
     use crate::common::ALICE_ORIGIN;
     use pubky_dispatch_core::records::{Inbox, ServiceKeyEntry};
-    let service = w.alice.switch().change_key_into([74; 32]);
-    w.router.add_switch(ALICE_ORIGIN, &service);
+    let service = w.alice.dispatch().change_key_into([74; 32]);
+    w.router.add_dispatch(ALICE_ORIGIN, &service);
     let doc = w
         .alice
         .sign_next(|body| {
@@ -13405,7 +13405,7 @@ async fn carried_loss_withdrawal(keep_key: bool) {
 
     // An in-place service-key change preserves the selected upload and the chain.
     let next = recovered.change_key_into([74; 32]);
-    w.router.add_switch(SWITCH_ORIGIN, &next);
+    w.router.add_dispatch(SWITCH_ORIGIN, &next);
     let advance = w
         .alice
         .sign_next(|doc| {
@@ -13557,7 +13557,7 @@ async fn kept_rejection_across_generations(lost: bool) {
     assert!(proposal.authenticated && proposal.content.value().is_some());
 
     w.alice
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
             path: "/ops".into(),
             after: 0,
@@ -13586,8 +13586,8 @@ async fn kept_rejection_across_generations(lost: bool) {
         use crate::common::ALICE_ORIGIN;
         use pubky_dispatch_core::records::Inbox;
         // Dispatch 12.5 retains the current signed write across a service key change.
-        let service = w.alice.switch().change_key_into([74; 32]);
-        w.router.add_switch(ALICE_ORIGIN, &service);
+        let service = w.alice.dispatch().change_key_into([74; 32]);
+        w.router.add_dispatch(ALICE_ORIGIN, &service);
         let doc = w
             .alice
             .sign_next(|body| {
@@ -13883,7 +13883,7 @@ async fn queued_withdrawal_after_reload(later: LaterProposal) {
     .unwrap();
     wallet.app_mut().release_queued(&w.bob_id()).await.unwrap();
     w.alice
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
             path: format!(
                 "records/{}",
@@ -14028,7 +14028,7 @@ async fn withdraw_before_receiving(case: WithdrawalCase) {
         // interrupt the next service write before it answers.
         wallet.app_mut().receive(None).await.unwrap();
         w.alice
-            .switch()
+            .dispatch()
             .fail_next(pubky_dispatch_client::testing::Fault::Unanswered {
                 path: "/ops".into(),
                 after: 1,
@@ -14261,12 +14261,12 @@ async fn test_pending_capacity_waits_for_a_fresh_listing_after_a_delayed_page() 
         .unwrap();
     shop.receive(None).await.unwrap();
     wallet.receive(None).await.unwrap();
-    let before = w.alice.switch().tip_seq();
+    let before = w.alice.dispatch().tip_seq();
     // The proposal is the same on both pages. A separate, ordinary invitation advances
     // the already verified account history while the earlier listing is in flight.
     phone.app_mut().invite(&w.carol_id()).await.unwrap();
     let complete = wallet.receive(None).await.unwrap().report;
-    assert!(w.alice.switch().tip_seq() > before);
+    assert!(w.alice.dispatch().tip_seq() > before);
     let kind = paykit_lib::Collection::AllowanceProposals;
     let family = Collection::new(kind.name(), kind.fixed_policy());
     assert!(wallet
@@ -14280,7 +14280,7 @@ async fn test_pending_capacity_waits_for_a_fresh_listing_after_a_delayed_page() 
         "records?collection={}",
         pubky_dispatch_core::enc::b64(&collection_id)
     );
-    w.alice.switch().fail_next(Fault::Head {
+    w.alice.dispatch().fail_next(Fault::Head {
         path: page_path.clone(),
         at: Some(before),
         forked: false,
@@ -14294,8 +14294,8 @@ async fn test_pending_capacity_waits_for_a_fresh_listing_after_a_delayed_page() 
         .is_none());
     // A missed entry makes the wallet relist before admitting another proposal.
     missed(&w);
-    let unavailable = w.alice.switch().unreached_bodies().len();
-    w.alice.switch().fail_next(Fault::Unreachable {
+    let unavailable = w.alice.dispatch().unreached_bodies().len();
+    w.alice.dispatch().fail_next(Fault::Unreachable {
         path: page_path,
         after: 0,
     });
@@ -14303,7 +14303,7 @@ async fn test_pending_capacity_waits_for_a_fresh_listing_after_a_delayed_page() 
         .propose_executable_allowance(w.bob_id(), terms(), UserConfirmed::new())
         .await;
     assert!(result.is_err(), "{result:?}");
-    assert_eq!(w.alice.switch().unreached_bodies().len(), unavailable + 1);
+    assert_eq!(w.alice.dispatch().unreached_bodies().len(), unavailable + 1);
     // The interrupted listing requires the wallet to reload before inspecting its outbox.
     let app_id = wallet.app_id();
     drop(wallet);
@@ -14357,7 +14357,7 @@ async fn test_pending_capacity_waits_for_the_key_of_an_earlier_proposal() {
 
     // This wallet holds the current epoch's key but missed the one used for the first proposal.
     w.alice.next_doc(|doc| doc.data_epoch += 1).unwrap();
-    let newest = w.alice.switch().identity_doc().unwrap().data_epoch();
+    let newest = w.alice.dispatch().identity_doc().unwrap().data_epoch();
     let cert = wallet.app().cert().clone();
     crate::unrequested::store_bundle_from(&w, wallet.app_id(), &cert, newest);
     for _ in 0..2 {
@@ -14436,7 +14436,7 @@ async fn test_pending_capacity_resumes_from_a_listing_after_a_withdrawal_leaves_
     assert_eq!(shop.allowances().await.unwrap().len(), 8);
 
     // The wallet misses the phone's two withdrawals while the service advances its checkpoint.
-    let service = w.alice.switch();
+    let service = w.alice.dispatch();
     service.set_retention(Some(Retention {
         checkpoint_behind: 3,
         ..Retention::default()
@@ -15280,7 +15280,7 @@ async fn test_pending_reply_retry_uses_the_same_original_after_an_unanswered_acc
     let mut wallet = Box::pin(paying_wallet(&w)).await;
     let (_, mine) = Box::pin(proposed(&w, &mut shop, &mut wallet)).await;
     w.alice
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::LoseAnswer {
             path: "/ops".into(),
         });
@@ -15349,7 +15349,7 @@ async fn test_pending_unanswered_acceptance_after_restore_observes_the_original_
         .unwrap()
         .unwrap();
     w.alice
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::LoseAnswer {
             path: "/ops".into(),
         });
@@ -15649,7 +15649,7 @@ async fn test_pending_rejection_waits_when_the_second_record_cannot_be_read() {
     let key = alice.app().record_key(&target).unwrap();
     // The preparation reads the permanent key once. Its next GET belongs to delivery.
     w.alice
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
             path: format!("records/{}", pubky_dispatch_core::enc::b64(&key)),
             after: 1,
@@ -16265,7 +16265,7 @@ async fn test_allowances_end_and_executor_notice_wait_under_a_renewal_paykit_ref
     wallet.app_mut().hold_queued(&w.bob_id()).await.unwrap();
     // The executor notice's first try fails, and it is held from then on.
     w.alice
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::Error {
             path: "/inbox".into(),
             code: pubky_dispatch_core::http::ErrorCode::Unavailable,

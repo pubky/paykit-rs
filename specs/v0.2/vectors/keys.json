@@ -138,7 +138,7 @@
       "signing_seed_label": "bob/hosted/signing"
     }
   ],
-  "description": "The fixed keys every other file of this set uses (Switch wire 1.3, 1.5, 3.1). Each secret is BLAKE3(\"paykit/v1/test-vectors/\" + seed label); X25519 secrets (bundle keys) are then clamped as RFC 7748 requires, and Ed25519 secrets are 32-byte seeds. identities holds alice, the payer, and bob, the payee, with their Pubky IDs, their Switch roots, derive(\"pubky-switch/v1/scope-root\", identity secret), and their naming keys, derive(\"pubky-switch/v1/naming\", root), which blind every record key and claim input of this set. apps holds each app with its signing and bundle keys, its App ID and the scopes and switch permissions of its certificate in documents.json certificates: the executor's and the phone's hold paykit_contacts. scope_keys are derive(\"pubky-switch/v1/scope-key\", root, u64(data_epoch), scope), key_material_hex being the input after the label: alice's paykit_pay key under which sealed.json's values are sealed, bob's paykit_request key and the key of his label shop1, which seals sealed.json's labelled record, and bob's paykit_settlements key, which seals sealed.json's settlement_marks. Bob's apps, payee apps, each hold paykit_settlements.",
+  "description": "The fixed keys every other file of this set uses (Switch wire 1.3, 1.5, 3.1). Each secret is BLAKE3(\"paykit/v1/test-vectors/\" + seed label); X25519 secrets (bundle keys) are then clamped as RFC 7748 requires, and Ed25519 secrets are 32-byte seeds. identities holds alice, the payer, and bob, the payee, with their Pubky IDs, their Switch roots, derive(\"pubky-dispatch/v1/scope-root\", identity secret), and their naming keys, derive(\"pubky-dispatch/v1/naming\", root), which blind every record key and claim input of this set. apps holds each app with its signing and bundle keys, its App ID and the scopes and switch permissions of its certificate in documents.json certificates: the executor's and the phone's hold paykit_contacts. scope_keys are derive(\"pubky-dispatch/v1/scope-key\", root, u64(data_epoch), scope), key_material_hex being the input after the label: alice's paykit_pay key under which sealed.json's values are sealed, bob's paykit_request key and the key of his label shop1, which seals sealed.json's labelled record, and bob's paykit_settlements key, which seals sealed.json's settlement_marks. Bob's apps, payee apps, each hold paykit_settlements.",
   "identities": [
     {
       "name": "alice",
@@ -147,7 +147,7 @@
       "public_hex": "f149881e9fb5b6c16f5a70fdae005551024ff70895b7fd499d5e368921b52f0c",
       "secret_hex": "e6a04c3e1b6e394c7e84527ac6c0d51c18251c4c0d8cd3e83674db6b2134b874",
       "seed_label": "alice/identity",
-      "switch_root_hex": "25f576c9daa8ddd87f67727eefadf3624989ca8e4e1fce14c80a40e023a7bc4d"
+      "dispatch_root_hex": "25f576c9daa8ddd87f67727eefadf3624989ca8e4e1fce14c80a40e023a7bc4d"
     },
     {
       "name": "bob",
@@ -156,7 +156,7 @@
       "public_hex": "eb74516b4e85b8ca18a21df66247a5002f24018e00e6f1b90786cf02c820bc07",
       "secret_hex": "7fea2475d18ab1c7256f42fbe72a0cf115f5c24de3792d71a4085f63e827dee3",
       "seed_label": "bob/identity",
-      "switch_root_hex": "1832075ee5bef0026fcda26c57cb8a67b6cfffdf8d43bbcce2107d6cf97f8176"
+      "dispatch_root_hex": "1832075ee5bef0026fcda26c57cb8a67b6cfffdf8d43bbcce2107d6cf97f8176"
     }
   ],
   "scope_keys": [

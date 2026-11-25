@@ -1397,8 +1397,8 @@ mod send_tests {
             let signed = shop2
                 .sign(alice, Kind::PaymentRequestCancellation, vec![[7; 32]], body)
                 .unwrap();
-            let bob_tip = w.bob.switch().tip_seq();
-            let alice_tip = w.alice.switch().tip_seq();
+            let bob_tip = w.bob.dispatch().tip_seq();
+            let alice_tip = w.alice.dispatch().tip_seq();
             let refused = shop2
                 .send_with_record(signed, &target, Role::Cancellation, Vec::new(), Vec::new())
                 .await
@@ -1408,8 +1408,8 @@ mod send_tests {
                 "{label:?}: {refused:?}"
             );
             shop2.receive(None).await.unwrap();
-            assert_eq!(w.bob.switch().tip_seq(), bob_tip, "{label:?}: written");
-            assert_eq!(w.alice.switch().tip_seq(), alice_tip, "{label:?}: sent");
+            assert_eq!(w.bob.dispatch().tip_seq(), bob_tip, "{label:?}: written");
+            assert_eq!(w.alice.dispatch().tip_seq(), alice_tip, "{label:?}: sent");
         }
     }
 }

@@ -83,7 +83,7 @@ async fn produced(w: &World, family: Family) -> (Paykit, Arc<dyn StateStore>, Ve
             }
             wallet.receive(None).await.unwrap();
             let now = w.clock.now_ms();
-            w.alice.switch().push_missed(1, now - 1_000, now);
+            w.alice.dispatch().push_missed(1, now - 1_000, now);
             // Run the real callback, leaving its checkpoints for the SDK's next pass.
             wallet.app_mut().receive(None).await.unwrap();
             if matches!(family, Family::MissedHold) {
@@ -180,7 +180,7 @@ async fn refuse_current(family: Family, how: Damage) {
         )
         .await
         .unwrap();
-    let sends = w.bob.switch().entries_from(&w.alice_id());
+    let sends = w.bob.dispatch().entries_from(&w.alice_id());
     let result = Paykit::load(
         w.env(&w.alice, storage),
         PaykitConfig::default(),
@@ -211,7 +211,7 @@ async fn refuse_current(family: Family, how: Damage) {
         wallet.app().protocol_get("paykit", &key).await.unwrap(),
         Some(bad)
     );
-    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), sends);
+    assert_eq!(w.bob.dispatch().entries_from(&w.alice_id()), sends);
     assert!(w.rail.all_executions().is_empty());
 }
 
@@ -455,7 +455,7 @@ async fn test_recovery_state_restore_regenerates_old_checkpoints() {
     let w = World::new();
     let (mut wallet, _, _, _) = Box::pin(produced(&w, Family::RestoreHold)).await;
     let now = w.clock.now_ms();
-    w.alice.switch().push_missed(1, now - 1_000, now);
+    w.alice.dispatch().push_missed(1, now - 1_000, now);
     wallet.app_mut().receive(None).await.unwrap();
     let missed = wallet
         .app()
@@ -700,14 +700,14 @@ async fn test_recovery_state_restored_answers_remain_uncertain_for_both_counterp
         .unwrap()
         .is_none());
     let delivered = (
-        w.bob.switch().entries_from(&w.alice_id()),
-        w.carol.switch().entries_from(&w.alice_id()),
+        w.bob.dispatch().entries_from(&w.alice_id()),
+        w.carol.dispatch().entries_from(&w.alice_id()),
     );
     loaded.receive(None).await.unwrap();
     assert_eq!(
         (
-            w.bob.switch().entries_from(&w.alice_id()),
-            w.carol.switch().entries_from(&w.alice_id())
+            w.bob.dispatch().entries_from(&w.alice_id()),
+            w.carol.dispatch().entries_from(&w.alice_id())
         ),
         delivered
     );
@@ -776,7 +776,7 @@ async fn checkpoint_own_request(w: &World) -> (Paykit, Arc<dyn StateStore>, Stor
     let mut request = draft("1", w.clock.now_ms());
     request.proposal_expires_at_ms = None;
     w.alice
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::LoseAnswer {
             path: "/ops".into(),
         });
@@ -892,9 +892,9 @@ async fn test_recovery_checkpoint_own_request_retains_its_signed_identity() {
         .await
         .unwrap()
         .is_none());
-    let before = w.bob.switch().entries_from(&w.alice_id());
+    let before = w.bob.dispatch().entries_from(&w.alice_id());
     shop.receive(None).await.unwrap();
-    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), before);
+    assert_eq!(w.bob.dispatch().entries_from(&w.alice_id()), before);
     assert!(w.rail.all_executions().is_empty());
 }
 
@@ -908,12 +908,12 @@ struct PartialAsks {
 async fn checkpoint_partial_asks(w: &World) -> PartialAsks {
     let dave = TestSigner::at(
         TestIdentity::new(&Seeds::default(), "dave"),
-        "https://dave-switch.example",
+        "https://dave-dispatch.example",
         Arc::clone(&w.clock),
         Arc::clone(&w.homeserver),
         crate::common::spec(),
     );
-    w.router.add_switch(dave.origin(), dave.switch());
+    w.router.add_dispatch(dave.origin(), dave.dispatch());
     let missing = dave.identity().public();
     let mut wallet = w.wallet("wallet").await;
     wallet.app_mut().invite(&w.carol_id()).await.unwrap();
@@ -955,7 +955,7 @@ async fn checkpoint_partial_asks(w: &World) -> PartialAsks {
     )
     .await;
     w.alice.next_doc(|body| body.data_epoch += 1).unwrap();
-    let newest = w.alice.switch().identity_doc().unwrap().data_epoch();
+    let newest = w.alice.dispatch().identity_doc().unwrap().data_epoch();
     crate::unrequested::store_bundle_from(w, app_id, &cert, newest);
     let storage = store();
     let mut wallet = restore(w, Arc::clone(&storage), &backup).await;

@@ -947,7 +947,7 @@ mod upkeep_tests {
 
     /// The Dispatch's answer `code`, with `current`.
     fn answered(code: ErrorCode, current: serde_json::Value) -> AppError {
-        AppError::Switch(ClientError::Switch {
+        AppError::Dispatch(ClientError::Dispatch {
             status: code.status(),
             code,
             message: String::new(),
@@ -1049,7 +1049,7 @@ mod upkeep_tests {
                 false,
             ),
         ] {
-            let error = AppError::Switch(error);
+            let error = AppError::Dispatch(error);
             assert_eq!(dispatch_unavailable(&error), try_again, "{error:?}");
             assert_eq!(owed(error.clone()), try_again, "{error:?}");
             assert_eq!(owed(kept(error.clone())), try_again, "{error:?} kept");

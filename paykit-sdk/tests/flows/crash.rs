@@ -266,7 +266,7 @@ async fn crash_receiving_a_receipt(fault: Fault) -> bool {
     // One `done` by evidence reached the Dispatch, whatever the crash.
     let evidence = w
         .alice
-        .switch()
+        .dispatch()
         .applied()
         .iter()
         .filter_map(|op| match &op.body().kind {
@@ -326,7 +326,7 @@ async fn test_crash_receiving_a_receipt_settles_its_claim_once() {
 async fn crash_sending_a_request(fault: Fault) -> bool {
     let w = World::new();
     // The entries alice's inbox accepted are counted after her wallet passed them.
-    w.alice.switch().keep_passed_entries();
+    w.alice.dispatch().keep_passed_entries();
     let mut wallet = w.wallet("wallet").await;
     let base = store();
     let shop = w
@@ -378,7 +378,7 @@ async fn crash_sending_a_request(fault: Fault) -> bool {
         Some(requests[0].request.request_hash),
         sales[0].request_hash
     );
-    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), 1, "{fault:?}");
+    assert_eq!(w.alice.dispatch().entries_from(&w.bob_id()), 1, "{fault:?}");
     hit
 }
 
@@ -393,7 +393,7 @@ async fn test_crash_sending_a_request_keeps_it_and_its_record_together() {
 async fn crash_rejecting(fault: Fault) -> bool {
     let w = World::new();
     // The entries bob's inbox accepted are counted after his shop passed them.
-    w.bob.switch().keep_passed_entries();
+    w.bob.dispatch().keep_passed_entries();
     let base = store();
     let mut wallet = w.wallet_on("wallet", Arc::clone(&base)).await;
     let wallet_id = wallet.app_id();
@@ -422,7 +422,7 @@ async fn crash_rejecting(fault: Fault) -> bool {
     shop.receive(None).await.unwrap();
     if wallet.request(&request).await.unwrap().status != RequestStatus::Rejected {
         // Nothing was written: no rejection went out either, and the user rejects again.
-        assert_eq!(w.bob.switch().entries_from(&w.alice_id()), 0, "{fault:?}");
+        assert_eq!(w.bob.dispatch().entries_from(&w.alice_id()), 0, "{fault:?}");
         wallet.reject_request(&request, None).await.unwrap();
         shop.receive(None).await.unwrap();
     }
@@ -431,7 +431,7 @@ async fn crash_rejecting(fault: Fault) -> bool {
         PayeeStatus::Rejected,
         "{fault:?}"
     );
-    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), 1, "{fault:?}");
+    assert_eq!(w.bob.dispatch().entries_from(&w.alice_id()), 1, "{fault:?}");
     let record = wallet.request(&request).await.unwrap().record;
     // The request record by the receive step, then the rejection: two writes.
     assert_eq!(w.record_writes(&w.alice, &record), 2, "{fault:?}");

@@ -43,7 +43,7 @@ async fn received(w: &World, config: PaykitConfig) -> (Paykit, Paykit, RequestRe
 
 /// The deny list's next read fails.
 fn fail_list_read(w: &World) {
-    w.alice.switch().fail_next(Fault::Error {
+    w.alice.dispatch().fail_next(Fault::Error {
         path: "/allow".into(),
         code: ErrorCode::Unavailable,
         current: serde_json::Value::Null,
@@ -260,7 +260,7 @@ async fn test_blocked_local_block_seen_with_no_read() {
 /// The next `n` calls to alice's Dispatch's `/ops` don't connect: the batch is kept unanswered.
 fn keep_ops(w: &World, n: usize) {
     for _ in 0..n {
-        w.alice.switch().fail_next(Fault::Unreachable {
+        w.alice.dispatch().fail_next(Fault::Unreachable {
             path: "/ops".into(),
             after: 0,
         });
@@ -271,7 +271,7 @@ fn keep_ops(w: &World, n: usize) {
 fn keep_unblock_ops(w: &World, n: usize) {
     assert!(n > 0);
     w.alice
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
             path: "/ops".into(),
             after: 1,
@@ -470,7 +470,7 @@ async fn test_blocked_peer_asked_after_a_missed_item_only_once_unblocked() {
     let (mut wallet, _, _) = received(&w, PaykitConfig::default()).await;
     wallet.block(&w.bob_id()).await.unwrap();
     let now = w.clock.now_ms();
-    w.alice.switch().push_missed(1, now - 1_000, now);
+    w.alice.dispatch().push_missed(1, now - 1_000, now);
     wallet.receive(None).await.unwrap();
     wallet.receive(None).await.unwrap();
     assert!(crate::common::asked(&wallet, &w.bob_id()).await.is_empty());
@@ -515,7 +515,7 @@ async fn test_blocked_peer_asked_after_a_missed_item_only_once_the_deny_list_rea
     fail_list_read(&w);
     fail_list_read(&w);
     let now = w.clock.now_ms();
-    w.alice.switch().push_missed(1, now - 1_000, now);
+    w.alice.dispatch().push_missed(1, now - 1_000, now);
     wallet.receive(None).await.unwrap();
     assert!(crate::common::asked(&wallet, &w.bob_id()).await.is_empty());
     assert_eq!(
@@ -632,7 +632,7 @@ async fn test_blocked_payer_asked_for_dropped_replies_only_once_the_deny_list_re
     let w = World::new();
     let mut shop = shop_with_a_due_mark(&w).await;
     w.clock.advance_ms(paykit_sdk::LISTS_REFRESH_MS);
-    w.bob.switch().fail_next(Fault::Error {
+    w.bob.dispatch().fail_next(Fault::Error {
         path: "/allow".into(),
         code: ErrorCode::Unavailable,
         current: serde_json::Value::Null,
@@ -648,7 +648,7 @@ async fn test_blocked_peer_not_blocked_asked_after_a_missed_item() {
     let w = World::new();
     let (mut wallet, _, _) = received(&w, PaykitConfig::default()).await;
     let now = w.clock.now_ms();
-    w.alice.switch().push_missed(1, now - 1_000, now);
+    w.alice.dispatch().push_missed(1, now - 1_000, now);
     wallet.receive(None).await.unwrap();
     assert_eq!(crate::common::asked(&wallet, &w.bob_id()).await.len(), 1);
 }
@@ -867,7 +867,7 @@ async fn point_reply_mark_at(shop: &mut Paykit, msg_id: &str) {
 async fn test_blocked_mark_cannot_flush_another_queued_message() {
     let w = World::new();
     let mut shop = shop_with_a_due_mark(&w).await;
-    w.alice.switch().fail_next(Fault::Error {
+    w.alice.dispatch().fail_next(Fault::Error {
         path: "/inbox".into(),
         code: ErrorCode::Unavailable,
         current: serde_json::Value::Null,
@@ -881,9 +881,9 @@ async fn test_blocked_mark_cannot_flush_another_queued_message() {
         paykit_sdk::MessageDelivery::Queued { .. }
     ));
     point_reply_mark_at(&mut shop, &request.msg_id).await;
-    let before = w.alice.switch().entries_from(&w.bob_id());
+    let before = w.alice.dispatch().entries_from(&w.bob_id());
     let result = shop.receive(None).await;
-    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), before);
+    assert_eq!(w.alice.dispatch().entries_from(&w.bob_id()), before);
     assert!(crate::common::is_corrupt(&result.unwrap_err()));
 }
 
@@ -896,7 +896,7 @@ async fn test_blocked_peer_ask_held_goes_30_days_after_its_time() {
     let (mut wallet, _, _) = received(&w, PaykitConfig::default()).await;
     wallet.block(&w.bob_id()).await.unwrap();
     let now = w.clock.now_ms();
-    w.alice.switch().push_missed(1, now - 1_000, now);
+    w.alice.dispatch().push_missed(1, now - 1_000, now);
     wallet.receive(None).await.unwrap();
     wallet.receive(None).await.unwrap();
     assert_eq!(
@@ -1400,22 +1400,22 @@ async fn test_blocked_resend_request_to_a_blocked_counterparty_refused_with_noth
     let w = World::new();
     let (mut wallet, _request) = blocked(&w).await;
     let selection = paykit_sdk::ResendSelection::default().with_accepted_from_ms(0);
-    let before = w.bob.switch().entries_from(&w.alice_id());
+    let before = w.bob.dispatch().entries_from(&w.alice_id());
     let refused = wallet
         .request_resend(w.bob_id(), selection.clone())
         .await
         .unwrap_err();
     assert!(blocked_send(&refused), "{refused:?}");
     wallet.flush().await.unwrap();
-    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), before);
+    assert_eq!(w.bob.dispatch().entries_from(&w.alice_id()), before);
     wallet.unblock(&w.bob_id()).await.unwrap();
     wallet.request_resend(w.bob_id(), selection).await.unwrap();
-    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), before + 1);
+    assert_eq!(w.bob.dispatch().entries_from(&w.alice_id()), before + 1);
 }
 
 /// Keep a normally authorized re-send request in the outbox for its next delivery.
 async fn queued_resend(w: &World, wallet: &mut Paykit) -> String {
-    w.bob.switch().fail_next(Fault::Error {
+    w.bob.dispatch().fail_next(Fault::Error {
         path: "/inbox".into(),
         code: ErrorCode::Unavailable,
         current: serde_json::Value::Null,
@@ -1469,7 +1469,7 @@ async fn test_blocked_direct_delivery_requires_a_current_deny_list() {
         .unwrap();
 
     let read = w.clock.now_ms();
-    let before = w.bob.switch().entries_from(&w.alice_id());
+    let before = w.bob.dispatch().entries_from(&w.alice_id());
     w.clock.set_ms(read - 1);
     wallet.app_mut().flush_outbox().await.unwrap();
     for id in [&ask, &offer] {
@@ -1496,7 +1496,7 @@ async fn test_blocked_direct_delivery_requires_a_current_deny_list() {
     for id in [&ask, &offer] {
         assert!(!may_send(&wallet, id).await);
     }
-    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), before);
+    assert_eq!(w.bob.dispatch().entries_from(&w.alice_id()), before);
 
     phone.unblock(&bob).await.unwrap();
     w.clock.advance_ms(paykit_sdk::LISTS_REFRESH_MS);
@@ -1508,7 +1508,7 @@ async fn test_blocked_direct_delivery_requires_a_current_deny_list() {
         .unwrap();
     wallet.flush().await.unwrap();
     assert!(may_send(&wallet, &offer).await);
-    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), before + 1);
+    assert_eq!(w.bob.dispatch().entries_from(&w.alice_id()), before + 1);
 }
 
 #[tokio::test]
@@ -1517,15 +1517,15 @@ async fn test_blocked_queued_resend_waits_for_permission_to_deliver() {
     let (mut wallet, _shop, _) = received(&w, PaykitConfig::default()).await;
     let id = Box::pin(queued_resend(&w, &mut wallet)).await;
     assert!(may_send(&wallet, &id).await);
-    let before = w.bob.switch().entries_from(&w.alice_id());
+    let before = w.bob.dispatch().entries_from(&w.alice_id());
     wallet.block(&w.bob_id()).await.unwrap();
     assert!(!may_send(&wallet, &id).await);
     wallet.app_mut().flush_outbox().await.unwrap();
-    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), before);
+    assert_eq!(w.bob.dispatch().entries_from(&w.alice_id()), before);
     wallet.unblock(&w.bob_id()).await.unwrap();
     wallet.receive(None).await.unwrap();
     wallet.flush_outbox_in_delivery().await.unwrap();
-    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), before + 1);
+    assert_eq!(w.bob.dispatch().entries_from(&w.alice_id()), before + 1);
 }
 
 #[tokio::test]
@@ -1549,7 +1549,7 @@ async fn test_blocked_queued_resend_checks_current_contacts_and_the_deny_copy() 
     wallet.receive(None).await.unwrap();
     assert_eq!(wallet.app().cert().hash(), renewed.hash());
     assert!(!may_send(&wallet, &id).await);
-    let before = w.bob.switch().entries_from(&w.alice_id());
+    let before = w.bob.dispatch().entries_from(&w.alice_id());
     wallet
         .app_mut()
         .release_message(
@@ -1560,7 +1560,7 @@ async fn test_blocked_queued_resend_checks_current_contacts_and_the_deny_copy() 
         .await
         .unwrap();
     wallet.app_mut().flush_outbox().await.unwrap();
-    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), before);
+    assert_eq!(w.bob.dispatch().entries_from(&w.alice_id()), before);
 }
 
 #[tokio::test]
@@ -1574,7 +1574,7 @@ async fn test_blocked_resend_request_while_the_deny_list_is_unknown_refused_with
     fail_list_read(&w);
     wallet.receive(None).await.unwrap();
     let selection = paykit_sdk::ResendSelection::default().with_accepted_from_ms(0);
-    let before = w.bob.switch().entries_from(&w.alice_id());
+    let before = w.bob.dispatch().entries_from(&w.alice_id());
     fail_list_read(&w);
     let refused = wallet
         .request_resend(w.bob_id(), selection.clone())
@@ -1582,9 +1582,9 @@ async fn test_blocked_resend_request_while_the_deny_list_is_unknown_refused_with
         .unwrap_err();
     assert!(Held::Unknown.refused(&refused), "{refused:?}");
     wallet.flush().await.unwrap();
-    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), before);
+    assert_eq!(w.bob.dispatch().entries_from(&w.alice_id()), before);
     wallet.request_resend(w.bob_id(), selection).await.unwrap();
-    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), before + 1);
+    assert_eq!(w.bob.dispatch().entries_from(&w.alice_id()), before + 1);
 }
 
 /// Bob is blocked; the wallet's unblock is then kept unanswered, and its batch dropped: sent
@@ -1594,7 +1594,7 @@ async fn unblock_dropped_then_blocked_by_the_phone(w: &World, wallet: &mut Payki
     wallet.block(&w.bob_id()).await.unwrap();
     keep_unblock_ops(w, 1);
     wallet.unblock(&w.bob_id()).await.unwrap();
-    w.alice.switch().fail_next(Fault::Error {
+    w.alice.dispatch().fail_next(Fault::Error {
         path: "/ops".into(),
         code: ErrorCode::Conflict,
         current: serde_json::Value::Null,
@@ -2106,7 +2106,7 @@ async fn answer_held(held: Held, answer: Answer, between: Between) {
         .unwrap()
         .version;
     let queued = counts.outbox.load(std::sync::atomic::Ordering::SeqCst);
-    let entries = w.bob.switch().entries_from(&w.alice_id());
+    let entries = w.bob.dispatch().entries_from(&w.alice_id());
 
     let msg_id = answer.give(&mut wallet, &request).await.unwrap();
     flush_held(&w, &mut wallet, held).await;
@@ -2164,7 +2164,7 @@ async fn answer_held(held: Held, answer: Answer, between: Between) {
         "{held:?} {answer:?}"
     );
     assert!(wallet.app().delivery(&msg_id).await.unwrap().is_none());
-    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), entries);
+    assert_eq!(w.bob.dispatch().entries_from(&w.alice_id()), entries);
 
     let mut wallet = match between {
         Between::Nothing => wallet,
@@ -2193,7 +2193,7 @@ async fn answer_held(held: Held, answer: Answer, between: Between) {
     }
     assert!(wallet.app().delivery(&msg_id).await.unwrap().is_none());
     assert_eq!(
-        w.bob.switch().entries_from(&w.alice_id()),
+        w.bob.dispatch().entries_from(&w.alice_id()),
         entries,
         "{held:?} {answer:?} {between:?}"
     );
@@ -2209,21 +2209,21 @@ async fn answer_held(held: Held, answer: Answer, between: Between) {
     if matches!(between, Between::Restore) {
         assert!(crate::common::possibly_delivered(&wallet, &msg_id).await);
         wallet.flush().await.unwrap();
-        assert_eq!(w.bob.switch().entries_from(&w.alice_id()), entries);
+        assert_eq!(w.bob.dispatch().entries_from(&w.alice_id()), entries);
         return;
     }
     // Once bob can receive, the held answer goes once. A clean restore owes no block ask.
     let asks = crate::common::asked(&wallet, &w.bob_id()).await.len();
     assert_eq!(asks, 0);
     assert_eq!(
-        w.bob.switch().entries_from(&w.alice_id()),
+        w.bob.dispatch().entries_from(&w.alice_id()),
         entries + 1 + asks,
         "{held:?} {answer:?} {between:?}"
     );
     wallet.receive(None).await.unwrap();
     wallet.flush().await.unwrap();
     assert_eq!(
-        w.bob.switch().entries_from(&w.alice_id()),
+        w.bob.dispatch().entries_from(&w.alice_id()),
         entries + 1 + asks,
         "{held:?} {answer:?} {between:?}"
     );
@@ -2279,8 +2279,8 @@ async fn test_blocked_held_rejection_kept_unanswered_resumed_with_nothing_sent()
     let w = World::new();
     let (mut wallet, mut shop, request) = received(&w, PaykitConfig::default()).await;
     wallet.block(&w.bob_id()).await.unwrap();
-    let entries = w.bob.switch().entries_from(&w.alice_id());
-    w.alice.switch().fail_next(Fault::LoseAnswer {
+    let entries = w.bob.dispatch().entries_from(&w.alice_id());
+    w.alice.dispatch().fail_next(Fault::LoseAnswer {
         path: "/ops".into(),
     });
     let kept = wallet.reject_request(&request, None).await;
@@ -2293,11 +2293,11 @@ async fn test_blocked_held_rejection_kept_unanswered_resumed_with_nothing_sent()
         wallet.request(&request).await.unwrap().status,
         RequestStatus::Rejected
     );
-    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), entries);
+    assert_eq!(w.bob.dispatch().entries_from(&w.alice_id()), entries);
     wallet.unblock(&w.bob_id()).await.unwrap();
     wallet.receive(None).await.unwrap();
     wallet.receive(None).await.unwrap();
-    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), entries + 1);
+    assert_eq!(w.bob.dispatch().entries_from(&w.alice_id()), entries + 1);
     shop.receive(None).await.unwrap();
     assert_eq!(
         shop.payee_activity().await.unwrap()[0].status,
@@ -2330,7 +2330,7 @@ async fn test_blocked_held_rejection_kept_while_its_record_doesnt_read() {
     let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
     wallet.receive(None).await.unwrap();
     wallet.block(&w.bob_id()).await.unwrap();
-    let entries = w.bob.switch().entries_from(&w.alice_id());
+    let entries = w.bob.dispatch().entries_from(&w.alice_id());
     wallet.reject_request(&request, None).await.unwrap();
     phone.receive(None).await.unwrap();
     let target = crate::outcome_record::payer_record(&request);
@@ -2365,14 +2365,14 @@ async fn test_blocked_held_rejection_kept_while_its_record_doesnt_read() {
             .len(),
         1
     );
-    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), entries);
+    assert_eq!(w.bob.dispatch().entries_from(&w.alice_id()), entries);
     assert!(wallet.notices().await.unwrap().is_empty());
     phone.receive(None).await.unwrap();
     crate::outcome_record::phone_writes(&mut phone, &request, Some(&good)).await;
     for _ in 0..2 {
         wallet.receive(None).await.unwrap();
     }
-    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), entries + 1);
+    assert_eq!(w.bob.dispatch().entries_from(&w.alice_id()), entries + 1);
     assert!(wallet
         .app()
         .protocol_scan("paykit", b"ha/")
@@ -2396,7 +2396,7 @@ async fn test_blocked_held_rejection_past_its_window_given_up_with_a_notice() {
     let (mut wallet, _shop, request) = received(&w, PaykitConfig::default()).await;
     let mut phone = w.wallet("phone").await;
     wallet.block(&w.bob_id()).await.unwrap();
-    let entries = w.bob.switch().entries_from(&w.alice_id());
+    let entries = w.bob.dispatch().entries_from(&w.alice_id());
     let msg_id = wallet.reject_request(&request, None).await.unwrap();
     w.clock.advance_ms(31 * 24 * crate::common::HOUR_MS);
     wallet.receive(None).await.unwrap();
@@ -2404,7 +2404,7 @@ async fn test_blocked_held_rejection_past_its_window_given_up_with_a_notice() {
     wallet.unblock(&w.bob_id()).await.unwrap();
     wallet.receive(None).await.unwrap();
     wallet.flush().await.unwrap();
-    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), entries);
+    assert_eq!(w.bob.dispatch().entries_from(&w.alice_id()), entries);
     let notices = wallet.notices().await.unwrap();
     assert_eq!(notices.len(), 1, "{notices:?}");
     assert_eq!(notices[0].kind, paykit_sdk::NoticeKind::MessageGivenUp);
@@ -2414,7 +2414,7 @@ async fn test_blocked_held_rejection_past_its_window_given_up_with_a_notice() {
     // Raised once: a later receive neither raises it again nor sends anything.
     wallet.receive(None).await.unwrap();
     assert_eq!(wallet.notices().await.unwrap().len(), 1);
-    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), entries);
+    assert_eq!(w.bob.dispatch().entries_from(&w.alice_id()), entries);
     let record = wallet.request(&request).await.unwrap().record;
     let held = wallet.app().shared_record(&record).await.unwrap().unwrap();
     let value: serde_json::Value = serde_json::from_slice(held.content.value().unwrap()).unwrap();
@@ -2487,7 +2487,7 @@ async fn acceptance_held(held: Held) {
         .unwrap()
         .version;
     let queued = counts.queued.load(std::sync::atomic::Ordering::SeqCst);
-    let entries = w.bob.switch().entries_from(&w.alice_id());
+    let entries = w.bob.dispatch().entries_from(&w.alice_id());
 
     let refused = wallet.accept_subscription(&request).await.unwrap_err();
     let Some(Refusal::Blocked { payment }) = refused.refusal().cloned() else {
@@ -2520,7 +2520,7 @@ async fn acceptance_held(held: Held) {
         queued,
         "{held:?}"
     );
-    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), entries);
+    assert_eq!(w.bob.dispatch().entries_from(&w.alice_id()), entries);
 
     wallet
         .accept_subscription_with(&request, confirmed)
@@ -2531,7 +2531,7 @@ async fn acceptance_held(held: Held) {
         wallet.request(&request).await.unwrap().status,
         RequestStatus::Blocked
     );
-    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), entries + 1);
+    assert_eq!(w.bob.dispatch().entries_from(&w.alice_id()), entries + 1);
     let after = wallet.app().shared_record(&record).await.unwrap().unwrap();
     let value: serde_json::Value = serde_json::from_slice(after.content.value().unwrap()).unwrap();
     assert!(!value["response"].is_null(), "{value}");
@@ -2598,7 +2598,7 @@ async fn test_blocked_confirmed_payment_while_the_deny_list_is_unknown_refused()
     // spec 8.1, "How fresh the deny list is").
     let w = World::new();
     let (mut wallet, request, paid, _) = blocked_then_unknown(&w).await;
-    let entries = w.bob.switch().entries_from(&w.alice_id());
+    let entries = w.bob.dispatch().entries_from(&w.alice_id());
     fail_list_read(&w);
     let refused = wallet
         .pay_request(&request, PayOptions::default().with_blocked_confirmed(paid))
@@ -2608,7 +2608,7 @@ async fn test_blocked_confirmed_payment_while_the_deny_list_is_unknown_refused()
     wallet.flush().await.unwrap();
     assert!(w.rail.all_executions().is_empty());
     assert!(wallet.payments().await.unwrap().is_empty());
-    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), entries);
+    assert_eq!(w.bob.dispatch().entries_from(&w.alice_id()), entries);
 }
 
 #[tokio::test]
@@ -2617,7 +2617,7 @@ async fn test_blocked_confirmed_payment_without_a_request_while_the_deny_list_is
     // request reaches bob.
     let w = World::new();
     let (mut wallet, _, _, unrequested) = blocked_then_unknown(&w).await;
-    let entries = w.bob.switch().entries_from(&w.alice_id());
+    let entries = w.bob.dispatch().entries_from(&w.alice_id());
     fail_list_read(&w);
     let refused = wallet
         .pay_without_request(unrequested_payment(
@@ -2630,7 +2630,7 @@ async fn test_blocked_confirmed_payment_without_a_request_while_the_deny_list_is
     wallet.flush().await.unwrap();
     assert!(w.rail.all_executions().is_empty());
     assert!(wallet.payments().await.unwrap().is_empty());
-    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), entries);
+    assert_eq!(w.bob.dispatch().entries_from(&w.alice_id()), entries);
 }
 
 /// Alice's wallet holds bob's request but no list of his, and its sends to bob are then
@@ -2649,7 +2649,7 @@ async fn no_list_asked_while_held(held: Held) {
             fail_list_read(&w);
         }
     }
-    let entries = w.bob.switch().entries_from(&w.alice_id());
+    let entries = w.bob.dispatch().entries_from(&w.alice_id());
     let refused = wallet
         .pay_without_request(unrequested_payment(&w, PayOptions::default()))
         .await
@@ -2663,7 +2663,7 @@ async fn no_list_asked_while_held(held: Held) {
         ),
     }
     wallet.flush().await.unwrap();
-    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), entries);
+    assert_eq!(w.bob.dispatch().entries_from(&w.alice_id()), entries);
     if let Held::Blocked = held {
         wallet.unblock(&w.bob_id()).await.unwrap();
     }
@@ -2676,7 +2676,7 @@ async fn no_list_asked_while_held(held: Held) {
         matches!(waits.refusal(), Some(Refusal::WaitingForList { .. })),
         "{waits:?}"
     );
-    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), entries + 1);
+    assert_eq!(w.bob.dispatch().entries_from(&w.alice_id()), entries + 1);
     assert!(w.rail.all_executions().is_empty());
 }
 
@@ -2715,7 +2715,7 @@ async fn contacts_seller_wallet(
 
 /// The next read of bob's lists fails.
 fn fail_bobs_list_read(w: &World) {
-    w.bob.switch().fail_next(Fault::Error {
+    w.bob.dispatch().fail_next(Fault::Error {
         path: "/allow".into(),
         code: ErrorCode::Unavailable,
         current: serde_json::Value::Null,
@@ -2766,7 +2766,7 @@ async fn refused_first_share(held: Held, previously_withdrawn: bool) {
     }
     let prior = if previously_withdrawn { 2 } else { 0 };
     assert_eq!(w.record_writes(&w.bob, &key), prior);
-    let delivered = w.alice.switch().entries_from(&w.bob_id());
+    let delivered = w.alice.dispatch().entries_from(&w.bob_id());
     hold_publication(&w, &mut shop, held).await;
     let err = shop.publish_list_to(recipient).await.unwrap_err();
     assert!(held.refused(&err), "{err}");
@@ -2792,11 +2792,11 @@ async fn refused_first_share(held: Held, previously_withdrawn: bool) {
         prior,
         "{held:?}, previously withdrawn {previously_withdrawn}"
     );
-    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), delivered);
+    assert_eq!(w.alice.dispatch().entries_from(&w.bob_id()), delivered);
     assert!(shop.queued_in_delivery().await.unwrap().is_empty());
     shop.publish_list_to(recipient).await.unwrap();
     assert_eq!(w.record_writes(&w.bob, &key), prior + 1);
-    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), delivered + 1);
+    assert_eq!(w.alice.dispatch().entries_from(&w.bob_id()), delivered + 1);
 }
 
 #[tokio::test]
@@ -2899,7 +2899,7 @@ async fn request_held(held: Held, recurring: bool) {
         }
     }
     let queued = counts.queued.load(std::sync::atomic::Ordering::SeqCst);
-    let entries = w.alice.switch().entries_from(&w.bob_id());
+    let entries = w.alice.dispatch().entries_from(&w.bob_id());
 
     let refused = seller_wallet
         .send_request(w.alice_id(), draft(&w))
@@ -2916,13 +2916,13 @@ async fn request_held(held: Held, recurring: bool) {
         seller_wallet.payee_activity().await.unwrap().is_empty(),
         "{held:?}"
     );
-    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), entries);
+    assert_eq!(w.alice.dispatch().entries_from(&w.bob_id()), entries);
 
     if let Held::Blocked = held {
         seller_wallet.unblock(&w.alice_id()).await.unwrap();
     }
     let request = request_from(&mut seller_wallet, w.alice_id(), draft(&w)).await;
-    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), entries + 1);
+    assert_eq!(w.alice.dispatch().entries_from(&w.bob_id()), entries + 1);
     wallet.receive(None).await.unwrap();
     let view = wallet.request(&request).await.unwrap();
     assert_eq!(view.status, RequestStatus::Open);
@@ -2984,7 +2984,7 @@ async fn details_held(held: Held) {
         }
     }
     let queued = counts.queued.load(std::sync::atomic::Ordering::SeqCst);
-    let entries = w.alice.switch().entries_from(&w.bob_id());
+    let entries = w.alice.dispatch().entries_from(&w.bob_id());
     let details = || crate::periods::january_details(w.clock.now_ms() + 24 * HOUR_MS);
 
     let refused = seller_wallet
@@ -3004,7 +3004,7 @@ async fn details_held(held: Held) {
             .is_empty(),
         "{held:?}"
     );
-    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), entries);
+    assert_eq!(w.alice.dispatch().entries_from(&w.bob_id()), entries);
 
     if let Held::Blocked = held {
         seller_wallet.unblock(&w.alice_id()).await.unwrap();
@@ -3013,7 +3013,7 @@ async fn details_held(held: Held) {
         .send_period_details(&sale, details())
         .await
         .unwrap();
-    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), entries + 1);
+    assert_eq!(w.alice.dispatch().entries_from(&w.bob_id()), entries + 1);
     wallet.receive(None).await.unwrap();
     let view = wallet.request(&request).await.unwrap();
     assert!(
@@ -3052,7 +3052,7 @@ async fn test_blocked_period_details_from_an_app_without_contacts_sent_while_the
     shop.receive(None).await.unwrap();
     let sale = shop.payee_activity().await.unwrap()[0].record;
     fail_bobs_list_read(&w);
-    let entries = w.alice.switch().entries_from(&w.bob_id());
+    let entries = w.alice.dispatch().entries_from(&w.bob_id());
     let sent = shop
         .send_period_details(
             &sale,
@@ -3060,7 +3060,7 @@ async fn test_blocked_period_details_from_an_app_without_contacts_sent_while_the
         )
         .await
         .unwrap();
-    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), entries + 1);
+    assert_eq!(w.alice.dispatch().entries_from(&w.bob_id()), entries + 1);
     wallet.receive(None).await.unwrap();
     let view = wallet.request(&request).await.unwrap();
     assert!(
@@ -3079,9 +3079,9 @@ async fn test_blocked_request_from_an_app_without_contacts_sent_while_the_lists_
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
     fail_bobs_list_read(&w);
-    let entries = w.alice.switch().entries_from(&w.bob_id());
+    let entries = w.alice.dispatch().entries_from(&w.bob_id());
     let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
-    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), entries + 1);
+    assert_eq!(w.alice.dispatch().entries_from(&w.bob_id()), entries + 1);
     wallet.receive(None).await.unwrap();
     assert_eq!(
         wallet.request(&request).await.unwrap().status,
@@ -3171,7 +3171,7 @@ async fn test_blocked_subscription_cancellation_recorded_and_held_rejection_refu
     let record = wallet.request(&request).await.unwrap().record;
     let version = |held: Option<pubky_dispatch_client::app::SharedRecord>| held.unwrap().version;
     let before = version(wallet.app().shared_record(&record).await.unwrap());
-    let entries = w.bob.switch().entries_from(&w.alice_id());
+    let entries = w.bob.dispatch().entries_from(&w.alice_id());
     let refused = wallet.reject_request(&request, None).await.unwrap_err();
     assert_eq!(refused.refusal(), Some(&Refusal::Subscribed));
     assert_eq!(
@@ -3190,7 +3190,7 @@ async fn test_blocked_subscription_cancellation_recorded_and_held_rejection_refu
         .await
         .unwrap()
         .is_empty());
-    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), entries);
+    assert_eq!(w.bob.dispatch().entries_from(&w.alice_id()), entries);
 }
 
 #[tokio::test]
@@ -3234,7 +3234,7 @@ async fn test_blocked_restore_reports_a_held_rejection_once_its_record_reads() {
     .await
     .unwrap();
     wallet.unblock(&w.bob_id()).await.unwrap();
-    let entries = w.bob.switch().entries_from(&w.alice_id());
+    let entries = w.bob.dispatch().entries_from(&w.alice_id());
     for _ in 0..2 {
         wallet.receive(None).await.unwrap();
     }
@@ -3248,7 +3248,7 @@ async fn test_blocked_restore_reports_a_held_rejection_once_its_record_reads() {
     assert!(sent
         .iter()
         .all(|message| message.kind == "paykit.resend_request"));
-    let after_asks = w.bob.switch().entries_from(&w.alice_id());
+    let after_asks = w.bob.dispatch().entries_from(&w.alice_id());
     assert_eq!(after_asks, entries + sent.len());
     assert!(wallet.app().delivery(&rejection).await.unwrap().is_none());
     assert!(wallet
@@ -3269,7 +3269,7 @@ async fn test_blocked_restore_reports_a_held_rejection_once_its_record_reads() {
     crate::periods::writes_value(&mut phone, &target, &good).await;
     wallet.receive(None).await.unwrap();
     assert!(crate::common::possibly_delivered(&wallet, &rejection).await);
-    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), after_asks);
+    assert_eq!(w.bob.dispatch().entries_from(&w.alice_id()), after_asks);
     assert!(wallet
         .app()
         .protocol_get("paykit", b"ro")
@@ -3283,7 +3283,7 @@ async fn test_blocked_restore_reports_a_held_rejection_once_its_record_reads() {
         .unwrap()
         .is_empty());
     wallet.receive(None).await.unwrap();
-    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), after_asks);
+    assert_eq!(w.bob.dispatch().entries_from(&w.alice_id()), after_asks);
 }
 
 /// The protocol's verdict on each message the client's outbox holds, by kind and `msg_id`.
@@ -3877,7 +3877,7 @@ async fn test_blocked_rejection_held_in_the_outbox_given_up_past_its_replay_wind
     assert_eq!(given_up_notices(&w, &wallet, &rejection, &request).await, 0);
     // At the first receive at which the copy is known and doesn't hold bob, its outbox copy
     // ends and the host is told, once; nothing of it goes.
-    let before = w.bob.switch().entries_from(&w.alice_id());
+    let before = w.bob.dispatch().entries_from(&w.alice_id());
     wallet.unblock(&w.bob_id()).await.unwrap();
     wallet.app_mut().release_queued(&w.bob_id()).await.unwrap();
     wallet.receive(None).await.unwrap();
@@ -3886,7 +3886,7 @@ async fn test_blocked_rejection_held_in_the_outbox_given_up_past_its_replay_wind
     wallet.flush().await.unwrap();
     wallet.receive(None).await.unwrap();
     assert_eq!(given_up_notices(&w, &wallet, &rejection, &request).await, 1);
-    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), before);
+    assert_eq!(w.bob.dispatch().entries_from(&w.alice_id()), before);
     shop.receive(None).await.unwrap();
     assert_eq!(
         sale_status(&shop, &request).await,
@@ -3949,14 +3949,14 @@ async fn test_blocked_request_held_in_the_outbox_goes_once_unblocked() {
     shop.app_mut().release_queued(&w.alice_id()).await.unwrap();
     // Nothing gives a held request up: it waits while sends to alice are held, and goes once
     // they aren't (Paykit spec 8.1, "Messages already queued").
-    let before = w.alice.switch().entries_from(&w.bob_id());
+    let before = w.alice.dispatch().entries_from(&w.bob_id());
     shop.flush().await.unwrap();
-    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), before);
+    assert_eq!(w.alice.dispatch().entries_from(&w.bob_id()), before);
     assert_eq!(verdict(&shop, &request).await, Some(false));
     shop.unblock(&w.alice_id()).await.unwrap();
     shop.flush().await.unwrap();
     assert_eq!(verdict(&shop, &request).await, None);
-    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), before + 1);
+    assert_eq!(w.alice.dispatch().entries_from(&w.bob_id()), before + 1);
     wallet.receive(None).await.unwrap();
     assert_eq!(wallet.requests().await.unwrap().len(), 1);
 }
@@ -4099,10 +4099,10 @@ async fn test_blocked_stops_past_their_replay_window_never_go() {
     for msg_id in [&rejection, &cancellation] {
         assert_eq!(verdict(&wallet, msg_id).await, Some(false), "{msg_id}");
     }
-    let before = w.bob.switch().entries_from(&w.alice_id());
+    let before = w.bob.dispatch().entries_from(&w.alice_id());
     wallet.app_mut().release_queued(&w.bob_id()).await.unwrap();
     wallet.app_mut().flush_outbox().await.unwrap();
-    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), before);
+    assert_eq!(w.bob.dispatch().entries_from(&w.alice_id()), before);
 }
 
 #[tokio::test]
@@ -4130,7 +4130,7 @@ async fn test_blocked_withdrawal_goes_first_and_on_retry_but_its_resend_waits() 
     // (Paykit spec 8.1, "Messages already queued").
     assert_eq!(verdict(&shop, &withdrawal).await, Some(true));
     shop.app_mut().release_queued(&w.alice_id()).await.unwrap();
-    w.alice.switch().fail_next(Fault::Unreachable {
+    w.alice.dispatch().fail_next(Fault::Unreachable {
         path: "/inbox".into(),
         after: 0,
     });
@@ -4339,7 +4339,7 @@ async fn test_blocked_stop_tried_its_record_deleted_reported_possibly_delivered(
     let rejection = wallet.reject_request(&request, None).await.unwrap();
     // One try reaches bob's Dispatch, its answer lost: its outcome is unknown.
     wallet.app_mut().release_queued(&w.bob_id()).await.unwrap();
-    w.bob.switch().fail_next(Fault::LoseAnswer {
+    w.bob.dispatch().fail_next(Fault::LoseAnswer {
         path: "/inbox".into(),
     });
     wallet.flush_outbox_in_delivery().await.unwrap();
@@ -4454,7 +4454,7 @@ async fn test_blocked_stop_under_a_certificate_without_contacts_waits_for_the_or
         wallet.app_mut().release_queued(&w.bob_id()).await.unwrap();
         // Renewed without `paykit_contacts`, the app can't decide bob isn't blocked: the stop
         // is neither sent, nor given up, nor announced (Paykit spec 3.1, 8.1).
-        let before = w.bob.switch().entries_from(&w.alice_id());
+        let before = w.bob.dispatch().entries_from(&w.alice_id());
         renew_wallet(&w, &mut wallet, AppScopes::new().allowance(), 1_000).await;
         if past {
             w.clock.advance_ms(31 * 24 * HOUR_MS);
@@ -4462,7 +4462,11 @@ async fn test_blocked_stop_under_a_certificate_without_contacts_waits_for_the_or
         wallet.receive(None).await.unwrap();
         wallet.flush().await.unwrap();
         wallet.app_mut().flush_outbox().await.unwrap();
-        assert_eq!(w.bob.switch().entries_from(&w.alice_id()), before, "{past}");
+        assert_eq!(
+            w.bob.dispatch().entries_from(&w.alice_id()),
+            before,
+            "{past}"
+        );
         assert_eq!(verdict(&wallet, &rejection).await, Some(false), "{past}");
         assert_eq!(notices_of(&wallet, &rejection).await, 0, "{past}");
         // The scope back, the ordinary rule runs: sent in its window, else given up and told
@@ -4476,7 +4480,7 @@ async fn test_blocked_stop_under_a_certificate_without_contacts_waits_for_the_or
         wallet.receive(None).await.unwrap();
         shop.receive(None).await.unwrap();
         if past {
-            assert_eq!(w.bob.switch().entries_from(&w.alice_id()), before);
+            assert_eq!(w.bob.dispatch().entries_from(&w.alice_id()), before);
             assert_eq!(verdict(&wallet, &rejection).await, None);
             assert_eq!(given_up_notices(&w, &wallet, &rejection, &request).await, 1);
         } else {
@@ -4642,7 +4646,7 @@ async fn test_blocked_tried_stop_report_taken_again_after_a_restore() {
         .unwrap());
     // The other's one try reaches bob's Dispatch, its answer lost.
     wallet.app_mut().release_queued(&w.bob_id()).await.unwrap();
-    w.bob.switch().fail_next(Fault::LoseAnswer {
+    w.bob.dispatch().fail_next(Fault::LoseAnswer {
         path: "/inbox".into(),
     });
     wallet.flush_outbox_in_delivery().await.unwrap();
@@ -4686,7 +4690,7 @@ async fn test_blocked_possibly_delivered_stop_kept_across_a_restart_and_a_restor
     wallet.app_mut().hold_queued(&w.bob_id()).await.unwrap();
     let rejection = wallet.reject_request(&request, None).await.unwrap();
     wallet.app_mut().release_queued(&w.bob_id()).await.unwrap();
-    w.bob.switch().fail_next(Fault::LoseAnswer {
+    w.bob.dispatch().fail_next(Fault::LoseAnswer {
         path: "/inbox".into(),
     });
     wallet.flush_outbox_in_delivery().await.unwrap();
@@ -4845,9 +4849,9 @@ async fn test_blocked_contact_sends_never_go_past_their_replay_window() {
     w.clock.advance_ms(31 * 24 * HOUR_MS);
     wallet.flush().await.unwrap();
     wallet.app_mut().release_queued(&w.bob_id()).await.unwrap();
-    let before = w.bob.switch().entries_from(&w.alice_id());
+    let before = w.bob.dispatch().entries_from(&w.alice_id());
     wallet.app_mut().flush_outbox().await.unwrap();
-    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), before);
+    assert_eq!(w.bob.dispatch().entries_from(&w.alice_id()), before);
     for msg_id in &queued {
         assert_eq!(verdict(&wallet, msg_id).await, Some(false), "{msg_id}");
     }
@@ -5409,18 +5413,18 @@ async fn test_blocked_flush_judges_the_window_on_a_time_it_observed() {
     let mut wallet = w
         .load_on_clock(&w.alice, storage, app_id, std::sync::Arc::clone(&slow))
         .await;
-    let before = w.bob.switch().entries_from(&w.alice_id());
+    let before = w.bob.dispatch().entries_from(&w.alice_id());
     let reads = w.router.log().len();
     wallet.flush().await.unwrap();
     // It read the time itself, a request the client may sign again on the service's clock.
     assert_ne!(list_reads(&w.router.log(), reads), 0);
-    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), before);
+    assert_eq!(w.bob.dispatch().entries_from(&w.alice_id()), before);
     // Past its window, the receive step gives it up once and tells the host once.
     for _ in 0..2 {
         wallet.receive(None).await.unwrap();
     }
     assert_eq!(given_up_notices(&w, &wallet, &rejection, &request).await, 1);
-    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), before);
+    assert_eq!(w.bob.dispatch().entries_from(&w.alice_id()), before);
 }
 
 #[tokio::test]
@@ -5434,12 +5438,12 @@ async fn test_blocked_flush_outside_a_paykit_operation_holds_governed_messages()
     wallet.unblock(&w.bob_id()).await.unwrap();
     // A flush no Paykit operation started observed no service time: the rejection waits,
     // and nothing of it is lost (Paykit spec 8.1).
-    let before = w.bob.switch().entries_from(&w.alice_id());
+    let before = w.bob.dispatch().entries_from(&w.alice_id());
     wallet.app_mut().flush_outbox().await.unwrap();
-    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), before);
+    assert_eq!(w.bob.dispatch().entries_from(&w.alice_id()), before);
     assert!(wallet.app().delivery(&rejection).await.unwrap().is_some());
     wallet.flush().await.unwrap();
-    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), before + 1);
+    assert_eq!(w.bob.dispatch().entries_from(&w.alice_id()), before + 1);
 }
 
 #[tokio::test]
@@ -5602,7 +5606,7 @@ async fn test_blocked_time_answered_during_the_flush_justifies_no_send() {
     let rejection = wallet.reject_request(&request, None).await.unwrap();
     // A write of the wallet's whose answer is lost is kept, and the client sends it again
     // first in its next flush.
-    w.alice.switch().fail_next(Fault::LoseAnswer {
+    w.alice.dispatch().fail_next(Fault::LoseAnswer {
         path: "/ops".into(),
     });
     wallet.block(&w.carol_id()).await.unwrap();

@@ -532,7 +532,7 @@ impl CheckoutFixture {
                     .await
                     .map_err(|_| WalletError::invalid("test lost service account"))?;
                 world
-                    .add_switch(next, &[&buyer])
+                    .add_dispatch(next, &[&buyer])
                     .await
                     .map_err(|_| WalletError::invalid("test replacement service"))?;
                 let mut signer = self.signer.lock().await;

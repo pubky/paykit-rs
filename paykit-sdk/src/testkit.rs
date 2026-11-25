@@ -166,7 +166,7 @@ impl Party {
         let mut body = IdentityBody::first(
             self.id(),
             [1; 16],
-            Inbox::new("https://switch.example", [2; 32]),
+            Inbox::new("https://dispatch.example", [2; 32]),
             IdentityPolicy::default(),
         );
         for app in apps {
@@ -236,11 +236,11 @@ impl Dispatches {
                 spec.clone(),
             )
         };
-        let alice = signer("alice", "https://alice-switch.example");
-        let bob = signer("bob", "https://bob-switch.example");
+        let alice = signer("alice", "https://alice-dispatch.example");
+        let bob = signer("bob", "https://bob-dispatch.example");
         let router = Arc::new(Router::new());
-        router.add_switch(alice.origin(), alice.switch());
-        router.add_switch(bob.origin(), bob.switch());
+        router.add_dispatch(alice.origin(), alice.dispatch());
+        router.add_dispatch(bob.origin(), bob.dispatch());
         Self {
             clock,
             alice,
@@ -292,7 +292,7 @@ impl Dispatches {
         stored: &paykit_lib::records::StoredMessage,
     ) -> [u8; 16] {
         self.alice
-            .switch()
+            .dispatch()
             .fail_next(pubky_dispatch_client::testing::Fault::Error {
                 path: "/ops".into(),
                 code: pubky_dispatch_core::http::ErrorCode::RateLimited,

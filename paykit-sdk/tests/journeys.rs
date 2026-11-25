@@ -190,7 +190,7 @@ impl Owner {
     async fn enroll(world: &World, name: &str) -> TestResult<Self> {
         let identity = world.identity(name)?;
         let origin = format!("https://{name}.journey.test");
-        Box::pin(world.add_switch(&origin, &[&identity])).await?;
+        Box::pin(world.add_dispatch(&origin, &[&identity])).await?;
         let mut env = world.signer_env(&identity, Arc::new(MemoryStore::new()))?;
         env.transport = on_backend(world, env.transport);
         env.protocols = Protocols::new(vec![Arc::new(paykit_lib::signer::PaykitProtocol)])?;

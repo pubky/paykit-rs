@@ -56,7 +56,7 @@ async fn recovery(world: &World) -> TestResult {
     assert_eq!(payer.recovery_required().await?, Some(notice));
 
     let successor = "https://new-buyer.payments.test";
-    world.add_switch(successor, &[&owner]).await?;
+    world.add_dispatch(successor, &[&owner]).await?;
     let recovered = Box::pin(signer.declare_provider_loss(
         successor,
         pubky_dispatch_signer::UserConfirmed::shown_and_confirmed(),

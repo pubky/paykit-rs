@@ -451,7 +451,7 @@ async fn test_public_read_identity_source_rereads_a_directory_only_pass() {
 
 #[tokio::test]
 async fn test_public_read_failed_lookup_time_does_not_shorten_the_homeserver_observation() {
-    use pubky_dispatch_client::app::SwitchCopy;
+    use pubky_dispatch_client::app::DispatchCopy;
     let w = Arc::new(World::new());
     let (mut wallet, reads) = wallet_reading_through(&w).await;
     let apps = bob_apps(&w, &["shop", "seller-wallet"]).await;
@@ -472,8 +472,8 @@ async fn test_public_read_failed_lookup_time_does_not_shorten_the_homeserver_obs
         .identity_of(&w.bob_id(), true)
         .await
         .unwrap();
-    assert_eq!(source.switch_copy, SwitchCopy::Unavailable);
-    assert_eq!(source.switch_lookup_ms, w.clock.now_ms());
+    assert_eq!(source.dispatch_copy, DispatchCopy::Unavailable);
+    assert_eq!(source.dispatch_lookup_ms, w.clock.now_ms());
     assert_eq!(source.homeserver_read_ms, Some(observed));
 
     let changed = Arc::clone(&w);
@@ -546,7 +546,7 @@ async fn test_public_read_identity_source_rereads_after_rollback_past_either_obs
             (base, later)
         };
         assert_eq!(
-            (source.read_at_ms, source.switch_lookup_ms),
+            (source.read_at_ms, source.dispatch_lookup_ms),
             (Some(version_at), lookup_at)
         );
         let changed = Arc::clone(&w);
@@ -633,7 +633,7 @@ async fn read_during_renewal(already_listed: bool) {
     let (name, id) = apps[0];
     publish_now(&w, name, one_endpoint("btc-lightning-bolt11", "lnbc1old"));
     let keys = w.bob.identity().app_keys(name);
-    let held = w.bob.switch().app(&id).record.unwrap();
+    let held = w.bob.dispatch().app(&id).record.unwrap();
     let old = AppRecord::verify(&held, &w.bob_id()).unwrap();
     paykit_lib::scopes::check_certificate(old.cert()).unwrap();
     let scopes: Vec<_> = old.cert().scopes().iter().map(String::as_str).collect();
@@ -645,7 +645,7 @@ async fn read_during_renewal(already_listed: bool) {
     replacement.cert = renewed.signed().clone();
     let list_renewal = move |w: &World| {
         w.bob
-            .switch()
+            .dispatch()
             .signer_op(OpKind::CertPut {
                 target_app_id: id,
                 cert: renewed.signed().clone(),
@@ -1023,7 +1023,7 @@ async fn test_public_read_failures_told_with_every_payment_result() {
     // The payer's Dispatch can't be reached for the attempt: an error, and the shop's
     // failure is still told.
     w.alice
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
             path: "/ops".into(),
             after: 0,

@@ -1918,8 +1918,8 @@ mod tests {
     fn test_stored_receipt_claim_read_decides_its_write() {
         use pubky_dispatch_core::http::ErrorCode;
         let answered = |code: ErrorCode| {
-            Err(AppError::Switch(
-                pubky_dispatch_client::error::ClientError::Switch {
+            Err(AppError::Dispatch(
+                pubky_dispatch_client::error::ClientError::Dispatch {
                     status: code.status(),
                     code,
                     message: String::new(),
@@ -1964,7 +1964,7 @@ mod tests {
         use pubky_dispatch_client::error::ClientError;
         use pubky_dispatch_core::http::ErrorCode;
         for code in ErrorCode::ALL {
-            let bare = AppError::Switch(ClientError::Switch {
+            let bare = AppError::Dispatch(ClientError::Dispatch {
                 status: code.status(),
                 code,
                 message: String::new(),

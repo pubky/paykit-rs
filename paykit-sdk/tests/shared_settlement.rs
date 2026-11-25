@@ -53,7 +53,7 @@ impl Timer for TestTimer {
 
 async fn setup_identity(world: &World, name: &str, origin: &str) -> TestResult<Signer> {
     let identity = world.identity(name)?;
-    world.add_switch(origin, &[&identity]).await?;
+    world.add_dispatch(origin, &[&identity]).await?;
     signer_on(world, name, origin).await
 }
 
@@ -1063,9 +1063,9 @@ async fn reconcile_fractional_periods(world: &World) -> TestResult {
         );
     }
     let subscriber = world.identity("subscriber")?;
-    world.lose_switch(origin);
+    world.lose_dispatch(origin);
     let recovered = "https://recovered-subscriber.payment.test";
-    world.add_switch(recovered, &[&subscriber]).await?;
+    world.add_dispatch(recovered, &[&subscriber]).await?;
     Box::pin(signer.declare_provider_loss(
         recovered,
         pubky_dispatch_signer::UserConfirmed::shown_and_confirmed(),
@@ -1212,9 +1212,9 @@ async fn early_paid_period_after_loss(world: &World) -> TestResult {
     assert_eq!(rail.pay_calls(&attempt_id), 1);
 
     let subscriber = world.identity("subscriber")?;
-    world.lose_switch("https://subscriber.payment.test");
+    world.lose_dispatch("https://subscriber.payment.test");
     let recovered_origin = "https://recovered-subscriber.payment.test";
-    world.add_switch(recovered_origin, &[&subscriber]).await?;
+    world.add_dispatch(recovered_origin, &[&subscriber]).await?;
     Box::pin(signer.declare_provider_loss(
         recovered_origin,
         pubky_dispatch_signer::UserConfirmed::shown_and_confirmed(),

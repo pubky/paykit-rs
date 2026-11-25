@@ -1009,7 +1009,7 @@ async fn test_recovery_repeat_withheld_by_a_kept_stop_it_couldnt_place() {
     shop.cancel_sent_request(&record, None).await.unwrap();
     let refuse_next_batch = || {
         w.alice
-            .switch()
+            .dispatch()
             .fail_next(pubky_dispatch_client::testing::Fault::Error {
                 path: "/ops".into(),
                 code: pubky_dispatch_core::http::ErrorCode::PermissionMissing,
@@ -1095,7 +1095,7 @@ async fn test_recovery_repeat_over_a_request_record_not_found_withheld() {
     let w = World::new();
     let (mut wallet, _request, attempt_id) = in_flight_without_history(&w).await;
     w.alice
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::Error {
             path: "/records/".into(),
             code: pubky_dispatch_core::http::ErrorCode::NotFound,
@@ -1162,7 +1162,7 @@ async fn test_recovery_repeat_ends_the_resume_at_a_store_failure_in_its_identity
     assert!(order.iter().all(|p| p.stage == Stage::Paying));
     let later = order[1].attempt_id;
     let doc = w.alice.sign_next(|_| {}).unwrap();
-    w.alice.switch().deliver_identity(&doc).unwrap();
+    w.alice.dispatch().deliver_identity(&doc).unwrap();
     // Past the 60 s of the last confirmation, a repeat reads the own identity.json again.
     w.clock.advance_ms(61_000);
     // The first commit of the own identity copy fails.

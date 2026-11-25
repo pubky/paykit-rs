@@ -4374,8 +4374,8 @@ mod held_write_tests {
     fn test_allowances_kept_batch_of_a_kept_message_is_held_not_written() {
         let kept = AppError::Kept {
             batch_id: [7; 16],
-            error: Box::new(AppError::Switch(
-                pubky_dispatch_client::error::ClientError::Switch {
+            error: Box::new(AppError::Dispatch(
+                pubky_dispatch_client::error::ClientError::Dispatch {
                     status: 429,
                     code: ErrorCode::RateLimited,
                     message: String::new(),
@@ -4416,7 +4416,7 @@ mod held_write_tests {
             )
             .await;
         // A batch the client keeps: its send is rate-limited.
-        w.alice.switch().fail_next(Fault::Error {
+        w.alice.dispatch().fail_next(Fault::Error {
             path: "/ops".into(),
             code: ErrorCode::RateLimited,
             current: serde_json::Value::Null,

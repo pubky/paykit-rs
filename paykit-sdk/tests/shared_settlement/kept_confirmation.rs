@@ -119,7 +119,9 @@ async fn kept_confirmation(world: &World) -> TestResult {
     let limits = serde_json::from_value(serde_json::json!({
         "quota_bytes": 8192, "sender_share_percent": 100
     }))?;
-    world.add_switch_with(origin, &[&identity], limits).await?;
+    world
+        .add_dispatch_with(origin, &[&identity], limits)
+        .await?;
     let mut payer_signer = Box::pin(signer_on(world, "payer", origin)).await?;
     let mut shop_signer =
         Box::pin(setup_identity(world, "shop", "https://shop.payment.test")).await?;
@@ -244,7 +246,9 @@ async fn kept_first_grant(world: &World) -> TestResult {
     let limits = serde_json::from_value(serde_json::json!({
         "quota_bytes": 8192, "sender_share_percent": 100
     }))?;
-    world.add_switch_with(origin, &[&identity], limits).await?;
+    world
+        .add_dispatch_with(origin, &[&identity], limits)
+        .await?;
     let mut payer_signer = Box::pin(signer_on(world, "payer", origin)).await?;
     let mut shop_signer =
         Box::pin(setup_identity(world, "shop", "https://shop.payment.test")).await?;

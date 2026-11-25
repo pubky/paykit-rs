@@ -46,9 +46,9 @@ use paykit_lib::{
     Rate,
 };
 use pubky_dispatch_client::app::{
-    claim_conflict, AppError, ClaimAttempt, ClaimOp, Initiator, KeptBatch, KeptBatchStatus,
-    LocalWrite, ObligationDeadline, OpBatch, PeerIdentity, RecordContent, Refusal as ClientRefusal,
-    SharedRecord, SignedMessage, SwitchCopy, UserConfirmed, REVALIDATION_MS,
+    claim_conflict, AppError, ClaimAttempt, ClaimOp, DispatchCopy, Initiator, KeptBatch,
+    KeptBatchStatus, LocalWrite, ObligationDeadline, OpBatch, PeerIdentity, RecordContent,
+    Refusal as ClientRefusal, SharedRecord, SignedMessage, UserConfirmed, REVALIDATION_MS,
 };
 use pubky_dispatch_core::chain::TransitionProof;
 use pubky_dispatch_core::claims::{
@@ -898,7 +898,7 @@ fn first_handoff_hold(held: Held) -> FirstHold {
         // Writes still go on in reconcile mode and with the clocks apart: the attempt is
         // closed, so a later payment of the obligation isn't held behind it.
         Held::Client(refusal @ ClientRefusal::NotNow(_)) => FirstHold::Fail(Refusal::HeldForUser(
-            crate::HeldForUserReason::SwitchClient(refusal.to_string()),
+            crate::HeldForUserReason::DispatchClient(refusal.to_string()),
         )),
         Held::Client(refusal) => FirstHold::Return(held_back(refusal)),
         Held::Check(refusal @ Refusal::NotCurrent(_)) => FirstHold::Return(refusal.into()),
@@ -1113,11 +1113,11 @@ pub(crate) fn client_waits(error: &AppError) -> bool {
     // client keeps one the host's own transport refused too, which no resend clears.
     match error.unkept() {
         AppError::ExpiredUnsent | AppError::NotAnsweringAsAccount { .. } => true,
-        AppError::Transport(transport) | AppError::Switch(C::Transport(transport)) => {
+        AppError::Transport(transport) | AppError::Dispatch(C::Transport(transport)) => {
             transport_waits(transport)
         }
-        AppError::Switch(dispatch) => match dispatch {
-            C::Switch { code, .. } => matches!(
+        AppError::Dispatch(dispatch) => match dispatch {
+            C::Dispatch { code, .. } => matches!(
                 code.retry(),
                 Retry::Yes | Retry::AfterRetryAfter | Retry::WithNewTimestamp | Retry::AfterReread
             ),
@@ -1507,11 +1507,11 @@ fn replaced_by_an_older_write(answered: &JournalEntry, held: &JournalEntry) -> b
 pub(crate) fn kept_read_stop(
     reason: &pubky_dispatch_client::app::KeptReason,
 ) -> Option<PaykitError> {
-    let pubky_dispatch_client::app::KeptReason::SwitchRefused { code } = reason else {
+    let pubky_dispatch_client::app::KeptReason::DispatchRefused { code } = reason else {
         return None;
     };
-    let error = PaykitError::Client(AppError::Switch(
-        pubky_dispatch_client::error::ClientError::Switch {
+    let error = PaykitError::Client(AppError::Dispatch(
+        pubky_dispatch_client::error::ClientError::Dispatch {
             status: code.status(),
             code: *code,
             message: "the Dispatch refused the record's read".into(),
@@ -1747,14 +1747,14 @@ enum FenceNews {
 #[derive(Clone, Copy, Debug)]
 struct Answer {
     /// The Dispatch copy state of the identity the answer finished with.
-    copy: SwitchCopy,
+    copy: DispatchCopy,
     /// Whether the Dispatch's answer learned nothing from any service: no verified copy, and so
-    /// no freeze or version ([`pubky_dispatch_client::app::SwitchAnswer::learned_nothing`]),
+    /// no freeze or version ([`pubky_dispatch_client::app::DispatchAnswer::learned_nothing`]),
     /// whatever state the finished identity carries. A failed lookup can still carry a copy
     /// or a freeze a service gave before it failed.
     learned_nothing: bool,
     /// Whether the Dispatch's answer confirms the document the check decided on
-    /// ([`pubky_dispatch_client::app::SwitchAnswer::confirms`]).
+    /// ([`pubky_dispatch_client::app::DispatchAnswer::confirms`]).
     confirmed: bool,
 }
 
@@ -1766,8 +1766,13 @@ struct Answer {
 /// lookup learned nothing, against a basis with no Dispatch copy either, is none for a payment
 /// by hand. An automatic payment holds on
 /// anything but a confirming answer, as it always has.
-fn fence_news(same_document: bool, basis: SwitchCopy, answer: Answer, by: Initiator) -> FenceNews {
-    if answer.confirmed && same_document && answer.copy == SwitchCopy::Read {
+fn fence_news(
+    same_document: bool,
+    basis: DispatchCopy,
+    answer: Answer,
+    by: Initiator,
+) -> FenceNews {
+    if answer.confirmed && same_document && answer.copy == DispatchCopy::Read {
         FenceNews::Confirms
     } else if by == Initiator::User
         && same_document
@@ -1783,10 +1788,10 @@ fn fence_news(same_document: bool, basis: SwitchCopy, answer: Answer, by: Initia
 
 /// Whether `copy` is a Dispatch copy state known to carry no read copy. A state this crate
 /// doesn't know reads as one that may: the fence holds on it.
-fn unread(copy: SwitchCopy) -> bool {
+fn unread(copy: DispatchCopy) -> bool {
     matches!(
         copy,
-        SwitchCopy::Unavailable | SwitchCopy::Stale | SwitchCopy::Pending
+        DispatchCopy::Unavailable | DispatchCopy::Stale | DispatchCopy::Pending
     )
 }
 
@@ -6117,7 +6122,7 @@ impl Paykit {
                     .last_public_read
                     .as_ref()
                     .is_some_and(|read| read.current(&payee, now))
-                || !payee_copy_usable(now, &payee, Need::SwitchCopy, by, confirmed));
+                || !payee_copy_usable(now, &payee, Need::DispatchCopy, by, confirmed));
         let mut payee = answered.unwrap_or(payee);
         if recheck_records {
             match Box::pin(self.check_destination(
@@ -6463,9 +6468,9 @@ impl Paykit {
             match self.take_kept_lookup(&entry.payee).await? {
                 Ok(Some(answer)) => match fence_news(
                     answer.doc.signed() == payee.doc.signed(),
-                    payee.switch_copy,
+                    payee.dispatch_copy,
                     Answer {
-                        copy: answer.switch_copy,
+                        copy: answer.dispatch_copy,
                         learned_nothing,
                         confirmed: confirmed_document,
                     },
@@ -6886,8 +6891,8 @@ impl Paykit {
 pub(crate) fn dispatch_unavailable(error: &AppError) -> bool {
     match error.unkept() {
         AppError::Transport(_) | AppError::NotAnsweringAsAccount { .. } => true,
-        AppError::Switch(pubky_dispatch_client::error::ClientError::Transport(_)) => true,
-        AppError::Switch(pubky_dispatch_client::error::ClientError::BadServiceSignature {
+        AppError::Dispatch(pubky_dispatch_client::error::ClientError::Transport(_)) => true,
+        AppError::Dispatch(pubky_dispatch_client::error::ClientError::BadServiceSignature {
             status,
         }) => *status >= 500,
         other => matches!(
@@ -7226,7 +7231,7 @@ mod tests {
         }
         // Writes go on: the attempt is closed, as before the client's refusal was typed.
         let wait = ClientRefusal::NotNow("reconcile mode".into());
-        let FirstHold::Fail(Refusal::HeldForUser(crate::HeldForUserReason::SwitchClient(why))) =
+        let FirstHold::Fail(Refusal::HeldForUser(crate::HeldForUserReason::DispatchClient(why))) =
             first_handoff_hold(Held::Client(wait.clone()))
         else {
             panic!("reconcile mode left the attempt open");
@@ -7343,7 +7348,7 @@ mod tests {
             StoreError::Unavailable
         ))));
         let answer = |code: pubky_dispatch_core::http::ErrorCode| {
-            PaykitError::Client(AppError::Switch(ClientError::Switch {
+            PaykitError::Client(AppError::Dispatch(ClientError::Dispatch {
                 status: code.status(),
                 code,
                 message: String::new(),
@@ -7372,7 +7377,7 @@ mod tests {
             _ => None,
         };
         let unsigned = |status| {
-            PaykitError::Client(AppError::Switch(ClientError::BadServiceSignature {
+            PaykitError::Client(AppError::Dispatch(ClientError::BadServiceSignature {
                 status,
             }))
         };
@@ -7382,7 +7387,7 @@ mod tests {
             answer(E::Unavailable),
             answer(E::RateLimited),
             answer(E::StaleTimestamp),
-            PaykitError::Client(AppError::Switch(ClientError::BodyUnread {
+            PaykitError::Client(AppError::Dispatch(ClientError::BodyUnread {
                 status: 429,
                 code: E::RateLimited,
                 retry_after: None,
@@ -7402,12 +7407,12 @@ mod tests {
             unsigned(503),
             PaykitError::Client(AppError::Kept {
                 batch_id: [1; 16],
-                error: Box::new(AppError::Switch(ClientError::BadServiceSignature {
+                error: Box::new(AppError::Dispatch(ClientError::BadServiceSignature {
                     status: 502,
                 })),
             }),
             PaykitError::Client(AppError::ExpiredUnsent),
-            PaykitError::Client(AppError::Switch(ClientError::StaleAnswer {
+            PaykitError::Client(AppError::Dispatch(ClientError::StaleAnswer {
                 server_time_ms: 1,
             })),
             answer(E::Staged),
@@ -7432,7 +7437,7 @@ mod tests {
             answer(E::QuotaExceeded),
             unsigned(404),
             answer(E::Moved),
-            PaykitError::Client(AppError::Switch(ClientError::InvalidResponse(
+            PaykitError::Client(AppError::Dispatch(ClientError::InvalidResponse(
                 "member".into(),
             ))),
             transport(TransportError::InvalidRequest("header".into())),
@@ -7440,7 +7445,7 @@ mod tests {
             kept(ClientRefusal::NotNow("reconcile mode".into())),
             PaykitError::Client(AppError::Kept {
                 batch_id: [1; 16],
-                error: Box::new(AppError::Switch(ClientError::Switch {
+                error: Box::new(AppError::Dispatch(ClientError::Dispatch {
                     status: 429,
                     code: E::QuotaExceeded,
                     message: String::new(),
@@ -7451,7 +7456,7 @@ mod tests {
             }),
             transport(TransportError::FirstSendUnavailable),
             transport(TransportError::FirstSendExpired),
-            PaykitError::Client(AppError::Switch(ClientError::BodyUnread {
+            PaykitError::Client(AppError::Dispatch(ClientError::BodyUnread {
                 status: 413,
                 code: E::TooLarge,
                 retry_after: None,
@@ -7459,10 +7464,10 @@ mod tests {
             transport(TransportError::Refused("origin".into())),
             transport(TransportError::TooLarge(1)),
             transport(TransportError::UnreadableSignedHeader { status: 400 }),
-            PaykitError::Client(AppError::Switch(ClientError::InvalidResponse(
+            PaykitError::Client(AppError::Dispatch(ClientError::InvalidResponse(
                 "member".into(),
             ))),
-            PaykitError::Client(AppError::Switch(ClientError::Unpinned)),
+            PaykitError::Client(AppError::Dispatch(ClientError::Unpinned)),
             PaykitError::Client(AppError::InvalidData("member".into())),
             answer(E::StaleEpoch),
             answer(E::Moved),
@@ -7506,18 +7511,18 @@ mod tests {
         AppError::Transport(TransportError::Connect("down".into()))
     }
 
-    const COPIES: [SwitchCopy; 4] = [
-        SwitchCopy::Read,
-        SwitchCopy::Unavailable,
-        SwitchCopy::Stale,
-        SwitchCopy::Pending,
+    const COPIES: [DispatchCopy; 4] = [
+        DispatchCopy::Read,
+        DispatchCopy::Unavailable,
+        DispatchCopy::Stale,
+        DispatchCopy::Pending,
     ];
 
-    fn unread_copies() -> impl Iterator<Item = SwitchCopy> {
-        COPIES.into_iter().filter(|c| *c != SwitchCopy::Read)
+    fn unread_copies() -> impl Iterator<Item = DispatchCopy> {
+        COPIES.into_iter().filter(|c| *c != DispatchCopy::Read)
     }
 
-    fn answer(copy: SwitchCopy, learned_nothing: bool, confirmed: bool) -> Answer {
+    fn answer(copy: DispatchCopy, learned_nothing: bool, confirmed: bool) -> Answer {
         Answer {
             copy,
             learned_nothing,
@@ -7527,11 +7532,11 @@ mod tests {
 
     #[test]
     fn test_fence_news_unread_names_only_the_states_known_to_read_nothing() {
-        assert!(!unread(SwitchCopy::Read));
+        assert!(!unread(DispatchCopy::Read));
         for copy in [
-            SwitchCopy::Unavailable,
-            SwitchCopy::Stale,
-            SwitchCopy::Pending,
+            DispatchCopy::Unavailable,
+            DispatchCopy::Stale,
+            DispatchCopy::Pending,
         ] {
             assert!(unread(copy), "{copy:?}");
         }
@@ -7541,7 +7546,7 @@ mod tests {
     fn test_fence_news_confirming_answer_goes_on_for_either_initiator() {
         for by in [Initiator::User, Initiator::Automatic] {
             for basis in COPIES {
-                let confirming = answer(SwitchCopy::Read, false, true);
+                let confirming = answer(DispatchCopy::Read, false, true);
                 assert_eq!(fence_news(true, basis, confirming, by), FenceNews::Confirms);
             }
         }
@@ -7597,7 +7602,7 @@ mod tests {
                     assert_eq!(
                         fence_news(
                             true,
-                            SwitchCopy::Read,
+                            DispatchCopy::Read,
                             answer(copy, learned_nothing, confirmed),
                             by
                         ),
@@ -7631,7 +7636,7 @@ mod tests {
                 }
                 // A read Dispatch copy of the same document that doesn't confirm it is news.
                 assert_eq!(
-                    fence_news(true, basis, answer(SwitchCopy::Read, false, false), by),
+                    fence_news(true, basis, answer(DispatchCopy::Read, false, false), by),
                     FenceNews::Holds,
                     "{basis:?}"
                 );
@@ -7818,19 +7823,19 @@ mod tests {
         assert!(dispatch_unavailable(&AppError::NotAnsweringAsAccount {
             since_ms: 1
         }));
-        assert!(dispatch_unavailable(&AppError::Switch(
+        assert!(dispatch_unavailable(&AppError::Dispatch(
             ClientError::BadServiceSignature { status: 503 }
         )));
     }
 
     #[test]
     fn test_dispatch_unavailable_not_for_an_answer_it_signed() {
-        assert!(!dispatch_unavailable(&AppError::Switch(
+        assert!(!dispatch_unavailable(&AppError::Dispatch(
             ClientError::BadServiceSignature { status: 404 }
         )));
         assert!(!dispatch_unavailable(&AppError::Kept {
             batch_id: [1; 16],
-            error: Box::new(AppError::Switch(ClientError::BadServiceSignature {
+            error: Box::new(AppError::Dispatch(ClientError::BadServiceSignature {
                 status: 404
             })),
         }));

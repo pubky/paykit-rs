@@ -57,7 +57,7 @@ async fn join(
 async fn start_signer(world: &World, name: &str) -> TestResult<Signer> {
     let identity = world.identity(name)?;
     let origin = format!("https://{name}.allowance.test");
-    Box::pin(world.add_switch(&origin, &[&identity])).await?;
+    Box::pin(world.add_dispatch(&origin, &[&identity])).await?;
     let mut env = world.signer_env(&identity, Arc::new(MemoryStore::new()))?;
     env.protocols = Protocols::new(vec![Arc::new(paykit_lib::signer::PaykitProtocol)])?;
     if matches!(world.backend(), Backend::Service) {

@@ -126,7 +126,7 @@ async fn members(world: &World) -> TestResult {
     world
         .set_account_missing("https://buyer.payments.test", &buyer, true)
         .await?;
-    world.add_switch(successor, &[&buyer]).await?;
+    world.add_dispatch(successor, &[&buyer]).await?;
     let opening = Box::pin(signer.declare_provider_loss(
         successor,
         pubky_dispatch_signer::UserConfirmed::shown_and_confirmed(),
@@ -206,7 +206,7 @@ async fn members_of_another_app(world: &World) -> TestResult {
     world
         .set_account_missing("https://buyer.payments.test", &buyer, true)
         .await?;
-    world.add_switch(successor, &[&buyer]).await?;
+    world.add_dispatch(successor, &[&buyer]).await?;
     let opening = Box::pin(signer.declare_provider_loss(
         successor,
         pubky_dispatch_signer::UserConfirmed::shown_and_confirmed(),
@@ -539,7 +539,7 @@ async fn restored_handoff(world: &World, resolution: ConfirmedResolution) -> Tes
     world
         .set_account_missing("https://buyer.payments.test", &buyer, true)
         .await?;
-    world.add_switch(successor, &[&buyer]).await?;
+    world.add_dispatch(successor, &[&buyer]).await?;
     let opening = Box::pin(signer.declare_provider_loss(
         successor,
         pubky_dispatch_signer::UserConfirmed::shown_and_confirmed(),

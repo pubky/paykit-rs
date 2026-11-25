@@ -229,7 +229,7 @@ async fn connect_after_earlier_batch(
     let service_reply = pubky_dispatch_client::app::AppError::Ahead {
         ahead: *ahead,
         error: Box::new(
-            pubky_dispatch_client::error::ClientError::Switch {
+            pubky_dispatch_client::error::ClientError::Dispatch {
                 status: 503,
                 code: pubky_dispatch_core::http::ErrorCode::Unavailable,
                 message: "unavailable".into(),

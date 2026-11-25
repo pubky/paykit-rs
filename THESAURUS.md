@@ -343,7 +343,7 @@ Paykit uses these as the Pubky Dispatch defines them. Each entry cites its Dispa
 | **Kept peer** | A peer a managing app explicitly kept on the allowlist. Not a v0.1 Public Contact Marker. | Dispatch spec 7 |
 | **Reply grant** | The allowlist reason that lets a peer reply after an own app sent to it, invited it or accepted its connect request. | Dispatch spec 7 |
 | **Invite** | A reply grant added before any message, so the counterparty can write first, for example a shop at checkout. | Dispatch spec 7 |
-| **Invite code** | A random code an app registers and shows, as `pubky://<id>?switch=invite&code=<code>`, so that anyone who has it can write once. | Dispatch spec 7, Dispatch wire 1.7 |
+| **Invite code** | A random code an app registers and shows, as `pubky://<id>?dispatch=invite&code=<code>`, so that anyone who has it can write once. | Dispatch spec 7, Dispatch wire 1.7 |
 | **Connect request** | A content-free request from a stranger to be invited. | Dispatch spec 7 |
 
 ## Coordination

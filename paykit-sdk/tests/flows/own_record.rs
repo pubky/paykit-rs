@@ -781,7 +781,7 @@ async fn test_own_record_withdrawal_reports_its_unanswered_delivery() {
     // The withdrawal signs with its cleared policy. A delivery failure leaves the
     // previous offer on the Homeserver until the next read.
     w.bob
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
             path: "/ops".into(),
             after: 0,
@@ -858,7 +858,7 @@ async fn test_own_record_restored_withdrawal_finishes_delivery_after_the_first_r
     .unwrap();
     // The backup retains the signed withdrawal whose delivery failed.
     w.bob
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
             path: "/ops".into(),
             after: 0,
@@ -879,7 +879,7 @@ async fn test_own_record_restored_withdrawal_finishes_delivery_after_the_first_r
     // Nothing is signed before the confirmed first read.
     let restored_record = restored.app().record().clone();
     w.bob
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::Error {
             path: "/feed".into(),
             code: pubky_dispatch_core::http::ErrorCode::Unavailable,
@@ -907,7 +907,7 @@ async fn restored_after_an_undelivered_withdrawal(w: &World) -> Paykit {
         .await
         .unwrap();
     w.bob
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
             path: "/ops".into(),
             after: 0,
@@ -1216,7 +1216,7 @@ async fn test_own_record_oversized_capabilities_refuse_the_join() {
     let app_id = request.keys.app_id_bytes();
     let base = store();
     let fault = Arc::new(FaultStore::new(Arc::clone(&base), Fault::None));
-    let tip = w.alice.switch().tip_seq();
+    let tip = w.alice.dispatch().tip_seq();
     let joined = Box::pin(Paykit::join(
         w.env(&w.alice, Arc::clone(&fault) as Arc<dyn StateStore>),
         publishing(),
@@ -1229,8 +1229,8 @@ async fn test_own_record_oversized_capabilities_refuse_the_join() {
     assert!(is_usage(&error), "{error:?}");
     // Refused before the client's join: no commit, nothing at the Dispatch or the Homeserver.
     assert_eq!(fault.commits(), 0);
-    assert_eq!(w.alice.switch().tip_seq(), tip);
-    assert!(w.alice.switch().app(&app_id).record.is_none());
+    assert_eq!(w.alice.dispatch().tip_seq(), tip);
+    assert!(w.alice.dispatch().app(&app_id).record.is_none());
     assert!(w
         .homeserver
         .file(w.alice_id(), &app_record_path(&app_id))
@@ -1284,7 +1284,7 @@ async fn joined_with_failed_delivery(
     w.rail.set_endpoint_identifiers(vec![supported.clone()]);
     let request = w.approve(&w.alice, "wallet", &AppScopes::new().pay().build().unwrap());
     w.alice
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
             path: "/ops".into(),
             after: 1,
@@ -1307,7 +1307,7 @@ async fn joined_with_failed_delivery(
             .endpoint_identifiers,
         vec![supported.clone()]
     );
-    let at_dispatch = w.alice.switch().app(&wallet.app_id()).record.unwrap();
+    let at_dispatch = w.alice.dispatch().app(&wallet.app_id()).record.unwrap();
     assert_ne!(at_dispatch, kept);
     assert_eq!(
         PaykitMember::read(&AppRecord::verify(&at_dispatch, &w.alice_id()).unwrap()).unwrap(),
@@ -1328,7 +1328,7 @@ async fn joined_with_failed_delivery(
 fn delivered(w: &World, wallet: &Paykit, kept: &pubky_dispatch_core::sig::SignedDoc) {
     assert_eq!(wallet.app().record(), kept);
     assert_eq!(
-        w.alice.switch().app(&wallet.app_id()).record.as_ref(),
+        w.alice.dispatch().app(&wallet.app_id()).record.as_ref(),
         Some(kept)
     );
     let bytes = w
@@ -1376,7 +1376,7 @@ async fn test_own_record_failed_update_stays_owed_until_delivery() {
     let supported = endpoint("btc-onchain-address");
     w.rail.set_endpoint_identifiers(vec![supported.clone()]);
     w.alice
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
             path: "/ops".into(),
             after: 0,
@@ -1486,7 +1486,7 @@ async fn test_own_record_withdrawal_waits_for_delivery_before_publication() {
         .unwrap();
     let published = on_homeserver(&w, &shop).unwrap();
     w.bob
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
             path: "/ops".into(),
             after: 0,
@@ -1580,7 +1580,7 @@ async fn test_own_record_restored_changes_wait_for_confirmed_first_read() {
             .await
             .unwrap();
         let backup = shop.backup().await.unwrap();
-        let earlier = w.bob.switch().tip_seq();
+        let earlier = w.bob.dispatch().tip_seq();
         shop.app_mut().invite(&w.carol_id()).await.unwrap();
         let reads = Arc::new(ScriptedIdentityReads::new(
             Arc::clone(&w.homeserver),
@@ -1669,7 +1669,7 @@ async fn test_own_record_restored_upkeep_waits_for_a_completed_read() {
     let before = restored.app().record().clone();
     w.clock.advance_ms(46 * DAY_MS);
     w.bob
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::Error {
             path: "/feed".into(),
             code: pubky_dispatch_core::http::ErrorCode::Unavailable,
@@ -2036,7 +2036,7 @@ async fn test_own_record_failed_renewal_keeps_exact_bytes_until_delivery() {
     let published = on_homeserver(&w, &shop).unwrap();
     w.clock.advance_ms(46 * DAY_MS);
     w.bob
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::Error {
             path: "/ops".into(),
             code: pubky_dispatch_core::http::ErrorCode::Unavailable,
@@ -2286,7 +2286,7 @@ async fn test_own_record_restored_endpoint_after_clock_rollback_stays_payable() 
         .await
         .unwrap();
     w.bob
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
             path: "/ops".into(),
             after: 0,

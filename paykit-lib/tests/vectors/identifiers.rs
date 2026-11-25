@@ -189,9 +189,9 @@ fn derived(keys: &Keys) -> Vec<(Place<'static>, Value)> {
     out
 }
 
-const POLICIES_DESCRIPTION: &str = "Wire 1.5, Switch wire 1.5: the policies of Paykit's \
+const POLICIES_DESCRIPTION: &str = "Wire 1.5, Dispatch wire 1.5: the policies of Paykit's \
 collections, each with its read scope, its write scopes and its policy hash, \
-hash(lp(\"pubky-switch/v1/policy\", read_scope, u64(n), write_scope_1, ..., write_scope_n)), \
+hash(lp(\"pubky-dispatch/v1/policy\", read_scope, u64(n), write_scope_1, ..., write_scope_n)), \
 hashed_bytes_hex being the bytes hashed: the fixed policy of each collection, by its name, \
 permanent policies use the permanent-policy label and append their generation as a u64, \
 or zero for a null generation, and, last, \
@@ -274,18 +274,18 @@ fn check_policies(v: &Value) {
     }
 }
 
-const RECORD_KEYS_DESCRIPTION: &str = "Wire 1.5, Switch wire 1.5: the record keys of \
+const RECORD_KEYS_DESCRIPTION: &str = "Wire 1.5, Dispatch wire 1.5: the record keys of \
 Paykit's natural keys, each in its collection under its policy, blinded with the naming key \
-of the identity whose switch holds it (identity, keys.json): natural_key (and \
+of the identity whose Dispatch holds it (identity, keys.json): natural_key (and \
 natural_key_hex) is the natural key, blinded_natural_key its blind, \
-derive(\"pubky-switch/v1/name\", naming_key, natural_key), key_material_hex the input of \
+derive(\"pubky-dispatch/v1/name\", naming_key, natural_key), key_material_hex the input of \
 the record key, lp(collection, blinded_natural_key, policy_hash), and record_key \
-derive(\"pubky-switch/v1/record\", collection, blinded_natural_key, policy_hash). The \
+derive(\"pubky-dispatch/v1/record\", collection, blinded_natural_key, policy_hash). The \
 request hashes are those of messages.json's payment_request, payment_request_recurring \
 (its February period, 1772236800) and payment_request_labelled, whose payee record is under \
 the policy of its label shop1. The last is the settlements bucket of the settlement \
 of the payment without a request, whose settlement ID is the UTF-8 bytes of settlement_id, \
-given as such rather than read from a proof, held at bob's switch: \
+given as such rather than read from a proof, held at bob's Dispatch: \
 settlement_tag_input_hex is lp(settlement ID), blinded_settlement_tag_input its blind, \
 settlement_tag_hex the settlement's tag, derive(\"paykit/v1/settlement\", \"tag\", \
 blinded_settlement_tag_input), bucket u16_be(tag[0..2]) >> 6, mark_settlement_tag_hex bytes 2 \

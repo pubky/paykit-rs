@@ -32,7 +32,7 @@ use pubky_dispatch_client::app::{
 use pubky_dispatch_client::client::answers::FeedQuery;
 use pubky_dispatch_client::store::MemoryStore;
 use pubky_dispatch_client::transport::BoxFuture;
-use pubky_dispatch_client::{Credentials, SwitchClient};
+use pubky_dispatch_client::{Credentials, DispatchClient};
 use pubky_dispatch_core::ops::{Condition, OpKind, SignedOp};
 use pubky_dispatch_core::shared::ApplicationRef;
 use pubky_dispatch_harness::{parties::Asking, Backend, World};
@@ -49,7 +49,7 @@ impl Timer for TestTimer {
 
 async fn setup_identity(world: &World, name: &str, origin: &str) -> TestResult<Signer> {
     let identity = world.identity(name)?;
-    world.add_switch(origin, &[&identity]).await?;
+    world.add_dispatch(origin, &[&identity]).await?;
     let mut env = world.signer_env(&identity, Arc::new(MemoryStore::new()))?;
     env.protocols = Protocols::new(vec![Arc::new(paykit_lib::signer::PaykitProtocol)])?;
     let keyring = world.keyring(&identity)?;
@@ -244,7 +244,7 @@ async fn record_op(
         .ok_or_else(|| "missing signed record operation".into())
 }
 
-async fn service_cursor(client: &SwitchClient) -> TestResult<u64> {
+async fn service_cursor(client: &DispatchClient) -> TestResult<u64> {
     Ok(client
         .feed(FeedQuery {
             limit: Some(0),
@@ -254,7 +254,7 @@ async fn service_cursor(client: &SwitchClient) -> TestResult<u64> {
         .cursor)
 }
 
-async fn shared_position(client: &SwitchClient, key: &[u8; 32]) -> TestResult<(u64, u64)> {
+async fn shared_position(client: &DispatchClient, key: &[u8; 32]) -> TestResult<(u64, u64)> {
     let record = client.record(key).await?.view;
     Ok((record.version, service_cursor(client).await?))
 }
@@ -266,9 +266,9 @@ fn shop_client(
     signer: &Signer,
     wallet: &Paykit,
     name: &str,
-) -> TestResult<SwitchClient> {
+) -> TestResult<DispatchClient> {
     let identity = wallet.identity();
-    Ok(SwitchClient::new(
+    Ok(DispatchClient::new(
         SHOP,
         identity,
         Credentials::App {
@@ -295,7 +295,7 @@ struct IssuedSale {
     request: RequestRef,
     key: [u8; 32],
     target: RecordTarget,
-    observer: SwitchClient,
+    observer: DispatchClient,
     original: serde_json::Value,
     proof_only: serde_json::Value,
     receipt: StoredMessage,

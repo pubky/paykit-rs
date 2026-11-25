@@ -929,7 +929,7 @@ mod tests {
             let receive = async |app: &mut Paykit| {
                 let seq = w
                     .alice
-                    .switch()
+                    .dispatch()
                     .send_plaintext(bob, cert, message.plaintext(), &[app.app_id()])
                     .unwrap_or_else(|e| panic!("{prefix} delivery: {e}"));
                 Box::pin(app.app_mut().receive(None))
@@ -949,7 +949,7 @@ mod tests {
                 "ax/" => {
                     // A competing proposal cannot be placed over the divergent original.
                     w.alice
-                        .switch()
+                        .dispatch()
                         .make_divergent([0x5a; 16], pending, [1; 32])
                         .unwrap();
                     Box::pin(wallet.receive(None)).await.unwrap();
@@ -962,7 +962,7 @@ mod tests {
                 "se/" => {
                     // The refused request write leaves the verified entry in the client's store.
                     wallet.app_mut().flush_cursor().await.unwrap();
-                    w.alice.switch().fail_next(Fault::Error {
+                    w.alice.dispatch().fail_next(Fault::Error {
                         path: "/ops".into(),
                         code: ErrorCode::PermissionMissing,
                         current: serde_json::Value::Null,

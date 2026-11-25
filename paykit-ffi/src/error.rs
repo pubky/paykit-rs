@@ -422,7 +422,7 @@ fn held_for_user_code(reason: &crate::HeldForUserKind) -> &'static str {
         R::AllowanceExecutionHeld => "allowance_execution_held",
         R::AttemptCheck => "attempt_check",
         R::ReloadRequired => "reload_required",
-        R::SwitchClient => "dispatch_client_hold",
+        R::DispatchClient => "dispatch_client_hold",
         R::Unresolved => "held_unresolved",
         R::PendingProposalsFull => "pending_proposals_full",
         R::AllowanceLedgerFull => "allowance_ledger_full",
@@ -530,12 +530,12 @@ fn dispatch_client_category(e: &pubky_dispatch_client::error::ClientError) -> (C
     use pubky_dispatch_client::error::ClientError as C;
     use Category::*;
     let (category, code) = match e {
-        C::Switch {
+        C::Dispatch {
             code: pubky_dispatch_core::http::ErrorCode::QuotaExceeded,
             current,
             ..
         } => return quota_category(current.get("limit").and_then(|limit| limit.as_str())),
-        C::Switch { code, .. } => return service_category(*code),
+        C::Dispatch { code, .. } => return service_category(*code),
         C::OwnRecoveryRequired { .. } => (Recovery, "own_recovery_required"),
         // Signed by the service and not verifying: evidence handled as a rollback.
         C::Chain(_) => CHAIN,
@@ -657,15 +657,15 @@ fn client_failure(e: &AppError) -> (Category, WalletFailure) {
             let (category, code) = app_refusal_category(refusal);
             failure(category, code)
         }
-        AppError::Switch(dispatch) => {
+        AppError::Dispatch(dispatch) => {
             let (category, code) = dispatch_client_category(dispatch);
             let (category, mut failure) = failure(category, &code);
-            if let ClientError::Switch { retry_after, .. }
+            if let ClientError::Dispatch { retry_after, .. }
             | ClientError::BodyUnread { retry_after, .. } = dispatch
             {
                 failure.retry_after_ms = retry_after.map(|s| s.saturating_mul(1000));
             }
-            if let ClientError::Switch {
+            if let ClientError::Dispatch {
                 code: pubky_dispatch_core::http::ErrorCode::QuotaExceeded,
                 current,
                 ..

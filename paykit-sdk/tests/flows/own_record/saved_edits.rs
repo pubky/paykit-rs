@@ -71,7 +71,7 @@ fn mentions(value: &Value, needle: &str) -> bool {
 /// The next time read of `signer`'s Dispatch fails, once a fresh sample is too old.
 fn time_read_fails(w: &World, signer: &pubky_dispatch_client::testing::TestSigner) {
     w.clock.advance_ms(11 * 60 * 1000);
-    signer.switch().fail_next(Fault::Unreachable {
+    signer.dispatch().fail_next(Fault::Unreachable {
         path: "/feed".into(),
         after: 0,
     });

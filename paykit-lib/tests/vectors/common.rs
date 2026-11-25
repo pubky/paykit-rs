@@ -679,7 +679,7 @@ pub fn file_text(file: &Value) -> String {
 }
 
 /// `text`, a record value or a document body, with every app certificate it carries (a
-/// `body` and `sig` pair whose body is a `pubky-switch.app_cert`) replaced by the certificate
+/// `body` and `sig` pair whose body is a `pubky-dispatch.app_cert`) replaced by the certificate
 /// of the same app in this set ([`cert_doc`]). Only the scopes and permissions of a carried
 /// certificate may differ from this set's: every other byte of `text` stays.
 pub fn recertified(keys: &Keys, text: &str) -> String {
@@ -697,7 +697,7 @@ pub fn recertified(keys: &Keys, text: &str) -> String {
                         .body_bytes()
                         .ok()
                         .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
-                        .is_some_and(|b| b["kind"] == "pubky-switch.app_cert");
+                        .is_some_and(|b| b["kind"] == "pubky-dispatch.app_cert");
                     if is_cert {
                         out.push(doc);
                     }

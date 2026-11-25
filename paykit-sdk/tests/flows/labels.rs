@@ -411,13 +411,13 @@ async fn test_labels_payment_proceeds_when_every_early_cancellation_is_excluded(
 /// Use the known loss boundary or retain both if a subsequent loss obscures it.
 async fn stops_across_loss(another_loss: bool) {
     use pubky_dispatch_client::app::FeedPosition;
-    use pubky_dispatch_client::testing::ScriptedSwitch;
+    use pubky_dispatch_client::testing::ScriptedDispatch;
     let w = World::new();
     let mut payer = w.wallet("wallet").await;
     let issuer = w.join(&w.bob, "issuer", selling("shop1")).await;
     payer.app_mut().invite(&w.bob_id()).await.unwrap();
     let request = sale(&w, &w.bob, &w.alice);
-    let send = |service: &ScriptedSwitch, target, hash| {
+    let send = |service: &ScriptedDispatch, target, hash| {
         let stop = w.sign_as(
             &w.bob,
             "issuer",
@@ -444,7 +444,7 @@ async fn stops_across_loss(another_loss: bool) {
         sibling.app_mut().invite(&w.bob_id()).await.unwrap();
         w.deliver(&w.bob, "issuer", &w.alice, &[sibling.app_id()], &request);
         sibling.receive(None).await.unwrap();
-        let id = send(w.alice.switch(), sibling.app_id(), request.hash());
+        let id = send(w.alice.dispatch(), sibling.app_id(), request.hash());
         sibling.receive(None).await.unwrap();
         let value = crate::outcome_record::record_value(&mut sibling, &purchase)
             .await

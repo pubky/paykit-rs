@@ -265,11 +265,11 @@ async fn upload_without_proof(
     original: &pubky_dispatch_client::app::KeptOp,
 ) -> TestResult {
     use pubky_dispatch_client::client::answers::{RecoveryUpload, UploadedOp};
-    use pubky_dispatch_client::client::{Credentials, SwitchClient};
+    use pubky_dispatch_client::client::{Credentials, DispatchClient};
     phone.app_mut().refresh_identity().await?;
     phone.app_mut().follow_provider().await?;
     let buyer = world.identity("buyer")?;
-    let client = SwitchClient::new(
+    let client = DispatchClient::new(
         origin,
         buyer.public(),
         Credentials::App {
@@ -491,8 +491,8 @@ async fn receive_fenced_acceptance(
         Box::pin(retain_large_inventory(&mut payer)).await?;
     }
     let next = "https://replacement.buyer.allowance.test";
-    w.lose_switch("https://buyer.allowance.test");
-    w.add_switch(next, &[&w.identity("buyer")?]).await?;
+    w.lose_dispatch("https://buyer.allowance.test");
+    w.add_dispatch(next, &[&w.identity("buyer")?]).await?;
     Box::pin(signer.declare_provider_loss(
         next,
         pubky_dispatch_signer::UserConfirmed::shown_and_confirmed(),

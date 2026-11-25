@@ -34,7 +34,7 @@ pub(crate) fn publish_app_at(
 ) -> Vec<u8> {
     let keys = w.bob.identity().app_keys(app);
     let app_id = keys.app_id_bytes();
-    let held = w.bob.switch().app(&app_id).record.unwrap();
+    let held = w.bob.dispatch().app(&app_id).record.unwrap();
     let mut body = AppRecord::verify(&held, &w.bob_id())
         .unwrap()
         .body()
@@ -672,7 +672,7 @@ async fn test_public_slow_dispatch_paid_once_the_user_confirms() {
 
 #[tokio::test]
 async fn test_public_identity_source_stale_service_requires_user_confirmation() {
-    use pubky_dispatch_client::app::SwitchCopy;
+    use pubky_dispatch_client::app::DispatchCopy;
     use pubky_dispatch_client::clock::TestClock;
     use pubky_dispatch_client::testing::START_MS;
     use std::sync::Arc;
@@ -697,7 +697,7 @@ async fn test_public_identity_source_stale_service_requires_user_confirmation() 
         .identity_of(&w.bob_id(), true)
         .await
         .unwrap();
-    assert_eq!(source.switch_copy, SwitchCopy::Stale);
+    assert_eq!(source.dispatch_copy, DispatchCopy::Stale);
     assert_eq!(source.homeserver_read_ms, Some(w.clock.now_ms()));
     let public = public_to_bob(&w).options;
     let confirmed = public
@@ -731,7 +731,7 @@ async fn test_public_identity_source_stale_service_requires_user_confirmation() 
 
 #[tokio::test]
 async fn test_public_failed_lookup_needs_the_exact_homeserver_version_even_with_consent() {
-    use pubky_dispatch_client::app::SwitchCopy;
+    use pubky_dispatch_client::app::DispatchCopy;
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
@@ -744,8 +744,8 @@ async fn test_public_failed_lookup_needs_the_exact_homeserver_version_even_with_
         .await
         .unwrap();
     assert_eq!(source.doc.hash(), higher.hash());
-    assert_eq!(source.switch_copy, SwitchCopy::Read);
-    assert!(source.switch_read_ms.is_some());
+    assert_eq!(source.dispatch_copy, DispatchCopy::Read);
+    assert!(source.dispatch_read_ms.is_some());
     assert_eq!(source.homeserver_read_ms, None);
 
     w.router.remove(crate::common::BOB_ORIGIN);
@@ -754,7 +754,7 @@ async fn test_public_failed_lookup_needs_the_exact_homeserver_version_even_with_
         .identity_of(&w.bob_id(), true)
         .await
         .unwrap();
-    assert_eq!(source.switch_copy, SwitchCopy::Unavailable);
+    assert_eq!(source.dispatch_copy, DispatchCopy::Unavailable);
     assert_eq!(source.homeserver_read_ms, None);
     let mut payment = public_to_bob(&w);
     payment.options.unconfirmed_identity_confirmed = Some(UserConfirmed::new());
@@ -776,7 +776,7 @@ async fn test_public_failed_lookup_needs_the_exact_homeserver_version_even_with_
         .identity_of(&w.bob_id(), true)
         .await
         .unwrap();
-    assert_eq!(source.switch_copy, SwitchCopy::Unavailable);
+    assert_eq!(source.dispatch_copy, DispatchCopy::Unavailable);
     assert_eq!(source.homeserver_read_ms, Some(w.clock.now_ms()));
     let refused = wallet
         .pay_without_request(public_to_bob(&w))
@@ -1630,7 +1630,7 @@ fn publish_padded(
 ) -> Vec<u8> {
     let keys = w.bob.identity().app_keys("shop");
     let app_id = keys.app_id_bytes();
-    let held = w.bob.switch().app(&app_id).record.unwrap();
+    let held = w.bob.dispatch().app(&app_id).record.unwrap();
     let mut body = AppRecord::verify(&held, &w.bob_id())
         .unwrap()
         .body()

@@ -16,7 +16,7 @@ use pubky_dispatch_client::app::{AppError, AppEvent, OutgoingMessage, SENT_RETEN
 use pubky_dispatch_client::clock::Clock;
 use pubky_dispatch_client::error::StoreError;
 use pubky_dispatch_client::store::{Fault as StoreFault, FaultStore, StateStore};
-use pubky_dispatch_client::testing::{Fault, Router, ScriptedSwitch, TestSigner};
+use pubky_dispatch_client::testing::{Fault, Router, ScriptedDispatch, TestSigner};
 use pubky_dispatch_client::transport::{BoxFuture, Request, Response, Transport};
 
 use crate::common::{draft, endpoint, receive_message, request_from, store, World};
@@ -179,7 +179,7 @@ async fn test_restore_held_waits_for_the_rest_of_the_feed() {
             Default::default(),
         );
     }
-    let before_rejection = w.bob.switch().seq();
+    let before_rejection = w.bob.dispatch().seq();
     let rejection = wallet.reject_request(&request, None).await.unwrap();
     wallet.flush().await.unwrap();
 
@@ -249,7 +249,7 @@ async fn test_restore_held_unreadable_stop_waits_then_releases() {
         .app()
         .record_key(&crate::restore::payee_record(&request))
         .unwrap();
-    w.bob.switch().fail_next(Fault::Unreachable {
+    w.bob.dispatch().fail_next(Fault::Unreachable {
         path: format!("records/{}", pubky_dispatch_core::enc::b64(&key)),
         after: 0,
     });
@@ -362,7 +362,7 @@ async fn test_restore_held_store_only_stop_without_a_readable_record_ends_after_
 
     let mut wallet = Box::pin(restore(&w, &w.alice, storage, &backup)).await;
     let fail_read = || {
-        w.alice.switch().fail_next(Fault::Unreachable {
+        w.alice.dispatch().fail_next(Fault::Unreachable {
             path: format!("records/{}", pubky_dispatch_core::enc::b64(&key)),
             after: 0,
         })
@@ -691,7 +691,7 @@ async fn test_restore_held_proof_waits_for_a_stored_receipt_not_placed() {
         "se/{}/{receipt}",
         pubky_dispatch_core::enc::b64(&w.bob_id())
     );
-    w.alice.switch().keep_passed_entries();
+    w.alice.dispatch().keep_passed_entries();
     crate::common::refuse_writes(&w.alice, 2);
     wallet.receive(None).await.unwrap();
     assert_receipt_unplaced(&wallet, &note).await;
@@ -1011,7 +1011,7 @@ async fn test_restore_held_rejection_waits_while_its_record_is_paused() {
 fn reply_grants(who: &TestSigner, peer: [u8; 32]) -> usize {
     use pubky_dispatch_core::admission::PeerReason;
     use pubky_dispatch_core::ops::OpKind;
-    who.switch()
+    who.dispatch()
         .applied()
         .iter()
         .filter(|op| {
@@ -1053,7 +1053,7 @@ async fn test_restore_held_allowance_end_waits_while_its_record_is_paused() {
     shop.receive(None).await.unwrap();
     // Seen divergent: the record is paused until its user confirms it (Paykit spec 6).
     w.bob
-        .switch()
+        .dispatch()
         .make_divergent([0x5a; 16], theirs, [1; 32])
         .unwrap();
     shop.receive(None).await.unwrap();
@@ -1383,7 +1383,7 @@ async fn test_restore_held_allowance_end_waits_for_the_key_its_record_needs() {
     .unwrap()
     {
         w.bob
-            .switch()
+            .dispatch()
             .signer_op(OpKind::KeyBundlePut(KeyBundlePut {
                 target_app_id: cert.app_id(),
                 bundle: part.bundle,
@@ -1452,7 +1452,7 @@ async fn test_restore_held_conflicted_allowance_withdraws_its_recorded_end_silen
 
     let mut shop = Box::pin(restore(&w, &w.bob, store(), &backup)).await;
     assert!(held(&shop, &end).await);
-    let before = w.alice.switch().entries_from(&w.bob_id());
+    let before = w.alice.dispatch().entries_from(&w.bob_id());
     let counts = decisions_through_listing(&mut shop).await;
     assert_eq!(
         (
@@ -1465,7 +1465,7 @@ async fn test_restore_held_conflicted_allowance_withdraws_its_recorded_end_silen
     shop.flush().await.unwrap();
     let read = wallet.receive(None).await.unwrap();
     assert!(!allowances::received(&read, "paykit.allowance_end"));
-    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), before);
+    assert_eq!(w.alice.dispatch().entries_from(&w.bob_id()), before);
     assert!(shop.message_delivery(&end).await.unwrap().is_none());
     shop.receive(None).await.unwrap();
     assert!(!shop
@@ -1522,7 +1522,7 @@ async fn test_restore_held_divergent_cancellation_released_after_confirmation() 
         .record_key(&crate::restore::payee_record(&request))
         .unwrap();
     w.bob
-        .switch()
+        .dispatch()
         .make_divergent([0x5a; 16], record, [1; 32])
         .unwrap();
     Box::pin(confirm_held_divergent(&mut shop, record, &stop)).await;
@@ -1537,7 +1537,7 @@ async fn test_restore_held_divergent_allowance_end_released_after_confirmation()
     let backup = shop.backup().await.unwrap();
     drop(shop);
     w.bob
-        .switch()
+        .dispatch()
         .make_divergent([0x5a; 16], record, [1; 32])
         .unwrap();
     let mut shop = Box::pin(restore(&w, &w.bob, store(), &backup)).await;
@@ -1733,7 +1733,7 @@ async fn recovery_upload_for_listing(
 // scope keys are unchanged (Paykit spec 7.2, Dispatch spec 12.4).
 #[tokio::test]
 async fn test_restore_held_waits_for_a_listing_the_client_owes() {
-    use pubky_dispatch_client::client::{Credentials, SwitchClient};
+    use pubky_dispatch_client::client::{Credentials, DispatchClient};
     use pubky_dispatch_client::testing::SWITCH_ORIGIN;
 
     let w = World::new();
@@ -1757,7 +1757,7 @@ async fn test_restore_held_waits_for_a_listing_the_client_owes() {
     fail_withdrawal(&mut wallet, &storage, &stop).await;
     assert!(!wallet.app().listing_owed().await.unwrap());
     let before = service.tip_seq();
-    let client = SwitchClient::new(
+    let client = DispatchClient::new(
         SWITCH_ORIGIN,
         w.alice_id(),
         Credentials::App {
@@ -2075,7 +2075,7 @@ async fn test_restore_held_direct_client_read_does_not_open_paykit_decisions() {
     wallet.flush().await.unwrap();
     wallet.resume_payments().await.unwrap();
     assert!(held(&wallet, &stop).await);
-    w.alice.switch().fail_next(Fault::Unreachable {
+    w.alice.dispatch().fail_next(Fault::Unreachable {
         path: "/feed".into(),
         after: 0,
     });
@@ -2140,7 +2140,7 @@ async fn read_restored_client(app: &mut Paykit) {
 /// Refuse just the placement write. The restore can still read the same record afresh.
 struct RefusePlacement {
     router: Arc<Router>,
-    service: Arc<ScriptedSwitch>,
+    service: Arc<ScriptedDispatch>,
     record: [u8; 32],
     refusing: AtomicBool,
 }
@@ -2185,7 +2185,7 @@ async fn restore_before_placement(
 ) -> (Paykit, Arc<RefusePlacement>) {
     let placement = Arc::new(RefusePlacement {
         router: w.router.clone(),
-        service: who.switch().clone(),
+        service: who.dispatch().clone(),
         record,
         refusing: AtomicBool::new(true),
     });

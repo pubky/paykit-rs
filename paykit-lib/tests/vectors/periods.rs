@@ -137,7 +137,7 @@ fn details_rates_members() -> Vec<(Place<'static>, Value)> {
         (
             Place::Member("/details_rates/description"),
             json!(
-                "The rates of period details apply to a payment whose independently verified payment time, from the payment method's evidence, is at or after their start, the details' created_at cut to whole seconds (v0.1's valid_from), and at or before expires_at, all read at millisecond precision with further digits truncated (Switch wire 1.6, wire 4.9; spec 8.2). An evidence time in whole seconds reads as .000. The payee credits a payment at the rates only then; the payer pays by them only while its device clock and its highest verified service time are both at or after their start and before expires_at."
+                "The rates of period details apply to a payment whose independently verified payment time, from the payment method's evidence, is at or after their start, the details' created_at cut to whole seconds (v0.1's valid_from), and at or before expires_at, all read at millisecond precision with further digits truncated (Dispatch wire 1.6, wire 4.9; spec 8.2). An evidence time in whole seconds reads as .000. The payee credits a payment at the rates only then; the payer pays by them only while its device clock and its highest verified service time are both at or after their start and before expires_at."
             ),
         ),
     ]
@@ -289,7 +289,7 @@ fn destination_expiry_members() -> Vec<(Place<'static>, Value)> {
         Place::Member("/destination_expiry"),
         json!({
             "cases": cases,
-            "description": "A destination has expired once its expiry is at or before the later of the payer's device clock and the highest service time it has verified for its own account at its current service, compared at millisecond precision (spec 7.2, check the destination; Switch wire 1.6). A null service_time is a payer that has verified none, which judges by its device clock alone. The expiry is a public record's finite expires_at or its updated_at plus the record age limit, a Private Payment List's expires_at or 30 days after its acceptance, or period details' expires_at.",
+            "description": "A destination has expired once its expiry is at or before the later of the payer's device clock and the highest service time it has verified for its own account at its current service, compared at millisecond precision (spec 7.2, check the destination; Dispatch wire 1.6). A null service_time is a payer that has verified none, which judges by its device clock alone. The expiry is a public record's finite expires_at or its updated_at plus the record age limit, a Private Payment List's expires_at or 30 days after its acceptance, or period details' expires_at.",
             "expires_at": DESTINATION_EXPIRES_AT,
         }),
     )]

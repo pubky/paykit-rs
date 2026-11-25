@@ -452,7 +452,7 @@ fn stored_list(w: &World, version: paykit_lib::ListVersion, payload: &str) -> se
         body,
     );
     let keys = w.bob.identity().app_keys("shop");
-    let cert = w.bob.switch().app(&keys.app_id_bytes()).cert.unwrap();
+    let cert = w.bob.dispatch().app(&keys.app_id_bytes()).cert.unwrap();
     serde_json::json!({
         "sender": pubky_dispatch_core::enc::pubky_id(&w.bob_id()),
         "cert": { "body": cert.signed().body, "sig": cert.signed().sig },
@@ -910,7 +910,7 @@ async fn test_unrequested_list_after_a_delete_stays_held_and_its_single_use_endp
     // without the mark.
     let backup = wallet.backup().await.unwrap();
     drop(wallet);
-    w.alice.switch().drop_record(&key).unwrap();
+    w.alice.dispatch().drop_record(&key).unwrap();
     let mut restored = restored_onto(&w, crate::common::store(), &backup).await;
     restored.receive(None).await.unwrap();
     assert_list_stays_held_and_unpaid(&w, &mut restored, &mut shop, &key).await;
@@ -950,7 +950,7 @@ async fn test_unrequested_with_the_own_dispatch_unavailable_refused_and_nothing_
         .await;
     wallet.receive(None).await.unwrap();
     w.alice
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::Error {
             path: "/claims".into(),
             code: pubky_dispatch_core::http::ErrorCode::Unavailable,
@@ -979,7 +979,7 @@ async fn test_unrequested_paid_with_its_outcome_unwritten_is_no_error() {
     wallet.receive(None).await.unwrap();
     // The attempt's batch goes through; the outcome's, after the method paid, can't connect.
     w.alice
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
             path: "/ops".into(),
             after: 1,
@@ -1046,12 +1046,12 @@ pub(crate) fn store_bundle_from(
     cert: &pubky_dispatch_core::records::AppCert,
     first: u64,
 ) {
-    store_bundle_at(w, w.alice.switch(), app, cert, first);
+    store_bundle_at(w, w.alice.dispatch(), app, cert, first);
 }
 
 pub(crate) fn store_bundle_at(
     w: &World,
-    dispatch: &pubky_dispatch_client::testing::ScriptedSwitch,
+    dispatch: &pubky_dispatch_client::testing::ScriptedDispatch,
     app: [u8; 16],
     cert: &pubky_dispatch_core::records::AppCert,
     first: u64,
@@ -1683,7 +1683,7 @@ async fn test_unrequested_list_held_over_a_forgotten_delete_stays_held_after_a_f
     // The service forgets the delete, as it does once every own app's cursor passed it:
     // the key reads as absent and a create there starts afresh.
     let key = wallet.app().record_key(&target).unwrap();
-    w.alice.switch().drop_record(&key).unwrap();
+    w.alice.dispatch().drop_record(&key).unwrap();
     let writes = w.record_writes(&w.alice, &key);
 
     // A fresh store restored from a backup holds the held list but not the delete.
@@ -1871,7 +1871,7 @@ async fn test_unrequested_delete_seen_before_any_list_survives_a_restore_and_a_f
         let backup = wallet.backup().await.unwrap();
         drop(wallet);
         // The service forgets the delete: the key reads absent.
-        w.alice.switch().drop_record(&key).unwrap();
+        w.alice.dispatch().drop_record(&key).unwrap();
         let onto = if in_place {
             storage
         } else {
@@ -1920,7 +1920,7 @@ async fn test_unrequested_hold_over_a_delete_survives_an_in_place_restore_from_b
     assert_eq!(wallet.held_lists().await.unwrap().len(), 1);
     let key = wallet.app().record_key(&target).unwrap();
     drop(wallet);
-    w.alice.switch().drop_record(&key).unwrap();
+    w.alice.dispatch().drop_record(&key).unwrap();
     // Restored in place: the installation saw the delete, which the older backup didn't.
     let mut restored = restored_onto(&w, storage, &backup).await;
     restored.receive(None).await.unwrap();
@@ -1967,7 +1967,7 @@ async fn test_unrequested_list_held_for_a_refused_write_stays_held_over_a_later_
     let key = wallet.app().record_key(&target).unwrap();
     let backup = wallet.backup().await.unwrap();
     drop(wallet);
-    w.alice.switch().drop_record(&key).unwrap();
+    w.alice.dispatch().drop_record(&key).unwrap();
     let mut restored = restored_onto(&w, crate::common::store(), &backup).await;
     restored.receive(None).await.unwrap();
     let writes = w.record_writes(&w.alice, &key);
@@ -1997,7 +1997,7 @@ async fn test_unrequested_unmarked_create_over_a_forgotten_delete_keeps_the_list
             pay_single_use_then_delete_elsewhere(&w, &mut wallet, &mut phone, &mut shop).await;
         // The wallet sees the delete; the service then forgets it.
         wallet.receive(None).await.unwrap();
-        w.alice.switch().drop_record(&key).unwrap();
+        w.alice.dispatch().drop_record(&key).unwrap();
         let mut wallet = if fresh {
             let backup = wallet.backup().await.unwrap();
             drop(wallet);
@@ -2097,7 +2097,7 @@ async fn test_unrequested_delete_by_another_installation_of_the_app_keeps_a_late
     // forgets the delete.
     let backup = second.backup().await.unwrap();
     drop(second);
-    w.alice.switch().drop_record(&key).unwrap();
+    w.alice.dispatch().drop_record(&key).unwrap();
     let mut restored = restored_onto(&w, crate::common::store(), &backup).await;
     restored.receive(None).await.unwrap();
     assert_list_stays_held_and_unpaid(&w, &mut restored, &mut shop, &key).await;
@@ -2141,7 +2141,7 @@ async fn test_unrequested_put_back_of_the_known_history_after_a_newer_recreation
     // a fresh store: what it read is gone with the store.
     phone.app_mut().read_record(&target).await.unwrap();
     put_list_record(&mut phone, &target, None).await;
-    w.alice.switch().drop_record(&key).unwrap();
+    w.alice.dispatch().drop_record(&key).unwrap();
     let mut restored = restored_onto(&w, crate::common::store(), &backup).await;
     restored.receive(None).await.unwrap();
     // A newly joined app takes a newer list, the third, sent to it and the wallet, and
@@ -2458,7 +2458,7 @@ async fn test_unrequested_delete_over_a_write_this_app_couldnt_read_keeps_no_cop
     put_list_record(&mut phone, &target, None).await;
     wallet.receive(None).await.unwrap();
     let key = wallet.app().record_key(&target).unwrap();
-    w.alice.switch().drop_record(&key).unwrap();
+    w.alice.dispatch().drop_record(&key).unwrap();
     // The wallet's key comes, and a newly joined app writes the copy it held back.
     store_bundle(&w, wallet.app_id(), &wallet.app().cert().clone());
     wallet.receive(None).await.unwrap();
@@ -2516,7 +2516,7 @@ async fn test_unrequested_another_payee_apps_record_at_a_key_never_its_copy() {
     let key = wallet.app().record_key(&target).unwrap();
     let backup = wallet.backup().await.unwrap();
     drop(wallet);
-    w.alice.switch().drop_record(&key).unwrap();
+    w.alice.dispatch().drop_record(&key).unwrap();
     let mut wallet = restored_onto(&w, crate::common::store(), &backup).await;
     wallet.receive(None).await.unwrap();
     // A newly joined app writes the second shop's own list there.
@@ -2846,7 +2846,7 @@ async fn test_unrequested_loss_marker_read_first_kept_through_a_fresh_restore() 
     // from an older copy without the mark, naming the delete. The tablet first learns of
     // the delete from that put-back, then is backed up.
     put_list_record(&mut phone, &target, None).await;
-    w.alice.switch().drop_record(&key).unwrap();
+    w.alice.dispatch().drop_record(&key).unwrap();
     let mut put_back = marked.clone();
     put_back["used"] = serde_json::json!([]);
     put_back["lost_to_delete"] = serde_json::json!(pubky_dispatch_core::enc::b64(&[5u8; 32]));
@@ -2907,7 +2907,7 @@ async fn test_unrequested_write_dropping_a_loss_marker_after_a_fresh_restore_sho
     // from an older copy without the mark, naming the delete. The tablet first learns of
     // the delete from that put-back, then is backed up.
     put_list_record(&mut phone, &target, None).await;
-    w.alice.switch().drop_record(&key).unwrap();
+    w.alice.dispatch().drop_record(&key).unwrap();
     let mut put_back = marked.clone();
     put_back["used"] = serde_json::json!([]);
     put_back["lost_to_delete"] = serde_json::json!(pubky_dispatch_core::enc::b64(&[5u8; 32]));
@@ -2965,7 +2965,7 @@ async fn test_unrequested_flagged_put_back_then_a_dropped_marker_not_paid_after_
     // copy, without the mark and naming the delete, is flagged by the wallet for dropping
     // the mark it saw, so Paykit never sees its marker. The wallet is then backed up.
     put_list_record(&mut phone, &target, None).await;
-    w.alice.switch().drop_record(&key).unwrap();
+    w.alice.dispatch().drop_record(&key).unwrap();
     let mut put_back = marked.clone();
     put_back["used"] = serde_json::json!([]);
     put_back["lost_to_delete"] = serde_json::json!(pubky_dispatch_core::enc::b64(&[5u8; 32]));
@@ -3098,7 +3098,7 @@ async fn test_unrequested_later_write_changing_lost_to_delete_taken() {
 #[tokio::test]
 async fn test_unrequested_loss_marker_of_a_recovery_upload_kept_through_an_in_place_restore() {
     use pubky_dispatch_client::client::answers::{RecoveryUpload, UploadedOp};
-    use pubky_dispatch_client::client::{Credentials, SwitchClient};
+    use pubky_dispatch_client::client::{Credentials, DispatchClient};
     use pubky_dispatch_client::testing::{Fault, SWITCH_ORIGIN};
     use pubky_dispatch_core::ops::{Entry, OpsRequest};
     let w = World::new();
@@ -3130,7 +3130,7 @@ async fn test_unrequested_loss_marker_of_a_recovery_upload_kept_through_an_in_pl
     phone.app_mut().read_record(&target).await.unwrap();
     let (_, marked) = list_record(&phone, &w).await;
     put_list_record(&mut phone, &target, None).await;
-    w.alice.switch().drop_record(&key).unwrap();
+    w.alice.dispatch().drop_record(&key).unwrap();
     // The phone's put-back naming the delete, without the mark, never reaches the old
     // service; after a provider loss it is a recovery upload, signed and readable with no
     // proof of its version.
@@ -3144,13 +3144,13 @@ async fn test_unrequested_loss_marker_of_a_recovery_upload_kept_through_an_in_pl
         )
         .await
         .unwrap();
-    w.alice.switch().fail_next(Fault::Unreachable {
+    w.alice.dispatch().fail_next(Fault::Unreachable {
         path: "/ops".into(),
         after: 0,
     });
     let batch = pubky_dispatch_client::app::OpBatch::for_protocol("paykit").entry(op);
     assert!(phone.app_mut().submit_batch(batch).await.is_err());
-    let missed = w.alice.switch().unreached_bodies().pop().unwrap();
+    let missed = w.alice.dispatch().unreached_bodies().pop().unwrap();
     let records = OpsRequest::parse(&missed)
         .unwrap()
         .entries
@@ -3174,7 +3174,7 @@ async fn test_unrequested_loss_marker_of_a_recovery_upload_kept_through_an_in_pl
     // last.
     tablet.app_mut().refresh_identity().await.unwrap();
     tablet.app_mut().follow_provider().await.unwrap();
-    SwitchClient::new(
+    DispatchClient::new(
         SWITCH_ORIGIN,
         w.alice_id(),
         Credentials::App {
@@ -3345,7 +3345,7 @@ async fn test_unrequested_unread_mark_kept_after_the_record_reads_again() {
     drop(phone);
     // The record is deleted, which the phone never sees, and the service forgets it.
     put_list_record(&mut tool, &target, None).await;
-    w.alice.switch().drop_record(&key).unwrap();
+    w.alice.dispatch().drop_record(&key).unwrap();
     // Restored, the phone gets the list again and reads the key absent: it once read a value
     // it couldn't, so the list stays held, never written afresh without the mark (Paykit
     // spec 6).
@@ -3403,7 +3403,7 @@ async fn test_unrequested_list_held_over_an_unreadable_record_stays_held_over_a_
     drop(phone);
     // The record is deleted, which the phone never sees, and the service forgets it.
     put_list_record(&mut tool, &target, None).await;
-    w.alice.switch().drop_record(&key).unwrap();
+    w.alice.dispatch().drop_record(&key).unwrap();
     // Restored, the phone reads the key absent: what the unreadable value held is unknown,
     // so the list stays held, never written afresh without the mark (Paykit spec 6).
     let mut restored = restored_onto(&w, crate::common::store(), &backup).await;
@@ -3437,7 +3437,7 @@ async fn test_unrequested_held_list_over_an_absent_key_never_created_over_a_forg
     wallet.receive(None).await.unwrap();
     assert_eq!(wallet.held_lists().await.unwrap().len(), 1);
     w.alice
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
             path: "/ops".into(),
             after: 0,
@@ -3447,7 +3447,7 @@ async fn test_unrequested_held_list_over_an_absent_key_never_created_over_a_forg
     let key = wallet.app().record_key(&target).unwrap();
     assert_eq!(w.record_writes(&w.alice, &key), 0);
     for _ in 0..3 {
-        if !w.alice.switch().unreached_bodies().is_empty() {
+        if !w.alice.dispatch().unreached_bodies().is_empty() {
             break;
         }
         // The wallet sent nothing: another app's writes, never sent again, meet the faults
@@ -3464,7 +3464,7 @@ async fn test_unrequested_held_list_over_an_absent_key_never_created_over_a_forg
         let batch = pubky_dispatch_client::app::OpBatch::for_protocol("paykit").entry(op);
         assert!(tool.app_mut().submit_batch(batch).await.is_err());
     }
-    assert!(!w.alice.switch().unreached_bodies().is_empty());
+    assert!(!w.alice.dispatch().unreached_bodies().is_empty());
     // The phone writes the list, pays its single-use endpoint and deletes the record; the
     // service forgets the delete, all inside five minutes.
     w.list_to_alice(&mut shop, &[phone.app_id()], list_version(1, 1))
@@ -3478,7 +3478,7 @@ async fn test_unrequested_held_list_over_an_absent_key_never_created_over_a_forg
     assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
     phone.app_mut().read_record(&target).await.unwrap();
     put_list_record(&mut phone, &target, None).await;
-    w.alice.switch().drop_record(&key).unwrap();
+    w.alice.dispatch().drop_record(&key).unwrap();
     let writes = w.record_writes(&w.alice, &key);
     // The wallet's next passes create nothing at the key: a held list's create over an
     // apparently absent key is withheld (Paykit wire 5, "Incomplete protected-record
@@ -3590,7 +3590,7 @@ async fn test_unrequested_loss_marker_kept_through_an_in_place_restore_of_a_back
     // The signer stores the bundle the renewed certificate needs, as it answers a request
     // for a full one.
     let store_bundle = || {
-        let epoch = w.alice.switch().identity_doc().unwrap().data_epoch();
+        let epoch = w.alice.dispatch().identity_doc().unwrap().data_epoch();
         for part in pubky_dispatch_core::records::seal_bundle_parts(
             w.alice.identity().key(),
             &wider,
@@ -3601,7 +3601,7 @@ async fn test_unrequested_loss_marker_kept_through_an_in_place_restore_of_a_back
         .unwrap()
         {
             w.alice
-                .switch()
+                .dispatch()
                 .signer_op(OpKind::KeyBundlePut(
                     pubky_dispatch_core::ops::KeyBundlePut {
                         target_app_id: me,

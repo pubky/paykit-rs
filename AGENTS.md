@@ -57,9 +57,9 @@
 - Session creation, capability scope and key storage remain the caller's responsibility; document that on each API that takes a session or a key. Transport timeouts are configured by the caller on the HTTP or Pubky client. The protocol's own deadlines, such as claim deadlines and `server_time_in` conditions, come from the specs and use service time.
 
 ## Paths and Labels
-- The Dispatch's paths are the Dispatch's (Dispatch spec 4.1): `identity.json`, app records and app backups live under `/pub/pubky-switch/v1/` and `/priv/pubky-switch/v1/`. Take them from the Dispatch crates; never build them here.
+- The Dispatch's paths are the Dispatch's (Dispatch spec 4.1): `identity.json`, app records and app backups live under `/pub/pubky-dispatch/v1/` and `/priv/pubky-dispatch/v1/`. Take them from the Dispatch crates; never build them here.
 - Paykit uses the Dispatch app record and optional backup paths. Each app manages its own contact details (Paykit spec 2, 3.4, 17.10).
-- Paykit's own signed formats and derivations use labels under `paykit/v1/`, such as `paykit/v1/executor-grant` and `paykit/v1/obligation` (Paykit spec 10, Paykit wire 1.5). Never sign or derive a Paykit format under a `pubky-switch/v1/` label (Dispatch spec 1).
+- Paykit's own signed formats and derivations use labels under `paykit/v1/`, such as `paykit/v1/executor-grant` and `paykit/v1/obligation` (Paykit spec 10, Paykit wire 1.5). Never sign or derive a Paykit format under a `pubky-dispatch/v1/` label (Dispatch spec 1).
 
 ## Messages and Shared State
 - Sealing, opening, the message frame and the common message checks are the Dispatch's (Dispatch wire 4 and 5.1), and come from `pubky-dispatch-core`. A receiving app runs those checks, then Paykit's, before acting on a message; a message that fails a check is dropped as that check says, and is never partly applied.

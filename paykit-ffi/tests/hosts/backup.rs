@@ -246,7 +246,7 @@ pub(super) async fn print_notice(cleared: bool) -> Result<()> {
     if cleared {
         payer.app_mut().ack_events_for("paykit", duty).await?;
         let successor = "https://new-payer.payments.test";
-        world.add_switch(successor, &[&owner]).await?;
+        world.add_dispatch(successor, &[&owner]).await?;
         let current = Box::pin(signer.declare_provider_loss(
             successor,
             pubky_dispatch_signer::UserConfirmed::shown_and_confirmed(),

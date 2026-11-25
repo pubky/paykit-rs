@@ -232,8 +232,8 @@ async fn receipt_after_loss(w: &World, source: Recovery) -> TestResult {
         Box::pin(witness.app_mut().refresh_identity()).await?;
     }
     let proof_backup = Box::pin(witness.backup()).await?;
-    w.lose_switch(origin);
-    w.add_switch(recovery, &[&w.identity("payer")?]).await?;
+    w.lose_dispatch(origin);
+    w.add_dispatch(recovery, &[&w.identity("payer")?]).await?;
     Box::pin(alice.declare_provider_loss(
         recovery,
         pubky_dispatch_signer::UserConfirmed::shown_and_confirmed(),

@@ -1389,13 +1389,13 @@ pub(crate) fn floor_write_error(error: crate::error::PaykitError) -> crate::erro
         return error;
     }
     match &error {
-        crate::error::PaykitError::Client(AppError::Switch(answer))
+        crate::error::PaykitError::Client(AppError::Dispatch(answer))
             if answer.retry() == Some(Retry::No) =>
         {
             error
         }
         crate::error::PaykitError::Client(
-            AppError::Switch(_)
+            AppError::Dispatch(_)
             | AppError::Transport(_)
             | AppError::NotAnsweringAsAccount { .. }
             | AppError::Refused(ClientRefusal::NotNow(_)),
@@ -1888,8 +1888,8 @@ mod tests {
     }
 
     fn answered(code: ErrorCode) -> pubky_dispatch_client::app::AppError {
-        pubky_dispatch_client::app::AppError::Switch(
-            pubky_dispatch_client::error::ClientError::Switch {
+        pubky_dispatch_client::app::AppError::Dispatch(
+            pubky_dispatch_client::error::ClientError::Dispatch {
                 status: 400,
                 code,
                 message: String::new(),
@@ -1998,7 +1998,7 @@ mod tests {
         // Another wait whose text reads the same is not the floor's: only the reason tells.
         let text = crate::NotNowReason::FloorUnreadable.to_string();
         let same_text: crate::error::PaykitError =
-            Refusal::HeldForUser(crate::HeldForUserReason::SwitchClient(text.clone())).into();
+            Refusal::HeldForUser(crate::HeldForUserReason::DispatchClient(text.clone())).into();
         assert!(!is_unreadable_floor(&same_text));
         let other: crate::error::PaykitError =
             Refusal::NotNow(NotNowReason::ReadAgain("the deny list must be read again")).into();

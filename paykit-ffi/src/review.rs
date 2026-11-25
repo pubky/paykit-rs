@@ -575,7 +575,7 @@ pub enum HeldForUserKind {
     ReloadRequired,
     /// The Dispatch client holds the attempt back, as the message names: reconcile mode, the
     /// clocks apart, or a display read owed.
-    SwitchClient,
+    DispatchClient,
     /// A hold on one request, publication or delivery that no wait clears, as the message
     /// names.
     Unresolved,
@@ -646,7 +646,7 @@ impl From<&paykit_sdk::HeldForUserReason> for HeldForUserKind {
             R::AllowanceExecutionHeld(_) => Self::AllowanceExecutionHeld,
             R::AttemptCheck(_) => Self::AttemptCheck,
             R::ReloadRequired => Self::ReloadRequired,
-            R::SwitchClient(_) => Self::SwitchClient,
+            R::DispatchClient(_) => Self::DispatchClient,
             R::Unresolved(_) => Self::Unresolved,
             R::PendingProposalsFull => Self::PendingProposalsFull,
             R::AllowanceLedgerFull => Self::AllowanceLedgerFull,

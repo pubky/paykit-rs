@@ -72,7 +72,7 @@ pub(crate) fn renew_for(
     )
     .unwrap();
     signer
-        .switch()
+        .dispatch()
         .signer_op(OpKind::CertPut {
             target_app_id: app_id,
             cert: renewed.signed().clone(),
@@ -135,7 +135,7 @@ async fn test_certificate_join_paykit_refuses_writes_and_sends_nothing() {
     let app_id = request.keys.app_id_bytes();
     let base = store();
     let fault = Arc::new(FaultStore::new(Arc::clone(&base), Fault::None));
-    let tip = w.alice.switch().tip_seq();
+    let tip = w.alice.dispatch().tip_seq();
     let joined = Paykit::join(
         w.env(&w.alice, Arc::clone(&fault) as Arc<dyn StateStore>),
         PaykitConfig::default(),
@@ -148,8 +148,8 @@ async fn test_certificate_join_paykit_refuses_writes_and_sends_nothing() {
     assert!(is_cert_refused(&error), "{error:?}");
     // Refused before the client's join: no commit, and no registration at the dispatch.
     assert_eq!(fault.commits(), 0);
-    assert_eq!(w.alice.switch().tip_seq(), tip);
-    assert!(w.alice.switch().app(&app_id).cert.is_none());
+    assert_eq!(w.alice.dispatch().tip_seq(), tip);
+    assert!(w.alice.dispatch().app(&app_id).cert.is_none());
     let loaded = Paykit::load(
         w.env(&w.alice, base),
         PaykitConfig::default(),
@@ -999,7 +999,7 @@ async fn test_certificate_renewal_dropping_pay_resumes_without_reading_claims() 
     w.rail.set_declaration(declaration);
     for _ in 0..8 {
         w.alice
-            .switch()
+            .dispatch()
             .fail_next(pubky_dispatch_client::testing::Fault::Error {
                 path: "/claims".into(),
                 code: pubky_dispatch_core::http::ErrorCode::PermissionMissing,
@@ -1309,7 +1309,7 @@ async fn renewed_to_read_more_with_seller_wallet(
         1_000,
     );
     // The signer stores a bundle with the scope keys the renewed certificate needs.
-    let epoch = w.alice.switch().identity_doc().unwrap().data_epoch();
+    let epoch = w.alice.dispatch().identity_doc().unwrap().data_epoch();
     let parts = pubky_dispatch_core::records::seal_bundle_parts(
         w.alice.identity().key(),
         &wider,
@@ -1320,7 +1320,7 @@ async fn renewed_to_read_more_with_seller_wallet(
     .unwrap();
     for part in parts {
         w.alice
-            .switch()
+            .dispatch()
             .signer_op(OpKind::KeyBundlePut(
                 pubky_dispatch_core::ops::KeyBundlePut {
                     target_app_id: me,
@@ -1346,7 +1346,7 @@ async fn reloaded_after_a_failed_read(w: &World, base: &Arc<dyn StateStore>) -> 
     let (mut wallet, wider) = renewed_to_read_more_on(w, Arc::clone(base)).await;
     let me = wallet.app_id();
     w.alice
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
             path: "/ops".into(),
             after: 0,
@@ -1401,7 +1401,7 @@ async fn test_certificate_renewal_reading_more_lists_its_records_first() {
     let refused = wallet.payee_activity().await.unwrap_err();
     assert!(is_not_now(&refused), "{refused:?}");
     w.alice
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
             path: "/records".into(),
             after: 0,
@@ -1412,7 +1412,7 @@ async fn test_certificate_renewal_reading_more_lists_its_records_first() {
     // The client's pages succeed. Paykit's next listing request after that read
     // cannot connect, so the report must carry the outage and keep the records held.
     w.alice
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
             path: "/records".into(),
             after: client_listing_requests(&wider),
@@ -1451,7 +1451,7 @@ async fn test_certificate_renewal_reading_more_taken_by_a_failed_read_holds_read
     let w = World::new();
     let (mut wallet, wider) = renewed_to_read_more(&w).await;
     w.alice
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
             path: "/ops".into(),
             after: 0,
@@ -1606,7 +1606,7 @@ async fn test_certificate_passing_after_a_refused_load_unlisted_across_a_restart
     let _ = wallet.receive(None).await;
     list(&w, me, &refused, &fixed);
     w.alice
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
             path: "/ops".into(),
             after: 0,
@@ -1642,7 +1642,7 @@ async fn test_certificate_renewal_reading_more_listing_refused_holds_reads_until
     let (mut wallet, wider) = renewed_to_read_more(&w).await;
     wallet.receive(None).await.unwrap();
     w.alice
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::Error {
             path: "/records".into(),
             code: pubky_dispatch_core::http::ErrorCode::PermissionMissing,
@@ -1873,7 +1873,7 @@ async fn test_certificate_stored_entry_the_app_cant_keep_stays_for_the_host() {
     let reduced = renew(&w, me, &AppScopes::new().contacts().build().unwrap(), 1_000);
     list(&w, me, &first, &reduced);
     w.alice
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::Error {
             path: "/ops".into(),
             code: pubky_dispatch_core::http::ErrorCode::PermissionMissing,
@@ -1997,7 +1997,7 @@ async fn test_certificate_wider_without_keys_finishes_a_dispatched_payment_once_
         wallet.message_delivery(proof).await
     );
     // The acceptance, released at the handoff, and the proof: each once.
-    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), 2);
+    assert_eq!(w.bob.dispatch().entries_from(&w.alice_id()), 2);
     assert_eq!(
         claim_done(&mut wallet).await,
         pubky_dispatch_core::claims::Outcome::Done
@@ -2067,7 +2067,7 @@ async fn test_certificate_wider_without_the_pay_key_writes_nothing_and_journals_
         in_flight_under_a_wider_certificate_without_keys(&w).await;
     w.alice.next_doc(|body| body.data_epoch += 1).unwrap();
     wallet.receive(None).await.unwrap();
-    let entries = w.bob.switch().entries_from(&w.alice_id());
+    let entries = w.bob.dispatch().entries_from(&w.alice_id());
     w.rail.settle(&attempt_id, true);
     let before = w.router.log().len();
     let resumed = wallet.resume_payments().await.unwrap();
@@ -2092,7 +2092,7 @@ async fn test_certificate_wider_without_the_pay_key_writes_nothing_and_journals_
         claim_done(&mut wallet).await,
         pubky_dispatch_core::claims::Outcome::Open
     );
-    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), entries);
+    assert_eq!(w.bob.dispatch().entries_from(&w.alice_id()), entries);
     assert_eq!(w.rail.executions(&attempt_id), 1);
 }
 
@@ -2107,7 +2107,7 @@ pub(crate) fn store_bundle_for(
     me: [u8; 16],
     cert: &AppCert,
 ) {
-    let epoch = signer.switch().identity_doc().unwrap().data_epoch();
+    let epoch = signer.dispatch().identity_doc().unwrap().data_epoch();
     let parts = pubky_dispatch_core::records::seal_bundle_parts(
         signer.identity().key(),
         cert,
@@ -2118,7 +2118,7 @@ pub(crate) fn store_bundle_for(
     .unwrap();
     for part in parts {
         signer
-            .switch()
+            .dispatch()
             .signer_op(OpKind::KeyBundlePut(
                 pubky_dispatch_core::ops::KeyBundlePut {
                     target_app_id: me,
@@ -2692,7 +2692,7 @@ async fn test_certificate_payee_side_widening_with_a_data_epoch_rotation_writes_
     .await;
     wallet.receive(None).await.unwrap();
     w.alice
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
             path: "/ops".into(),
             after: 0,
@@ -2746,7 +2746,7 @@ async fn test_certificate_payee_side_widening_with_a_data_epoch_rotation_writes_
 /// is what takes that write.
 struct WriteBeforeSdkListing {
     inner: Arc<pubky_dispatch_client::testing::Router>,
-    dispatch: Arc<pubky_dispatch_client::testing::ScriptedSwitch>,
+    dispatch: Arc<pubky_dispatch_client::testing::ScriptedDispatch>,
     keys: pubky_dispatch_core::keys::AppKeys,
     op: std::sync::Mutex<Option<OpKind>>,
     skip: usize,
@@ -2833,7 +2833,7 @@ async fn test_certificate_duty_event_raised_by_the_sdks_listing_reaches_a_report
     .unwrap();
     let transport = Arc::new(WriteBeforeSdkListing {
         inner: Arc::clone(&w.router),
-        dispatch: Arc::clone(w.alice.switch()),
+        dispatch: Arc::clone(w.alice.dispatch()),
         keys: w.alice.identity().app_keys("seller-wallet"),
         op: std::sync::Mutex::new(Some(op)),
         skip: client_listing_requests(&wider),
@@ -2883,7 +2883,7 @@ async fn stored_entry_reported_under_a_refused_certificate(host_acks: bool) {
     )
     .await;
     w.alice
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::Error {
             path: "/ops".into(),
             code: pubky_dispatch_core::http::ErrorCode::PermissionMissing,
@@ -3436,7 +3436,7 @@ async fn restored_queued_reply_before_wider_keys(listing: RestoreListing) {
     wallet.receive(None).await.unwrap();
     for _ in 0..2 {
         w.bob
-            .switch()
+            .dispatch()
             .fail_next(pubky_dispatch_client::testing::Fault::Error {
                 path: "/inbox".into(),
                 code: pubky_dispatch_core::http::ErrorCode::Unavailable,
@@ -3450,7 +3450,7 @@ async fn restored_queued_reply_before_wider_keys(listing: RestoreListing) {
     ));
     let me = wallet.app_id();
     let backup = wallet.backup().await.unwrap();
-    let earlier = w.alice.switch().tip_seq();
+    let earlier = w.alice.dispatch().tip_seq();
     let old = wallet.app().cert().clone();
     let wider = renew(
         &w,
@@ -3605,7 +3605,7 @@ async fn test_reconcile_waits_for_the_last_collection_of_the_wallet() {
     assert!(!wallet.app().listing_owed().await.unwrap());
     let before = w.router.log().len();
     w.alice
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
             path: "records?collection".into(),
             after: budget,

@@ -246,7 +246,7 @@ impl Paykit {
                     });
                 }
             }
-        } else if matches!(&error, AppError::Switch(answer)
+        } else if matches!(&error, AppError::Dispatch(answer)
             if matches!(answer.code(), Some(ErrorCode::QuotaExceeded | ErrorCode::TooLarge)))
         {
             self.raise_settlement_notice(SettlementSubject::Bucket(write.number), write.payer)
@@ -292,7 +292,7 @@ impl Paykit {
 
 /// The verified service answer for this submission (Dispatch wire 7.6 and 9.3).
 fn refused_record_key(cause: &AppError) -> bool {
-    matches!(cause, AppError::Switch(ClientError::Switch {
+    matches!(cause, AppError::Dispatch(ClientError::Dispatch {
         status: 429, code: ErrorCode::QuotaExceeded, current, ..
     }) if current.get("limit").and_then(serde_json::Value::as_str) == Some("record_keys"))
 }
@@ -325,7 +325,7 @@ mod tests {
     #[test]
     fn test_only_the_signed_record_key_limit_identifies_a_new_bucket_refusal() {
         let answer = |code, limit| {
-            AppError::Switch(ClientError::Switch {
+            AppError::Dispatch(ClientError::Dispatch {
                 status: 429,
                 code,
                 current: serde_json::json!({ "limit": limit }),

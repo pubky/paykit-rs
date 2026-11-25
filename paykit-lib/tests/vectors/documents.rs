@@ -159,7 +159,7 @@ fn check_certificate_rejections(keys: &Keys, d: &Value) {
         let at_dispatch = AppCert::verify(&doc, &alice);
         assert_eq!(
             at_dispatch.is_ok(),
-            case["switch_accepts"] == true,
+            case["dispatch_accepts"] == true,
             "{name}"
         );
         let c = at_dispatch.unwrap();
@@ -201,7 +201,7 @@ fn check_labelled_scope_rejections(keys: &Keys, d: &Value) {
         let at_dispatch = AppCert::verify(&doc, &bob);
         assert_eq!(
             at_dispatch.is_ok(),
-            case["switch_accepts"] == true,
+            case["dispatch_accepts"] == true,
             "{name}"
         );
         let error = verify_certificate(&doc, &bob).unwrap_err().to_string();
@@ -222,7 +222,7 @@ fn check_labelled_scope_rejections(keys: &Keys, d: &Value) {
 }
 
 /// The top-level description, which names every member.
-const DESCRIPTION: &str = "Paykit's signed documents and Paykit's checks of the Switch's \
+const DESCRIPTION: &str = "Paykit's signed documents and Paykit's checks of the Dispatch's \
 certificates and app records (wire 3): the executor grant, alone and as the Allowance \
 record's grant history holds it, with Paykit's own executor certificate, and the executor's \
 certificate without paykit_contacts, which Paykit's verifiers refuse; Paykit's own phone certificate, and certificates \
@@ -233,13 +233,13 @@ Paykit's or instead of them, and app records as a Paykit reader reads their Payk
 The certificates are this file's certificates with scopes or permissions changed, and the \
 app records the shop's app record with its Paykit member changed.";
 
-const MULTI_PROTOCOL_DESCRIPTION: &str = "Wire 3.1, spec 3.2, Switch wire 3.1 \"Several \
+const MULTI_PROTOCOL_DESCRIPTION: &str = "Wire 3.1, spec 3.2, Dispatch wire 3.1 \"Several \
 protocols\" and \"Scope roots\": certificates that hold another protocol's scopes beside \
 Paykit's or instead of them, and one whose extension prefix doesn't start with paykit-, as \
 Paykit's \
 verifiers check them. Each is the shop's certificate of this file's certificates (the \
 last, the cap's) with scopes and permissions changed, signed again by bob's \
-identity key; the switch takes every one (switch_accepts). A scope whose root, the part \
+identity key; the Dispatch takes every one (dispatch_accepts). A scope whose root, the part \
 before any :, isn't Paykit's (paykit, or paykit followed by _ or - and more characters) is \
 another protocol's, such as chat. \
 paykit_scopes are the scopes Paykit reads, and paykit_permissions the list they need. A \
@@ -262,14 +262,14 @@ const APP_RECORDS_DESCRIPTION: &str = "Wire 3.2: Paykit's member of an app recor
 protocols.paykit, as a Paykit reader reads it. Each record is the shop's app record, which \
 carries the shop's certificate of this file's certificates, with its paykit member changed or removed (and, for public \
 endpoints with expires_at null, expires_at null too), signed again with the shop's signing \
-key; the signatures verify. The switch takes every one, since it checks only the form of \
-protocols (Switch wire 3.2). accepted are records a Paykit reader takes, the first the \
+key; the signatures verify. The Dispatch takes every one, since it checks only the form of \
+protocols (Dispatch wire 3.2). accepted are records a Paykit reader takes, the first the \
 shop's record as it is; reads is what the reader takes from each: the Payment Endpoint \
 Identifiers of capabilities.endpoint_identifiers, and the public endpoints. A missing or null \
 paykit member, capabilities, endpoint_identifiers or public_endpoints reads as empty, and \
 unknown members are ignored. The reader accepts public endpoints with expires_at null. \
-refused are records Paykit's readers refuse, though the switch \
-takes them (switch_accepts): a capabilities or public_endpoints that isn't an object, an \
+refused are records Paykit's readers refuse, though the Dispatch \
+takes them (dispatch_accepts): a capabilities or public_endpoints that isn't an object, an \
 endpoint_identifiers that isn't an array of strings, a payload that isn't a string, and, last, \
 four that break wire 1.4: an endpoint identifier \
 in capabilities that isn't a Payment Endpoint Identifier (btc-lightning/bolt11), a public \
@@ -391,7 +391,7 @@ fn cert_case(keys: &Keys, (name, app, scopes, permissions): CertCase, accepted: 
 fn certificate_case(c: &AppCert, name: &str, accepted: bool) -> Value {
     assert!(
         AppCert::verify(c.signed(), &c.identity()).is_ok(),
-        "{name}: the switch takes it"
+        "{name}: the Dispatch takes it"
     );
     let mut case = json!({
         "body": body_text(c.signed()),
@@ -401,7 +401,7 @@ fn certificate_case(c: &AppCert, name: &str, accepted: bool) -> Value {
         "permissions": permission_names(c.permissions()),
         "scopes": c.scopes(),
         "signed": signed_json(c.signed()),
-        "switch_accepts": true,
+        "dispatch_accepts": true,
     });
     match check_certificate(c) {
         Ok(()) => assert!(accepted, "{name}: Paykit takes it"),
@@ -435,7 +435,7 @@ fn app_record_case(keys: &Keys, name: &str, member: &Value) -> Value {
         "protocols": as_signed["protocols"],
         "reason": quoted(&error.to_string()),
         "signed": signed_json(record.signed()),
-        "switch_accepts": AppRecord::verify(record.signed(), &bob).is_ok(),
+        "dispatch_accepts": AppRecord::verify(record.signed(), &bob).is_ok(),
     })
 }
 
@@ -445,7 +445,7 @@ paykit_contacts, so that every executor reads the deny list. accepted is Paykit'
 of this file carries: the executor's certificate of this file's certificates, which holds \
 paykit_contacts. refused is that certificate with paykit_contacts removed from its scopes, \
 so that it holds paykit_allowance_execute without paykit_contacts, and the permissions its \
-scopes need, signed again by alice's identity key: the switch takes it (switch_accepts), and Paykit's \
+scopes need, signed again by alice's identity key: the Dispatch takes it (dispatch_accepts), and Paykit's \
 verifiers refuse it. reason is paykit-lib's wording at a Paykit verifier.";
 
 /// `executor_certificates` (Paykit spec 3.1): Paykit's own executor certificate, which the grant
@@ -509,7 +509,7 @@ certificates, which holds paykit_contacts. refused are that certificate with pay
 removed from its scopes, so that it holds paykit_pay and paykit_allowance without \
 paykit_contacts, and the permissions its scopes need, signed again by alice's identity key, \
 and the wallet's certificate of this file's certificates with paykit_pay alone and the permissions paykit_pay needs, signed again by alice's identity key: the \
-switch takes each (switch_accepts), and Paykit's verifiers refuse each. reason is \
+Dispatch takes each (dispatch_accepts), and Paykit's verifiers refuse each. reason is \
 paykit-lib's wording at a Paykit verifier.";
 
 /// `payer_certificates` (Paykit spec 3.1): Paykit's own phone certificate, which the phone's stored
@@ -546,7 +546,7 @@ fn check_payer_certificates(keys: &Keys, d: &Value) {
             let again = identity.sign_doc(labels::sig::APP_CERT, &[], doc.body_bytes().unwrap());
             assert_eq!(again, doc, "{name}");
             let c = AppCert::verify(&doc, &alice).unwrap_or_else(|e| panic!("{name}: {e}"));
-            assert_eq!(case["switch_accepts"], true, "{name}");
+            assert_eq!(case["dispatch_accepts"], true, "{name}");
             assert_eq!(c.scopes(), strings(&case["scopes"]).as_slice(), "{name}");
             assert!(c.scopes().iter().any(|s| s == "paykit_pay"), "{name}");
             // Its permissions are exactly what its scopes need: only the scope rule refuses.
@@ -588,8 +588,8 @@ receives as payee holds the identity's lists. accepted are the shop's and the ho
 certificates of this file's certificates, which hold both beside paykit_request and beside \
 paykit_request:shop1. refused are those certificates with paykit_settlements removed from \
 their scopes, and, last, the shop's with paykit_contacts removed, each with the permissions \
-its scopes need, signed again by bob's identity key: the switch takes each \
-(switch_accepts), and Paykit's verifiers refuse each. reason is paykit-lib's wording at a \
+its scopes need, signed again by bob's identity key: the Dispatch takes each \
+(dispatch_accepts), and Paykit's verifiers refuse each. reason is paykit-lib's wording at a \
 Paykit verifier.";
 
 /// The accepted cases of `payee_certificates`: the payee apps and their case names.
@@ -686,7 +686,7 @@ fn check_payee_certificates(keys: &Keys, d: &Value) {
         let again = identity.sign_doc(labels::sig::APP_CERT, &[], doc.body_bytes().unwrap());
         assert_eq!(again, doc, "{name}");
         let c = AppCert::verify(&doc, &bob).unwrap_or_else(|e| panic!("{name}: {e}"));
-        assert_eq!(case["switch_accepts"], true, "{name}");
+        assert_eq!(case["dispatch_accepts"], true, "{name}");
         assert_eq!(c.scopes(), strings(&case["scopes"]).as_slice(), "{name}");
         assert!(paykit_lib::scopes::acts_as_payee(c.scopes()), "{name}");
         assert_eq!(
@@ -719,11 +719,11 @@ fn check_payee_certificates(keys: &Keys, d: &Value) {
     }
 }
 
-const CERTIFICATES_DESCRIPTION: &str = "Wire 3.1, Switch wire 3.1: the certificate of \
+const CERTIFICATES_DESCRIPTION: &str = "Wire 3.1, Dispatch wire 3.1: the certificate of \
 each app of keys.json, as Paykit's verifiers take it, in its carrying form (signed: body and \
 sig). Each holds its app's keys, scopes and permissions as keys.json gives them, issued_at \
 2025-12-01T00:00:00.000Z and the app's expires_at, signed by its identity's key under \
-pubky-switch/v1/app-cert. The executor's and the phone's are Paykit's own, the accepted \
+pubky-dispatch/v1/app-cert. The executor's and the phone's are Paykit's own, the accepted \
 certificates of executor_certificates and payer_certificates, holding paykit_contacts; the \
 shop's, the cap's and the hosted app's hold paykit_settlements and paykit_contacts, the \
 hosted app's and the \
@@ -750,13 +750,13 @@ fn certificates(keys: &Keys) -> Value {
     json!({ "cases": cases, "description": CERTIFICATES_DESCRIPTION })
 }
 
-const EXTENSION_APP_DESCRIPTION: &str = "Wire 3.1, 3.2, Switch wire 3.1, 3.2: bob's \
+const EXTENSION_APP_DESCRIPTION: &str = "Wire 3.1, 3.2, Dispatch wire 3.1, 3.2: bob's \
 extension app cap. certificate is its certificate of certificates, holding paykit_request \
 beside the extension scope paykit_ext:paykit-cap. app_record is its app record, signed by its signing key \
-under pubky-switch/v1/app-record: it carries that certificate, accepts the kinds a payee \
+under pubky-dispatch/v1/app-record: it carries that certificate, accepts the kinds a payee \
 app takes from payers and the extension kind paykit-cap.offer, and its Paykit member states \
 its endpoint identifiers and no public endpoints; its updated_at its \
-certificate's issued_at, and its expires_at null. The switch takes the record, and a Paykit \
+certificate's issued_at, and its expires_at null. The Dispatch takes the record, and a Paykit \
 reader reads its member.";
 
 /// `extension_app` (Paykit wire 3.1, 3.2): the `cap` app's certificate and its app record,
@@ -966,7 +966,7 @@ fn certificate_rejections(keys: &Keys) -> Vec<Value> {
                 "reason": quoted(&error),
                 "scopes": scopes,
                 "signed": signed_json(&doc),
-                "switch_accepts": AppCert::verify(&doc, &identity).is_ok(),
+                "dispatch_accepts": AppCert::verify(&doc, &identity).is_ok(),
             })
         })
         .collect()
@@ -986,7 +986,7 @@ fn labelled_scope_rejections(keys: &Keys) -> Vec<Value> {
                 "reason": reason,
                 "scopes": scopes,
                 "signed": signed_json(&doc),
-                "switch_accepts": AppCert::verify(&doc, &pubky(BOB)).is_ok(),
+                "dispatch_accepts": AppCert::verify(&doc, &pubky(BOB)).is_ok(),
             })
         })
         .collect()
@@ -1031,13 +1031,13 @@ fn app_record_cases(keys: &Keys, file: &Value) -> [(Place<'static>, Value); 2] {
                     json!({ "endpoint_identifiers": ids, "public_endpoints": endpoints }),
                 );
                 case.remove("reason");
-                case.remove("switch_accepts");
+                case.remove("dispatch_accepts");
                 accepted.push(Value::Object(case));
             }
             Err(error) => {
                 assert!(case["reason"].is_string());
                 case.insert("reason".into(), json!(quoted(&error.to_string())));
-                case.insert("switch_accepts".into(), json!(true));
+                case.insert("dispatch_accepts".into(), json!(true));
                 refused.push(Value::Object(case));
             }
         }
@@ -1063,7 +1063,7 @@ fn check_multi_protocol_certificates(d: &Value) {
             let doc = signed(&case["signed"]);
             assert_eq!(body_text(&doc), st(case, "body"), "{name}");
             let c = AppCert::verify(&doc, &bob).unwrap_or_else(|e| panic!("{name}: {e}"));
-            assert_eq!(case["switch_accepts"], true, "{name}");
+            assert_eq!(case["dispatch_accepts"], true, "{name}");
             assert_eq!(c.scopes(), strings(&case["scopes"]).as_slice(), "{name}");
             assert_eq!(
                 permission_names(c.permissions()),
@@ -1137,7 +1137,7 @@ fn check_app_records(keys: &Keys, d: &Value) {
             );
             let record = AppRecord::verify(&doc, &bob).unwrap_or_else(|e| panic!("{name}: {e}"));
             if !accepted {
-                assert_eq!(case["switch_accepts"], true, "{name}");
+                assert_eq!(case["dispatch_accepts"], true, "{name}");
             }
             match (PaykitMember::read(&record), accepted) {
                 (Ok(read), true) => {

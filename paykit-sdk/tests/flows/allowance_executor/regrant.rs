@@ -15,7 +15,7 @@ use pubky_dispatch_client::clock::Clock;
 use super::{first_grant_in, terms};
 use crate::common::{draft, request_from, store, World};
 
-type Service = std::sync::Arc<pubky_dispatch_client::testing::ScriptedSwitch>;
+type Service = std::sync::Arc<pubky_dispatch_client::testing::ScriptedDispatch>;
 
 fn refusal_of<T: std::fmt::Debug>(result: paykit_sdk::Result<T>) -> Refusal {
     result
@@ -647,7 +647,7 @@ async fn test_allowance_regrant_ordinary_end_reads_nothing_first() {
     // a read the service doesn't answer doesn't stop the user's end.
     use pubky_dispatch_client::testing::Fault;
     let (w, mut payer, _shop, key) = Box::pin(first_grant_in(store(), terms())).await;
-    w.alice.switch().fail_next(Fault::Unreachable {
+    w.alice.dispatch().fail_next(Fault::Unreachable {
         path: "/records/".into(),
         after: 0,
     });

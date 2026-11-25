@@ -31,14 +31,14 @@ use serde_json::Value;
 /// Deliver the first collection page of each bounded read from before a newer directory.
 pub fn delay_listing_pages(signer: &TestSigner, earlier: u64) {
     use pubky_dispatch_client::app::{Protocol, LISTING_PAGES_PER_READ};
-    assert!(signer.switch().tip_seq() > earlier);
+    assert!(signer.dispatch().tip_seq() > earlier);
     let reads = paykit_sdk::PaykitProtocol::new()
         .collections()
         .len()
         .div_ceil(LISTING_PAGES_PER_READ as usize);
     for _ in 0..reads {
         signer
-            .switch()
+            .dispatch()
             .fail_next(pubky_dispatch_client::testing::Fault::Head {
                 path: "records?collection".into(),
                 at: Some(earlier),
@@ -78,7 +78,7 @@ pub async fn enrolled_wallet(
 
     let identity = world.identity(name)?;
     let origin = format!("https://{name}.public.test");
-    world.add_switch(&origin, &[&identity]).await?;
+    world.add_dispatch(&origin, &[&identity]).await?;
     let mut env = world.signer_env(&identity, store())?;
     env.protocols = Protocols::new(vec![Arc::new(paykit_lib::signer::PaykitProtocol)])?;
     let mut signer = Box::pin(Signer::create(env, world.keyring(&identity)?, &origin)).await?;
@@ -130,11 +130,11 @@ pub async fn receive_message(wallet: &mut Paykit, msg_id: &str) {
 pub const HOUR_MS: u64 = 3_600_000;
 
 /// Where alice's Dispatch is.
-pub const ALICE_ORIGIN: &str = "https://alice-switch.example";
+pub const ALICE_ORIGIN: &str = "https://alice-dispatch.example";
 /// Where bob's Dispatch is.
-pub const BOB_ORIGIN: &str = "https://bob-switch.example";
+pub const BOB_ORIGIN: &str = "https://bob-dispatch.example";
 /// Where carol's Dispatch is.
-pub const CAROL_ORIGIN: &str = "https://carol-switch.example";
+pub const CAROL_ORIGIN: &str = "https://carol-dispatch.example";
 
 /// Every scope Paykit gives keys to, for the signers' approvals.
 pub fn spec() -> ProtocolSpec {
@@ -216,9 +216,9 @@ impl World {
         let bob = signer("bob", BOB_ORIGIN, &bob_clock);
         let carol = signer("carol", CAROL_ORIGIN, &clock);
         let router = Arc::new(Router::new());
-        router.add_switch(alice.origin(), alice.switch());
-        router.add_switch(bob.origin(), bob.switch());
-        router.add_switch(carol.origin(), carol.switch());
+        router.add_dispatch(alice.origin(), alice.dispatch());
+        router.add_dispatch(bob.origin(), bob.dispatch());
+        router.add_dispatch(carol.origin(), carol.dispatch());
         let rail = Arc::new(FakeRail::with_clock(Arc::clone(&clock) as Arc<dyn Clock>));
         Self {
             clock,
@@ -252,7 +252,7 @@ impl World {
         let mut body = self.bob.body();
         body.version += 1;
         let higher = IdentityDoc::sign(self.bob.identity().key(), body).unwrap();
-        self.bob.switch().deliver_identity(&higher).unwrap();
+        self.bob.dispatch().deliver_identity(&higher).unwrap();
         let message = Message::new(
             "paykit.private_payment_list_request",
             Sender {
@@ -864,7 +864,7 @@ impl World {
         body: serde_json::Map<String, Value>,
     ) -> String {
         let keys = signer.identity().app_keys(app);
-        let cert = signer.switch().app(&keys.app_id_bytes()).cert.unwrap();
+        let cert = signer.dispatch().app(&keys.app_id_bytes()).cert.unwrap();
         let message = pubky_dispatch_core::message::Message::new(
             kind,
             pubky_dispatch_core::message::Sender::of_app(signer.identity().public(), &keys),
@@ -875,7 +875,7 @@ impl World {
         )
         .unwrap();
         let plaintext = message.sign(&keys).unwrap();
-        to.switch()
+        to.dispatch()
             .send_plaintext(signer.identity().public(), &cert, &plaintext, targets)
             .unwrap();
         message.msg_id
@@ -916,8 +916,8 @@ impl World {
         plaintext: &pubky_dispatch_core::message::MessagePlaintext,
     ) {
         let keys = signer.identity().app_keys(app);
-        let cert = signer.switch().app(&keys.app_id_bytes()).cert.unwrap();
-        to.switch()
+        let cert = signer.dispatch().app(&keys.app_id_bytes()).cert.unwrap();
+        to.dispatch()
             .send_plaintext(signer.identity().public(), &cert, plaintext, targets)
             .unwrap();
     }
@@ -984,7 +984,7 @@ impl World {
     /// How many record writes `signer`'s Dispatch applied to the record `key`.
     pub fn record_writes(&self, signer: &TestSigner, key: &[u8; 32]) -> usize {
         signer
-            .switch()
+            .dispatch()
             .applied()
             .iter()
             .filter(|op| matches!(&op.body().kind, OpKind::RecordPut(put) if put.key == *key))
@@ -1365,7 +1365,7 @@ pub async fn mark_senders(app: &Paykit, prefix: &str) -> Vec<[u8; 32]> {
 pub fn refuse_writes(signer: &TestSigner, n: usize) {
     for _ in 0..n {
         signer
-            .switch()
+            .dispatch()
             .fail_next(pubky_dispatch_client::testing::Fault::Error {
                 path: "/ops".into(),
                 code: pubky_dispatch_core::http::ErrorCode::PermissionMissing,
@@ -1542,7 +1542,7 @@ pub async fn hold_kept_write(signer: &TestSigner, app: &mut Paykit, kept: &[u8])
         _ => panic!("not a kept copy: {key}"),
     };
     signer
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::Error {
             path: "/ops".into(),
             code: pubky_dispatch_core::http::ErrorCode::RateLimited,
@@ -1578,7 +1578,7 @@ pub fn resend_kept_batch(
 ) {
     w.clock.advance_ms(11 * 60_000);
     signer
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::Error {
             path: "/ops".into(),
             code,

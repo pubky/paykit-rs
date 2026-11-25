@@ -116,7 +116,7 @@ async fn test_notices_late_receipt_of_a_payment_written_failed_raises_one() {
 /// The next `n` batches at alice's Dispatch are refused for good, `403 permission_missing`.
 fn refuse_writes(w: &World, n: usize) {
     for _ in 0..n {
-        w.alice.switch().fail_next(Fault::Error {
+        w.alice.dispatch().fail_next(Fault::Error {
             path: "/ops".into(),
             code: ErrorCode::PermissionMissing,
             current: serde_json::Value::Null,
@@ -321,7 +321,7 @@ async fn receipt_read_answered_by(w: &World, code: ErrorCode) -> (Paykit, [u8; 3
     let mut other = w.wallet("second").await;
     other.receive(None).await.unwrap();
     receipt(&mut shop).await;
-    w.alice.switch().fail_next(Fault::Error {
+    w.alice.dispatch().fail_next(Fault::Error {
         path: "claims".into(),
         code,
         current: serde_json::Value::Null,
@@ -373,7 +373,7 @@ async fn test_notices_receipt_claim_read_never_passing_given_up_at_its_window() 
     )
     .await;
     for _ in 0..4 {
-        w.alice.switch().fail_next(Fault::Error {
+        w.alice.dispatch().fail_next(Fault::Error {
             path: "claims".into(),
             code: ErrorCode::Conflict,
             current: serde_json::Value::Null,
@@ -388,7 +388,7 @@ async fn test_notices_receipt_claim_read_never_passing_given_up_at_its_window() 
     w.clock.advance_ms(paykit_sdk::KEPT_MESSAGE_MS);
     let mut notices = Vec::new();
     for _ in 0..3 {
-        w.alice.switch().fail_next(Fault::Error {
+        w.alice.dispatch().fail_next(Fault::Error {
             path: "claims".into(),
             code: ErrorCode::Conflict,
             current: serde_json::Value::Null,
@@ -779,7 +779,7 @@ async fn test_notices_late_receipt_held_while_its_record_awaits_its_key() {
     )
     .await;
     w.alice.next_doc(|body| body.data_epoch += 1).unwrap();
-    let newest = w.alice.switch().identity_doc().unwrap().data_epoch();
+    let newest = w.alice.dispatch().identity_doc().unwrap().data_epoch();
     let cert = wallet.app().cert().clone();
     crate::unrequested::store_bundle_from(&w, wallet.app_id(), &cert, newest);
     wallet.receive(None).await.unwrap();
@@ -858,7 +858,7 @@ async fn test_notices_receipt_waiting_for_its_records_key_given_up_once_the_clie
     };
     phone.receive(None).await.unwrap();
     w.alice.next_doc(|body| body.data_epoch += 1).unwrap();
-    let sealed_at = w.alice.switch().identity_doc().unwrap().data_epoch();
+    let sealed_at = w.alice.dispatch().identity_doc().unwrap().data_epoch();
     crate::unrequested::store_bundle(&w, phone.app_id(), &phone.app().cert().clone());
     phone.receive(None).await.unwrap();
     phone.receive(None).await.unwrap();
@@ -872,7 +872,7 @@ async fn test_notices_receipt_waiting_for_its_records_key_given_up_once_the_clie
     )
     .await;
     w.alice.next_doc(|body| body.data_epoch += 1).unwrap();
-    let newest = w.alice.switch().identity_doc().unwrap().data_epoch();
+    let newest = w.alice.dispatch().identity_doc().unwrap().data_epoch();
     let cert = wallet.app().cert().clone();
     crate::unrequested::store_bundle_from(&w, wallet.app_id(), &cert, newest);
     wallet.receive(None).await.unwrap();
@@ -954,7 +954,7 @@ async fn test_notices_receipt_waiting_for_its_key_never_shown_as_a_store_unavail
     )
     .await;
     w.alice.next_doc(|body| body.data_epoch += 1).unwrap();
-    let newest = w.alice.switch().identity_doc().unwrap().data_epoch();
+    let newest = w.alice.dispatch().identity_doc().unwrap().data_epoch();
     let cert = wallet.app().cert().clone();
     crate::unrequested::store_bundle_from(&w, wallet.app_id(), &cert, newest);
     wallet.receive(None).await.unwrap();

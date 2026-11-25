@@ -223,7 +223,7 @@ async fn test_blocked_return_own_unblock_unanswered_asks_nothing() {
     // One for the unblock's own call, one for the receive's call again.
     for _ in 0..2 {
         w.alice
-            .switch()
+            .dispatch()
             .fail_next(pubky_dispatch_client::testing::Fault::Error {
                 path: "/ops".into(),
                 code: pubky_dispatch_core::http::ErrorCode::Unavailable,
@@ -345,7 +345,7 @@ async fn test_blocked_return_missed_window_marks_every_blocked_counterparty() {
     // he is marked over that window.
     let now = w.clock.now_ms();
     w.alice
-        .switch()
+        .dispatch()
         .push_missed(1, now - 1_000, now + MINUTE_MS);
     wallet.receive(None).await.unwrap();
     // The window is kept, and applied at the next read of the lists.
@@ -372,7 +372,7 @@ async fn test_blocked_return_missed_floor_uses_the_window_end_only_when_a_sender
     wallet.receive(None).await.unwrap();
     let start = w.clock.now_ms();
     w.clock.advance_ms(MINUTE_MS);
-    w.alice.switch().push_missed(1, start, start + 1_000);
+    w.alice.dispatch().push_missed(1, start, start + 1_000);
     wallet.receive(None).await.unwrap();
     w.clock.advance_ms(paykit_sdk::LISTS_REFRESH_MS);
     wallet.receive(None).await.unwrap();
@@ -382,7 +382,7 @@ async fn test_blocked_return_missed_floor_uses_the_window_end_only_when_a_sender
     wallet.block(&w.bob_id()).await.unwrap();
     let end = w.clock.now_ms();
     w.clock.advance_ms(MINUTE_MS);
-    w.alice.switch().push_missed(1, start, end);
+    w.alice.dispatch().push_missed(1, start, end);
     wallet.receive(None).await.unwrap();
     w.clock.advance_ms(paykit_sdk::LISTS_REFRESH_MS);
     wallet.receive(None).await.unwrap();
@@ -422,7 +422,7 @@ async fn test_blocked_return_window_widened_by_the_pass_read_is_not_expired_with
     // Past the expiry of bob's mark as it stands, the inbox tells of the lost window.
     w.clock.advance_ms(31 * MINUTE_MS);
     let now = w.clock.now_ms();
-    w.alice.switch().push_missed(1, now - 1_000, now);
+    w.alice.dispatch().push_missed(1, now - 1_000, now);
     wallet.receive(None).await.unwrap();
     assert_eq!(asked(&wallet, &w.carol_id()).await.len(), 1);
     // Bob's mark is kept with the window, and nothing is told as lost.
@@ -725,7 +725,7 @@ async fn test_blocked_return_window_delivered_not_told_lost_when_a_widening_drop
     let now = w.clock.now_ms();
     crate::common::seed_marks(&mut wallet, "bd/", paykit_sdk::MAX_DROPPED_MARKS - 1, now).await;
     wallet.app_mut().deny(&w.carol_id()).await.unwrap();
-    w.alice.switch().push_missed(1, now - 1_000, now);
+    w.alice.dispatch().push_missed(1, now - 1_000, now);
     wallet.receive(None).await.unwrap();
     w.clock.advance_ms(11 * MINUTE_MS);
     wallet.receive(None).await.unwrap();
@@ -1208,7 +1208,7 @@ async fn test_blocked_return_queued_ask_not_flushed_by_a_receive_once_blocked_ag
     wallet.unblock(&w.bob_id()).await.unwrap();
     w.clock.advance_ms(11 * MINUTE_MS);
     w.bob
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::Error {
             path: "/inbox".into(),
             code: pubky_dispatch_core::http::ErrorCode::Unavailable,
@@ -1462,7 +1462,7 @@ async fn test_blocked_return_mark_of_a_sender_still_blocked_spares_the_lists_rea
     for _ in 0..3 {
         w.clock.advance_ms(MINUTE_MS);
         w.alice
-            .switch()
+            .dispatch()
             .fail_next(pubky_dispatch_client::testing::Fault::Error {
                 path: "/allow".into(),
                 code: pubky_dispatch_core::http::ErrorCode::Unavailable,
@@ -1798,7 +1798,7 @@ async fn test_blocked_return_observed_unblock_retries_its_original_cutoff_after_
     w.clock.advance_ms(paykit_sdk::LISTS_REFRESH_MS);
     let expected = w.clock.now_ms() + pubky_dispatch_core::records::CLOCK_TOLERANCE_MS;
     w.alice
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::Error {
             path: "/ops".into(),
             code: pubky_dispatch_core::http::ErrorCode::PermissionMissing,
@@ -1835,7 +1835,7 @@ async fn test_blocked_return_observed_unblock_and_a_later_own_block_survive_a_lo
     w.clock.advance_ms(paykit_sdk::LISTS_REFRESH_MS);
     let expected = w.clock.now_ms() + pubky_dispatch_core::records::CLOCK_TOLERANCE_MS;
     w.alice
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::LoseAnswer {
             path: "/ops".into(),
         });
@@ -1931,7 +1931,7 @@ async fn test_blocked_return_own_unblock_waits_for_applied_evidence_after_a_lost
     let app_id = wallet.app_id();
     wallet.block(&w.bob_id()).await.unwrap();
     w.alice
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::LoseAnswer {
             path: "/ops".into(),
         });
@@ -2386,7 +2386,7 @@ async fn test_blocked_return_divergent_floor_held_for_good() {
     assert!(!floor_held_divergent(&wallet).await);
 
     w.alice
-        .switch()
+        .dispatch()
         .make_divergent([0x5a; 16], key, [1; 32])
         .unwrap();
     wallet.receive(None).await.unwrap();
@@ -2793,7 +2793,7 @@ async fn test_blocked_return_floor_read_that_fails_after_the_paying_commit_holds
     let (phone, attempt_id) = automatic_first_handoff(&w, |w, _wallet, _shop| {
         // The request record is read again first, then the floor, which fails.
         w.alice
-            .switch()
+            .dispatch()
             .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
                 path: "/records/".into(),
                 after: 1,
@@ -3344,7 +3344,7 @@ async fn test_blocked_return_floor_kept_copy_not_taken_for_the_dispatch_at_a_han
     let path = LandsAfter::Floor.path(&w, &phone, &carols);
     for _ in 0..4 {
         w.alice
-            .switch()
+            .dispatch()
             .fail_next(pubky_dispatch_client::testing::Fault::Error {
                 path: path.clone(),
                 code: pubky_dispatch_core::http::ErrorCode::NotFound,
@@ -3441,7 +3441,7 @@ async fn held_floor_wallet(
     wallet.receive(None).await.unwrap();
     let key = floor_key(w, &wallet);
     w.alice
-        .switch()
+        .dispatch()
         .make_divergent([0x5a; 16], key, [1; 32])
         .unwrap();
     wallet.receive(None).await.unwrap();
@@ -3679,7 +3679,7 @@ async fn test_blocked_return_floor_seen_then_gone_after_a_restore_holds() {
     let backup = wallet.backup().await.unwrap();
     let key = floor_key(&w, &wallet);
     drop(wallet);
-    w.alice.switch().drop_record(&key).unwrap();
+    w.alice.dispatch().drop_record(&key).unwrap();
     let storage = store();
     let mut restored = Box::pin(Paykit::restore(
         w.env(&w.alice, Arc::clone(&storage)),
@@ -3721,7 +3721,7 @@ async fn test_blocked_return_held_floor_kept_over_a_missed_item() {
     let (mut wallet, mut shop, subscription) = held_floor_wallet(&w, store()).await;
     let now = w.clock.now_ms();
     w.alice
-        .switch()
+        .dispatch()
         .push_missed(1, now - 1_000, now + MINUTE_MS);
     wallet.receive(None).await.unwrap();
     w.clock.advance_ms(11 * MINUTE_MS);
@@ -3741,7 +3741,7 @@ async fn test_blocked_return_missed_item_under_the_hold_asks_no_one() {
     let (mut wallet, _shop, _subscription) = held_floor_wallet(&w, store()).await;
     let since = w.clock.now_ms();
     w.alice
-        .switch()
+        .dispatch()
         .push_missed(1, since - 1_000, since + MINUTE_MS);
     wallet.receive(None).await.unwrap();
     assert_eq!(asked_since(&wallet, &w.bob_id(), since).await, 0);
@@ -3779,7 +3779,7 @@ async fn test_blocked_return_missed_item_holds_a_due_mark_ask_until_its_raise() 
     let since = w.clock.now_ms();
     due_mark(&mut wallet, &w.bob_id(), since - 2_000).await;
     w.alice
-        .switch()
+        .dispatch()
         .push_missed(1, since - 1_000, since + MINUTE_MS);
     wallet.receive(None).await.unwrap();
     assert!(!widening_owed(&wallet).await);
@@ -3798,11 +3798,11 @@ async fn test_blocked_return_conflicting_widening_raise_keeps_the_receive_going(
     wallet.block(&w.carol_id()).await.unwrap();
     let since = w.clock.now_ms();
     w.alice
-        .switch()
+        .dispatch()
         .push_missed(1, since - 1_000, since + MINUTE_MS);
     for _ in 0..2 {
         w.alice
-            .switch()
+            .dispatch()
             .fail_next(pubky_dispatch_client::testing::Fault::Error {
                 path: "/ops".into(),
                 code: pubky_dispatch_core::http::ErrorCode::Conflict,
@@ -3829,7 +3829,7 @@ async fn test_blocked_return_missed_item_with_nothing_to_ask_read_in_its_receive
     wallet.block(&w.carol_id()).await.unwrap();
     let since = w.clock.now_ms();
     w.alice
-        .switch()
+        .dispatch()
         .push_missed(1, since - 1_000, since + MINUTE_MS);
     wallet.receive(None).await.unwrap();
     assert!(!widening_owed(&wallet).await);
@@ -3858,14 +3858,14 @@ async fn test_blocked_return_missed_item_under_the_hold_read_in_its_receive() {
         .unwrap();
     wallet.receive(None).await.unwrap();
     w.alice
-        .switch()
+        .dispatch()
         .make_divergent([0x5e; 16], floor_key(&w, &wallet), [5; 32])
         .unwrap();
     wallet.receive(None).await.unwrap();
     assert!(floor_held_divergent(&wallet).await);
     let since = w.clock.now_ms();
     w.alice
-        .switch()
+        .dispatch()
         .push_missed(1, since - 1_000, since + MINUTE_MS);
     wallet.receive(None).await.unwrap();
     assert!(missed_widening_read(&wallet).await);
@@ -3886,11 +3886,11 @@ async fn test_blocked_return_missed_item_holds_a_due_mark_ask_while_its_read_fai
     let since = w.clock.now_ms();
     due_mark(&mut wallet, &w.bob_id(), since - 2_000).await;
     w.alice
-        .switch()
+        .dispatch()
         .push_missed(1, since - 1_000, since + MINUTE_MS);
     for _ in 0..6 {
         w.alice
-            .switch()
+            .dispatch()
             .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
                 path: "/allow".into(),
                 after: 0,
@@ -3929,7 +3929,7 @@ async fn test_blocked_return_missed_item_read_in_its_receive_at_a_contacts_only_
     contacts.receive(None).await.unwrap();
     let since = w.clock.now_ms();
     w.alice
-        .switch()
+        .dispatch()
         .push_missed(1, since - 1_000, since + MINUTE_MS);
     contacts.receive(None).await.unwrap();
     assert!(!widening_owed(&contacts).await);
@@ -3965,7 +3965,7 @@ async fn test_blocked_return_missed_item_over_a_refused_lower_write_applied_with
     assert_eq!(shared_floor(&wallet).await, Some(high));
     let since = w.clock.now_ms();
     w.alice
-        .switch()
+        .dispatch()
         .push_missed(1, since - 1_000, since + MINUTE_MS);
     wallet.receive(None).await.unwrap();
     assert!(!widening_owed(&wallet).await);
@@ -4286,7 +4286,7 @@ async fn test_blocked_return_raise_waiting_on_a_sealed_floor_tried_once_the_key_
     dropped_for_the_block(&w, &mut wallet, &mut shop).await;
     let mut phone = payer_app(&w, "phone").await;
     w.alice.next_doc(|doc| doc.data_epoch += 1).unwrap();
-    let epoch = w.alice.switch().identity_doc().unwrap().data_epoch();
+    let epoch = w.alice.dispatch().identity_doc().unwrap().data_epoch();
     crate::unrequested::store_bundle_from(&w, phone.app_id(), &phone.app().cert().clone(), epoch);
     phone.receive(None).await.unwrap();
     phone.receive(None).await.unwrap();
@@ -4349,7 +4349,7 @@ async fn test_blocked_return_raise_waiting_for_the_current_scope_key_tried_once_
         .unwrap();
     wallet.receive(None).await.unwrap();
     w.alice.next_doc(|doc| doc.data_epoch += 1).unwrap();
-    let epoch = w.alice.switch().identity_doc().unwrap().data_epoch();
+    let epoch = w.alice.dispatch().identity_doc().unwrap().data_epoch();
     let mut contacts = w
         .join_with(
             &w.alice,
@@ -4463,7 +4463,7 @@ async fn test_blocked_return_waiting_raise_goes_at_once_under_both_holds() {
     }
     assert_eq!(raise_retry(&wallet).await, Some((4, 240_000)));
     w.alice
-        .switch()
+        .dispatch()
         .make_divergent([0x5f; 16], floor_key(&w, &wallet), [6; 32])
         .unwrap();
     wallet.receive(None).await.unwrap();
@@ -4496,11 +4496,11 @@ async fn test_blocked_return_one_read_leaving_two_raises_unwritten_counts_one_tr
     wallet.receive(None).await.unwrap();
     let since = w.clock.now_ms();
     w.alice
-        .switch()
+        .dispatch()
         .push_missed(1, since - 1_000, since + MINUTE_MS);
     for _ in 0..2 {
         w.alice
-            .switch()
+            .dispatch()
             .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
                 path: "/allow".into(),
                 after: 0,
@@ -4647,7 +4647,7 @@ async fn test_blocked_return_conflict_leaves_the_retry_record_as_it_is() {
         .unwrap();
     wallet.receive(None).await.unwrap();
     w.alice.next_doc(|doc| doc.data_epoch += 1).unwrap();
-    let epoch = w.alice.switch().identity_doc().unwrap().data_epoch();
+    let epoch = w.alice.dispatch().identity_doc().unwrap().data_epoch();
     let mut contacts = w
         .join_with(
             &w.alice,
@@ -4666,7 +4666,7 @@ async fn test_blocked_return_conflict_leaves_the_retry_record_as_it_is() {
     crate::unrequested::store_bundle_from(&w, wallet.app_id(), &wallet.app().cert().clone(), epoch);
     for _ in 0..4 {
         w.alice
-            .switch()
+            .dispatch()
             .fail_next(pubky_dispatch_client::testing::Fault::Error {
                 path: "/ops".into(),
                 code: pubky_dispatch_core::http::ErrorCode::Conflict,
@@ -4695,7 +4695,7 @@ async fn test_blocked_return_new_widening_below_a_waiting_raise_tried_at_once() 
     let (mut wallet, _shop, _phone, _contacts) = waiting_raise(&w, true).await;
     let now = w.clock.now_ms();
     w.alice
-        .switch()
+        .dispatch()
         .push_missed(1, now - 20 * MINUTE_MS, now - 19 * MINUTE_MS);
     w.clock.advance_ms(5_000);
     wallet.receive(None).await.unwrap();
@@ -4799,7 +4799,7 @@ async fn test_blocked_return_scope_key_arriving_ends_the_wait_over_a_floor_that_
         .unwrap();
     wallet.receive(None).await.unwrap();
     w.alice.next_doc(|doc| doc.data_epoch += 1).unwrap();
-    let epoch = w.alice.switch().identity_doc().unwrap().data_epoch();
+    let epoch = w.alice.dispatch().identity_doc().unwrap().data_epoch();
     let mut contacts = w
         .join_with(
             &w.alice,
@@ -4885,7 +4885,7 @@ async fn test_blocked_return_conflicting_raise_starts_no_wait() {
     w.clock.advance_ms(11 * MINUTE_MS);
     for _ in 0..2 {
         w.alice
-            .switch()
+            .dispatch()
             .fail_next(pubky_dispatch_client::testing::Fault::Error {
                 path: "/ops".into(),
                 code: pubky_dispatch_core::http::ErrorCode::Conflict,
@@ -4952,7 +4952,7 @@ async fn test_blocked_return_divergent_floor_holds_a_repeat_the_user_started() {
     };
     assert_eq!(w.rail.pay_calls(&attempt_id), 1);
     w.alice
-        .switch()
+        .dispatch()
         .make_divergent([0x5a; 16], floor_key(&w, &phone), [1; 32])
         .unwrap();
     phone.receive(None).await.unwrap();
@@ -5107,7 +5107,7 @@ async fn test_blocked_return_owed_raise_asks_the_unblocked_sender_nothing() {
         .unwrap();
     wallet.receive(None).await.unwrap();
     w.alice
-        .switch()
+        .dispatch()
         .make_divergent([0x5a; 16], floor_key(&w, &wallet), [1; 32])
         .unwrap();
     wallet.receive(None).await.unwrap();
@@ -5184,7 +5184,7 @@ async fn test_blocked_return_owed_raise_holds_an_ask_already_queued() {
     wallet.receive(None).await.unwrap();
     let before = asked(&wallet, &w.bob_id()).await.len();
     w.bob
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
             path: "/inbox".into(),
             after: 0,
@@ -5222,7 +5222,7 @@ async fn test_blocked_return_owed_raise_holds_an_ask_already_queued() {
         .unwrap();
     wallet.receive(None).await.unwrap();
     w.alice
-        .switch()
+        .dispatch()
         .make_divergent([0x5b; 16], floor_key(&w, &wallet), [2; 32])
         .unwrap();
     wallet.receive(None).await.unwrap();
@@ -5265,7 +5265,7 @@ async fn test_blocked_return_owed_raise_counts_no_queued_ask_as_sent() {
     wallet.receive(None).await.unwrap();
     let before = asked(&wallet, &w.bob_id()).await.len();
     w.bob
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
             path: "/inbox".into(),
             after: 0,
@@ -5308,7 +5308,7 @@ async fn test_blocked_return_owed_raise_counts_no_queued_ask_as_sent() {
         .unwrap();
     wallet.receive(None).await.unwrap();
     w.alice
-        .switch()
+        .dispatch()
         .make_divergent([0x5b; 16], floor_key(&w, &wallet), [2; 32])
         .unwrap();
     wallet.receive(None).await.unwrap();
@@ -5367,7 +5367,7 @@ async fn test_blocked_return_owed_raise_takes_period_details_and_holds_a_one_tim
         .unwrap();
     wallet.receive(None).await.unwrap();
     w.alice
-        .switch()
+        .dispatch()
         .make_divergent([0x5d; 16], floor_key(&w, &wallet), [4; 32])
         .unwrap();
     wallet.receive(None).await.unwrap();
@@ -5523,7 +5523,7 @@ async fn test_blocked_return_conflicting_background_raise_keeps_the_receive_goin
     .unwrap();
     for _ in 0..2 {
         w.alice
-            .switch()
+            .dispatch()
             .fail_next(pubky_dispatch_client::testing::Fault::Error {
                 path: "/ops".into(),
                 code: pubky_dispatch_core::http::ErrorCode::Conflict,
@@ -5541,7 +5541,7 @@ async fn test_blocked_return_conflicting_background_raise_keeps_the_receive_goin
     assert_eq!(raise_waiting_notices(&wallet).await, 1);
     for _ in 0..2 {
         w.alice
-            .switch()
+            .dispatch()
             .fail_next(pubky_dispatch_client::testing::Fault::Error {
                 path: "/ops".into(),
                 code: pubky_dispatch_core::http::ErrorCode::Conflict,
@@ -5589,7 +5589,7 @@ async fn test_blocked_return_held_floor_takes_a_cancellation_from_an_unblocked_p
         .unwrap();
     wallet.receive(None).await.unwrap();
     w.alice
-        .switch()
+        .dispatch()
         .make_divergent([0x5a; 16], floor_key(&w, &wallet), [1; 32])
         .unwrap();
     wallet.receive(None).await.unwrap();
@@ -5636,7 +5636,7 @@ async fn test_blocked_return_divergence_reported_and_cleared_before_a_backup_hol
         .unwrap();
     wallet.receive(None).await.unwrap();
     w.alice
-        .switch()
+        .dispatch()
         .make_divergent([0x5a; 16], floor_key(&w, &wallet), [1; 32])
         .unwrap();
     wallet.app_mut().read_record(&target).await.unwrap();
@@ -5700,7 +5700,7 @@ async fn test_blocked_return_divergent_floor_holds_an_automatic_repeat() {
 
     let key = floor_key(&w, &phone);
     w.alice
-        .switch()
+        .dispatch()
         .make_divergent([0x5a; 16], key, [1; 32])
         .unwrap();
     w.clock.advance_ms(MINUTE_MS);
@@ -5745,7 +5745,7 @@ async fn test_blocked_return_floor_gone_in_continuous_history_holds_a_repeat() {
     assert_eq!(w.rail.pay_calls(&attempt_id), 1);
 
     w.alice
-        .switch()
+        .dispatch()
         .drop_record(&floor_key(&w, &phone))
         .unwrap();
     w.clock.advance_ms(MINUTE_MS);
@@ -5815,7 +5815,7 @@ async fn test_blocked_return_floor_read_that_fails_at_the_repeat_holds_it() {
     w.clock.advance_ms(MINUTE_MS);
     // The resume reads the request record again, twice, then the floor, which fails.
     w.alice
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
             path: "/records/".into(),
             after: 2,
@@ -5834,7 +5834,7 @@ async fn test_blocked_return_floor_write_kept_by_the_client_names_its_batch() {
     let mut shop = w.shop().await;
     dropped_for_the_block(&w, &mut wallet, &mut shop).await;
     w.alice
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::LoseAnswer {
             path: "/ops".into(),
         });
@@ -5863,7 +5863,7 @@ async fn test_blocked_return_floor_write_kept_at_unblock_is_asked_once_after_suc
     let mut shop = w.shop().await;
     dropped_for_the_block(&w, &mut wallet, &mut shop).await;
     w.alice
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::LoseAnswer {
             path: "/ops".into(),
         });
@@ -5974,7 +5974,7 @@ async fn test_blocked_return_ask_whose_answer_is_lost_asked_once_after_a_restart
     let (mut wallet, _shop, lists) = Box::pin(wallet_with_a_quiet_mark(&w)).await;
     keep_ask(&mut wallet, &w.bob_id(), 5).await;
     w.bob
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::LoseAnswer {
             path: "/inbox".into(),
         });
@@ -6010,7 +6010,7 @@ async fn test_blocked_return_conflicting_unblock_raise_retries_before_any_ask() 
     let mut shop = w.shop().await;
     dropped_for_the_block(&w, &mut wallet, &mut shop).await;
     w.alice
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::Error {
             path: "/ops".into(),
             code: pubky_dispatch_core::http::ErrorCode::Conflict,
@@ -6178,7 +6178,7 @@ async fn test_blocked_return_kept_floor_raise_holds_the_restore_verdict() {
     // Every batch of this receive goes unanswered, the floor's raise among them.
     for _ in 0..4 {
         w.alice
-            .switch()
+            .dispatch()
             .fail_next(pubky_dispatch_client::testing::Fault::Unanswered {
                 path: "/ops".into(),
                 after: 0,
@@ -6223,7 +6223,7 @@ async fn test_blocked_return_kept_floor_batch_holds_an_open_restore_verdict() {
     // A batch the client keeps: a write to the deny list that can't be sent.
     for _ in 0..2 {
         w.alice
-            .switch()
+            .dispatch()
             .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
                 path: "/ops".into(),
                 after: 0,
@@ -6273,7 +6273,7 @@ async fn test_blocked_return_kept_floor_batch_holds_an_open_restore_verdict() {
     // The kept batch can't be sent again meanwhile.
     for _ in 0..4 {
         w.alice
-            .switch()
+            .dispatch()
             .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
                 path: "/ops".into(),
                 after: 0,

@@ -31,7 +31,9 @@ async fn confirm_after_quota(world: &World, fail_notice: bool) -> TestResult {
     let origin = "https://shop.payment.test";
     let identity = world.identity("shop")?;
     let limits = serde_json::from_value(serde_json::json!({"max_record_keys": 3}))?;
-    world.add_switch_with(origin, &[&identity], limits).await?;
+    world
+        .add_dispatch_with(origin, &[&identity], limits)
+        .await?;
     let signer = Box::pin(signer_on(world, &identity, origin)).await?;
     let mut wallets = Box::pin(enrolled_merchant_wallets(world, Some(signer))).await?;
     let merchant = wallets.seller_wallet.identity();

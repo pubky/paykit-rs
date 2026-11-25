@@ -542,7 +542,7 @@ async fn test_replies_dropped_asked_again_at_most_once_a_day_while_the_mark_live
 
 /// The next delivery to alice's inbox is answered `code`.
 fn refuse_next_delivery(w: &World, code: ErrorCode) {
-    w.alice.switch().fail_next(Fault::Error {
+    w.alice.dispatch().fail_next(Fault::Error {
         path: "/inbox".into(),
         code,
         current: serde_json::Value::Null,
@@ -923,7 +923,7 @@ async fn uncertain_answer_at_the_reply_bound(total: bool) {
     wallet.flush().await.unwrap();
     Box::pin(record_request(&w, &mut shop, &request)).await;
     w.clock.advance_ms(2 * DAY_MS);
-    w.bob.switch().fail_next(Fault::LoseAnswer {
+    w.bob.dispatch().fail_next(Fault::LoseAnswer {
         path: "/ops".into(),
     });
     let failed = shop.app_mut().receive(None).await;
@@ -1093,7 +1093,7 @@ async fn rejected_requests(
             ))
             .unwrap();
         signer
-            .switch()
+            .dispatch()
             .send_plaintext(
                 w.bob_id(),
                 shop.app().cert(),
@@ -1145,7 +1145,7 @@ async fn test_replies_past_the_bound_per_sender_drop_the_earliest_and_ask_for_it
 /// The signer stores bob's app `app`'s key bundle for `cert`, epochs `first` to current.
 fn bob_bundle(w: &World, app: [u8; 16], cert: &pubky_dispatch_core::records::AppCert, first: u64) {
     use pubky_dispatch_client::app::Protocol as _;
-    let epoch = w.bob.switch().identity_doc().unwrap().data_epoch();
+    let epoch = w.bob.dispatch().identity_doc().unwrap().data_epoch();
     let protocol = paykit_sdk::PaykitProtocol::new();
     let parts = pubky_dispatch_core::records::seal_bundle_parts(
         w.bob.identity().key(),
@@ -1157,7 +1157,7 @@ fn bob_bundle(w: &World, app: [u8; 16], cert: &pubky_dispatch_core::records::App
     .unwrap();
     for part in parts {
         w.bob
-            .switch()
+            .dispatch()
             .signer_op(pubky_dispatch_core::ops::OpKind::KeyBundlePut(
                 pubky_dispatch_core::ops::KeyBundlePut {
                     target_app_id: app,
@@ -1324,10 +1324,10 @@ async fn test_replies_kept_past_30_days_stay_while_the_records_are_not_listed() 
     );
     w.clock.advance_ms(paykit_sdk::KEPT_MESSAGE_MS + DAY_MS);
     let now = w.clock.now_ms();
-    w.bob.switch().push_missed(1, now - 1_000, now);
+    w.bob.dispatch().push_missed(1, now - 1_000, now);
     // The client lists the shop's collections right after the item; Paykit's own listing at
     // the end of the receive fails.
-    w.bob.switch().fail_next(Fault::Unreachable {
+    w.bob.dispatch().fail_next(Fault::Unreachable {
         path: "records?collection".into(),
         after: crate::certificate::client_listing_requests(shop.app().cert()),
     });
@@ -1539,7 +1539,7 @@ async fn test_replies_kept_past_30_days_whose_write_fails_stay_kept() {
     w.clock.advance_ms(2 * DAY_MS);
     shop.app_mut().rotate().await.unwrap();
     shop.app_mut().flush_cursor().await.unwrap();
-    w.bob.switch().fail_next(Fault::Unreachable {
+    w.bob.dispatch().fail_next(Fault::Unreachable {
         path: "/ops".into(),
         after: 0,
     });
@@ -1615,7 +1615,7 @@ async fn test_replies_kept_past_30_days_over_quota_wait_only_while_held() {
     shop.app_mut().rotate().await.unwrap();
     shop.app_mut().flush_cursor().await.unwrap();
     for _ in 0..2 {
-        w.bob.switch().fail_next(Fault::Error {
+        w.bob.dispatch().fail_next(Fault::Error {
             path: "/ops".into(),
             code: ErrorCode::QuotaExceeded,
             current: serde_json::Value::Null,
@@ -2334,7 +2334,7 @@ fn replies_with_id(
     msg_id: &str,
 ) {
     let keys = w.alice.identity().app_keys("wallet");
-    let cert = w.alice.switch().app(&keys.app_id_bytes()).cert.unwrap();
+    let cert = w.alice.dispatch().app(&keys.app_id_bytes()).cert.unwrap();
     let mut message = pubky_dispatch_core::message::Message::new(
         kind,
         pubky_dispatch_core::message::Sender::of_app(w.alice_id(), &keys),
@@ -2347,7 +2347,7 @@ fn replies_with_id(
     message.msg_id = msg_id.to_owned();
     let plaintext = message.sign(&keys).unwrap();
     w.bob
-        .switch()
+        .dispatch()
         .send_plaintext(w.alice_id(), &cert, &plaintext, &[shop.app_id()])
         .unwrap();
 }
@@ -2522,7 +2522,7 @@ async fn check_dropped_replies(
         let backup = shop.backup().await.unwrap();
         // The original installation delivered the ask, lost its reply and gave up that ID.
         shop.unblock(&payer).await.unwrap();
-        w.alice.switch().fail_next(Fault::LoseAnswer {
+        w.alice.dispatch().fail_next(Fault::LoseAnswer {
             path: "/inbox".into(),
         });
         shop.receive(None).await.unwrap();
@@ -2739,7 +2739,7 @@ async fn test_replies_dropped_restore_in_place_uses_the_identified_first_deliver
         shop.unblock(&payer).await.unwrap();
         if !accepted {
             shop.app_mut().forget_directory(&payer).await.unwrap();
-            w.alice.switch().fail_next(Fault::Unreachable {
+            w.alice.dispatch().fail_next(Fault::Unreachable {
                 path: "/directory".into(),
                 after: 0,
             });

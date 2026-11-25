@@ -207,8 +207,8 @@ async fn test_shared_hold_key_change_without_loss_holds_nothing() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
-    let changed = w.alice.switch().change_key_into([74; 32]);
-    w.router.add_switch(crate::common::ALICE_ORIGIN, &changed);
+    let changed = w.alice.dispatch().change_key_into([74; 32]);
+    w.router.add_dispatch(crate::common::ALICE_ORIGIN, &changed);
     let current = w
         .alice
         .sign_next(|body| {
@@ -250,7 +250,7 @@ async fn test_shared_hold_kept_through_a_key_change_and_a_second_loss() {
     // A key change in place after the loss keeps `recovery_from` below `generation - 1`.
     let changed = next.change_key_into([75; 32]);
     w.router
-        .add_switch(pubky_dispatch_client::testing::SWITCH_ORIGIN, &changed);
+        .add_dispatch(pubky_dispatch_client::testing::SWITCH_ORIGIN, &changed);
     let current = w
         .alice
         .sign_next(|body| {
@@ -467,7 +467,7 @@ async fn test_shared_hold_lets_an_owed_unblock_go_once_it_stands() {
         .unwrap();
     let key = wallet.app().record_key(&target).unwrap();
     w.alice
-        .switch()
+        .dispatch()
         .make_divergent([0x5b; 16], key, [2; 32])
         .unwrap();
     wallet.receive(None).await.unwrap();
@@ -548,7 +548,7 @@ async fn test_shared_hold_unblocks_under_both_holds_while_the_floor_cant_be_read
         .unwrap();
     let key = wallet.app().record_key(&target).unwrap();
     w.alice
-        .switch()
+        .dispatch()
         .make_divergent([0x5c; 16], key, [3; 32])
         .unwrap();
     wallet.receive(None).await.unwrap();
@@ -652,7 +652,7 @@ async fn test_shared_hold_applies_a_restore_widening_without_the_raise() {
         .unwrap();
     let key = wallet.app().record_key(&target).unwrap();
     w.alice
-        .switch()
+        .dispatch()
         .make_divergent([0x5d; 16], key, [4; 32])
         .unwrap();
     wallet.receive(None).await.unwrap();

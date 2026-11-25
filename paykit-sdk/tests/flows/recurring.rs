@@ -150,7 +150,7 @@ fn phone_acceptance(w: &World, request: &RequestRef) -> paykit_lib::records::Sto
         serde_json::Map::new(),
     );
     let keys = w.alice.identity().app_keys("phone");
-    let cert = w.alice.switch().app(&keys.app_id_bytes()).cert.unwrap();
+    let cert = w.alice.dispatch().app(&keys.app_id_bytes()).cert.unwrap();
     paykit_lib::records::StoredMessage::new(
         w.alice_id(),
         cert.signed(),
@@ -272,7 +272,7 @@ async fn test_recurring_rejection_failing_otherwise_past_expiry_is_the_failure()
     let request = monthly_to(&w, &mut wallet, expires_at).await;
     w.clock.advance_ms(expires_at + 1 - w.clock.now_ms());
     w.alice
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::Error {
             path: "/ops".into(),
             code: pubky_dispatch_core::http::ErrorCode::QuotaExceeded,
@@ -362,7 +362,7 @@ async fn rejected_over(w: &World, write: PhoneWrite, heard: bool) -> paykit_sdk:
     };
     if let PhoneWrite::NotFoundAtTheDispatch = write {
         w.alice
-            .switch()
+            .dispatch()
             .fail_next(pubky_dispatch_client::testing::Fault::Error {
                 path: "/records/".into(),
                 code: pubky_dispatch_core::http::ErrorCode::NotFound,

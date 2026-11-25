@@ -39,7 +39,7 @@ pub(crate) fn check() {
     check_recovery_report(&keys, &v["recovery_report"]);
     let case = &cases[0];
     assert_eq!(st(case, "label"), EXECUTOR_GRANT_LABEL);
-    assert!(!EXECUTOR_GRANT_LABEL.starts_with("pubky-switch/"));
+    assert!(!EXECUTOR_GRANT_LABEL.starts_with("pubky-dispatch/"));
     let fields: Vec<Vec<u8>> = arr(case, "fields")
         .iter()
         .map(|f| unhex(st(f, "hex")))
@@ -211,7 +211,7 @@ fn recovery_report_case(keys: &Keys) -> serde_json::Value {
         phone.identity,
         [4; 16],
         Inbox::new(
-            "https://switch.example",
+            "https://dispatch.example",
             keys.app("wallet").keys.signing_public(),
         ),
         Default::default(),

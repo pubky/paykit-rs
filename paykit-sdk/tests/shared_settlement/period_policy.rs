@@ -42,7 +42,9 @@ async fn open_subscription(world: &World) -> TestResult<Subscription> {
     let limits = serde_json::from_value(serde_json::json!({
         "quota_bytes": 8192, "sender_share_percent": 100
     }))?;
-    world.add_switch_with(origin, &[&identity], limits).await?;
+    world
+        .add_dispatch_with(origin, &[&identity], limits)
+        .await?;
     let mut buyer_signer = Box::pin(signer_on(world, "subscriber", origin)).await?;
     let mut shop_signer =
         Box::pin(setup_identity(world, "shop", "https://shop.payment.test")).await?;

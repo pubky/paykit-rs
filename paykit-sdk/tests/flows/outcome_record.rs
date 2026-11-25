@@ -488,7 +488,7 @@ async fn outcome_refused_when_sent_again(
     first: pubky_dispatch_client::testing::Fault,
 ) {
     w.rail.settle(attempt_id, true);
-    let dispatch = w.alice.switch();
+    let dispatch = w.alice.dispatch();
     dispatch.fail_next(first);
     dispatch.fail_next(pubky_dispatch_client::testing::Fault::Error {
         path: "/ops".into(),
@@ -562,7 +562,7 @@ async fn test_outcome_record_kept_after_a_refusal_about_the_caller_stays_unwritt
     let w = World::new();
     let (mut wallet, _phone, request, attempt_id) = in_flight(&w).await;
     w.rail.settle(&attempt_id, true);
-    let dispatch = w.alice.switch();
+    let dispatch = w.alice.dispatch();
     dispatch.fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
         path: "/ops".into(),
         after: 0,

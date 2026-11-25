@@ -360,7 +360,7 @@ fn held_dispatch(w: &World) -> Arc<SlowDispatch> {
 fn change_shop_on_the_dispatch_only(w: &World, change: impl FnOnce(&mut IdentityBody)) {
     let older = w.homeserver.file(w.bob_id(), IDENTITY_PATH).unwrap();
     let doc = w.bob.sign_next(change).unwrap();
-    w.bob.switch().deliver_identity(&doc).unwrap();
+    w.bob.dispatch().deliver_identity(&doc).unwrap();
     w.homeserver.put(w.bob_id(), IDENTITY_PATH, older);
 }
 
@@ -758,7 +758,7 @@ async fn test_final_check_late_public_lookup_rechecks_the_selected_endpoint() {
             .bob
             .sign_next(|body| body.record_max_age = Some(86_400))
             .unwrap();
-        w.bob.switch().deliver_identity(&higher).unwrap();
+        w.bob.dispatch().deliver_identity(&higher).unwrap();
         w.homeserver.put(w.bob_id(), IDENTITY_PATH, older);
         w.clock.advance_ms(1);
         let slow = held_dispatch(&w);
@@ -1071,12 +1071,12 @@ async fn test_final_check_repeat_retention_ending_during_the_lookup_not_paid() {
 /// Bob's signer equivocates: his Dispatch holds one document at the next version, his
 /// Homeserver another body at that same version.
 fn equivocate(w: &World) {
-    let switch_copy = w
+    let dispatch_copy = w
         .bob
         .sign_next(|body| body.record_max_age = Some(30 * 86_400))
         .unwrap();
-    w.bob.switch().deliver_identity(&switch_copy).unwrap();
-    let mut other = switch_copy.body().clone();
+    w.bob.dispatch().deliver_identity(&dispatch_copy).unwrap();
+    let mut other = dispatch_copy.body().clone();
     other.record_max_age = Some(60 * 86_400);
     let homeserver_copy =
         pubky_dispatch_core::records::IdentityDoc::sign(w.bob.identity().key(), other).unwrap();
@@ -1539,7 +1539,7 @@ async fn test_fence_older_dispatch_answer_with_a_newer_homeserver_copy_holds_the
         .unwrap();
     assert_eq!(held.doc.version(), w.bob.body().version);
     assert!(held.homeserver_read_ms.is_some());
-    assert!(held.switch_read_ms.is_none());
+    assert!(held.dispatch_read_ms.is_none());
 }
 
 #[tokio::test]
@@ -1713,7 +1713,7 @@ async fn fence_unread(
     let (store, app_id, request) = with_a_request(w).await;
     let paying = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let seen = Arc::clone(&paying);
-    let dispatch = w.alice.switch().clone();
+    let dispatch = w.alice.dispatch().clone();
     store.on_paying(Box::new(move || {
         seen.store(true, std::sync::atomic::Ordering::SeqCst);
         dispatch.fail_next(Fault::Unreachable {
@@ -2443,7 +2443,7 @@ async fn test_acceptance_sent_earlier_is_placed_when_another_app_resolves_the_pa
     wallet.receive(None).await.unwrap();
     // The wallet's write placing the acceptance meets a conflict: the entry waits.
     w.alice
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::Error {
             path: "/ops".into(),
             code: pubky_dispatch_core::http::ErrorCode::Conflict,
@@ -2509,7 +2509,7 @@ async fn test_acceptance_queued_then_unplaced_finishes_after_a_restart() {
     // The outcome is written in three tries.
     for _ in 0..3 {
         w.alice
-            .switch()
+            .dispatch()
             .fail_next(pubky_dispatch_client::testing::Fault::Error {
                 path: "/ops".into(),
                 code: pubky_dispatch_core::http::ErrorCode::Conflict,
@@ -2751,7 +2751,7 @@ async fn manual_deny_boundary_result(
     phone.block(&w.bob_id()).await.unwrap();
     w.clock.advance_ms(paykit_sdk::LISTS_REFRESH_MS - 1);
     let clock = Arc::clone(&w.clock);
-    let dispatch = w.alice.switch().clone();
+    let dispatch = w.alice.dispatch().clone();
     let local = Arc::clone(&store);
     store.on_paying(Box::new(move || {
         if matches!(boundary, DenyBoundary::LocalRead) {
@@ -2918,7 +2918,7 @@ async fn test_resume_ends_at_the_dispatchs_answer_that_the_wallet_must_stop() {
         let (w, mut wallet, attempt_id) = made_then_in_flight().await;
         w.rail.settle(&attempt_id, true);
         w.alice
-            .switch()
+            .dispatch()
             .fail_next(pubky_dispatch_client::testing::Fault::Error {
                 path: "/ops".into(),
                 code,
@@ -2988,7 +2988,7 @@ async fn test_resume_ends_when_its_first_claim_read_installs_a_recovery_notice()
         w.rail.settle(&attempt_id, true);
         let generation = wallet.app().own_identity().generation();
         w.alice
-            .switch()
+            .dispatch()
             .fail_next(pubky_dispatch_client::testing::Fault::Error {
                 path: "/claims".into(),
                 code: pubky_dispatch_core::http::ErrorCode::RecoveryRequired,
@@ -3100,7 +3100,7 @@ async fn test_pay_whose_outcome_write_is_answered_not_current_returns_the_stop()
     let w = World::new();
     let (store, app_id, request) = with_a_request(&w).await;
     let mut wallet = reload(&w, &store, app_id).await;
-    let dispatch = Arc::clone(w.alice.switch());
+    let dispatch = Arc::clone(w.alice.dispatch());
     store.on_paying(Box::new(move || {
         dispatch.fail_next(pubky_dispatch_client::testing::Fault::Error {
             path: "/ops".into(),
@@ -3236,7 +3236,7 @@ async fn test_resume_returns_a_service_answer_no_retry_passes_after_the_later_pa
         w.rail.settle(&attempt_id, true);
         let code = pubky_dispatch_core::http::ErrorCode::PermissionMissing;
         w.alice
-            .switch()
+            .dispatch()
             .fail_next(pubky_dispatch_client::testing::Fault::Error {
                 path: "/claims".into(),
                 code,
@@ -3367,7 +3367,7 @@ async fn test_resume_releases_no_new_acceptance_while_the_payer_side_awaits_keys
     );
     // No acceptance signed, queued or sent, and nothing written.
     assert_eq!(store.acceptances().len(), journaled);
-    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), 0);
+    assert_eq!(w.bob.dispatch().entries_from(&w.alice_id()), 0);
     let writes: Vec<String> = w.router.log()[before..]
         .iter()
         .filter(|line| line.contains("/ops"))
@@ -3383,7 +3383,7 @@ async fn test_resume_releases_no_new_acceptance_while_the_payer_side_awaits_keys
         "{resumed:?}"
     );
     // The acceptance and the proof, each once.
-    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), 2);
+    assert_eq!(w.bob.dispatch().entries_from(&w.alice_id()), 2);
     assert_eq!(w.rail.executions(&attempt_id), 1);
 }
 
@@ -3428,7 +3428,7 @@ async fn test_resume_waits_past_an_unverifiable_gateway_error_on_one_claim_read(
         sighted(&w);
         w.rail.settle(&attempt_id, true);
         w.alice
-            .switch()
+            .dispatch()
             .fail_next(pubky_dispatch_client::testing::Fault::ErrorSignedWith {
                 path: "claims".into(),
                 code: pubky_dispatch_core::http::ErrorCode::Unavailable,

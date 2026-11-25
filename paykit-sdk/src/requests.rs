@@ -2942,16 +2942,16 @@ fn fresh_kept(reason: KeptReason) -> Result<Fresh> {
     match reason {
         KeptReason::NotFound => Ok(Fresh::Missing),
         KeptReason::Unreachable(why) => Err(Refusal::DispatchUnavailable(why).into()),
-        KeptReason::SwitchRefused { code } => {
-            Err(PaykitError::Client(AppError::Switch(ClientError::Switch {
+        KeptReason::DispatchRefused { code } => Err(PaykitError::Client(AppError::Dispatch(
+            ClientError::Dispatch {
                 status: code.status(),
                 code,
                 message: "the Dispatch refused the record's read".into(),
                 current: serde_json::Value::Null,
                 known_version: None,
                 retry_after: None,
-            })))
-        }
+            },
+        ))),
         // Refused, no newer than the write held, or a reason a later client names.
         _ => Ok(Fresh::Unreadable),
     }

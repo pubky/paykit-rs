@@ -517,7 +517,7 @@ mod tests {
 
     #[test]
     fn test_error_carries_the_dispatch_code() {
-        let error = PaykitError::from(AppError::Switch(ClientError::Switch {
+        let error = PaykitError::from(AppError::Dispatch(ClientError::Dispatch {
             status: 409,
             code: ErrorCode::Conflict,
             message: "scripted".into(),

@@ -78,7 +78,7 @@ fn world() -> World {
         Arc::clone(&w.homeserver),
         spec,
     );
-    w.router.add_switch(w.alice.origin(), w.alice.switch());
+    w.router.add_dispatch(w.alice.origin(), w.alice.dispatch());
     w
 }
 
@@ -361,7 +361,7 @@ async fn test_mixed_protocols_join_counts_only_owned_kinds() {
     .expect("the record the client signs fits");
     let record = w
         .alice
-        .switch()
+        .dispatch()
         .app(&app.app_id())
         .record
         .expect("the joined app's record");
@@ -410,7 +410,7 @@ async fn withdraw_public_offer(
 
     let seller = world.identity("seller")?;
     let origin = "https://seller.public-endpoints.test";
-    world.add_switch(origin, &[&seller]).await?;
+    world.add_dispatch(origin, &[&seller]).await?;
     let mut signer_env = world.signer_env(&seller, store())?;
     signer_env.protocols = Protocols::new(vec![
         Arc::new(paykit_lib::signer::PaykitProtocol),
@@ -966,7 +966,7 @@ async fn test_mixed_protocols_join_requires_the_supplied_paykit() {
         let w = world();
         let fault = Arc::new(FaultStore::new(store(), Fault::None));
         let request = w.approve(&w.alice, "mixed", &scopes());
-        let tip = w.alice.switch().tip_seq();
+        let tip = w.alice.dispatch().tip_seq();
         usage(
             Paykit::join_with_protocols(
                 w.env(&w.alice, Arc::clone(&fault) as Arc<dyn StateStore>),
@@ -979,7 +979,7 @@ async fn test_mixed_protocols_join_requires_the_supplied_paykit() {
             .await,
         );
         assert_eq!(fault.commits(), 0);
-        assert_eq!(w.alice.switch().tip_seq(), tip);
+        assert_eq!(w.alice.dispatch().tip_seq(), tip);
     }
 }
 
@@ -1042,7 +1042,7 @@ async fn test_mixed_protocols_keyed_approval_checks_paykit_before_writes() {
     let mut requested = scopes();
     requested.permissions.clear();
     let request = w.approve(&w.alice, "mixed", &requested);
-    let tip = w.alice.switch().tip_seq();
+    let tip = w.alice.dispatch().tip_seq();
     let result = Paykit::join_with_protocols(
         w.env(&w.alice, Arc::clone(&fault) as Arc<dyn StateStore>),
         PaykitConfig::default(),
@@ -1059,7 +1059,7 @@ async fn test_mixed_protocols_keyed_approval_checks_paykit_before_writes() {
         ))
     ));
     assert_eq!(fault.commits(), 0);
-    assert_eq!(w.alice.switch().tip_seq(), tip);
+    assert_eq!(w.alice.dispatch().tip_seq(), tip);
 }
 
 #[tokio::test]

@@ -41,7 +41,7 @@ impl Timer for TestTimer {
 
 async fn setup_identity(world: &World, name: &str, origin: &str) -> TestResult<Signer> {
     let identity = world.identity(name)?;
-    world.add_switch(origin, &[&identity]).await?;
+    world.add_dispatch(origin, &[&identity]).await?;
     signer_on(world, &identity, origin).await
 }
 
@@ -573,8 +573,8 @@ async fn finish_seller_lookups(wallets: &mut SellerWallets) -> TestResult {
     for buyer in [&mut wallets.buyer, &mut wallets.other] {
         let identity = buyer.app_mut().identity_of(&seller, true).await?;
         assert_eq!(
-            identity.switch_copy,
-            pubky_dispatch_client::app::SwitchCopy::Read
+            identity.dispatch_copy,
+            pubky_dispatch_client::app::DispatchCopy::Read
         );
     }
     Ok(())
@@ -896,9 +896,9 @@ async fn follow_recovered_shop(shop: &mut Paykit) -> TestResult {
 
 async fn declare_shop_loss(world: &World, signer: Box<Signer>) -> TestResult {
     let shop = world.identity("shop")?;
-    world.lose_switch("https://shop.payment.test");
+    world.lose_dispatch("https://shop.payment.test");
     let origin = "https://recovered-shop.payment.test";
-    world.add_switch(origin, &[&shop]).await?;
+    world.add_dispatch(origin, &[&shop]).await?;
     tokio::spawn(Box::pin(async move {
         let mut signer = signer;
         signer

@@ -362,7 +362,7 @@ async fn test_receipts_of_a_billing_period_carry_the_requests_reference() {
         receipt,
     );
     let keys = w.bob.identity().app_keys("shop");
-    let cert = w.bob.switch().app(&keys.app_id_bytes()).cert.unwrap();
+    let cert = w.bob.dispatch().app(&keys.app_id_bytes()).cert.unwrap();
     let stored = paykit_lib::records::StoredMessage::new(
         w.bob_id(),
         cert.signed(),

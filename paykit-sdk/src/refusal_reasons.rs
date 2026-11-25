@@ -185,7 +185,7 @@ pub enum HeldForUserReason {
     /// user ends, the clocks apart, which the user may have to correct, or a display read the
     /// host owes (Dispatch spec 10.1, 12.4). The text alone tells them apart, so it is shown.
     #[error("{0}")]
-    SwitchClient(String),
+    DispatchClient(String),
     /// A hold on one request, publication or delivery that no wait clears as far as this
     /// wallet can tell: the text names it, and the host shows it (Paykit spec 8.1, 8.4).
     #[error("{0}")]

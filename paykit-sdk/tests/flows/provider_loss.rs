@@ -14,7 +14,7 @@ use paykit_sdk::{
 };
 use pubky_dispatch_client::app::UserConfirmed;
 use pubky_dispatch_client::clock::Clock;
-use pubky_dispatch_client::testing::{ScriptedSwitch, SWITCH_ORIGIN};
+use pubky_dispatch_client::testing::{ScriptedDispatch, SWITCH_ORIGIN};
 use pubky_dispatch_core::claims::ClaimStatus;
 use pubky_dispatch_core::records::{Inbox, CLOCK_TOLERANCE_MS};
 
@@ -31,24 +31,24 @@ const LATER_SECRET: [u8; 32] = [0x4f; 32];
 /// service recovering the account at the next generation, routed at [`SWITCH_ORIGIN`], the
 /// next `identity.json` naming it with `recovery_from`, delivered there and published; then
 /// the old service is unreachable.
-pub(super) fn declare_loss(w: &World) -> Arc<ScriptedSwitch> {
+pub(super) fn declare_loss(w: &World) -> Arc<ScriptedDispatch> {
     declare_loss_of(w, ALICE_ORIGIN, NEXT_SECRET)
 }
 
 /// The signer replaces the first recovery service after a second declared loss.
-pub(super) fn declare_second_loss(w: &World) -> Arc<ScriptedSwitch> {
+pub(super) fn declare_second_loss(w: &World) -> Arc<ScriptedDispatch> {
     declare_loss_of(w, SWITCH_ORIGIN, LATER_SECRET)
 }
 
 /// The signer replaces the second recovery service with a new service key.
-pub(super) fn declare_third_loss(w: &World) -> Arc<ScriptedSwitch> {
+pub(super) fn declare_third_loss(w: &World) -> Arc<ScriptedDispatch> {
     declare_loss_of(w, SWITCH_ORIGIN, [123; 32])
 }
 
 /// [`declare_loss`], with the next `identity.json` still listing the lost generation's
 /// service key, as a signer could: only the rule that nothing from before a loss carries
 /// across then refuses the lost generation's evidence.
-pub(super) fn declare_loss_keeping_key(w: &World) -> Arc<ScriptedSwitch> {
+pub(super) fn declare_loss_keeping_key(w: &World) -> Arc<ScriptedDispatch> {
     let lost = w.homeserver.identity_doc(&w.alice_id()).unwrap();
     let entry = pubky_dispatch_core::records::ServiceKeyEntry {
         generation: lost.generation(),
@@ -58,7 +58,7 @@ pub(super) fn declare_loss_keeping_key(w: &World) -> Arc<ScriptedSwitch> {
 }
 
 /// [`declare_loss`] of the service at `lost_origin`, the new one under `secret`.
-fn declare_loss_of(w: &World, lost_origin: &str, secret: [u8; 32]) -> Arc<ScriptedSwitch> {
+fn declare_loss_of(w: &World, lost_origin: &str, secret: [u8; 32]) -> Arc<ScriptedDispatch> {
     declare_loss_with(w, lost_origin, secret, None)
 }
 
@@ -67,13 +67,13 @@ fn declare_loss_with(
     lost_origin: &str,
     secret: [u8; 32],
     kept_key: Option<pubky_dispatch_core::records::ServiceKeyEntry>,
-) -> Arc<ScriptedSwitch> {
+) -> Arc<ScriptedDispatch> {
     let lost_generation = w
         .homeserver
         .identity_doc(&w.alice_id())
         .unwrap()
         .generation();
-    let next = ScriptedSwitch::recovering(
+    let next = ScriptedDispatch::recovering(
         w.alice.identity().key(),
         secret,
         Arc::clone(&w.clock),
@@ -92,7 +92,7 @@ fn declare_loss_with(
         .unwrap();
     next.deliver_identity(&doc).unwrap();
     w.router.remove(lost_origin);
-    w.router.add_switch(SWITCH_ORIGIN, &next);
+    w.router.add_dispatch(SWITCH_ORIGIN, &next);
     next
 }
 
@@ -184,7 +184,7 @@ async fn recover_activity_with_phone_write(
     phone: &mut Paykit,
     target: &pubky_dispatch_client::app::RecordTarget,
     delete_held: bool,
-) -> Arc<ScriptedSwitch> {
+) -> Arc<ScriptedDispatch> {
     recover_activity_writes(w, wallet, phone, &[(target, delete_held)]).await
 }
 
@@ -193,7 +193,7 @@ async fn recover_activity_writes(
     wallet: &mut Paykit,
     phone: &mut Paykit,
     targets: &[(&pubky_dispatch_client::app::RecordTarget, bool)],
-) -> Arc<ScriptedSwitch> {
+) -> Arc<ScriptedDispatch> {
     let writes = competing_activity_writes(w, wallet, phone, targets).await;
     recover_competing_writes(w, wallet, phone, targets, writes).await
 }
@@ -253,12 +253,12 @@ async fn competing_activity_writes(
         assert_eq!(write.version.version, base.version.version + 1);
         applied.push((key, write.version));
     }
-    w.alice.switch().fail_next(Fault::Unreachable {
+    w.alice.dispatch().fail_next(Fault::Unreachable {
         path: "/ops".into(),
         after: 0,
     });
     assert!(phone.app_mut().submit_batch(batch).await.is_err());
-    let missed = w.alice.switch().unreached_bodies().pop().unwrap();
+    let missed = w.alice.dispatch().unreached_bodies().pop().unwrap();
     let records = OpsRequest::parse(&missed)
         .unwrap()
         .entries
@@ -291,14 +291,14 @@ async fn recover_competing_writes(
     phone: &mut Paykit,
     targets: &[(&pubky_dispatch_client::app::RecordTarget, bool)],
     writes: CompetingWrites,
-) -> Arc<ScriptedSwitch> {
+) -> Arc<ScriptedDispatch> {
     use pubky_dispatch_client::client::answers::RecoveryUpload;
-    use pubky_dispatch_client::client::{Credentials, SwitchClient};
+    use pubky_dispatch_client::client::{Credentials, DispatchClient};
     let lost = wallet.app().own_identity().signed().clone();
     let next = declare_loss_of(w, ALICE_ORIGIN, NEXT_SECRET);
     phone.app_mut().refresh_identity().await.unwrap();
     phone.app_mut().follow_provider().await.unwrap();
-    let client = SwitchClient::new(
+    let client = DispatchClient::new(
         SWITCH_ORIGIN,
         w.alice_id(),
         Credentials::App {
@@ -1561,7 +1561,7 @@ async fn test_provider_loss_kept_and_stored_details_wait_for_each_disputed_recor
             .unwrap()
             .msg_id;
         for _ in 0..2 {
-            w.alice.switch().fail_next(Fault::Error {
+            w.alice.dispatch().fail_next(Fault::Error {
                 path: "/ops".into(),
                 code: ErrorCode::PermissionMissing,
                 current: serde_json::Value::Null,
@@ -1824,7 +1824,7 @@ async fn test_provider_loss_missing_record_epoch_holds_the_original_request_proo
         )
         .await;
     w.alice.next_doc(|body| body.data_epoch += 1).unwrap();
-    let sealed_at = w.alice.switch().identity_doc().unwrap().data_epoch();
+    let sealed_at = w.alice.dispatch().identity_doc().unwrap().data_epoch();
     for app in [&mut writer, &mut phone] {
         store_bundle(&w, app.app_id(), app.app().cert());
         app.app_mut().refresh_identity().await.unwrap();
@@ -1832,7 +1832,7 @@ async fn test_provider_loss_missing_record_epoch_holds_the_original_request_proo
     }
     let writes = competing_activity_writes(&w, &mut writer, &mut phone, &targets).await;
     w.alice.next_doc(|body| body.data_epoch += 1).unwrap();
-    let current = w.alice.switch().identity_doc().unwrap().data_epoch();
+    let current = w.alice.dispatch().identity_doc().unwrap().data_epoch();
     store_bundle(&w, phone.app_id(), phone.app().cert());
     phone.app_mut().refresh_identity().await.unwrap();
     phone.app_mut().fetch_key_bundle().await.unwrap();
@@ -3566,7 +3566,7 @@ async fn test_provider_loss_keeps_the_floor_divergence_hold() {
         .unwrap();
     let key = wallet.app().record_key(&target).unwrap();
     w.alice
-        .switch()
+        .dispatch()
         .make_divergent([0x5a; 16], key, [1; 32])
         .unwrap();
     wallet.receive(None).await.unwrap();
@@ -4114,7 +4114,7 @@ async fn recover_with_divergent_phone_write(
     wallet: &mut Paykit,
     phone: &mut Paykit,
     target: &pubky_dispatch_client::app::RecordTarget,
-) -> Arc<ScriptedSwitch> {
+) -> Arc<ScriptedDispatch> {
     recover_with_divergent_phone_writes(w, wallet, phone, &[(target, false)]).await
 }
 
@@ -4124,7 +4124,7 @@ async fn recover_with_divergent_phone_writes(
     wallet: &mut Paykit,
     phone: &mut Paykit,
     targets: &[(&pubky_dispatch_client::app::RecordTarget, bool)],
-) -> Arc<ScriptedSwitch> {
+) -> Arc<ScriptedDispatch> {
     let writes = competing_activity_writes(w, wallet, phone, targets).await;
     recover_competing_writes(w, wallet, phone, targets, writes).await
 }
@@ -4675,12 +4675,12 @@ async fn test_provider_loss_send_to_a_blocked_peer_waits_after_a_read_at_the_upl
     let (mut shop, _) =
         loss_interrupted_at_upload(&w, AppScopes::new().request().manage_contacts(), false).await;
     assert!(recovery_step(&shop).await > pubky_dispatch_client::app::RecoveryStep::Lists);
-    let entries = w.bob.switch().entries_from(&w.alice_id());
+    let entries = w.bob.dispatch().entries_from(&w.alice_id());
     let _ = shop
         .send_request(w.bob_id(), draft("2", w.clock.now_ms()))
         .await;
     let _ = shop.flush().await;
-    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), entries);
+    assert_eq!(w.bob.dispatch().entries_from(&w.alice_id()), entries);
 }
 
 #[tokio::test]
@@ -4834,10 +4834,10 @@ async fn test_provider_loss_read_before_the_loss_isnt_fresh_at_the_list_step() {
         recovery_step(&shop).await,
         pubky_dispatch_client::app::RecoveryStep::Lists
     );
-    let entries = w.carol.switch().entries_from(&w.alice_id());
+    let entries = w.carol.dispatch().entries_from(&w.alice_id());
     let _ = shop
         .send_request(carol_id, draft("1", w.clock.now_ms()))
         .await;
     let _ = shop.flush().await;
-    assert_eq!(w.carol.switch().entries_from(&w.alice_id()), entries);
+    assert_eq!(w.carol.dispatch().entries_from(&w.alice_id()), entries);
 }
