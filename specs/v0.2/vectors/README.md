@@ -13,7 +13,7 @@ The `documents.json` `app_records` corpus has 13 accepted and 9 refused cases. T
 
 ## Allowance usage conformance
 
-`allowance_usage.json` checks the counting and limit rules of wire 5.5 and spec 8.3, including failed attempts and compacted `totals.failed` items. Every failed attempt is released: it counts in no amount and no count, while its claim remains and after it is gone. A `done` or matching paid proof always spends.
+`allowance_usage.json` checks the counting and limit rules of wire 5.5 and spec 8.3, including failed attempts and compacted `totals.failed` items. Every failed attempt is released: it counts in no amount and no count, while its claim remains and after it is gone. A `done` or matching paid proof always spends. These cases hold no payment-method history: a failed attempt the executor's own payment method still reports pending stays reserved (spec 8.3, Pending holds a failure), which the SDK decides from that history; no case here is one.
 
 The `failure_evidence` cases supply already validated counting evidence to the pure library. Callers must bind that evidence to the attempt, obligation, Allowance, amount, asset and owner. These cases do not establish the SDK's authority to obtain or persist the evidence, reconstruct a ledger, release a reservation, or dispatch a payment. The generator checks exact expected lifetime amounts before regenerating the vectors.
 
