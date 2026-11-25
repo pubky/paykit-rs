@@ -267,37 +267,51 @@ impl<'a> ClaimResults<'a> {
                 let proof = result.proof.envelope();
                 let owner = result.cert.app_id() == self.app.app_id();
                 !matches!(claim.state, ClaimState::Failed { by_owner } if owner != by_owner)
-                    && opened < proof.seq
-                    // The sequence continues across an orderly generation change.
-                    && before.is_none_or(|copy| {
-                        proof.generation <= copy.revision.generation
-                            && proof.seq < copy.revision.seq
-                            && proof.server_time <= copy.at_ms
-                    })
+                    && in_window(
+                        opened,
+                        (proof.generation, proof.seq, proof.server_time),
+                        before
+                            .map(|copy| (copy.revision.generation, copy.revision.seq, copy.at_ms)),
+                    )
             })
         })
     }
 }
 
+/// Whether an outcome proved at `(generation, seq, server_time)` comes after the opening at
+/// sequence `opened`, and, given the copy `before` at `(generation, seq, at_ms)`, before
+/// that copy was written. The sequence continues across an orderly generation change.
+fn in_window(opened: u64, proved: (u64, u64, u64), before: Option<(u64, u64, u64)>) -> bool {
+    let (generation, seq, server_time) = proved;
+    opened < seq
+        && before.is_none_or(|(copy_generation, copy_seq, copy_at)| {
+            generation <= copy_generation && seq < copy_seq && server_time <= copy_at
+        })
+}
+
 /// The claim state to count for a read showing `claim`, given `verifies`, which says whether
-/// this app holds a signed outcome for a state: a failure the read shows gives way to a
-/// later signed `done`, since a read can lag behind the claim, and a later `done` spends a
-/// failed attempt again (Paykit spec 8.3, `failed` releases). `None` when the state the
-/// read shows doesn't verify.
+/// this app holds a signed outcome for a state: whatever the read shows, open, `unknown` or
+/// failed, gives way to a later signed `done` this app holds, since a read can lag behind
+/// the claim, and a later `done` spends the attempt (Paykit spec 8.3, `failed` releases).
+/// `None` when neither verifies.
 pub(super) fn settled_state(
     claim: ReservationClaim,
     verifies: impl Fn(ReservationClaim) -> bool,
 ) -> Option<ReservationClaim> {
-    if matches!(claim.state, ClaimState::Failed { .. }) {
-        let done = ReservationClaim {
-            state: ClaimState::Done,
-            ..claim
-        };
-        if verifies(done) {
-            return Some(done);
+    let done = ReservationClaim {
+        state: ClaimState::Done,
+        ..claim
+    };
+    if verifies(done) {
+        return Some(done);
+    }
+    match claim.state {
+        // Verified above, or not at all.
+        ClaimState::Done => None,
+        ClaimState::Open | ClaimState::Unknown | ClaimState::Failed { .. } => {
+            verifies(claim).then_some(claim)
         }
     }
-    verifies(claim).then_some(claim)
 }
 
 /// The pending condition must select this original write before acceptance. An upload
@@ -872,6 +886,21 @@ impl AppliedRecord {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn test_evidence_an_outcome_counts_only_after_its_opening_and_before_the_copy() {
+        use super::in_window;
+        // After the opening at 3, and no copy to land before.
+        assert!(in_window(3, (1, 4, 100), None));
+        // At or before the opening: an earlier attempt's outcome, not this one's.
+        assert!(!in_window(3, (1, 3, 100), None));
+        assert!(!in_window(3, (1, 2, 100), None));
+        // Before the copy at (1, 9, 200), in sequence, generation and time.
+        assert!(in_window(3, (1, 4, 100), Some((1, 9, 200))));
+        assert!(!in_window(3, (1, 9, 100), Some((1, 9, 200))));
+        assert!(!in_window(3, (2, 4, 100), Some((1, 9, 200))));
+        assert!(!in_window(3, (1, 4, 201), Some((1, 9, 200))));
+    }
+
     #[test]
     fn test_evidence_authorization_admits_only_the_current_generation() {
         // An opening answered in an earlier generation authorizes no new attempt, after an

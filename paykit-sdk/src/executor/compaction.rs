@@ -295,6 +295,7 @@ mod tests {
                 &HashMap::new(),
                 retired,
                 facts.clone(),
+                &HashSet::new(),
                 now,
             )
         };

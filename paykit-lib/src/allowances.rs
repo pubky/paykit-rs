@@ -1032,23 +1032,19 @@ pub fn counts(entry: &LedgerEntry, evidence: AttemptEvidence) -> Counting {
 }
 
 fn counting(outcome: Option<EntryOutcome>, evidence: AttemptEvidence) -> Counting {
-    if outcome == Some(EntryOutcome::Done)
-        || evidence.claim == Some(ClaimState::Done)
-        || evidence.paid
-    {
+    // A payment shown anywhere spends, over any failure (Paykit spec 8.3, `failed`
+    // releases).
+    if evidence.paid {
         return Counting::Spent;
     }
-    if outcome == Some(EntryOutcome::Failed)
-        || matches!(evidence.claim, Some(ClaimState::Failed { .. }))
-    {
-        return Counting::Released;
-    }
-    match evidence.claim {
-        Some(ClaimState::Open | ClaimState::Unknown) => Counting::Reserved,
+    match (outcome, evidence.claim) {
+        (Some(EntryOutcome::Done), _) | (_, Some(ClaimState::Done)) => Counting::Spent,
+        (Some(EntryOutcome::Failed), _) | (None, Some(ClaimState::Failed { .. })) => {
+            Counting::Released
+        }
+        (None, Some(ClaimState::Open | ClaimState::Unknown)) => Counting::Reserved,
         // Without an outcome, a claim that is gone or doesn't hold the attempt spends.
-        None => Counting::Spent,
-        // Counted above, as spent and released.
-        Some(ClaimState::Done | ClaimState::Failed { .. }) => Counting::Spent,
+        (None, None) => Counting::Spent,
     }
 }
 

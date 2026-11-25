@@ -101,6 +101,31 @@ impl Paykit {
         Ok(())
     }
 
+    /// The obligation of the activity's own request or occurrence with the ledger's
+    /// counterparty, whether or not the record holds a proof yet.
+    fn activity_obligation(
+        &self,
+        activity: &ActivityRecord,
+        ledger: &Ledger,
+    ) -> Result<Option<[u8; 32]>> {
+        if activity.counterparty != ledger.counterparty {
+            return Ok(None);
+        }
+        let (request, period) = match activity.binding()? {
+            RecordBinding::Request { request_hash } => (request_hash, None),
+            RecordBinding::Period {
+                request_hash,
+                billing_period,
+            } => (request_hash, Some(billing_period)),
+            RecordBinding::Unrequested => return Ok(None),
+        };
+        Ok(Some(self.obligation(
+            &activity.counterparty,
+            &request,
+            period.map_or(0, |p: paykit_lib::periods::PeriodRef| p.start_secs()),
+        )))
+    }
+
     /// Bind each signed payer proof to its activity's own request or occurrence and
     /// the original reservation. A payment method result alone cannot be copied.
     fn allowance_proof(
@@ -156,14 +181,24 @@ impl Paykit {
     ) -> Result<(Vec<AttemptId>, Vec<AttemptId>)> {
         let mut paid_attempts = Vec::new();
         let mut undated = Vec::new();
+        let held_by = |found: Option<(AttemptId, [u8; 32])>| {
+            found.filter(|(id, obligation)| {
+                attempts.get(id).is_some_and(|(key, _)| key == obligation)
+            })
+        };
         for activity in self.payer_records().await? {
-            let Some((id, obligation)) = self.allowance_proof(&activity, ledger)? else {
+            // Every record of an obligation the ledger still counts is read again, also one
+            // whose copy here holds no proof yet: the proof may have reached the record since
+            // (Paykit spec 8.3, `failed` releases).
+            let Some(obligation) = self.activity_obligation(&activity, ledger)? else {
                 continue;
             };
-            if attempts.get(&id).is_none_or(|(key, _)| key != &obligation) {
+            if !attempts.values().any(|(key, _)| key == &obligation) {
                 continue;
             }
-            undated.push(id);
+            if let Some((id, _)) = held_by(self.allowance_proof(&activity, ledger)?) {
+                undated.push(id);
+            }
             let target = ActivityTarget::payer(
                 activity.natural_key_with(&self.identity(), &|endpoint, proof| {
                     self.rail.settlement_id(endpoint, proof)
@@ -176,9 +211,10 @@ impl Paykit {
             let Some(current) = self.read_activity(&target, Some(&fresh)) else {
                 continue;
             };
-            if self.allowance_proof(&current, ledger)? != Some((id, obligation)) {
+            let Some((id, _)) = held_by(self.allowance_proof(&current, ledger)?) else {
                 continue;
-            }
+            };
+            undated.push(id);
             if let Some(proof) = &current.proof {
                 let held = self.app.shared_evidence().await?;
                 let dated = held.ops.iter().any(|op| {
@@ -211,7 +247,8 @@ impl Paykit {
                 }
             }
         }
-        undated.retain(|id| !paid_attempts.contains(id));
+        let mut once = HashSet::new();
+        undated.retain(|id| !paid_attempts.contains(id) && once.insert(*id));
         Ok((paid_attempts, undated))
     }
 
@@ -306,6 +343,22 @@ impl Paykit {
                 )
             }) {
                 facts.insert(id, AttemptEvidence::from(state));
+                payments.remove(&id);
+            }
+        }
+        // A signed `done` held without the opening it follows explains a copied `done` too,
+        // as the count takes it (Paykit spec 8.3, `failed` releases).
+        let unopened: Vec<_> = payments
+            .iter()
+            .map(|(id, (obligation, _))| (*id, *obligation))
+            .collect();
+        for (id, obligation) in unopened {
+            let done = ReservationClaim {
+                obligation,
+                state: ClaimState::Done,
+            };
+            if results.confirms(id, done, 0, Some(current)) {
+                facts.insert(id, AttemptEvidence::from(ClaimState::Done));
                 payments.remove(&id);
             }
         }

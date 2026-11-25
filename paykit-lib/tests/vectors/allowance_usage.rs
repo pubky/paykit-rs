@@ -549,17 +549,18 @@ fn check_failure_case(case: &Value) {
     )
     .unwrap();
     assert_eq!(usage_json(&u), case["usage"], "{}", st(case, "name"));
-    assert_eq!(
-        check_limits(
-            &terms,
-            &u,
-            &Decimal::parse(st(&case["candidate"], "amount")).unwrap()
-        )
-        .is_ok(),
-        case["candidate"]["allowed"].as_bool().unwrap(),
-        "{}",
-        st(case, "name")
+    let verdict = check_limits(
+        &terms,
+        &u,
+        &Decimal::parse(st(&case["candidate"], "amount")).unwrap(),
     );
+    // These terms hold no period limit and a payment within the per-payment range, so a
+    // candidate refused is refused by the lifetime limit, counted from the evidence.
+    let expected = match case["candidate"]["allowed"].as_bool().unwrap() {
+        true => Ok(()),
+        false => Err(paykit_lib::allowances::LimitKind::Lifetime),
+    };
+    assert_eq!(verdict, expected, "{}", st(case, "name"));
 }
 
 /// Each case's usage and its candidates' verdicts, and the compaction's result, from their

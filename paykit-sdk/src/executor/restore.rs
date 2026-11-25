@@ -98,7 +98,7 @@ fn classify_claim(
     );
     ClaimClass::Shown(match read {
         Some(read) => unverified_claim(read, attempt, signed_done),
-        None if signed_done => super::ClaimShows::UnverifiedDone,
+        None if signed_done => super::ClaimShows::SignedDone,
         None => super::ClaimShows::Gone,
     })
 }
@@ -118,7 +118,8 @@ fn unverified_claim(
         .attempt(&attempt.to_bytes())
         .map(|shown| shown.outcome);
     match (signed_done, shown) {
-        (true, _) | (false, Some(Outcome::Done)) => super::ClaimShows::UnverifiedDone,
+        (true, _) => super::ClaimShows::SignedDone,
+        (false, Some(Outcome::Done)) => super::ClaimShows::ShownDone,
         (false, Some(Outcome::Open | Outcome::Unknown | Outcome::Failed) | None) => {
             super::ClaimShows::Gone
         }
@@ -869,13 +870,7 @@ impl Paykit {
         }
         let (facts, undated) =
             Box::pin(self.allowance_outcomes(&ledger, &claims, &dispatched)).await?;
-        // A proof only this app's copy of a payer record shows counts the attempt spent,
-        // though it isn't copied into the ledger: a failure is released only while no proof
-        // of payment is known (Paykit spec 8.3, `failed` releases).
-        let mut counting = facts.clone();
-        for id in undated {
-            counting.entry(id).or_default().paid = true;
-        }
+        let undated: std::collections::HashSet<_> = undated.into_iter().collect();
         let mut retired = if ledger.count == 0 {
             HashMap::new()
         } else {
@@ -892,9 +887,11 @@ impl Paykit {
             };
             retired
         };
+        // The count and the outcomes copied into the ledger take the same verdicts.
         let Some(Accounting {
             counted,
             unclassified,
+            writes,
         }) = reconciled_usage(
             inventory,
             &proposed.terms,
@@ -902,7 +899,8 @@ impl Paykit {
             &claims,
             &unverified,
             &mut retired,
-            counting,
+            facts,
+            &undated,
             at,
         )
         else {
@@ -1088,7 +1086,7 @@ impl Paykit {
             ledger,
             exact_grant,
             compaction,
-            facts,
+            writes,
         )))
     }
 }
@@ -1412,19 +1410,32 @@ mod tests {
             class(Some(&shows_failed), &[(claim(ClaimState::Open), 3)], &[]),
             ClaimClass::Verified(claim(ClaimState::Open))
         );
+        // A stale read still shows the attempt open or `unknown` while this app holds the
+        // later signed `done`: the attempt counts paid.
+        for stale in [ClaimState::Open, ClaimState::Unknown] {
+            assert_eq!(
+                class(
+                    Some(&read(Some(Outcome::Open), false, false)),
+                    &[(claim(stale), 3)],
+                    &[ClaimState::Done]
+                ),
+                ClaimClass::Verified(claim(ClaimState::Done)),
+                "{stale:?}"
+            );
+        }
         // A signed `done` without its opening counts, whether the claim reads or is gone.
         assert_eq!(
             class(Some(&shows_failed), &[], &[ClaimState::Done]),
-            ClaimClass::Shown(ClaimShows::UnverifiedDone)
+            ClaimClass::Shown(ClaimShows::SignedDone)
         );
         assert_eq!(
             class(None, &[], &[ClaimState::Done]),
-            ClaimClass::Shown(ClaimShows::UnverifiedDone)
+            ClaimClass::Shown(ClaimShows::SignedDone)
         );
-        // A `done` the read shows without its opening.
+        // A `done` only the read shows, without its opening.
         assert_eq!(
             class(Some(&read(Some(Outcome::Done), false, false)), &[], &[]),
-            ClaimClass::Shown(ClaimShows::UnverifiedDone)
+            ClaimClass::Shown(ClaimShows::ShownDone)
         );
         // Anything else without a verified opening leaves the recorded failure as it is: a
         // divergent or rebuilt view, or one showing the attempt open, `unknown` or failed.

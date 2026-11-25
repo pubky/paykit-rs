@@ -537,7 +537,9 @@ impl AllowanceReservation {
             .map_err(|refused| match refused {
                 TermsRefusal::NotActive if expired => Refusal::AllowanceEnded.into(),
                 TermsRefusal::NotActive => terms_not_active(),
-                _ => not_automatic("the transfer does not satisfy the Allowance terms"),
+                TermsRefusal::Asset | TermsRefusal::Endpoint => {
+                    not_automatic("the transfer does not satisfy the Allowance terms")
+                }
             })?;
         if let Err(limit) = check_limits(&checked.terms, &checked.usage, &amount.value) {
             let room = lifetime_room(&checked.terms, &checked.usage, &amount.value);
