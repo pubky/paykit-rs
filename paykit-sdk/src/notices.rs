@@ -136,6 +136,14 @@ pub enum NoticeKind {
     /// Shared post-loss hold). Raised once, and again after each reopen, while the hold
     /// stands; it names no attempt, message or counterparty.
     AutomaticPaymentsHeld,
+    /// A change of the app's public endpoints that it saved and didn't sign wasn't published:
+    /// a later run of the app or a restore held it aside, and Paykit never signs such a
+    /// change, a withdrawal included (Paykit spec 4, "Changes saved and not yet signed").
+    /// [`Notice::endpoints_withdrawn`] and [`Notice::endpoints_offered`] name what it asked.
+    /// The host withdraws again the endpoints it would have withdrawn, and has the user make
+    /// the offers and changes again; with neither list, it shows the current endpoints. Kept
+    /// until acknowledged, and through a restore; it can be told again for the same change.
+    PublicEndpointChangeNotPublished,
 }
 
 impl NoticeKind {
@@ -165,6 +173,7 @@ impl NoticeKind {
             Self::BlockFloorHeld => "floor_held",
             Self::FloorRaiseWaiting => "raise_waiting",
             Self::AutomaticPaymentsHeld => "loss_hold",
+            Self::PublicEndpointChangeNotPublished => "endpoint_change_not_published",
         }
     }
 
@@ -175,6 +184,7 @@ impl NoticeKind {
             Self::BlockFloorHeld,
             Self::FloorRaiseWaiting,
             Self::AutomaticPaymentsHeld,
+            Self::PublicEndpointChangeNotPublished,
         ]
         .into_iter()
         .find(|kind| kind.tag() == tag)
@@ -348,6 +358,13 @@ pub struct Notice {
     pub lost_from_ms: Option<u64>,
     /// For [`NoticeKind::BlockedMessagesLost`] or [`NoticeKind::DroppedMessagesLost`]: the latest such time.
     pub lost_until_ms: Option<u64>,
+    /// For [`NoticeKind::PublicEndpointChangeNotPublished`]: the public endpoints the change
+    /// would have withdrawn. Empty, with [`Notice::endpoints_offered`], when the change isn't
+    /// known, as after a restore from a backup taken before it.
+    pub endpoints_withdrawn: Vec<paykit_lib::PaymentEndpointIdentifier>,
+    /// For [`NoticeKind::PublicEndpointChangeNotPublished`]: the public endpoints the change
+    /// would have offered or changed.
+    pub endpoints_offered: Vec<paykit_lib::PaymentEndpointIdentifier>,
 }
 
 /// A notice as kept (`p/nt/<attempt_id>/<kind>`, `p/nt/<sender>/<msg_id>` for a message
@@ -380,6 +397,10 @@ pub(crate) struct KeptNotice {
     /// of acceptance times, earliest and latest.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) lost: Option<(u64, u64)>,
+    /// For an endpoint change not published: the public endpoints the change asked to
+    /// withdraw and offer or change, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) endpoints: Option<crate::own_record::EndpointChange>,
 }
 
 /// Where a message given up with no entry stored came from: no entry, so no handle.
@@ -460,6 +481,7 @@ impl KeptNotice {
             stored: None,
             origin: None,
             lost: None,
+            endpoints: None,
         }
     }
 
@@ -477,6 +499,7 @@ impl KeptNotice {
             stored: None,
             origin: None,
             lost: None,
+            endpoints: None,
         }
     }
 
@@ -495,6 +518,7 @@ impl KeptNotice {
             stored: None,
             origin: None,
             lost: None,
+            endpoints: None,
         }
     }
 
@@ -519,6 +543,7 @@ impl KeptNotice {
             stored: None,
             origin: None,
             lost: None,
+            endpoints: None,
         }
     }
 
@@ -548,6 +573,7 @@ impl KeptNotice {
             stored,
             origin,
             lost: None,
+            endpoints: None,
         }
     }
 
@@ -565,6 +591,7 @@ impl KeptNotice {
             stored: None,
             origin: None,
             lost: None,
+            endpoints: None,
         })
     }
 
@@ -609,6 +636,7 @@ impl KeptNotice {
             stored: None,
             origin: None,
             lost: None,
+            endpoints: None,
         }
     }
 
@@ -661,6 +689,7 @@ impl KeptNotice {
             stored: None,
             origin: None,
             lost: Some((from, until.max(from))),
+            endpoints: None,
         }
     }
 
@@ -779,8 +808,22 @@ impl KeptNotice {
             raised_at_ms: self.raised_at_ms,
             lost_from_ms: self.lost.map(|(from, _)| from),
             lost_until_ms: self.lost.map(|(_, until)| until),
+            endpoints_withdrawn: identifiers(self.endpoints.as_ref().map(|c| &c.withdrawn))?,
+            endpoints_offered: identifiers(self.endpoints.as_ref().map(|c| &c.offered))?,
         })
     }
+}
+
+/// The Payment Endpoint Identifiers a kept notice names, each checked again (Paykit wire 1.4).
+fn identifiers(
+    ids: Option<&std::collections::BTreeSet<String>>,
+) -> Result<Vec<paykit_lib::PaymentEndpointIdentifier>> {
+    ids.into_iter()
+        .flatten()
+        .map(|id| {
+            paykit_lib::PaymentEndpointIdentifier::new(id).map_err(|_| PaykitError::corrupt())
+        })
+        .collect()
 }
 
 /// Bind `notice`, read at `key` (`nt/...`), to what the key names, as a restore checks it:
@@ -823,7 +866,11 @@ pub(crate) fn bind_notice(key: &str, notice: &KeptNotice) -> Result<()> {
         }
         _ if notice.settlement.is_some() => Err(PaykitError::corrupt()),
         Some(StateKey::IdentityNotice(kind)) => {
-            if *notice == KeptNotice::identity(kind, notice.raised_at_ms) {
+            let mut plain = notice.clone();
+            if kind == NoticeKind::PublicEndpointChangeNotPublished {
+                plain.endpoints = None;
+            }
+            if plain == KeptNotice::identity(kind, notice.raised_at_ms) {
                 Ok(())
             } else {
                 Err(PaykitError::corrupt())
@@ -977,7 +1024,19 @@ impl Paykit {
         ) {
             return Err(Refusal::NotFound.into());
         }
-        let mut kept = self.kept_notice(&key).await?.ok_or(Refusal::NotFound)?;
+        let Some(mut kept) = self.kept_notice(&key).await? else {
+            // This notice is deleted when acknowledged and may be told again: acknowledging
+            // it twice is no error.
+            if matches!(
+                StateKey::parse(key.as_bytes()),
+                Some(StateKey::IdentityNotice(
+                    NoticeKind::PublicEndpointChangeNotPublished
+                ))
+            ) {
+                return Ok(());
+            }
+            return Err(Refusal::NotFound.into());
+        };
         if kept.acknowledged {
             return Ok(());
         }
@@ -1050,6 +1109,30 @@ impl Paykit {
                 .await?;
         }
         Ok(())
+    }
+
+    /// Tell the host that a change of public endpoints saved earlier wasn't published, with
+    /// the endpoints `asked` names ([`NoticeKind::PublicEndpointChangeNotPublished`]).
+    ///
+    /// # Errors
+    ///
+    /// A store failure, or a kept notice that doesn't read.
+    pub(crate) async fn endpoint_change_not_published(
+        &mut self,
+        asked: crate::own_record::EndpointChange,
+    ) -> Result<()> {
+        let kind = NoticeKind::PublicEndpointChangeNotPublished;
+        let key = key::identity_notice(kind);
+        let mut notice = match self.kept_notice(&key).await? {
+            Some(kept) => kept,
+            None => KeptNotice::identity(kind, self.service_time().unwrap_or(0)),
+        };
+        // A change told while an earlier one is still shown joins it.
+        let mut endpoints = notice.endpoints.take().unwrap_or_default();
+        endpoints.withdrawn.extend(asked.withdrawn);
+        endpoints.offered.extend(asked.offered);
+        notice.endpoints = (!endpoints.is_empty()).then_some(endpoints);
+        self.local_put(&key, &notice).await
     }
 
     /// The notice kept at `key`, read whole and bound to it ([`bind_notice`]).
@@ -1135,6 +1218,7 @@ mod tests {
             stored: None,
             origin: None,
             lost: None,
+            endpoints: None,
         }
     }
 
@@ -1144,6 +1228,7 @@ mod tests {
             NoticeKind::BlockFloorHeld,
             NoticeKind::FloorRaiseWaiting,
             NoticeKind::AutomaticPaymentsHeld,
+            NoticeKind::PublicEndpointChangeNotPublished,
         ] {
             let key = key::identity_notice(kind);
             let notice = KeptNotice::identity(kind, 5);
@@ -1193,6 +1278,7 @@ mod tests {
                 stored: None,
                 origin: None,
                 lost: None,
+                endpoints: None,
             };
             for acknowledged in [false, true] {
                 notice.acknowledged = acknowledged;
@@ -1267,6 +1353,7 @@ mod tests {
             stored: None,
             origin: None,
             lost: None,
+            endpoints: None,
         };
         let key = key::restored_delivery(&to, id, &hash);
         assert!(bind_notice(&key, &notice).is_ok());
