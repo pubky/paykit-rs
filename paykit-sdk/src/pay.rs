@@ -63,6 +63,7 @@ use crate::app_records::PublicAppFailure;
 use crate::conversion::{self, Priced, PricedPayment, RateSource};
 use crate::destination::{payee_copy_usable, Carrier, Need};
 use crate::error::{PaykitError, Refusal, Result};
+use crate::heap::on_heap;
 use crate::journal::{
     Destination, JournalEntry, KeptAmount, KeptPrice, PaymentView, Stage, TransferBound,
 };
@@ -1838,13 +1839,15 @@ impl Paykit {
         let _delivery = self.delivery_operation();
         let mut public_failures = Vec::new();
         // The call's future goes on the heap, as `receive`'s does: it nests deep.
-        let outcome = Box::pin(self.pay_request_inner(
-            request,
-            options,
-            Initiator::User,
-            None,
-            &mut public_failures,
-        ))
+        let outcome = on_heap(|| {
+            self.pay_request_inner(
+                request,
+                options,
+                Initiator::User,
+                None,
+                &mut public_failures,
+            )
+        })
         .await;
         PayResult {
             outcome,
@@ -1870,13 +1873,15 @@ impl Paykit {
         // A delivery operation for the whole call (Paykit spec 8.1).
         let _delivery = self.delivery_operation();
         let mut public_failures = Vec::new();
-        let outcome = Box::pin(self.pay_request_inner(
-            request,
-            options,
-            Initiator::Automatic,
-            None,
-            &mut public_failures,
-        ))
+        let outcome = on_heap(|| {
+            self.pay_request_inner(
+                request,
+                options,
+                Initiator::Automatic,
+                None,
+                &mut public_failures,
+            )
+        })
         .await;
         PayResult {
             outcome,
@@ -1914,13 +1919,15 @@ impl Paykit {
         // A delivery operation for the whole call (Paykit spec 8.1).
         let _delivery = self.delivery_operation();
         let mut public_failures = Vec::new();
-        let outcome = Box::pin(self.pay_request_inner(
-            request,
-            PayOptions::default(),
-            Initiator::Automatic,
-            Some(*allowance),
-            &mut public_failures,
-        ))
+        let outcome = on_heap(|| {
+            self.pay_request_inner(
+                request,
+                PayOptions::default(),
+                Initiator::Automatic,
+                Some(*allowance),
+                &mut public_failures,
+            )
+        })
         .await;
         PayResult {
             outcome,
@@ -1938,8 +1945,8 @@ impl Paykit {
     ) -> Result<PayOutcome> {
         // Finish the request reads before polling the payment and its outgoing messages.
         let plan =
-            Box::pin(self.plan_request(request, options, by, allowance, public_failures)).await?;
-        Box::pin(self.execute(plan)).await
+            on_heap(|| self.plan_request(request, options, by, allowance, public_failures)).await?;
+        on_heap(|| self.execute(plan)).await
     }
 
     async fn plan_request(
@@ -1952,7 +1959,7 @@ impl Paykit {
     ) -> Result<Plan> {
         self.refuse_held_back()?;
         self.refresh_own()?;
-        Box::pin(self.first_read_before_writing()).await?;
+        on_heap(|| self.first_read_before_writing()).await?;
         self.refresh_own()?;
         self.records_known().await?;
         self.require_pay()?;
@@ -1960,7 +1967,7 @@ impl Paykit {
             .may_attempt(by == Initiator::Automatic)
             .map_err(held_back)?;
         self.refuse_while_payer_pass_owed().await?;
-        let (target, record) = self.payer_request(request).await?;
+        let (target, record) = on_heap(|| self.payer_request(request)).await?;
         let (stored, body) = request_of(&record).ok_or(Refusal::NotFound)?;
         let (stored, body) = (stored.clone(), body.clone());
         if body.is_recurring() {
@@ -1996,15 +2003,14 @@ impl Paykit {
         // destination check refuses it; and one requiring an app the payee removed is refused
         // for that.
         let deadline = body.attempt_deadline(None)?;
-        if Box::pin(self.pause_at(&record_key)).await?.blocks_by_hand()
+        if on_heap(|| self.pause_at(&record_key))
+            .await?
+            .blocks_by_hand()
             && !self.deadline_passed(deadline)
         {
-            Box::pin(self.refuse_unpayable_request(
-                &request.payee,
-                &stored,
-                &body.destination,
-                &options,
-            ))
+            on_heap(|| {
+                self.refuse_unpayable_request(&request.payee, &stored, &body.destination, &options)
+            })
             .await?;
             Box::pin(self.refuse_while_paused(&[record_key])).await?;
         }
@@ -2036,7 +2042,7 @@ impl Paykit {
             if record.manual_only {
                 return Err(Refusal::ManualOnly.into());
             }
-            let reservation = Box::pin(self.allowance_reservation(&key, &request.payee)).await?;
+            let reservation = on_heap(|| self.allowance_reservation(&key, &request.payee)).await?;
             reservation.request(&record, claim.as_ref(), None)?;
             let hold = if blocked {
                 Some(AutomaticHold::Blocked)
@@ -2088,8 +2094,8 @@ impl Paykit {
             payment_amount,
             paid,
             price,
-        } = self
-            .request_destination(
+        } = Box::pin({
+            self.request_destination(
                 &request.payee,
                 &stored,
                 &body,
@@ -2099,7 +2105,8 @@ impl Paykit {
                 &mut None,
                 public_failures,
             )
-            .await?;
+        })
+        .await?;
         if blocked {
             let amount = paid.ok_or_else(|| {
                 Refusal::Destination(
@@ -2269,7 +2276,7 @@ impl Paykit {
             RequestDestination::RequiredApp(app) => Some(*app),
             _ => options.list_app,
         };
-        self.list_destination(payee, app, accepted, pricing, options, public_failures)
+        on_heap(|| self.list_destination(payee, app, accepted, pricing, options, public_failures))
             .await
     }
 
@@ -2291,7 +2298,8 @@ impl Paykit {
         let _delivery = self.delivery_operation();
         let mut public_failures = Vec::new();
         // The call's future goes on the heap, as `receive`'s does: it nests deep.
-        let outcome = Box::pin(self.pay_without_request_inner(payment, &mut public_failures)).await;
+        let outcome =
+            on_heap(|| self.pay_without_request_inner(payment, &mut public_failures)).await;
         PayResult {
             outcome,
             public_failures,
@@ -2305,7 +2313,7 @@ impl Paykit {
     ) -> Result<PayOutcome> {
         self.refuse_held_back()?;
         self.refresh_own()?;
-        Box::pin(self.first_read_before_writing()).await?;
+        on_heap(|| self.first_read_before_writing()).await?;
         self.refresh_own()?;
         self.records_known().await?;
         self.require_pay()?;
@@ -2323,8 +2331,8 @@ impl Paykit {
             payment_amount,
             paid,
             ..
-        } = self
-            .list_destination(
+        } = Box::pin({
+            self.list_destination(
                 &payment.payee,
                 options.list_app,
                 None,
@@ -2332,7 +2340,8 @@ impl Paykit {
                 &options,
                 public_failures,
             )
-            .await?;
+        })
+        .await?;
         if blocked {
             let amount = paid.ok_or_else(|| {
                 Refusal::Destination(
@@ -2422,23 +2431,25 @@ impl Paykit {
             billing_period: None,
         };
         if deadline.is_none() {
-            return Box::pin(self.pay_public_offline(entry, carrier, &options)).await;
+            return on_heap(|| self.pay_public_offline(entry, carrier, &options)).await;
         }
-        self.execute(Plan {
-            entry,
-            record: ActivityTarget::payer(natural),
-            carrier,
-            step: 0,
-            reserve,
-            create: Some(record),
-            on_record: false,
-            allowance: None,
-            by: Initiator::User,
-            unconfirmed: options.unconfirmed_identity_confirmed,
-            blocked_confirmed: options.blocked_confirmed,
-            end_hold: None,
-            conditions: Vec::new(),
-            record_writes: Vec::new(),
+        on_heap(|| {
+            self.execute(Plan {
+                entry,
+                record: ActivityTarget::payer(natural),
+                carrier,
+                step: 0,
+                reserve,
+                create: Some(record),
+                on_record: false,
+                allowance: None,
+                by: Initiator::User,
+                unconfirmed: options.unconfirmed_identity_confirmed,
+                blocked_confirmed: options.blocked_confirmed,
+                end_hold: None,
+                conditions: Vec::new(),
+                record_writes: Vec::new(),
+            })
         })
         .await
     }
@@ -2491,12 +2502,12 @@ impl Paykit {
         // A delivery operation for the whole call (Paykit spec 8.1).
         let _delivery = self.delivery_operation();
         // The call's future goes on the heap, as `receive`'s does: it nests deep.
-        Box::pin(self.repair_activity_record_inner(attempt_id)).await
+        on_heap(|| self.repair_activity_record_inner(attempt_id)).await
     }
 
     async fn repair_activity_record_inner(&mut self, attempt_id: &AttemptId) -> Result<PayOutcome> {
         self.refresh_own()?;
-        Box::pin(self.first_read_before_writing()).await?;
+        on_heap(|| self.first_read_before_writing()).await?;
         self.refresh_own()?;
         // A repair writes over a value the app can't read, on the user's word: it waits for
         // the records to be listed, a wider certificate's keys included.
@@ -2509,7 +2520,7 @@ impl Paykit {
             .find(|e| e.attempt_id == attempt_id.to_text())
             .filter(|e| e.record_held && e.stage == Stage::RailPaid)
             .ok_or(Refusal::NotFound)?;
-        match self.write_outcome(&mut entry, true, true).await? {
+        match on_heap(|| self.write_outcome(&mut entry, true, true)).await? {
             Written::Done => {}
             Written::Held => {
                 return Ok(PayOutcome::RecordHeld {
@@ -2801,15 +2812,16 @@ impl Paykit {
         if let PaymentMode::Public(_) = options.mode {
             // The failures go into the call's list as each app is judged, so an error later in
             // the read still returns those found before it ([`PayResult`]).
-            let (identity, mut records) = self
-                .public_records(
+            let (identity, mut records) = on_heap(|| {
+                self.public_records(
                     payee,
                     app,
                     pricing.by,
                     options.unconfirmed_identity_confirmed,
                     public_failures,
                 )
-                .await??;
+            })
+            .await??;
             // The payee's public Payment List is every current app's public endpoints together
             // (Paykit spec 4), handed to the method by App ID, then by identifier, so every
             // payer device hands the same for the same records.
@@ -2894,7 +2906,7 @@ impl Paykit {
                         held_over.push((app_id, version));
                     }
                 }
-                None if Box::pin(self.pause_at(&record)).await?.blocks_by_hand() => {
+                None if on_heap(|| self.pause_at(&record)).await?.blocks_by_hand() => {
                     paused_held.push((app_id, version, record));
                 }
                 None => held_only.push((app_id, version)),
@@ -2916,7 +2928,7 @@ impl Paykit {
                 held.1 = held.1.max(version);
                 continue;
             }
-            if Box::pin(self.pause_at(&record)).await?.blocks_by_hand() {
+            if on_heap(|| self.pause_at(&record)).await?.blocks_by_hand() {
                 paused_held.push((app_id, version, record));
             }
         }
@@ -3026,7 +3038,7 @@ impl Paykit {
             let record = self
                 .app
                 .record_key(&list_target(&list.payee, &list.app_id))?;
-            if Box::pin(self.pause_at(&record)).await?.blocks_by_hand() {
+            if on_heap(|| self.pause_at(&record)).await?.blocks_by_hand() {
                 paused_lists.push(record);
                 paused_apps.push(list.app_id);
                 continue;
@@ -3201,7 +3213,7 @@ impl Paykit {
                 self.ask_for_lists(payee, app, &held, &installed, &[], &paused_apps)
                     .await?;
             }
-            Box::pin(self.refuse_while_paused(&paused_lists)).await?;
+            on_heap(|| self.refuse_while_paused(&paused_lists)).await?;
         }
         if unsupported_only {
             return Err(unsupported("the payee's Private Payment List endpoints"));
@@ -3238,7 +3250,7 @@ impl Paykit {
             None => held.is_empty() && others.is_empty() && !paused_apps.is_empty(),
         };
         if asks_nothing {
-            Box::pin(self.refuse_while_paused(&paused_held_records)).await?;
+            on_heap(|| self.refuse_while_paused(&paused_held_records)).await?;
         }
         self.ask_for_lists(payee, app, &held, &installed, &others, &paused_apps)
             .await?;
@@ -3849,8 +3861,8 @@ impl Paykit {
         // payee's Dispatch couldn't confirm it needs the user's confirmation first, and an
         // automatic one isn't made (Paykit spec 7.2 step 1, Dispatch spec 4.3).
         let request_hash = entry.request_hash()?;
-        let identity = self
-            .check_destination(
+        let identity = on_heap(|| {
+            self.check_destination(
                 &entry.payee,
                 &entry.destination,
                 &carrier,
@@ -3858,7 +3870,8 @@ impl Paykit {
                 by,
                 unconfirmed,
             )
-            .await??;
+        })
+        .await??;
         self.current_rate_details(&entry, &identity)??;
         self.activity_write_base(&self.activity_key(&record)?)
             .await?;
@@ -3890,7 +3903,7 @@ impl Paykit {
         };
         if let Some(original) = &mut create {
             if on_record {
-                let (fresh, _) = self.fresh_request_stamped(&record).await?;
+                let (fresh, _) = on_heap(|| self.fresh_request_stamped(&record)).await?;
                 if !matches!(fresh, crate::requests::Fresh::Held(ref value) if value.to_json()? == original.to_json()?)
                 {
                     return Err(PaykitError::Conflict(
@@ -3958,7 +3971,7 @@ impl Paykit {
         let mut attempted = entry.clone();
         attempted.stage = Stage::Attempted;
         batch = batch.local(self.journal_write(&attempted)?);
-        if Box::pin(self.period_recovery_held(&entry)).await? {
+        if on_heap(|| self.period_recovery_held(&entry)).await? {
             return Err(Refusal::MayBePaid {
                 reason: crate::loss::LOSS_DOUBT.into(),
                 doubt: None,
@@ -4002,7 +4015,7 @@ impl Paykit {
                 );
                 if self.deadline_passed(entry.deadline) {
                     if on_record {
-                        return Err(self.past_deadline(&record, Some(changed)).await?);
+                        return Err(on_heap(|| self.past_deadline(&record, Some(changed))).await?);
                     }
                     return Err(Refusal::DeadlinePassed.into());
                 }
@@ -4034,15 +4047,16 @@ impl Paykit {
             .map(|proof| ClaimView::from_value(&proof.body().state))
             .transpose()?;
         self.set_stage(&mut entry, Stage::Attempted).await?;
-        if !Box::pin(self.keep_executor_reply(&entry, &submitted.proofs)).await? {
-            return self
-                .fail_attempt(
+        if !on_heap(|| self.keep_executor_reply(&entry, &submitted.proofs)).await? {
+            return on_heap(|| {
+                self.fail_attempt(
                     &mut entry,
                     Refusal::HeldForUser(crate::HeldForUserReason::AttemptCheck(
                         "the applied Allowance reservation could not be established",
                     )),
                 )
-                .await;
+            })
+            .await;
         }
         // Before any money moves, the gate every handoff passes (Paykit spec 4, 7.2 step 1).
         // The copies checked before the write are still fresh: this reads no network unless
@@ -4050,42 +4064,45 @@ impl Paykit {
         // but for an attempt at a service the identity no longer names, which the move rules
         // resolve (Dispatch spec 12.5, 12.6): nothing is written there.
         let Some(claim) = claim else {
-            return self
-                .fail_attempt(
+            return on_heap(|| {
+                self.fail_attempt(
                     &mut entry,
                     Refusal::HeldForUser(crate::HeldForUserReason::AttemptCheck(
                         "no attempt proof",
                     )),
                 )
-                .await;
+            })
+            .await;
         };
         let Some(opened_at_ms) = claim
             .attempt(&attempt_id.to_bytes())
             .map(|attempt| attempt.opened_at)
         else {
-            return self
-                .fail_attempt(
+            return on_heap(|| {
+                self.fail_attempt(
                     &mut entry,
                     Refusal::HeldForUser(crate::HeldForUserReason::AttemptCheck(
                         "no attempt in its proof",
                     )),
                 )
-                .await;
+            })
+            .await;
         };
         let answered = Answered {
             opened_at_ms,
             wall_ms: answered_wall_ms,
             at: answered_at,
         };
-        let doc = match self
-            .pay_gate(&entry, &carrier, &claim, by, unconfirmed, false)
+        let doc = match on_heap(|| self.pay_gate(&entry, &carrier, &claim, by, unconfirmed, false))
             .await?
         {
             Ok(doc) => doc,
             Err(held) => {
                 return match first_handoff_hold(held) {
                     FirstHold::Return(error) => Err(error),
-                    FirstHold::Fail(refusal) => self.fail_attempt(&mut entry, refusal).await,
+                    FirstHold::Fail(refusal) => {
+                        on_heap(|| self.fail_attempt(&mut entry, refusal)).await
+                    }
                 }
             }
         };
@@ -4094,18 +4111,20 @@ impl Paykit {
         // the attempt `failed` rather than taking it as possibly handed off. `Paying` is
         // journaled just before the payment method's call ([`Paykit::handoff`]). The
         // acceptance is signed and journaled now, and sendable only once that call is made.
-        let acceptance = self.journal_acceptance(&mut entry).await?;
-        Box::pin(self.handoff(
-            entry,
-            doc,
-            by,
-            unconfirmed,
-            Handoff::First {
-                answered,
-                blocked_confirmed,
-            },
-            acceptance,
-        ))
+        let acceptance = on_heap(|| self.journal_acceptance(&mut entry)).await?;
+        on_heap(|| {
+            self.handoff(
+                entry,
+                doc,
+                by,
+                unconfirmed,
+                Handoff::First {
+                    answered,
+                    blocked_confirmed,
+                },
+                acceptance,
+            )
+        })
         .await
     }
 
@@ -4193,7 +4212,7 @@ impl Paykit {
     /// A check failed after the attempt and before any money moved: `failed` instead of
     /// paying (Paykit spec 7.2 step 1).
     async fn fail_attempt(&mut self, entry: &mut JournalEntry, why: Refusal) -> Result<PayOutcome> {
-        self.write_outcome(entry, false, false).await?;
+        on_heap(|| self.write_outcome(entry, false, false)).await?;
         Err(Refusal::AttemptFailed(Box::new(why)).into())
     }
 
@@ -4368,7 +4387,7 @@ impl Paykit {
         // placed, while the request record is paused, by the one gate of the outcome
         // (Paykit spec 6); the entry stays owed, for a resume after the user's confirmation,
         // which sends it also over a view still divergent.
-        if Box::pin(self.handed_off_write_waits(&key)).await? {
+        if on_heap(|| self.handed_off_write_waits(&key)).await? {
             return Ok(());
         }
         self.release_acceptance(entry, None).await?;
@@ -4436,9 +4455,8 @@ impl Paykit {
         // Nothing is submitted unless the final payment check passes. Held, the attempt
         // stays open for a resume to decide: a first handoff is still `Attempted` then,
         // known unsubmitted, and the resume writes it `failed`.
-        let (check, payee) = self
-            .final_payment_check(&entry, payee, by, confirmed, kind)
-            .await?;
+        let (check, payee) =
+            on_heap(|| self.final_payment_check(&entry, payee, by, confirmed, kind)).await?;
         match check {
             FinalCheck::Pay => {}
             FinalCheck::Hold => return Ok(PayOutcome::Pending { attempt_id }),
@@ -4451,7 +4469,9 @@ impl Paykit {
             // a handoff that paid, so it stays "may be paid", for a receipt or the user.
             FinalCheck::Refused(refusal) => {
                 return match kind {
-                    Handoff::First { .. } => self.fail_attempt(&mut entry, refusal).await,
+                    Handoff::First { .. } => {
+                        on_heap(|| self.fail_attempt(&mut entry, refusal)).await
+                    }
                     Handoff::Repeat { .. } => Ok(PayOutcome::Uncertain { attempt_id }),
                 }
             }
@@ -4461,10 +4481,12 @@ impl Paykit {
         if matches!(kind, Handoff::First { .. }) {
             self.set_stage(&mut entry, Stage::Paying).await?;
         }
-        match Box::pin(self.payment_fence(&entry, payee, by, confirmed, kind)).await {
+        match on_heap(|| self.payment_fence(&entry, payee, by, confirmed, kind)).await {
             Ok(FinalCheck::Pay) => {}
-            Ok(stopped) => return self.stopped_before_the_call(entry, kind, stopped).await,
-            Err(error) => return self.unread_at_the_fence(entry, kind, error).await,
+            Ok(stopped) => {
+                return on_heap(|| self.stopped_before_the_call(entry, kind, stopped)).await
+            }
+            Err(error) => return on_heap(|| self.unread_at_the_fence(entry, kind, error)).await,
         }
         let outcome = self.rail.pay(payment).await;
         // The call was made and the payment may be running, its outcome not known yet: only
@@ -4477,7 +4499,7 @@ impl Paykit {
             outcome,
             Ok(RailOutcome::Pending) | Err(RailError::Unavailable(_))
         ) {
-            if let Err(error) = self.release_acceptance(&mut entry, acceptance).await {
+            if let Err(error) = on_heap(|| self.release_acceptance(&mut entry, acceptance)).await {
                 unless_stop(error)?;
             }
             None
@@ -4485,7 +4507,7 @@ impl Paykit {
             acceptance
         };
         match outcome {
-            Ok(outcome) => self.take_outcome(&mut entry, outcome, acceptance).await,
+            Ok(outcome) => on_heap(|| self.take_outcome(&mut entry, outcome, acceptance)).await,
             // A refusal is authoritative: nothing was and nothing will be submitted, so a
             // first handoff is definitively not paid, written `failed`, and may be replaced
             // (Paykit spec 7.2). A repeat's refusal says nothing of the handoff before it,
@@ -4522,7 +4544,9 @@ impl Paykit {
     ) -> Result<PayOutcome> {
         let attempt_id = entry.attempt()?;
         match (kind, stopped) {
-            (Handoff::First { .. }, stopped) => self.stopped_at_the_fence(entry, stopped).await,
+            (Handoff::First { .. }, stopped) => {
+                on_heap(|| self.stopped_at_the_fence(entry, stopped)).await
+            }
             (Handoff::Repeat { .. }, FinalCheck::Hold) => Ok(PayOutcome::Pending { attempt_id }),
             (Handoff::Repeat { .. }, _) => Ok(PayOutcome::Uncertain { attempt_id }),
         }
@@ -4551,7 +4575,7 @@ impl Paykit {
             return Err(error);
         }
         self.set_stage(&mut entry, Stage::Attempted).await?;
-        match self.write_outcome(&mut entry, false, false).await {
+        match on_heap(|| self.write_outcome(&mut entry, false, false)).await {
             // Written failed: a refusal is the failed attempt's cause; any other error, such
             // as the Dispatch's own answer with its code and retry time, or a store failure, is
             // returned as it is.
@@ -4591,7 +4615,7 @@ impl Paykit {
             _ => self.take_kept_lookup(&entry.payee).await?.err(),
         };
         match refused {
-            Some(refusal) => self.fail_attempt(&mut entry, refusal).await,
+            Some(refusal) => on_heap(|| self.fail_attempt(&mut entry, refusal)).await,
             None => Ok(PayOutcome::Pending { attempt_id }),
         }
     }
@@ -4615,7 +4639,7 @@ impl Paykit {
                 entry.rail_proof = Some(proof);
                 entry.paid_at_ms = paid_at_ms;
                 self.set_stage(entry, Stage::RailPaid).await?;
-                if let Err(error) = self.release_acceptance(entry, acceptance).await {
+                if let Err(error) = on_heap(|| self.release_acceptance(entry, acceptance)).await {
                     unless_stop(error)?;
                 }
             }
@@ -4627,7 +4651,7 @@ impl Paykit {
                 // The method shows the payment running, so its acceptance may go (Paykit spec
                 // 7.2 step 2); one the handoff couldn't queue is queued now, best effort, at
                 // every resume that finds it still pending.
-                if let Err(error) = self.release_acceptance(entry, acceptance).await {
+                if let Err(error) = on_heap(|| self.release_acceptance(entry, acceptance)).await {
                     unless_stop(error)?;
                 }
                 return Ok(PayOutcome::Pending { attempt_id });
@@ -4641,7 +4665,7 @@ impl Paykit {
     /// [`PayOutcome::PaidOutcomeUnwritten`], never as the payment's error (Paykit spec 7.2),
     /// unless it stops the wallet.
     pub(crate) async fn report(&mut self, entry: &mut JournalEntry) -> Result<PayOutcome> {
-        Box::pin(self.report_as(entry, false)).await
+        on_heap(|| self.report_as(entry, false)).await
     }
 
     /// [`Paykit::report`] for a resume: a failure of the Dispatch client to write a payment made
@@ -4649,7 +4673,7 @@ impl Paykit {
     /// [`PayOutcome::PaidOutcomeUnwritten`] and decides whether the failure is a wait or one
     /// the host must act on ([`entry_waits`]).
     async fn resume_report(&mut self, entry: &mut JournalEntry) -> Result<PayOutcome> {
-        Box::pin(self.report_as(entry, true)).await
+        on_heap(|| self.report_as(entry, true)).await
     }
 
     async fn report_as(&mut self, entry: &mut JournalEntry, strict: bool) -> Result<PayOutcome> {
@@ -4663,7 +4687,7 @@ impl Paykit {
                     reason: METHOD_FAILED.into(),
                 });
             }
-            match self.record_offline_attempt(entry).await {
+            match on_heap(|| self.record_offline_attempt(entry)).await {
                 Ok(true) => {}
                 Ok(false) => return Ok(PayOutcome::PaidOutcomeUnwritten { attempt_id }),
                 Err(error) if strict && judged_at_resume(&error) => return Err(error),
@@ -4675,7 +4699,7 @@ impl Paykit {
         }
         // Recording an Allowance outcome also authenticates the current ledger. Keep
         // that future off the wallet stack when resuming an interrupted handoff.
-        match Box::pin(self.write_outcome(entry, paid, false)).await {
+        match on_heap(|| self.write_outcome(entry, paid, false)).await {
             Ok(Written::Done) => {}
             Ok(Written::Held) => return Ok(PayOutcome::RecordHeld { attempt_id }),
             Ok(Written::Divergent(record)) => {
@@ -4742,7 +4766,7 @@ impl Paykit {
             // before its acceptance is released: nothing of it goes over that record until
             // then, and then also over a view still divergent (Paykit spec 6).
             let record = self.activity_key(&ActivityTarget::payer(entry.natural_key.clone()))?;
-            if Box::pin(self.handed_off_write_waits(&record)).await? {
+            if on_heap(|| self.handed_off_write_waits(&record)).await? {
                 return Ok(Written::Divergent(record));
             }
             // Every path that writes a payment made goes through here: its acceptance is
@@ -4784,14 +4808,14 @@ impl Paykit {
             // The record's update is settled first: without it nothing is written, `done`
             // included (Paykit spec 7.2 step 3).
             let proof = if paid {
-                Box::pin(self.outcome_proof(entry, &target)).await?
+                on_heap(|| self.outcome_proof(entry, &target)).await?
             } else {
                 None
             };
             let decision = if paid && proof.is_none() {
                 OutcomeRecord::Held
             } else {
-                self.outcome_record(entry, &target, paid, proof.as_ref(), overwrite)
+                on_heap(|| self.outcome_record(entry, &target, paid, proof.as_ref(), overwrite))
                     .await?
             };
             let mut compare = None;
@@ -4839,7 +4863,7 @@ impl Paykit {
                 batch = batch.entry(write);
             }
             if step.is_some() {
-                batch = Box::pin(self.executor_outcome(entry, paid, batch)).await?;
+                batch = on_heap(|| self.executor_outcome(entry, paid, batch)).await?;
             }
             let mut finished = entry.clone();
             if paid {
@@ -4878,7 +4902,7 @@ impl Paykit {
             }
             match self.submit(batch).await {
                 Ok(result) => {
-                    Box::pin(self.keep_executor_reply(entry, &result.proofs)).await?;
+                    on_heap(|| self.keep_executor_reply(entry, &result.proofs)).await?;
                     *entry = finished;
                     return Ok(Written::Done);
                 }
@@ -4962,7 +4986,7 @@ impl Paykit {
         // ([`crate::divergent::Pause::adds_no_stop_waits`]), so a failure's `failed` goes
         // alone, its record left as it is (Paykit spec 6).
         if let Some(current) = &held {
-            let pause = Box::pin(self.pause_of(current)).await?;
+            let pause = on_heap(|| self.pause_of(current)).await?;
             if paid && pause.handed_off_write_waits() {
                 return Ok(OutcomeRecord::Divergent(key));
             }
@@ -5289,7 +5313,7 @@ impl Paykit {
     pub async fn resume_payments(&mut self) -> Result<Vec<PayOutcome>> {
         let _delivery = self.delivery_operation();
         // The call's future goes on the heap, as `receive`'s does: it nests deep.
-        Box::pin(self.resume_payments_inner()).await
+        on_heap(|| self.resume_payments_inner()).await
     }
 
     async fn resume_payments_inner(&mut self) -> Result<Vec<PayOutcome>> {
@@ -5297,7 +5321,7 @@ impl Paykit {
         // the call returns is computed against it ([`resume_outcomes`]).
         let before = EntryFacts::of(&self.journal().await?);
         self.refresh_own()?;
-        Box::pin(self.first_read_before_writing()).await?;
+        on_heap(|| self.first_read_before_writing()).await?;
         self.refresh_own()?;
         // While a wider certificate's scope keys are missing, the resume goes on only on the
         // payer's side it can read: with the `paykit_pay` key held and the payer's records and
@@ -5318,17 +5342,17 @@ impl Paykit {
         // signed earlier, kept batches and queued messages, and builds nothing on the copy,
         // so it goes while the payer's side waits too. Its held messages' windows are judged
         // on the service time verified so far (Paykit spec 8.1).
-        Box::pin(self.note_service_time()).await?;
+        on_heap(|| self.note_service_time()).await?;
         self.send_outbox().await?;
         // Cancellations kept and not yet placed go into their records (Paykit spec 8.1),
         // which they build on: not while the payer's side waits.
         if !payer_waits {
-            self.place_kept_cancellations().await?;
+            on_heap(|| self.place_kept_cancellations()).await?;
         }
         // The method's history before any entry, which needs no dispatch: a payment it reports
         // made is journaled with its proof before anything an entry's step meets can end the
         // resume. It comes after the flush, so a kept batch's journal writes are in place.
-        let answers = self.journal_method_answers(payer_waits).await?;
+        let answers = on_heap(|| self.journal_method_answers(payer_waits)).await?;
         // Each entry's work stands alone. A wallet-wide stop ([`stops_resume`]) ends the
         // resume and is returned. Any other failure of one entry's step leaves that entry for
         // the next resume, told for it, and the next entry goes on, so a payment the method
@@ -5341,7 +5365,7 @@ impl Paykit {
         let mut turns = Turns::default();
         let mut failures = Vec::new();
         for listed in self.journal().await? {
-            let Some(mut entry) = self.at_its_turn(listed, &answers).await? else {
+            let Some(mut entry) = on_heap(|| self.at_its_turn(listed, &answers)).await? else {
                 continue;
             };
             let claim = entry.attempt().ok().map(|id| (id, entry.obligation));
@@ -5349,7 +5373,7 @@ impl Paykit {
             // One that can't be placed now stays owed for the next resume.
             if entry.stage == Stage::AcceptanceOwed {
                 if !payer_waits {
-                    if let Err(error) = self.finish_owed_acceptance(&mut entry).await {
+                    if let Err(error) = on_heap(|| self.finish_owed_acceptance(&mut entry)).await {
                         if stops_resume(&error) {
                             return Err(error);
                         }
@@ -5360,7 +5384,7 @@ impl Paykit {
                 }
             } else {
                 let mut told = Vec::new();
-                let step = Box::pin(self.resume_entry(entry, payer_waits, &mut told)).await;
+                let step = on_heap(|| self.resume_entry(entry, payer_waits, &mut told)).await;
                 told.into_iter().for_each(|outcome| turns.tell(outcome));
                 if let Err(error) = step {
                     if stops_resume(&error) {
@@ -5390,11 +5414,11 @@ impl Paykit {
             }
         }
         if self.holds("paykit_pay") && !payer_waits {
-            self.recheck_failed()
+            on_heap(|| self.recheck_failed())
                 .await?
                 .into_iter()
                 .for_each(|outcome| turns.tell(outcome));
-            Box::pin(self.record_ledger_outcomes()).await?;
+            on_heap(|| self.record_ledger_outcomes()).await?;
         }
         // After every payment's own work: what can't be delivered now stays queued, but a
         // wallet-wide stop met on the flush is returned. Pruning comes last, so after a stop
@@ -5522,7 +5546,7 @@ impl Paykit {
         for listed in self.journal().await? {
             // As the journal holds it now: an acceptance released for an earlier entry may
             // have sent a batch kept for this one.
-            let Some(mut entry) = self.at_its_turn(listed, &answers).await? else {
+            let Some(mut entry) = on_heap(|| self.at_its_turn(listed, &answers)).await? else {
                 continue;
             };
             if entry.stage != Stage::Paying || entry.restored || entry.offline.is_some() {
@@ -5613,9 +5637,11 @@ impl Paykit {
                     Some((step, Outcome::Open | Outcome::Unknown)) => {
                         entry.step = Some(step);
                         entry.stage = Stage::Paying;
-                        out.extend(self.resolve_handed_off(entry).await?);
+                        out.extend(on_heap(|| self.resolve_handed_off(entry)).await?);
                     }
-                    Some((_, outcome)) => self.finish_resolved(&mut entry, outcome).await?,
+                    Some((_, outcome)) => {
+                        on_heap(|| self.finish_resolved(&mut entry, outcome)).await?
+                    }
                     // A claim without the attempt, or no claim at all, proves nothing
                     // either: after a provider loss, once the claim is gone past its
                     // window, or when the backup was taken before its batch reached the
@@ -5628,7 +5654,7 @@ impl Paykit {
                     None => {
                         entry.step = None;
                         entry.stage = Stage::Paying;
-                        out.extend(self.resolve_handed_off(entry).await?);
+                        out.extend(on_heap(|| self.resolve_handed_off(entry)).await?);
                     }
                 }
             }
@@ -5637,18 +5663,18 @@ impl Paykit {
                 // No payment started: the open attempt is written `failed`.
                 Some((step, Outcome::Open | Outcome::Unknown)) => {
                     entry.step = Some(step);
-                    self.write_outcome(&mut entry, false, false).await?;
+                    on_heap(|| self.write_outcome(&mut entry, false, false)).await?;
                     out.push(PayOutcome::Failed {
                         attempt_id,
                         reason: NO_PAYMENT_STARTED.into(),
                     });
                 }
                 // Known unsubmitted: this app never called the method.
-                Some((_, outcome)) => self.finish_resolved(&mut entry, outcome).await?,
+                Some((_, outcome)) => on_heap(|| self.finish_resolved(&mut entry, outcome)).await?,
                 None => self.set_stage(&mut entry, Stage::Abandoned).await?,
             },
             Stage::Paying => {
-                out.extend(self.resolve_handed_off(entry).await?);
+                out.extend(on_heap(|| self.resolve_handed_off(entry)).await?);
             }
             Stage::RailPaid | Stage::RailFailed => {
                 out.push(self.resume_report(&mut entry).await?);
@@ -5671,7 +5697,7 @@ impl Paykit {
             && outcome == Outcome::Done
             && entry.may_place_acceptance()?
         {
-            if let Err(error) = self.finish_owed_acceptance(entry).await {
+            if let Err(error) = on_heap(|| self.finish_owed_acceptance(entry)).await {
                 // The resume's loop ends at a stop; anything else leaves the acceptance owed
                 // for the next resume, best effort.
                 if stops_resume(&error) {
@@ -5801,7 +5827,7 @@ impl Paykit {
         for listed in self.journal().await? {
             // As the journal holds it now: an earlier entry's report may have sent a batch
             // kept for this one.
-            let Some(mut entry) = self.at_its_turn(listed, &none).await? else {
+            let Some(mut entry) = on_heap(|| self.at_its_turn(listed, &none)).await? else {
                 continue;
             };
             if entry.stage != Stage::Finished || !entry.failed_by_method {
@@ -5892,7 +5918,7 @@ impl Paykit {
             match held.map(|a| a.outcome) {
                 Some(Outcome::Open) => entry.step = Some(claim.step),
                 Some(outcome @ (Outcome::Done | Outcome::Failed)) => {
-                    self.finish_resolved(&mut entry, outcome).await?;
+                    on_heap(|| self.finish_resolved(&mut entry, outcome)).await?;
                     return Ok(None);
                 }
                 Some(Outcome::Unknown) | None => {
@@ -5920,8 +5946,7 @@ impl Paykit {
                 longest_completion_ms: declaration.longest_completion_ms,
                 read_at,
             };
-            return self
-                .handoff(entry, doc, Initiator::Automatic, None, repeat, None)
+            return on_heap(|| self.handoff(entry, doc, Initiator::Automatic, None, repeat, None))
                 .await
                 .map(Some);
         }
@@ -5960,7 +5985,7 @@ impl Paykit {
         // A repeat is an automatic payment: none while its request record or its list's
         // record is divergent, or paused since it was seen so (Paykit spec 6). The view held
         // is taken before the record is read again, and the one read after it.
-        if Box::pin(self.divergent_withholds(entry)).await? {
+        if on_heap(|| self.divergent_withholds(entry)).await? {
             return Ok(true);
         }
         // Nor ever to a list destination over a record seen deleted (Paykit spec 6; wire 5):
@@ -5979,7 +6004,7 @@ impl Paykit {
         let target = ActivityTarget::payer(natural);
         if let Some(period) = entry.period()?.filter(|_| !entry.user_started) {
             return Ok(
-                Box::pin(self.automatic_period_conditions(entry, &target, period, None))
+                on_heap(|| self.automatic_period_conditions(entry, &target, period, None))
                     .await?
                     .is_none(),
             );
@@ -6019,7 +6044,7 @@ impl Paykit {
             || rejected(fresh)
             || (fresh.manual_only && !entry.user_started)
             || self.held(&self.activity_key(target)?, fresh).await?
-            || Box::pin(self.divergent_withholds(entry)).await?)
+            || on_heap(|| self.divergent_withholds(entry)).await?)
     }
 
     /// Whether `entry`'s request record, a Billing Period's period record, or the
@@ -6050,7 +6075,7 @@ impl Paykit {
             );
         }
         for record in records {
-            if rule(Box::pin(self.pause_at(&record)).await?) {
+            if rule(on_heap(|| self.pause_at(&record)).await?) {
                 return Ok(true);
             }
         }
@@ -6139,14 +6164,16 @@ impl Paykit {
                 || !payee_copy_usable(now, &payee, Need::DispatchCopy, by, confirmed));
         let mut payee = answered.unwrap_or(payee);
         if recheck_records {
-            match Box::pin(self.check_destination(
-                &entry.payee,
-                &entry.destination,
-                &entry.kept_carrier(&self.identity())?,
-                entry.request_hash()?.as_ref(),
-                by,
-                confirmed,
-            ))
+            match Box::pin({
+                self.check_destination(
+                    &entry.payee,
+                    &entry.destination,
+                    &entry.kept_carrier(&self.identity())?,
+                    entry.request_hash()?.as_ref(),
+                    by,
+                    confirmed,
+                )
+            })
             .await?
             {
                 Ok(checked) => payee = checked,
@@ -6185,7 +6212,7 @@ impl Paykit {
                 ActivityTarget::payer(entry.request_record()?.ok_or_else(PaykitError::corrupt)?);
             let period = ActivityTarget::payer(entry.natural_key.clone());
             for (target, crossing) in [(&parent, crossing_payee), (&period, None)] {
-                match Box::pin(self.current_period_activity(target, crossing)).await {
+                match on_heap(|| self.current_period_activity(target, crossing)).await {
                     Ok(Some(record)) if !payment_ended(&record, crossing) => {}
                     Ok(_) | Err(PaykitError::Refused(_)) => return Ok(true),
                     Err(error) => return Err(error),
@@ -6201,12 +6228,13 @@ impl Paykit {
         // A deletion that could have hidden a paid proof still holds it (Paykit spec 6, 8.1).
         if entry.billing_period.is_none() && entry.request_hash.is_some() {
             let target = ActivityTarget::payer(entry.natural_key.clone());
-            if !matches!(Box::pin(self.fresh_request(&target)).await?, Fresh::Held(record) if record.lost_to_delete.is_none())
+            if !matches!(on_heap(|| self.fresh_request(&target)).await?, Fresh::Held(record) if record.lost_to_delete.is_none())
             {
                 return Ok(true);
             }
         }
-        if Box::pin(self.divergent_pauses(entry, crate::divergent::Pause::blocks_by_hand)).await? {
+        if on_heap(|| self.divergent_pauses(entry, crate::divergent::Pause::blocks_by_hand)).await?
+        {
             return Ok(true);
         }
         Ok(self.denied_for_user(&entry.payee).await?
@@ -6272,12 +6300,13 @@ impl Paykit {
         kind: Handoff,
         crossing_payee: Option<[u8; 32]>,
     ) -> Result<bool> {
-        let Some(judged) = Box::pin(self.shared_collect(entry, kind, true, crossing_payee)).await?
+        let Some(judged) =
+            on_heap(|| self.shared_collect(entry, kind, true, crossing_payee)).await?
         else {
             return Ok(true);
         };
         let Some(confirmed) =
-            Box::pin(self.shared_collect(entry, kind, false, crossing_payee)).await?
+            on_heap(|| self.shared_collect(entry, kind, false, crossing_payee)).await?
         else {
             return Ok(true);
         };
@@ -6290,7 +6319,8 @@ impl Paykit {
             && matches!((&judged.period, &confirmed.period),
             (Some(before), Some(after)) if !before[0].crossed_stop && after[0].crossed_stop && before[1] == after[1])
         {
-            let latest = Box::pin(self.shared_collect(entry, kind, false, crossing_payee)).await?;
+            let latest =
+                on_heap(|| self.shared_collect(entry, kind, false, crossing_payee)).await?;
             return Ok(latest.as_ref() != Some(&confirmed));
         }
         Ok(true)
@@ -6311,29 +6341,21 @@ impl Paykit {
             .as_ref()
             .map(crate::executor::JournalAllowance::id)
             .transpose()?;
-        let Some(parent) = Box::pin(self.automatic_period_condition(
-            parent,
-            period,
-            true,
-            funding.as_ref(),
-            crossing_payee,
-        ))
+        let Some(parent) = on_heap(|| {
+            self.automatic_period_condition(parent, period, true, funding.as_ref(), crossing_payee)
+        })
         .await?
         else {
             return Ok(None);
         };
-        let Some(current) = Box::pin(self.automatic_period_condition(
-            &occurrence,
-            period,
-            false,
-            funding.as_ref(),
-            None,
-        ))
+        let Some(current) = on_heap(|| {
+            self.automatic_period_condition(&occurrence, period, false, funding.as_ref(), None)
+        })
         .await?
         else {
             return Ok(None);
         };
-        if Box::pin(self.divergent_withholds(entry)).await? {
+        if on_heap(|| self.divergent_withholds(entry)).await? {
             return Ok(None);
         }
         Ok(Some(Box::new([parent, current])))
@@ -6353,7 +6375,7 @@ impl Paykit {
         judge: bool,
         crossing_payee: Option<[u8; 32]>,
     ) -> Result<Option<SharedState>> {
-        if Box::pin(self.executor_handoff_held(entry, kind)).await? {
+        if on_heap(|| self.executor_handoff_held(entry, kind)).await? {
             return Ok(None);
         }
         let deny = match self.deny_list_now().await {
@@ -6376,9 +6398,10 @@ impl Paykit {
         };
         let target = ActivityTarget::payer(natural);
         if let Some(period) = entry.period()?.filter(|_| !entry.user_started) {
-            let Some(conditions) =
-                Box::pin(self.automatic_period_conditions(entry, &target, period, crossing_payee))
-                    .await?
+            let Some(conditions) = on_heap(|| {
+                self.automatic_period_conditions(entry, &target, period, crossing_payee)
+            })
+            .await?
             else {
                 return Ok(None);
             };
@@ -6428,7 +6451,7 @@ impl Paykit {
         if self.shared_loss_hold().await? {
             return Ok(None);
         }
-        let Some(floor) = self.floor_read_now().await? else {
+        let Some(floor) = on_heap(|| self.floor_read_now()).await? else {
             return Ok(None);
         };
         if judge && self.floor_holds_read(&stored, floor.as_ref()).await? {
@@ -6461,7 +6484,7 @@ impl Paykit {
             // caller's error, not a hold ([`Paykit::unread_at_the_fence`]). An automatic
             // payment's checks take a read that fails as a hold themselves.
             if self.handoff_held(entry, by, kind).await?
-                || Box::pin(self.period_recovery_held(entry)).await?
+                || on_heap(|| self.period_recovery_held(entry)).await?
             {
                 return Ok(FinalCheck::Hold);
             }

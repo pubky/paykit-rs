@@ -11,6 +11,7 @@ use pubky_dispatch_client::app::{DeliveryView, QueuedMessage, ReceiveReport, Rep
 use pubky_dispatch_core::message::Message;
 
 use crate::activity::{family, ActivityTarget, KeptSide, SideTag};
+use crate::heap::on_heap;
 use crate::notices::{GivenUpOrigin, KeptNotice, StopSubject};
 use crate::protocol::BACKUP_NAME;
 use crate::records::KeptMessage;
@@ -273,7 +274,7 @@ impl Paykit {
     /// past its own replay deadline at a flush. A non-stop error makes the step best
     /// effort, tried again at the next call; a stop of the wallet is returned, typed.
     pub(crate) async fn give_up_expired_held(&mut self) -> Result<()> {
-        let queued = match Box::pin(self.carried_lists_owed()).await {
+        let queued = match on_heap(|| self.carried_lists_owed()).await {
             Ok(Some(queued)) => queued,
             Ok(None) => return Ok(()),
             // Not listed now: nothing expires before the lists are recorded; tried again at
@@ -290,7 +291,7 @@ impl Paykit {
             .collect();
         // A stop's notice whose message is no longer held is shown, whether or not the
         // decisions can run now: one a crash left pending after its withdrawal included.
-        Box::pin(self.show_pending_stops(&held)).await?;
+        on_heap(|| self.show_pending_stops(&held)).await?;
         if held.is_empty() {
             return Ok(());
         }
@@ -306,7 +307,7 @@ impl Paykit {
             // payment is marked first, here, before every pass and flush that can end it,
             // so it is never replaced (`Paykit::acceptance_withdrawn_at_restore`).
             if q.kind == Kind::PaymentRequestAcceptance.as_str() {
-                Box::pin(self.acceptance_withdrawn_at_restore(&q.msg_id)).await?;
+                on_heap(|| self.acceptance_withdrawn_at_restore(&q.msg_id)).await?;
             }
             let past = originals
                 .get(&q.msg_id)
@@ -439,7 +440,7 @@ impl Paykit {
                     }
                 }
                 let msg = originals.get(&q.msg_id).and_then(Option::as_ref);
-                match Box::pin(self.check_held_message(report, q, msg)).await {
+                match on_heap(|| self.check_held_message(report, q, msg)).await {
                     Ok(Outcome::Released) => released = released.saturating_add(1),
                     Ok(Outcome::Withdrawn) => withdrawn = withdrawn.saturating_add(1),
                     Ok(Outcome::Waiting) => mark_stays |= carried_list,
@@ -455,7 +456,7 @@ impl Paykit {
         // (`mark_after`): the sweep runs only while the mark stands.
         let swept = match self.app.held_messages(BACKUP_NAME).await {
             Ok(left) => {
-                Box::pin(self.show_pending_stops(&left)).await?;
+                on_heap(|| self.show_pending_stops(&left)).await?;
                 true
             }
             Err(error) => {
@@ -500,7 +501,7 @@ impl Paykit {
         // doesn't parse, a stop or proof is withdrawn and told (`within_window`).
         if decision == Decision::Wait {
             decision = match decidable(msg, self.service_time()) {
-                Some(original) => match self.stop_evidence(report, q, original).await {
+                Some(original) => match on_heap(|| self.stop_evidence(report, q, original)).await {
                     Ok(evidence) => {
                         by_evidence = true;
                         decide(role, evidence)
@@ -540,7 +541,7 @@ impl Paykit {
                 // Marked here too, before the withdrawal, whatever the expiry step managed:
                 // a withdrawn acceptance is never replaced.
                 if role == HeldRole::Message(Kind::PaymentRequestAcceptance) {
-                    Box::pin(self.acceptance_withdrawn_at_restore(&q.msg_id)).await?;
+                    on_heap(|| self.acceptance_withdrawn_at_restore(&q.msg_id)).await?;
                 }
 
                 Ok(
@@ -584,11 +585,13 @@ impl Paykit {
     ) -> Result<StopEvidence> {
         use StopEvidence::*;
         if msg.kind == Kind::PaymentProof.as_str() {
-            return self.proof_evidence(q, msg).await;
+            return on_heap(|| self.proof_evidence(q, msg)).await;
         }
         if msg.kind == Kind::AllowanceEnd.as_str() {
             return match Body::parse(msg)? {
-                Body::AllowanceEnd(end) => self.held_allowance_end(q, msg, &end.allowance_id).await,
+                Body::AllowanceEnd(end) => {
+                    on_heap(|| self.held_allowance_end(q, msg, &end.allowance_id)).await
+                }
                 // A kind and body that disagree carry no stop: the message is withdrawn.
                 _ => Ok(Absent),
             };
@@ -614,8 +617,7 @@ impl Paykit {
         // A message of the counterparty's for this record kept and not placed yet, which may
         // open it or stop it, decides first: it waits, before anything below can return, a
         // record not written yet and a side not known yet included.
-        if self
-            .unplaced_for(&[self.activity_key(&target)?], &q.to, Records::Activity)
+        if Box::pin(self.unplaced_for(&[self.activity_key(&target)?], &q.to, Records::Activity))
             .await?
         {
             return Ok(Unreadable);
@@ -637,9 +639,10 @@ impl Paykit {
             };
             target = sale;
             // And for the payee's record the sale names.
-            if self
-                .unplaced_for(&[self.activity_key(&target)?], &q.to, Records::Activity)
-                .await?
+            if Box::pin({
+                self.unplaced_for(&[self.activity_key(&target)?], &q.to, Records::Activity)
+            })
+            .await?
             {
                 return Ok(Unreadable);
             }
@@ -726,8 +729,7 @@ impl Paykit {
         let target = ActivityTarget::payer(key);
         // A message of the counterparty's for this record kept and not placed yet, which may
         // open it or stop it, decides first: it waits, a record not written yet included.
-        if self
-            .unplaced_for(&[self.activity_key(&target)?], &q.to, Records::Activity)
+        if Box::pin(self.unplaced_for(&[self.activity_key(&target)?], &q.to, Records::Activity))
             .await?
         {
             return Ok(Unreadable);

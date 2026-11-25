@@ -37,6 +37,7 @@ use pubky_dispatch_core::ops::{Condition, OpKind};
 use crate::activity::{ActivityTarget, Role};
 use crate::app_records::PublicAppFailure;
 use crate::error::{PaykitError, Refusal, Result};
+use crate::heap::on_heap;
 use crate::journal::{JournalEntry, KeptAmount, KeptPeriod, Stage};
 use crate::pay::{BlockedPayment, Chosen, PayOptions, PayResult, Plan, Pricing};
 use crate::paykit::Paykit;
@@ -1122,16 +1123,12 @@ impl Paykit {
         options: PayOptions,
     ) -> PayResult {
         let mut public_failures = Vec::new();
-        let plan = Box::pin(self.plan_period_payment(
-            request,
-            period,
-            payer,
-            options,
-            &mut public_failures,
-        ))
+        let plan = on_heap(|| {
+            self.plan_period_payment(request, period, payer, options, &mut public_failures)
+        })
         .await;
         let outcome = match plan {
-            Ok(plan) => Box::pin(self.execute(plan)).await,
+            Ok(plan) => on_heap(|| self.execute(plan)).await,
             Err(error) => Err(error),
         };
         PayResult {

@@ -67,6 +67,7 @@ use pubky_dispatch_core::sig::SignedDoc;
 use pubky_dispatch_core::signing::Signs;
 
 use crate::error::{PaykitError, Refusal, Result};
+use crate::heap::on_heap;
 use crate::paykit::Paykit;
 use crate::rail::Rail;
 use crate::state::key;
@@ -107,7 +108,7 @@ impl Paykit {
     ) -> Result<Publication> {
         // A delivery operation for the whole call (Paykit spec 8.1).
         let _delivery = self.delivery_operation();
-        Box::pin(self.edit_public_endpoint(endpoint, Some(payload))).await
+        on_heap(|| self.edit_public_endpoint(endpoint, Some(payload))).await
     }
 
     /// Stop publishing the app's public endpoint `endpoint`; one the record doesn't hold is
@@ -124,7 +125,7 @@ impl Paykit {
     ) -> Result<Publication> {
         // A delivery operation for the whole call (Paykit spec 8.1).
         let _delivery = self.delivery_operation();
-        Box::pin(self.edit_public_endpoint(endpoint.clone(), None)).await
+        on_heap(|| self.edit_public_endpoint(endpoint.clone(), None)).await
     }
 
     async fn edit_public_endpoint(
@@ -132,7 +133,7 @@ impl Paykit {
         endpoint: PaymentEndpointIdentifier,
         payload: Option<PaymentEndpointPayload>,
     ) -> Result<Publication> {
-        let desired = Box::pin(self.publication_for_edit()).await?;
+        let desired = on_heap(|| self.publication_for_edit()).await?;
         let member = PaykitMember::from_member(desired.member.as_ref())?;
         let (mut endpoints, expiry) = if Self::cutoff_reached(desired.expiry, self.record_time()) {
             (BTreeMap::new(), RecordExpiry::Never)
@@ -144,7 +145,7 @@ impl Paykit {
         } else {
             endpoints.remove(&endpoint);
         }
-        Box::pin(self.offer_endpoints(endpoints, desired, expiry)).await
+        on_heap(|| self.offer_endpoints(endpoints, desired, expiry)).await
     }
 
     /// Offer exactly these public endpoints with an optional fixed cutoff in Unix
@@ -165,18 +166,18 @@ impl Paykit {
     ) -> Result<Publication> {
         // A delivery operation for the whole call (Paykit spec 8.1).
         let _delivery = self.delivery_operation();
-        let desired = Box::pin(self.publication_for_edit()).await?;
+        let desired = on_heap(|| self.publication_for_edit()).await?;
         let expiry = expires_at_ms.map_or(RecordExpiry::Never, RecordExpiry::At);
-        Box::pin(self.offer_endpoints(endpoints, desired, expiry)).await
+        on_heap(|| self.offer_endpoints(endpoints, desired, expiry)).await
     }
 
     async fn publication_for_edit(&mut self) -> Result<ProtocolRecord> {
         self.own_record_known()?;
-        Box::pin(self.first_read_before_writing()).await?;
+        on_heap(|| self.first_read_before_writing()).await?;
         // Before this call's ask is kept over a held change's.
-        Box::pin(self.held_change_settled()).await?;
+        on_heap(|| self.held_change_settled()).await?;
         self.refresh_own()?;
-        self.desired_record().await
+        on_heap(|| self.desired_record()).await
     }
 
     async fn desired_record(&mut self) -> Result<ProtocolRecord> {
@@ -214,7 +215,7 @@ impl Paykit {
             .into());
         }
         let member = self.own_member_with(endpoints);
-        Box::pin(self.put_member(member, desired, expiry)).await
+        on_heap(|| self.put_member(member, desired, expiry)).await
     }
 
     /// Bring the app's record up to date now (module docs), as each receive and the join do:
@@ -244,13 +245,13 @@ impl Paykit {
         // A delivery operation for the whole call (Paykit spec 8.1).
         let _delivery = self.delivery_operation();
         self.own_record_known()?;
-        Box::pin(self.first_read_before_writing()).await?;
-        Box::pin(self.held_change_settled()).await?;
+        on_heap(|| self.first_read_before_writing()).await?;
+        on_heap(|| self.held_change_settled()).await?;
         self.refresh_own()?;
-        match Box::pin(self.tend_own_record()).await? {
+        match on_heap(|| self.tend_own_record()).await? {
             Tended::Signed(publication) => Ok(publication),
             Tended::Held | Tended::Unchanged(_) => {
-                let app = Box::pin(self.signing_app()).await?;
+                let app = on_heap(|| self.signing_app()).await?;
                 let published = Box::pin(app.publish_record()).await;
                 self.note_own_record_write(&published);
                 Ok(published?)
@@ -280,7 +281,7 @@ impl Paykit {
         if self.own_record_unknown {
             return Ok(Tended::Held);
         }
-        let desired = self.desired_record().await?;
+        let desired = on_heap(|| self.desired_record()).await?;
         let held = PaykitMember::from_member(desired.member.as_ref())?;
         // The cutoff and half-life checks share one observation, even if the host clock
         // rolls back before the client signs the renewed record.
@@ -297,12 +298,12 @@ impl Paykit {
             desired.expiry
         };
         if desired.pending || wanted != held || expiry != desired.expiry {
-            return Box::pin(self.put_member(wanted, desired, expiry))
+            return on_heap(|| self.put_member(wanted, desired, expiry))
                 .await
                 .map(Tended::Signed);
         }
         if !held.public_endpoints.is_empty() && self.renewal_due(now)? {
-            let app = Box::pin(self.signing_app()).await?;
+            let app = on_heap(|| self.signing_app()).await?;
             let renewed = match expiry {
                 RecordExpiry::Never => app.renew_record(PROTOCOL_NAME, None).await,
                 RecordExpiry::At(at) => app.renew_record(PROTOCOL_NAME, Some(at)).await,
@@ -319,7 +320,7 @@ impl Paykit {
         }
         // The unchanged-member call retains the exact policy and optional fields. A
         // restored record never accepted by the service still gets its required new delivery.
-        let result = Box::pin(self.signing_app())
+        let result = on_heap(|| self.signing_app())
             .await?
             .set_protocol_member_with_lifetime(PROTOCOL_NAME, desired.member, None)
             .await;
@@ -352,13 +353,13 @@ impl Paykit {
         // A held change is told before anything of the record is signed
         // ([`Paykit::held_change_settled`]), and the held accepted kinds are worked out again.
         // A failure of either is the upkeep's.
-        if let Err(error) = Box::pin(self.held_change_settled()).await {
+        if let Err(error) = on_heap(|| self.held_change_settled()).await {
             return upkeep_outcome(error, &before, &self.own_standing());
         }
-        if let Err(error) = Box::pin(self.settle_held_accepts()).await {
+        if let Err(error) = on_heap(|| self.settle_held_accepts()).await {
             return upkeep_outcome(error, &before, &self.own_standing());
         }
-        match Box::pin(self.tend_own_record()).await {
+        match on_heap(|| self.tend_own_record()).await {
             // Nothing is signed while the record this handle holds may not be the one stored,
             // so the record isn't brought up to date until the app is loaded again.
             Ok(Tended::Held) => Ok(Some(OWED_UNTIL_LOADED.to_string())),
@@ -385,7 +386,7 @@ impl Paykit {
     /// record was applied, and [`Refusal::NotNow`] for any other failure.
     pub(crate) async fn held_change_settled(&mut self) -> Result<()> {
         if self.held_change_untold {
-            if let Err(error) = Box::pin(self.settle_held_endpoint_change()).await {
+            if let Err(error) = on_heap(|| self.settle_held_endpoint_change()).await {
                 // An alarm, a store failure and a reload the store asks for reach the caller
                 // as themselves, as at every other step, and a receive ends on them; only
                 // another failure is this wait.
@@ -407,7 +408,7 @@ impl Paykit {
     ///
     /// As [`Paykit::held_change_settled`].
     pub(crate) async fn signing_app(&mut self) -> Result<&mut pubky_dispatch_client::app::App> {
-        Box::pin(self.held_change_settled()).await?;
+        on_heap(|| self.held_change_settled()).await?;
         Ok(&mut self.app)
     }
 
@@ -415,7 +416,7 @@ impl Paykit {
     /// not the held change could be told, and a later call that would sign tries again.
     pub(crate) async fn settle_held_change_at_open(&mut self) {
         // A failure keeps the gate shut, which is what it means here.
-        let _ = Box::pin(self.held_change_settled()).await;
+        let _ = on_heap(|| self.held_change_settled()).await;
     }
 
     /// Tell the host of a change of Paykit's member the client holds aside, and clear it,
@@ -482,7 +483,7 @@ impl Paykit {
                     return Ok(());
                 };
                 // This run's own change, which its next read signs.
-                if self.desired_record().await?.pending {
+                if on_heap(|| self.desired_record()).await?.pending {
                     return Ok(());
                 }
                 // Told when it asked anything of the endpoints and isn't signed already, as
@@ -568,11 +569,11 @@ impl Paykit {
         match self.app.held_accepts().await {
             Ok(None) => {}
             Ok(Some(_)) | Err(AppError::InvalidData(_)) => {
-                Box::pin(self.signing_app())
+                on_heap(|| self.signing_app())
                     .await?
                     .clear_held_accepts()
                     .await?;
-                let updated = Box::pin(self.signing_app()).await?.update_accepts().await;
+                let updated = on_heap(|| self.signing_app()).await?.update_accepts().await;
                 self.note_own_record_write(&updated);
                 if let Err(error @ (AppError::Store(_) | AppError::Alarm(_))) = updated {
                     return Err(error.into());
@@ -580,7 +581,7 @@ impl Paykit {
             }
             Err(error) => return Err(error.into()),
         }
-        self.ack_record_edits_held().await
+        on_heap(|| self.ack_record_edits_held()).await
     }
 
     /// Acknowledge for Paykit the client's `RecordEditsHeld` duties, once nothing is held for
@@ -600,7 +601,7 @@ impl Paykit {
             .filter_map(|duty| duty.event.id())
             .collect();
         for id in ids {
-            self.ack_taken(id).await?;
+            on_heap(|| self.ack_taken(id)).await?;
         }
         Ok(())
     }
@@ -669,7 +670,7 @@ impl Paykit {
             (member != PaykitMember::default()).then(|| member.to_member())
         };
         // The gate before this change's ask is kept over a held change's.
-        Box::pin(self.held_change_settled()).await?;
+        on_heap(|| self.held_change_settled()).await?;
         // What this change asks, against the record signed now, is kept before the client is
         // asked to save it: only to tell the host exactly what a held change was.
         let signed = self.own_member()?.public_endpoints;
@@ -684,7 +685,7 @@ impl Paykit {
             classes: EndpointClasses::between(&signed, &member.public_endpoints),
         };
         self.local_put(key::ENDPOINT_CHANGE, &asked).await?;
-        let result = Box::pin(self.signing_app())
+        let result = on_heap(|| self.signing_app())
             .await?
             .set_protocol_member_with_expiry(PROTOCOL_NAME, value.clone(), expiry)
             .await;
@@ -692,7 +693,7 @@ impl Paykit {
         if let Err(error) = &result {
             // A change the client didn't save leaves the change it holds, if any, with its
             // own ask. One it can't tell of keeps this ask: the next load reads it again.
-            if let Ok(kept) = self.desired_record().await {
+            if let Ok(kept) = on_heap(|| self.desired_record()).await {
                 let saved = kept.pending && kept.member == value && kept.expiry == expiry;
                 if saved && matches!(error, AppError::Refused(_)) {
                     return Err(PaykitError::PublicEndpointChangePending(error.clone()));

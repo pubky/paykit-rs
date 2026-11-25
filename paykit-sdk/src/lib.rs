@@ -64,6 +64,7 @@ mod error;
 mod executor;
 mod extensions;
 mod floor;
+mod heap;
 mod hold;
 mod journal;
 mod loss;

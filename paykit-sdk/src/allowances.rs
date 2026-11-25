@@ -59,6 +59,7 @@ use pubky_dispatch_core::http::ErrorCode;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{PaykitError, Refusal, Result};
+use crate::heap::on_heap;
 use crate::hold::RecordSide;
 use crate::paykit::Paykit;
 use crate::receive::{self, Fail};
@@ -2206,7 +2207,7 @@ impl Paykit {
         record: &[u8; 32],
         execution: Option<crate::UserConfirmed>,
     ) -> Result<String> {
-        Box::pin(self.answer_allowance(record, Kind::AllowanceAcceptance, execution)).await
+        on_heap(|| self.answer_allowance(record, Kind::AllowanceAcceptance, execution)).await
     }
 
     /// Reject the Allowance proposed to this identity at `record` (Paykit spec 8.3, Paykit
@@ -2263,21 +2264,21 @@ impl Paykit {
         execution: Option<crate::UserConfirmed>,
     ) -> Result<String> {
         self.refresh_own()?;
-        Box::pin(self.first_read_before_writing()).await?;
+        on_heap(|| self.first_read_before_writing()).await?;
         self.refresh_own()?;
         self.require_allowance_send(kind)?;
-        Box::pin(self.records_known()).await?;
+        on_heap(|| self.records_known()).await?;
         // A record that can't be opened yet may hold a response or an end: nothing is
         // answered or ended over it until it opens (Paykit spec 8.3, one response).
-        Box::pin(self.refuse_while_awaiting_key(record)).await?;
+        on_heap(|| self.refuse_while_awaiting_key(record)).await?;
         if kind == Kind::AllowanceEnd {
-            Box::pin(self.retire_end_origins()).await?;
+            on_heap(|| self.retire_end_origins()).await?;
         }
-        if let Some(msg_id) = Box::pin(self.resume_pending_answer(record, kind)).await? {
+        if let Some(msg_id) = on_heap(|| self.resume_pending_answer(record, kind)).await? {
             return Ok(msg_id);
         }
-        if let Some((selected, _)) = Box::pin(self.pending_by_allowance_key(record)).await? {
-            return Box::pin(self.answer_pending(&selected, kind, execution, None)).await;
+        if let Some((selected, _)) = on_heap(|| self.pending_by_allowance_key(record)).await? {
+            return on_heap(|| self.answer_pending(&selected, kind, execution, None)).await;
         }
         let mut tries = 0;
         loop {
@@ -2286,7 +2287,7 @@ impl Paykit {
                 .await?
                 .ok_or(Refusal::NotFound)?;
             // Nothing is sent for a conflicted Allowance (Paykit spec 8.3, "Conflicted").
-            if self.unresolved_for_allowance(record, &held).await? {
+            if on_heap(|| self.unresolved_for_allowance(record, &held)).await? {
                 // The check may never settle, as when the earlier lifetime can't be
                 // established: shown, not waited on.
                 return Err(Refusal::HeldForUser(crate::HeldForUserReason::Unresolved(
@@ -2294,10 +2295,10 @@ impl Paykit {
                 ))
                 .into());
             }
-            if held.conflicted.is_some() || Box::pin(self.conflict_kept(record)).await? {
+            if held.conflicted.is_some() || on_heap(|| self.conflict_kept(record)).await? {
                 return Err(Refusal::AllowanceConflicted.into());
             }
-            if held.end.is_some() || Box::pin(self.allowance_stopped(record)).await? {
+            if held.end.is_some() || on_heap(|| self.allowance_stopped(record)).await? {
                 return Err(Refusal::AllowanceEnded.into());
             }
             if kind != Kind::AllowanceEnd {
@@ -2345,12 +2346,12 @@ impl Paykit {
                 .skip(1)
                 .map(|m| m.msg_id().to_owned())
                 .collect();
-            match Box::pin(self.submit_with_record(&target, &next, queue, locals, None)).await {
+            match on_heap(|| self.submit_with_record(&target, &next, queue, locals, None)).await {
                 Ok(()) => {
-                    Box::pin(self.delivered(&msg_id)).await?;
+                    on_heap(|| self.delivered(&msg_id)).await?;
                     // A notice not delivered now goes with the next flush.
                     for notice in notices {
-                        let _ = Box::pin(self.send_message(&notice)).await;
+                        let _ = on_heap(|| self.send_message(&notice)).await;
                     }
                     return Ok(msg_id);
                 }
