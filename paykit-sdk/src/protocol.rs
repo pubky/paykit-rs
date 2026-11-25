@@ -643,18 +643,24 @@ pub(crate) fn restore_paykit_layer(
     }
     // A repeated import on this installation preserves notices the host has already seen,
     // and unresolved ones first observed since the backup (Paykit spec 7.2).
-    // An endpoint change not published, and what the user's call asked, can't be told again
-    // once the held change is cleared: the installation's are kept over the backup's (Paykit
-    // spec 4, "Changes saved and not yet signed").
+    // The notices of endpoint changes not published, each at its own change's key, and what
+    // the user's last call asked: both stores' notices are kept, the installation's where
+    // both have one change's, and the installation's ask over the backup's, as the client keeps
+    // the installation's held change over the backup's (Paykit spec 4, "Changes saved and not
+    // yet signed"). Each is read whole and bound to its key, as the backup's are.
     let mut endpoint_rows = std::collections::BTreeMap::new();
-    for prefix in [
-        key::identity_notice(crate::notices::NoticeKind::PublicEndpointChangeNotPublished),
-        key::ENDPOINT_CHANGE.to_owned(),
-    ] {
+    for prefix in [key::ENDPOINT_CHANGE_NOTICES, key::ENDPOINT_CHANGE] {
         for (key, value) in restoring
             .previous_local_scan(prefix.as_bytes())
             .map_err(|_| "the endpoint change cannot be read")?
         {
+            let read = if prefix == key::ENDPOINT_CHANGE {
+                state::restored::<crate::own_record::EndpointChange>(&key, &value, &binder)
+                    .map(drop)
+            } else {
+                state::restored::<KeptNotice>(&key, &value, &binder).map(drop)
+            };
+            read.map_err(|_| "invalid retained endpoint change")?;
             endpoint_rows.insert(key, value);
         }
     }
@@ -1378,9 +1384,7 @@ pub(crate) fn restore_paykit_layer(
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
-            StateKey::IdentityNotice(
-                crate::notices::NoticeKind::PublicEndpointChangeNotPublished,
-            ) => {
+            StateKey::EndpointChangeNotice(_) => {
                 state::restored::<KeptNotice>(&key, &value, &binder).map_err(|_| unread())?;
                 endpoint_rows.entry(key).or_insert(value);
                 continue;

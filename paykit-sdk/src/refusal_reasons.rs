@@ -44,6 +44,15 @@ pub enum NotNowReason {
     /// the rollback alarm.
     #[error("Paykit wire 5.6: the block floor can't be read now")]
     FloorUnreadable,
+    /// A change of the app's public endpoints saved earlier and not signed couldn't be told
+    /// to the host yet: nothing of the app's record is signed until it is, which a receive
+    /// or the next call that signs tries again (Paykit spec 4, "Changes saved and not yet
+    /// signed").
+    #[error(
+        "Paykit spec 4: a change of the public endpoints saved earlier and not signed is told \
+         to the host before the app record is signed again"
+    )]
+    EndpointChangeUntold,
     /// A raise of the block floor left unwritten waits before it is tried again; the same
     /// call once the wait has passed clears this (Paykit wire 5.6).
     #[error("Paykit wire 5.6: a block floor raise left unwritten waits before it is tried again")]

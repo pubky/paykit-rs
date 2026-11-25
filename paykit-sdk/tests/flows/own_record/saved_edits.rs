@@ -687,3 +687,281 @@ async fn test_own_record_payload_change_saved_during_an_outage_is_told_as_a_payl
     );
     assert!(notice.endpoints_withdrawn.is_empty() && notice.endpoints_offered.is_empty());
 }
+
+/// The digest the SDK keeps of a set of public endpoints: each identifier and payload
+/// length-prefixed, in identifier order.
+fn digest(endpoints: &[(&str, &str)]) -> [u8; 32] {
+    let mut sorted = endpoints.to_vec();
+    sorted.sort();
+    let mut bytes = Vec::new();
+    for (id, payload) in sorted {
+        for part in [id, payload] {
+            bytes.extend_from_slice(&(part.len() as u64).to_be_bytes());
+            bytes.extend_from_slice(part.as_bytes());
+        }
+    }
+    pubky_dispatch_core::enc::hash(&bytes)
+}
+
+/// Keep in `shop`'s store an ask of the public endpoints with `endpoints` and `base`
+/// digests, withdrawing `withdrawn`, as one a crash left behind.
+async fn keep_ask(shop: &mut Paykit, endpoints: [u8; 32], base: [u8; 32], withdrawn: &[&str]) {
+    // The SDK's local record: its version, then the value.
+    let value = serde_json::json!({ "v": 1, "d": {
+        "endpoints": pubky_dispatch_core::enc::b64(&endpoints),
+        "base": pubky_dispatch_core::enc::b64(&base),
+        "classes": { "withdrawn": withdrawn, "offered": [], "changed": [] },
+    }});
+    shop.app_mut()
+        .protocol_commit(
+            "paykit",
+            &[pubky_dispatch_client::app::LocalWrite::Put {
+                key: b"ec".to_vec(),
+                value: serde_json::to_vec(&value).unwrap(),
+            }],
+        )
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_own_record_load_tells_a_held_change_before_any_call() {
+    // The open tells the held withdrawal and clears it, before any read: a call made right
+    // after the load, which signs, can't write over what the user asked, and the host still
+    // gets the endpoint to withdraw.
+    let w = World::new();
+    let kept = store();
+    let mut shop = shop_on(&w, false, Arc::clone(&kept)).await;
+    save_withdrawal_unsigned(&w, &mut shop).await;
+    let app_id = shop.app_id();
+    drop(shop);
+    let recorded = Recorded::over(Arc::clone(&w.router) as Arc<dyn Transport>);
+    let mut shop = load_recorded(&w, kept, app_id, publishing(), &recorded).await;
+    assert_eq!(recorded.requests(), 0);
+    assert!(shop
+        .app_mut()
+        .held_record_edit("paykit")
+        .await
+        .unwrap()
+        .is_none());
+    shop.set_public_endpoint(b(), payload("bc1qnew"))
+        .await
+        .unwrap();
+    let notice = told(&shop).await.unwrap();
+    assert_eq!(
+        ids(&notice.endpoints_withdrawn),
+        vec![a().as_str().to_owned()]
+    );
+    assert!(notice.endpoints_offered.is_empty() && notice.endpoints_changed.is_empty());
+    // The withdrawal was never signed: the call signed the offer over the record held.
+    assert!(signed_endpoints(&shop).contains(&(a().as_str().to_owned(), "lno1tips".to_owned())));
+    withdraw_again(&mut shop).await;
+    assert_eq!(
+        signed_endpoints(&shop),
+        vec![(b().as_str().to_owned(), "bc1qnew".to_owned())]
+    );
+}
+
+#[tokio::test]
+async fn test_own_record_restore_tells_a_held_change_at_the_open() {
+    // A restore holds the backup's saved offer aside, and the open tells it before any read.
+    let w = World::new();
+    let mut shop = shop_on(&w, false, store()).await;
+    save_offer_unsigned(&w, &mut shop).await;
+    let backup = shop.backup().await.unwrap();
+    drop(shop);
+    let restored = Paykit::restore(
+        w.env(&w.bob, store()),
+        publishing(),
+        &backup,
+        w.rail.clone(),
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    let notice = told(&restored).await.unwrap();
+    assert_eq!(
+        ids(&notice.endpoints_offered),
+        vec!["btc-lightning-bolt12".to_owned()]
+    );
+    assert!(notice.endpoints_withdrawn.is_empty() && notice.endpoints_changed.is_empty());
+}
+
+#[tokio::test]
+async fn test_own_record_open_whose_telling_fails_shuts_every_signing_until_it_is_told() {
+    // The notice can't be written at the load: the app opens all the same, the change stays
+    // held, and every call that would sign is refused until a later try tells it.
+    use pubky_dispatch_client::store::{Fault, FaultStore};
+    let w = World::new();
+    let kept = store();
+    let mut shop = shop_on(&w, false, Arc::clone(&kept)).await;
+    save_withdrawal_unsigned(&w, &mut shop).await;
+    let app_id = shop.app_id();
+    drop(shop);
+    let faulty = Arc::new(FaultStore::new(kept, Fault::None));
+    let notices = b"p/paykit/nt/endpoint_change_not_published/";
+    faulty.fail_put_once(notices);
+    let mut shop = Paykit::load(
+        w.env(&w.bob, Arc::clone(&faulty) as Arc<dyn StateStore>),
+        publishing(),
+        app_id,
+        w.rail.clone(),
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    assert!(told(&shop).await.is_none());
+    assert!(shop
+        .app_mut()
+        .held_record_edit("paykit")
+        .await
+        .unwrap()
+        .is_some());
+    let untold = |error: paykit_sdk::PaykitError| {
+        matches!(
+            error,
+            paykit_sdk::PaykitError::Refused(paykit_sdk::Refusal::NotNow(
+                paykit_sdk::NotNowReason::EndpointChangeUntold
+            ))
+        )
+    };
+    faulty.fail_put_once(notices);
+    assert!(untold(
+        shop.set_public_endpoint(b(), payload("bc1qnew"))
+            .await
+            .unwrap_err()
+    ));
+    faulty.fail_put_once(notices);
+    assert!(untold(shop.update_own_record().await.unwrap_err()));
+    assert_eq!(
+        signed_endpoints(&shop),
+        vec![(a().as_str().to_owned(), "lno1tips".to_owned())]
+    );
+    // The next receive tells it, and signing goes on.
+    shop.receive(None).await.unwrap();
+    let notice = told(&shop).await.unwrap();
+    assert_eq!(
+        ids(&notice.endpoints_withdrawn),
+        vec![a().as_str().to_owned()]
+    );
+    assert!(!still_held(&mut shop).await);
+    withdraw_again(&mut shop).await;
+    assert!(shop.own_public_endpoints().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_own_record_held_change_with_another_ask_on_the_same_record_is_told_by_its_endpoints()
+{
+    // The ask kept is a later one's, made on the record signed now, as a crash between it and
+    // its save leaves: the held offer is told by its own endpoints against that record.
+    let w = World::new();
+    let kept = store();
+    let mut shop = shop_on(&w, false, Arc::clone(&kept)).await;
+    save_offer_unsigned(&w, &mut shop).await;
+    keep_ask(&mut shop, [9; 32], digest(&[]), &["btc-other"]).await;
+    let app_id = shop.app_id();
+    drop(shop);
+    let recorded = Recorded::over(Arc::clone(&w.router) as Arc<dyn Transport>);
+    let shop = load_recorded(&w, kept, app_id, publishing(), &recorded).await;
+    let notice = told(&shop).await.unwrap();
+    assert_eq!(
+        ids(&notice.endpoints_offered),
+        vec!["btc-lightning-bolt12".to_owned()]
+    );
+    assert!(notice.endpoints_withdrawn.is_empty() && notice.endpoints_changed.is_empty());
+}
+
+#[tokio::test]
+async fn test_own_record_held_change_with_an_ask_on_another_record_names_no_endpoint() {
+    // The ask kept was made on a record other than the one signed now: the held change's
+    // classes against the record signed now could be wrong, so it is told naming no endpoint.
+    let w = World::new();
+    let kept = store();
+    let mut shop = shop_on(&w, false, Arc::clone(&kept)).await;
+    save_offer_unsigned(&w, &mut shop).await;
+    keep_ask(&mut shop, [9; 32], [8; 32], &["btc-other"]).await;
+    let app_id = shop.app_id();
+    drop(shop);
+    let recorded = Recorded::over(Arc::clone(&w.router) as Arc<dyn Transport>);
+    let shop = load_recorded(&w, kept, app_id, publishing(), &recorded).await;
+    let notice = told(&shop).await.unwrap();
+    assert!(
+        notice.endpoints_withdrawn.is_empty()
+            && notice.endpoints_offered.is_empty()
+            && notice.endpoints_changed.is_empty()
+    );
+}
+
+#[tokio::test]
+async fn test_own_record_ask_with_no_held_change_is_told_as_asked() {
+    // An ask neither signed nor held, as one whose held change a restore left behind as
+    // unreadable, is told as asked at the next open; one the record signed already has is
+    // told to no one.
+    let w = World::new();
+    let kept = store();
+    let mut shop = shop_on(&w, false, Arc::clone(&kept)).await;
+    shop.set_public_endpoint(a(), payload("lno1tips"))
+        .await
+        .unwrap();
+    let signed = digest(&[(a().as_str(), "lno1tips")]);
+    keep_ask(&mut shop, signed, digest(&[]), &[b().as_str()]).await;
+    let app_id = shop.app_id();
+    drop(shop);
+    let recorded = Recorded::over(Arc::clone(&w.router) as Arc<dyn Transport>);
+    let mut shop = load_recorded(&w, Arc::clone(&kept), app_id, publishing(), &recorded).await;
+    assert!(told(&shop).await.is_none());
+    keep_ask(&mut shop, digest(&[]), signed, &[a().as_str()]).await;
+    drop(shop);
+    let shop = load_recorded(&w, kept, app_id, publishing(), &recorded).await;
+    let notice = told(&shop).await.unwrap();
+    assert_eq!(
+        ids(&notice.endpoints_withdrawn),
+        vec![a().as_str().to_owned()]
+    );
+}
+
+#[tokio::test]
+async fn test_own_record_each_held_change_is_told_and_acknowledged_apart() {
+    // Two held changes, told at two loads: each is a notice of its own, and acknowledging the
+    // first leaves the second.
+    let w = World::new();
+    let kept = store();
+    let mut shop = shop_on(&w, false, Arc::clone(&kept)).await;
+    save_withdrawal_unsigned(&w, &mut shop).await;
+    let app_id = shop.app_id();
+    drop(shop);
+    let recorded = Recorded::over(Arc::clone(&w.router) as Arc<dyn Transport>);
+    let mut shop = load_recorded(&w, Arc::clone(&kept), app_id, publishing(), &recorded).await;
+    let first = told(&shop).await.unwrap();
+    shop.receive(None).await.unwrap();
+    time_read_fails(&w, &w.bob);
+    assert!(shop
+        .set_public_endpoint(b(), payload("bc1qnew"))
+        .await
+        .is_err());
+    drop(shop);
+    let mut shop = load_recorded(&w, kept, app_id, publishing(), &recorded).await;
+    let notices: Vec<Notice> = shop
+        .notices()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|notice| notice.kind == NoticeKind::PublicEndpointChangeNotPublished)
+        .collect();
+    assert_eq!(notices.len(), 2);
+    let second = notices.iter().find(|notice| notice.id != first.id).unwrap();
+    assert_eq!(
+        ids(&second.endpoints_offered),
+        vec![b().as_str().to_owned()]
+    );
+    shop.acknowledge_notice(&first.id).await.unwrap();
+    let left: Vec<String> = shop
+        .notices()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|notice| notice.kind == NoticeKind::PublicEndpointChangeNotPublished)
+        .map(|notice| notice.id)
+        .collect();
+    assert_eq!(left, vec![second.id.clone()]);
+}

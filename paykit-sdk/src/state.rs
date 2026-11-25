@@ -623,8 +623,8 @@ impl sealed::Sealed for crate::own_record::EndpointChange {}
 
 impl Stored for crate::own_record::EndpointChange {
     fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
-        // No writer keeps an empty one: a call that changes nothing deletes the key.
-        if matches!(family, StateKey::EndpointChange) && !self.is_empty() {
+        // Each identifier reads (Paykit wire 1.4).
+        if matches!(family, StateKey::EndpointChange) && self.classes.reads() {
             Ok(())
         } else {
             corrupt()
@@ -2059,8 +2059,8 @@ pub(crate) mod key {
     pub(crate) const LOSS_RECORDED: &str = "rl";
     /// A floor raise tried and left unwritten (`crate::floor::RaiseRetry`).
     pub(crate) const RAISE_RETRY: &str = "rr";
-    /// The public endpoint change the user's last call asked that may not be signed yet
-    /// (`crate::own_record::EndpointChange`).
+    /// What the last change of Paykit's member asked of the public endpoints, while it may
+    /// not be signed yet (`crate::own_record::EndpointChange`).
     pub(crate) const ENDPOINT_CHANGE: &str = "ec";
     pub(crate) const NOT_PAID_BEFORE_LOSS: &str = "pn/";
     /// A `missed` item's hold whose end isn't known yet (`Paykit::bound_missed_hold`).
@@ -2394,6 +2394,15 @@ pub(crate) mod key {
     pub(crate) fn identity_notice(kind: crate::notices::NoticeKind) -> String {
         format!("{NOTICES}{}", kind.tag())
     }
+
+    /// The notice of the endpoint change not published that `change` names
+    /// (`crate::own_record::endpoints_digest`).
+    pub(crate) fn endpoint_change_notice(change: &[u8; 32]) -> String {
+        format!("{ENDPOINT_CHANGE_NOTICES}{}", b64(change))
+    }
+
+    /// The prefix of the notices of endpoint changes not published.
+    pub(crate) const ENDPOINT_CHANGE_NOTICES: &str = "nt/endpoint_change_not_published/";
 
     pub(crate) fn notice(attempt: &AttemptId, kind: crate::notices::NoticeKind) -> String {
         format!("{NOTICES}{}", crate::notices::notice_id(attempt, kind))
@@ -2798,6 +2807,9 @@ pub(crate) enum StateKey {
     FloorKept,
     /// `nt/<tag>`: an identity-wide notice of the kind the tag names.
     IdentityNotice(crate::notices::NoticeKind),
+    /// `nt/endpoint_change_not_published/<change>`: the notice of an endpoint change not
+    /// published, by the digest that names the change.
+    EndpointChangeNotice([u8; 32]),
     /// `rl`: the newest provider loss this app recorded.
     LossRecorded,
     /// `rr`: a floor raise tried and left unwritten.
@@ -3261,6 +3273,9 @@ impl StateKey {
                         }
                     }
                     "nt" => {
+                        if let Some(change) = rest.strip_prefix("endpoint_change_not_published/") {
+                            return b64_32(change).map(Self::EndpointChangeNotice);
+                        }
                         if let Some(kind) = crate::notices::NoticeKind::identity_from_tag(rest) {
                             return Some(Self::IdentityNotice(kind));
                         }
@@ -4453,10 +4468,8 @@ mod tests {
                 StateKey::IdentityNotice(crate::notices::NoticeKind::AutomaticPaymentsHeld),
             ),
             (
-                key::identity_notice(crate::notices::NoticeKind::PublicEndpointChangeNotPublished),
-                StateKey::IdentityNotice(
-                    crate::notices::NoticeKind::PublicEndpointChangeNotPublished,
-                ),
+                key::endpoint_change_notice(&[6; 32]),
+                StateKey::EndpointChangeNotice([6; 32]),
             ),
             (key::ENDPOINT_CHANGE.into(), StateKey::EndpointChange),
             (key::LOSS_RECORDED.into(), StateKey::LossRecorded),

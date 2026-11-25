@@ -958,6 +958,7 @@ fn every_not_now_kind() -> Vec<NotNowKind> {
         R::ValueAwaitsKey,
         R::FloorUnreadable,
         R::FloorRaiseWaiting,
+        R::EndpointChangeUntold,
         R::NoServiceTime,
         R::ReadAgain,
         R::EarlierWriteUnresolved,
@@ -975,6 +976,7 @@ fn every_not_now_kind() -> Vec<NotNowKind> {
             | R::ValueAwaitsKey
             | R::FloorUnreadable
             | R::FloorRaiseWaiting
+            | R::EndpointChangeUntold
             | R::NoServiceTime
             | R::ReadAgain
             | R::EarlierWriteUnresolved
@@ -1257,6 +1259,11 @@ fn test_wallet_errors_sdk_refusals_take_the_table_code_through_the_conversion() 
             Refusal::NotNow(paykit_sdk::NotNowReason::FloorUnreadable),
             "retry_later",
             "floor_unreadable",
+        ),
+        (
+            Refusal::NotNow(paykit_sdk::NotNowReason::EndpointChangeUntold),
+            "retry_later",
+            "endpoint_change_untold",
         ),
     ] {
         let (found, failure) = categorized(PaykitError::Refused(refusal).into()).unwrap();
