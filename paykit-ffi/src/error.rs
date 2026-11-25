@@ -559,11 +559,11 @@ fn switch_client_category(e: &pubky_switch_client::error::ClientError) -> (Categ
 }
 
 // A failure that comes after the request left the device is `RetryLater` only where calling
-// again is safe whatever the first request did. Not every request the Switch client sends
-// outside a kept batch is: an accepted recovery upload after a provider loss appends a
-// transition each time, and an inbox append the service no longer holds is appended again
-// (Switch wire 7.4.3, 7.4.14). A failure doesn't name the request it came from, so each such
-// failure is `OutcomeUnknown`, bare as well as behind a kept batch.
+// again is safe whatever the first request did. Some requests the Switch client sends
+// outside a kept batch are safe to repeat only while the first is outstanding: an inbox
+// append the service no longer holds is appended again, and a late connect request can
+// reopen a declined one (Switch wire 7.4.3, 7.4.7). A failure doesn't name the request it
+// came from, so each such failure is `OutcomeUnknown`, bare as well as behind a kept batch.
 
 /// An answer whose response signature doesn't verify, or whose signed headers don't read:
 /// nothing of it was used, its status included, which proves nothing (Switch wire 7.1,
