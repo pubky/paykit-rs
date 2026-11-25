@@ -1548,7 +1548,7 @@ async fn test_blocked_queued_resend_checks_current_contacts_and_the_deny_copy() 
     let before = w.bob.switch().entries_from(&w.alice_id());
     wallet
         .app_mut()
-        .release_message("paykit", &id)
+        .release_message("paykit", &id, pubky_switch_client::app::ReplyGrantOnRelease::IfOwed)
         .await
         .unwrap();
     wallet.app_mut().flush_outbox().await.unwrap();

@@ -1018,17 +1018,19 @@ WalletEventData from app::AppEvent {
         duty_events: u64,
         /// The owed protocol calls left behind.
         owed_calls: u64,
-        /// The record changes held aside that the restore couldn't keep (Switch spec 4.2):
-        /// each protocol checks that the app record says what it wants.
+        /// The held record changes left behind.
         record_edits: u64,
     },
-    /// Changes of the app record that a later run or a restore held aside for their
-    /// protocols, which read, submit again or clear them (Switch spec 4.2). Paykit decides
-    /// its own at the load or the next receive and acknowledges this for itself.
+    /// A restore holds messages until their protocol releases or withdraws each.
+    MessagesHeldAtRestore {
+        /// How many it holds.
+        held: u64,
+    },
+    /// Unsigned record changes held aside for their protocols; Paykit decides its own.
     RecordEditsHeld {
-        /// The protocols whose member change or renewal is held aside.
+        /// The protocols whose change is held.
         protocols: Vec<String>,
-        /// Whether a change of the accepted kinds is held aside.
+        /// Whether accepted kinds are held.
         accepts_changed: bool,
     },
     /// The authenticated account is unavailable.
