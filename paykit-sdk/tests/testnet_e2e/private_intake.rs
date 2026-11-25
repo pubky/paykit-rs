@@ -1173,7 +1173,7 @@ async fn test_private_intake_live_insert_settles_while_consumer_drains() {
         .private_intake_cursors
         .get(&pair.bob.public_key)
         .cloned()
-        .expect("startup replay should have advanced the private intake cursor before the publish");
+        .expect("startup reconciliation should have stored the private intake cursor before the publish");
 
     publish_private_lists(&pair.bob, &pair.alice, 1).await;
 
