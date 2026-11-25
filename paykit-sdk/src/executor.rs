@@ -373,7 +373,7 @@ mod tests {
         }
         #[derive(Clone, Copy, Debug)]
         enum Proof {
-            NoProof,
+            Absent,
             Dated,
             Undated,
         }
@@ -391,25 +391,24 @@ mod tests {
         const HOLD: Option<(&str, &str, Written)> = None;
 
         // (held, method, claim, proof, sighted) => (lifetime, reserved amount, written)
-        let rows: &[(
-            (Held, Method, Claim, Proof, bool),
-            Option<(&str, &str, Written)>,
-        )] = &[
+        type Row = (Held, Method, Claim, Proof, bool);
+        type Expected = Option<(&'static str, &'static str, Written)>;
+        let rows: &[(Row, Expected)] = &[
             // An entry's own `failed`: it releases unless something says the money moved.
             (
-                (Recorded, NotListed, Gone, NoProof, false),
+                (Recorded, NotListed, Gone, Absent, false),
                 Some(("0", "0", Failed_)),
             ),
             (
-                (Recorded, HistFailed, Gone, NoProof, false),
+                (Recorded, HistFailed, Gone, Absent, false),
                 Some(("0", "0", Failed_)),
             ),
             (
-                (Recorded, HistPending, VFailed, NoProof, false),
+                (Recorded, HistPending, VFailed, Absent, false),
                 Some(("0", "0", Failed_)),
             ),
             (
-                (Recorded, HistPaid, VFailed, NoProof, false),
+                (Recorded, HistPaid, VFailed, Absent, false),
                 Some(("70", "0", Failed_)),
             ),
             (
@@ -421,28 +420,28 @@ mod tests {
                 Some(("70", "0", Failed_)),
             ),
             (
-                (Recorded, NotListed, SignedDone, NoProof, false),
+                (Recorded, NotListed, SignedDone, Absent, false),
                 Some(("70", "0", Done_)),
             ),
             (
-                (Recorded, NotListed, ShownDone, NoProof, false),
+                (Recorded, NotListed, ShownDone, Absent, false),
                 Some(("70", "0", Failed_)),
             ),
             (
-                (Recorded, NotListed, VDone, NoProof, false),
+                (Recorded, NotListed, VDone, Absent, false),
                 Some(("70", "0", Done_)),
             ),
             (
-                (Recorded, HistFailed, VFailed, NoProof, true),
+                (Recorded, HistFailed, VFailed, Absent, true),
                 Some(("70", "0", Failed_)),
             ),
             // No outcome yet: a verified failed claim writes `failed` only when nothing says paid.
             (
-                (Unset, NotListed, VFailed, NoProof, false),
+                (Unset, NotListed, VFailed, Absent, false),
                 Some(("0", "0", Failed_)),
             ),
             (
-                (Unset, HistPending, VFailed, NoProof, false),
+                (Unset, HistPending, VFailed, Absent, false),
                 Some(("0", "0", Failed_)),
             ),
             (
@@ -450,11 +449,11 @@ mod tests {
                 Some(("70", "0", Unset_)),
             ),
             (
-                (Unset, HistPaid, VFailed, NoProof, false),
+                (Unset, HistPaid, VFailed, Absent, false),
                 Some(("70", "0", Unset_)),
             ),
             (
-                (Unset, NotListed, VFailed, NoProof, true),
+                (Unset, NotListed, VFailed, Absent, true),
                 Some(("70", "0", Unset_)),
             ),
             (
@@ -462,48 +461,48 @@ mod tests {
                 Some(("70", "0", Done_)),
             ),
             (
-                (Unset, NotListed, VOpen, NoProof, false),
+                (Unset, NotListed, VOpen, Absent, false),
                 Some(("70", "70", Unset_)),
             ),
             (
-                (Unset, NotListed, VUnknown, NoProof, false),
+                (Unset, NotListed, VUnknown, Absent, false),
                 Some(("70", "70", Unset_)),
             ),
             (
-                (Unset, NotListed, Gone, NoProof, false),
+                (Unset, NotListed, Gone, Absent, false),
                 Some(("70", "0", Unset_)),
             ),
-            ((Unset, HistFailed, Gone, NoProof, false), HOLD),
+            ((Unset, HistFailed, Gone, Absent, false), HOLD),
             (
-                (Unset, NotListed, SignedDone, NoProof, false),
+                (Unset, NotListed, SignedDone, Absent, false),
                 Some(("70", "0", Done_)),
             ),
             (
-                (Unset, NotListed, ShownDone, NoProof, false),
+                (Unset, NotListed, ShownDone, Absent, false),
                 Some(("70", "0", Unset_)),
             ),
             // A compacted failure: v0.2's holds kept; a proven payment moves into the totals.
             (
-                (Compacted, NotListed, Gone, NoProof, false),
+                (Compacted, NotListed, Gone, Absent, false),
                 Some(("0", "0", Failed_)),
             ),
             (
-                (Compacted, HistFailed, VFailed, NoProof, false),
+                (Compacted, HistFailed, VFailed, Absent, false),
                 Some(("0", "0", Failed_)),
             ),
-            ((Compacted, HistFailed, Gone, NoProof, false), HOLD),
-            ((Compacted, HistPending, VFailed, NoProof, false), HOLD),
-            ((Compacted, HistPaid, Gone, NoProof, false), HOLD),
+            ((Compacted, HistFailed, Gone, Absent, false), HOLD),
+            ((Compacted, HistPending, VFailed, Absent, false), HOLD),
+            ((Compacted, HistPaid, Gone, Absent, false), HOLD),
             (
                 (Compacted, NotListed, VFailed, Dated, false),
                 Some(("70", "0", Done_)),
             ),
             (
-                (Compacted, NotListed, SignedDone, NoProof, false),
+                (Compacted, NotListed, SignedDone, Absent, false),
                 Some(("70", "0", Done_)),
             ),
             (
-                (Compacted, NotListed, ShownDone, NoProof, false),
+                (Compacted, NotListed, ShownDone, Absent, false),
                 Some(("70", "0", Failed_)),
             ),
             (
@@ -511,7 +510,7 @@ mod tests {
                 Some(("70", "0", Failed_)),
             ),
             (
-                (Compacted, NotListed, VFailed, NoProof, true),
+                (Compacted, NotListed, VFailed, Absent, true),
                 Some(("70", "0", Failed_)),
             ),
         ];
@@ -594,11 +593,11 @@ mod tests {
                         ..Default::default()
                     },
                 )]),
-                NoProof | Undated => HashMap::new(),
+                Absent | Undated => HashMap::new(),
             };
             let undated = match proof {
                 Undated => HashSet::from([id]),
-                NoProof | Dated => HashSet::new(),
+                Absent | Dated => HashSet::new(),
             };
             let seen = match sighted {
                 true => HashSet::from([id]),
