@@ -10865,7 +10865,11 @@ async fn queued_allowance_after_renewal(
     assert_eq!(payer.app().cert().hash(), narrower.hash());
     payer
         .app_mut()
-        .release_message("paykit", &msg_id, pubky_switch_client::app::ReplyGrantOnRelease::IfOwed)
+        .release_message(
+            "paykit",
+            &msg_id,
+            pubky_switch_client::app::ReplyGrantOnRelease::IfOwed,
+        )
         .await
         .unwrap();
     let retried = payer.app_mut().flush_message(&msg_id).await.unwrap();

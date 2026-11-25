@@ -327,14 +327,16 @@ impl Paykit {
             self.endpoint_change_not_published().await?;
         } else if asked.len() < base.len() {
             // A withdrawal saved earlier: completed, with the deadline the record has now.
-            let result = Box::pin(self.offer_endpoints(asked.clone(), desired.clone(), desired.expiry))
-                .await;
+            let result =
+                Box::pin(self.offer_endpoints(asked.clone(), desired.clone(), desired.expiry))
+                    .await;
             let now = PaykitMember::from_member(self.desired_record().await?.member.as_ref())?;
             if now.public_endpoints != asked {
                 return match result {
-                    Err(PaykitError::Client(error) | PaykitError::PublicEndpointChangePending(error))
-                        if matches!(error, AppError::Store(_) | AppError::Alarm(_)) =>
-                    {
+                    Err(
+                        PaykitError::Client(error)
+                        | PaykitError::PublicEndpointChangePending(error),
+                    ) if matches!(error, AppError::Store(_) | AppError::Alarm(_)) => {
                         Err(PaykitError::Client(error))
                     }
                     Err(error @ PaykitError::Lib(_)) => Err(error),
@@ -355,8 +357,10 @@ impl Paykit {
             .await?
             .into_iter()
             .filter(|duty| {
-                matches!(duty.event, pubky_switch_client::app::AppEvent::RecordEditsHeld { .. })
-                    && duty.owners.iter().any(|owner| owner == PROTOCOL_NAME)
+                matches!(
+                    duty.event,
+                    pubky_switch_client::app::AppEvent::RecordEditsHeld { .. }
+                ) && duty.owners.iter().any(|owner| owner == PROTOCOL_NAME)
             })
             .filter_map(|duty| duty.event.id())
             .collect();

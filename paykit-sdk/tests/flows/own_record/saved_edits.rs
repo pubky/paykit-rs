@@ -402,8 +402,8 @@ async fn test_own_record_restored_withdrawal_wins_over_an_offer_signed_after_it(
 }
 
 #[tokio::test]
-async fn test_own_record_offer_saved_during_an_outage_is_not_published_after_a_restart_and_is_told(
-) {
+async fn test_own_record_offer_saved_during_an_outage_is_not_published_after_a_restart_and_is_told()
+{
     // An offer saved during the outage, then a restart: the load holds it aside and Paykit
     // never signs it, and tells the host, which keeps knowing through a restore until it
     // acknowledges it.
