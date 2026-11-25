@@ -146,15 +146,19 @@ named by its class: to withdraw (`endpoints_withdrawn`), to offer
 (`endpoints_offered`) and to give a new payload (`endpoints_changed`). Each held
 change is a notice of its own, with its own `id`. If the notice can't be
 written at the open, the wallet still opens: the edit stays held, and every call
-that would sign the record is refused with `NotNowReason::EndpointChangeUntold`
-until the next `receive`, or the next such call, tells it. On that notice the
+that would sign the record is refused until the next `receive`, or the next such
+call, tells it: with the store's failure or the alarm itself, as any other call
+gets it, and a `receive` ends on it, or else with
+`NotNowReason::EndpointChangeUntold`. On that notice the
 host must:
 
-- withdraw again each endpoint in `endpoints_withdrawn` with
-  `remove_public_endpoint`, without asking the user again: the user already asked,
-  and the call reads first and only removes under the current record. After a
-  restore, the call waits for the first receive (`Refusal::NotNow` before it). If
-  another device offered that endpoint again since, the user offers it again;
+- once a `receive` has read since the load or the restore, withdraw again each
+  endpoint in `endpoints_withdrawn` with `remove_public_endpoint`, without asking
+  the user again: the user already asked. The read first brings the record other
+  devices had signed since, so the call removes under the current record and
+  doesn't sign this device's older copy of the other endpoints over theirs. After
+  a restore, the call is refused (`Refusal::NotNow`) until that read. If another
+  device offered that endpoint again since, the user offers it again;
 - show the user `endpoints_offered`, `endpoints_changed` and the current
   `own_public_endpoints`, and make those offers and payload changes again only
   when the user asks;
@@ -883,7 +887,7 @@ A failure that comes once the request may have left the device comes as `Outcome
 | `scope_keys_awaited` | `NotNowReason::ScopeKeysAwaited` | `RetryLater` | The signer stores the certificate's keys when it is next online; tell the user if it stays. |
 | `value_awaits_key` | `NotNowReason::ValueAwaitsKey` | `RetryLater` | The signer stores the record's keys when it is next online; call again then. |
 | `floor_unreadable` | `NotNowReason::FloorUnreadable` | `RetryLater` | The block floor can't be read now: the payer's records not listed yet, a key awaited, a kept floor write, or the Dispatch not answering. A later `receive` clears it with no one acting. |
-| `endpoint_change_untold` | `NotNowReason::EndpointChangeUntold` | `RetryLater` | A change of the public endpoints saved earlier and not signed couldn't be told yet (its notice or its clear failed). Nothing of the app record is signed until it is; the next `receive`, or the next call that signs, tries again with no one acting. |
+| `endpoint_change_untold` | `NotNowReason::EndpointChangeUntold` | `RetryLater` | A change of the public endpoints saved earlier and not signed couldn't be told yet, for a reason other than a store failure or an alarm, which come as themselves. Nothing of the app record is signed until it is; the next `receive`, or the next call that signs, tries again with no one acting. |
 | `floor_record_unreadable` | `HeldForUserReason::FloorRecordUnreadable` | `NeedsUser` | The block floor record doesn't read, and no later read clears it. This version has no call that repairs it: it reads again only once another of the user's wallets that holds a readable floor writes it. Until then an unblock is refused and the counterparty stays blocked, a block still takes effect, and one-time requests are paid by hand. Show that. |
 | `floor_raise_waiting` | `NotNowReason::FloorRaiseWaiting` | `RetryLater` | A block floor raise left unwritten waits before it is tried again: call again later. |
 | `no_service_time` | `NotNowReason::NoServiceTime` | `RetryLater` | `receive`, which verifies a service time, then call again. |

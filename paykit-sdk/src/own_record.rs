@@ -380,11 +380,20 @@ impl Paykit {
     ///
     /// # Errors
     ///
-    /// [`Refusal::NotNow`] while the held change can't be told and cleared.
+    /// While the held change can't be told and cleared: an alarm or a store failure as
+    /// itself, [`Refusal::HeldForUser`] while the store couldn't tell whether a write of the
+    /// record was applied, and [`Refusal::NotNow`] for any other failure.
     pub(crate) async fn held_change_settled(&mut self) -> Result<()> {
         if self.held_change_untold {
-            if Box::pin(self.settle_held_endpoint_change()).await.is_err() {
-                return Err(Refusal::NotNow(crate::NotNowReason::EndpointChangeUntold).into());
+            if let Err(error) = Box::pin(self.settle_held_endpoint_change()).await {
+                // An alarm, a store failure and a reload the store asks for reach the caller
+                // as themselves, as at every other step, and a receive ends on them; only
+                // another failure is this wait.
+                return Err(match error {
+                    error @ (PaykitError::Client(AppError::Alarm(_) | AppError::Store(_))
+                    | PaykitError::Refused(Refusal::HeldForUser(_))) => error,
+                    _ => Refusal::NotNow(crate::NotNowReason::EndpointChangeUntold).into(),
+                });
             }
             self.held_change_untold = false;
         }
@@ -426,9 +435,14 @@ impl Paykit {
     /// restore left behind as unreadable: it is told as asked, unless this run will still
     /// sign it, or the record signed already has its endpoints.
     ///
-    /// The notice goes first, at a key of its own for each change, then the clear, then the
-    /// ask: a failure or a crash between them tells the same change again, at the same key,
-    /// and never loses it. Local only, so it needs no read: it runs at each open.
+    /// With nothing held and nothing asked there is nothing to tell, and the gate opens
+    /// whatever the record signed holds, one whose Paykit member doesn't read included.
+    ///
+    /// The notice goes first, at the key of its telling ([`Telling`]), then the clear, then
+    /// the ask: a failure or a crash between them tells the same change again, at the same
+    /// key, and never loses it. A notice the host acknowledged before the clear is kept,
+    /// acknowledged, until the clear, so the change is shown once. Local only, so it needs no
+    /// read: it runs at each open.
     ///
     /// # Errors
     ///
@@ -453,8 +467,15 @@ impl Paykit {
             Err(error) if error.is_corrupt_state() => None,
             Err(error) => return Err(error),
         };
-        let signed = self.own_member()?.public_endpoints;
-        let signed_digest = endpoints_digest(&signed);
+        // Nothing held and nothing asked: nothing to tell, whatever the record holds.
+        if held.is_none() && asked.is_none() {
+            self.forget_told_endpoint_changes().await;
+            return Ok(());
+        }
+        // The endpoints of the record signed now; `None` when its Paykit member doesn't
+        // read, which a change is then told against naming no endpoint, or as asked.
+        let signed = self.own_member().ok().map(|member| member.public_endpoints);
+        let signed_digest = signed.as_ref().map(endpoints_digest);
         let told = match &held {
             None => {
                 let Some(asked) = asked else {
@@ -466,42 +487,71 @@ impl Paykit {
                 }
                 // Told when it asked anything of the endpoints and isn't signed already, as
                 // when a crash came between the signing and the ask's delete.
-                (!asked.classes.is_empty() && asked.endpoints != signed_digest)
-                    .then_some((asked.endpoints, Some(asked.classes)))
+                (!asked.classes.is_empty() && Some(asked.endpoints) != signed_digest)
+                    .then(|| Telling::of(asked.base, asked.endpoints, Some(asked.classes)))
             }
             Some(Some(endpoints)) => {
                 let digest = endpoints_digest(endpoints);
-                match asked {
+                match (asked, &signed) {
                     // The ask of this very change: told as asked, or not at all when it asked
                     // nothing of the endpoints.
-                    Some(asked) if asked.endpoints == digest => {
-                        (!asked.classes.is_empty()).then_some((digest, Some(asked.classes)))
-                    }
+                    (Some(asked), _) if asked.endpoints == digest => (!asked.classes.is_empty())
+                        .then(|| Telling::of(asked.base, digest, Some(asked.classes))),
                     // An ask made on the record signed now, but not for this change, as after
                     // a crash between a later ask and its save: this change's classes against
                     // that record.
-                    Some(asked) if asked.base == signed_digest => {
-                        let classes = EndpointClasses::between(&signed, endpoints);
-                        (!classes.is_empty()).then_some((digest, Some(classes)))
+                    (Some(asked), Some(signed)) if Some(asked.base) == signed_digest => {
+                        let classes = EndpointClasses::between(signed, endpoints);
+                        (!classes.is_empty())
+                            .then(|| Telling::of(asked.base, digest, Some(classes)))
                     }
                     // No ask to go by, and the record signed may have moved since the change
-                    // was made, as after a restore in place: told naming no endpoint when the
-                    // endpoints differ, for the host to show the ones signed.
-                    _ => (digest != signed_digest).then_some((digest, None)),
+                    // was made, as after a restore in place, or doesn't read: told naming no
+                    // endpoint when the endpoints differ, for the host to show the ones signed.
+                    _ => (Some(digest) != signed_digest)
+                        .then(|| Telling::of(signed_digest.unwrap_or([0; 32]), digest, None)),
                 }
             }
+            // An ask is this change's only when made on the record signed now; an older one
+            // could name an endpoint offered since.
             Some(None) => Some(match asked {
-                Some(asked) if !asked.classes.is_empty() => (asked.endpoints, Some(asked.classes)),
-                _ => ([0; 32], None),
+                Some(asked) if !asked.classes.is_empty() && Some(asked.base) == signed_digest => {
+                    Telling::of(asked.base, asked.endpoints, Some(asked.classes))
+                }
+                _ => Telling::of(signed_digest.unwrap_or([0; 32]), [0; 32], None),
             }),
         };
-        if let Some((digest, classes)) = told {
-            self.endpoint_change_not_published(&digest, classes).await?;
+        if let Some(telling) = told {
+            self.endpoint_change_not_published(&telling.id, telling.classes)
+                .await?;
         }
         if held.is_some() {
             self.app.clear_held_record_edit(PROTOCOL_NAME).await?;
         }
-        self.local_delete(key::ENDPOINT_CHANGE).await
+        self.local_delete(key::ENDPOINT_CHANGE).await?;
+        self.forget_told_endpoint_changes().await;
+        Ok(())
+    }
+
+    /// Delete the notices of endpoint changes the host acknowledged while their change was
+    /// still held: told and cleared now, none of them is told again
+    /// ([`Paykit::acknowledge_notice`]). Kept ones hide nothing and show nothing, so one this
+    /// can't delete now is deleted at a later settling.
+    async fn forget_told_endpoint_changes(&mut self) {
+        let Ok(told) = self
+            .local_scan::<crate::notices::KeptNotice>(key::ENDPOINT_CHANGE_NOTICES)
+            .await
+        else {
+            return;
+        };
+        for (id, notice) in told {
+            if notice.acknowledged {
+                let key = format!("{}{id}", key::ENDPOINT_CHANGE_NOTICES);
+                if self.local_delete(&key).await.is_err() {
+                    return;
+                }
+            }
+        }
     }
 
     /// Work out again the change of the record's accepted kinds the client holds aside, from
@@ -768,6 +818,41 @@ pub(crate) struct EndpointChange {
     #[serde(with = "pubky_dispatch_core::enc::serde_b64")]
     pub(crate) base: [u8; 32],
     pub(crate) classes: EndpointClasses,
+}
+
+/// A telling of a held change ([`Paykit::settle_held_endpoint_change`]): its classes, if
+/// known, and the ID of its notice, from the digest of the endpoints it was told against
+/// (`base`), the digest of the endpoints it asked (`target`) and its classes. Two tellings
+/// share an ID only when they tell the same, so the same telling tried again is the same
+/// notice, and no telling is lost under another's.
+struct Telling {
+    id: [u8; 32],
+    classes: Option<EndpointClasses>,
+}
+
+impl Telling {
+    fn of(base: [u8; 32], target: [u8; 32], classes: Option<EndpointClasses>) -> Self {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&base);
+        bytes.extend_from_slice(&target);
+        match &classes {
+            None => bytes.push(0),
+            Some(classes) => {
+                bytes.push(1);
+                for list in [&classes.withdrawn, &classes.offered, &classes.changed] {
+                    bytes.extend_from_slice(&(list.len() as u64).to_be_bytes());
+                    for id in list {
+                        bytes.extend_from_slice(&(id.len() as u64).to_be_bytes());
+                        bytes.extend_from_slice(id.as_bytes());
+                    }
+                }
+            }
+        }
+        Self {
+            id: pubky_dispatch_core::enc::hash(&bytes),
+            classes,
+        }
+    }
 }
 
 /// The digest of a set of public endpoints, each identifier and payload length-prefixed in
@@ -1097,17 +1182,41 @@ mod gate_tests {
         let mut counts = std::collections::BTreeMap::new();
         for (file, before) in &calls {
             *counts.entry(file.clone()).or_insert(0) += 1;
-            let receiver: String = before.chars().filter(|c| !c.is_whitespace()).collect();
+            let code: String = before.chars().filter(|c| !c.is_whitespace()).collect();
+            // The client it is called on comes straight from the gate, or from a binding the
+            // gate gave in the same function.
+            let function = code.rfind("fn").map_or("", |at| &code[at..]);
+            let from_gate = |text: &str| {
+                text.starts_with("Box::pin(self.signing_app()).await?")
+                    || text.starts_with("matchBox::pin(self.signing_app()).await{Ok(app)=>app,")
+            };
+            let gated = code.ends_with("Box::pin(self.signing_app()).await?")
+                || (code.ends_with("app")
+                    && ["letapp="].iter().any(|binding| {
+                        function
+                            .rfind(binding)
+                            .is_some_and(|at| from_gate(&function[at + binding.len()..]))
+                    }));
             assert!(
-                !receiver.ends_with("self.app"),
-                "{file}: a signing call on the client directly"
-            );
-            let function = before.rfind("fn ").map_or("", |at| &before[at..]);
-            assert!(
-                function.contains("signing_app()"),
-                "{file}: a signing call in a function that doesn't pass the gate"
+                gated,
+                "{file}: a signing call whose client doesn't come from the gate"
             );
         }
+        // The gate itself: the client goes out only once a held change is settled.
+        let text = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/own_record.rs"),
+        )
+        .unwrap();
+        let code: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+        let gate = code
+            .split("asyncfnsigning_app(&mutself)->Result<&mutpubky_dispatch_client::app::App>{")
+            .nth(1)
+            .and_then(|rest| rest.split("Ok(&mutself.app)").next())
+            .unwrap_or_default();
+        assert_eq!(
+            gate, "Box::pin(self.held_change_settled()).await?;",
+            "the gate hands out the client only after the held change is settled"
+        );
         let expected = std::collections::BTreeMap::from([
             ("extensions.rs".to_owned(), 1),
             ("own_record.rs".to_owned(), 7),

@@ -913,10 +913,11 @@ pub(crate) fn bind_notice(key: &str, notice: &KeptNotice) -> Result<()> {
                 Err(PaykitError::corrupt())
             }
         }
-        // Deleted at its acknowledgement, so never kept acknowledged.
+        // Kept acknowledged only while its change may still be held, so it isn't told again.
         Some(StateKey::EndpointChangeNotice(_)) => {
             let plain = KeptNotice {
                 endpoints: None,
+                acknowledged: false,
                 ..notice.clone()
             };
             let kind = NoticeKind::PublicEndpointChangeNotPublished;
@@ -1124,9 +1125,17 @@ impl Paykit {
                 self.identity_told.push(kind);
             }
         }
+        // The notice of an endpoint change whose held change may not be cleared yet stays,
+        // acknowledged, until the clear: told again after it, it would be shown twice
+        // (`Paykit::settle_held_endpoint_change`).
+        let telling_kept = matches!(
+            StateKey::parse(key.as_bytes()),
+            Some(StateKey::EndpointChangeNotice(_))
+        ) && self.held_change_untold;
         // A stop's notice stays, acknowledged, so a restore in place keeps that over an
         // older backup's copy (`protocol.rs`, `installation_stop_notices`).
         if !held
+            && !telling_kept
             && kept.settlement.is_none()
             && !kept.kind.names_outgoing_message()
             && kept.kind != NoticeKind::StopNotRecorded
@@ -1179,9 +1188,9 @@ impl Paykit {
 
     /// Tell the host that a change of public endpoints saved earlier wasn't published, with
     /// the endpoints `classes` names, if known ([`NoticeKind::PublicEndpointChangeNotPublished`]).
-    /// Each change is told at a key of its own, from `change`, the digest that names it: told
-    /// again, as after a crash before its clear, it is the same notice, and acknowledging one
-    /// change never takes another's.
+    /// Each telling is at a key of its own, from `change`, the ID that names it: told again,
+    /// as after a crash before its clear, it is the same notice, left as it is, acknowledged
+    /// or not, and acknowledging one telling never takes another's.
     ///
     /// # Errors
     ///
@@ -1365,11 +1374,11 @@ mod tests {
             Some(StateKey::EndpointChangeNotice([1; 32]))
         );
         assert!(StateKey::parse(b"nt/endpoint_change_not_published/short").is_none());
-        // Never kept acknowledged, and naming no counterparty or other kind.
+        // Kept acknowledged while its change is held, naming no counterparty or other kind.
         let key = key::endpoint_change_notice(&[1; 32]);
         let mut acknowledged = notice.clone();
         acknowledged.acknowledged = true;
-        assert!(bind_notice(&key, &acknowledged).is_err());
+        assert!(bind_notice(&key, &acknowledged).is_ok());
         let mut named = notice.clone();
         named.counterparty = Some(b64(&[1; 32]));
         assert!(bind_notice(&key, &named).is_err());
