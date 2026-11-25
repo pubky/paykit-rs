@@ -788,6 +788,24 @@ impl Paykit {
         Box::pin(self.sweep_divergent()).await?;
         // The host hears again, at each load, of what holds the identity for good.
         self.tell_identity_notices().await?;
+        // Changes of the record a load held aside are decided before anything else signs the
+        // record; after a restore, the client takes none until the first read, and the
+        // receive's upkeep decides them then (Paykit spec 4, "Changes saved and not yet
+        // signed").
+        // Only a store failure or an alarm stops the load; anything else is left to the receive.
+        if self.certificate_refused().is_none() {
+            if let Err(error) = Box::pin(self.settle_held_record_edits()).await {
+                if matches!(
+                    error,
+                    crate::PaykitError::Client(
+                        pubky_switch_client::app::AppError::Store(_)
+                            | pubky_switch_client::app::AppError::Alarm(_)
+                    )
+                ) {
+                    return Err(error);
+                }
+            }
+        }
         // A crash between the restore's commit and clock clamp leaves the clamp for the
         // next load. Nothing is written under a certificate Paykit refuses.
         if self.certificate_refused().is_none() {
@@ -1112,12 +1130,9 @@ impl Paykit {
         if self.certificate_refused().is_none() {
             Box::pin(self.drop_unblocks_not_kept()).await?;
         }
-        // A saved record edit with public endpoints this app no longer publishes is replaced
-        // first, so neither step below nor the read signs them (`crate::own_record`). Then
-        // the record accepts the kinds this app handles now, extension kinds included
+        // The record accepts the kinds this app handles now, extension kinds included
         // (`crate::extensions`), before the feed is read.
         if self.certificate_refused().is_none() {
-            Box::pin(self.withhold_saved_endpoints()).await?;
             Box::pin(self.align_accepts()).await?;
         }
         // An app holding `paykit_contacts` reads the flagged senders again first, at most every 10

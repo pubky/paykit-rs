@@ -1,10 +1,13 @@
 //! An own-record edit the client saves before it reads the service time to sign it (Switch
-//! spec 4.2): when that read fails, the edit stays saved and unsigned for a later read.
+//! spec 4.2): when that read fails, the edit stays saved and unsigned for a later read of the
+//! same run, and a later run or a restore holds it aside for Paykit to decide (Paykit spec 4,
+//! "Changes saved and not yet signed").
 
 use std::sync::{Arc, Mutex};
 
 use paykit_lib::app_record::PaykitMember;
-use paykit_sdk::{AppScopes, Paykit, PaykitConfig, Rail};
+use paykit_sdk::{AppScopes, NoticeKind, Paykit, PaykitConfig, Rail};
+use pubky_switch_client::app::AppEvent;
 use pubky_switch_client::store::StateStore;
 use pubky_switch_client::testing::Fault;
 use pubky_switch_client::transport::{BoxFuture, Request, Response, Transport};
@@ -159,7 +162,6 @@ async fn test_own_record_saved_offer_never_signed_once_publishing_stops() {
 }
 
 #[tokio::test]
-#[ignore = "needs the Switch revision that keeps a saved edit dormant after a reload or a restore"]
 async fn test_own_record_restored_saved_offer_never_signed_over_a_later_withdrawal() {
     // The backup carries the offer saved during the outage. The user then withdraws the
     // endpoint, and later restores that backup onto a new store: the restore never signs the
@@ -185,13 +187,13 @@ async fn test_own_record_restored_saved_offer_never_signed_over_a_later_withdraw
     )
     .await
     .unwrap();
-    let _ = restored.receive(None).await;
+    restored.receive(None).await.unwrap();
     let published = PaykitMember::read(&super::on_homeserver(&w, &restored).unwrap()).unwrap();
     assert!(published.public_endpoints.is_empty());
+    assert!(told_not_published(&restored).await);
 }
 
 #[tokio::test]
-#[ignore = "needs the Switch revision that keeps a saved edit dormant after a reload or a restore"]
 async fn test_own_record_saved_offer_never_signed_when_the_record_cant_be_tended() {
     // Loaded again without publishing and with capabilities the record can't carry: the
     // upkeep can't replace the saved offer, and the read still never signs it.
@@ -205,12 +207,11 @@ async fn test_own_record_saved_offer_never_signed_when_the_record_cant_be_tended
         .set_endpoint_identifiers(super::oversized_capabilities());
     let recorded = Recorded::over(Arc::clone(&w.router) as Arc<dyn Transport>);
     let mut shop = load_recorded(&w, kept, app_id, PaykitConfig::default(), &recorded).await;
-    let _ = shop.receive(None).await;
+    shop.receive(None).await.unwrap();
     assert!(!recorded.sent("lno1tips"));
 }
 
 #[tokio::test]
-#[ignore = "needs the Switch revision that keeps a saved edit dormant after a reload or a restore"]
 async fn test_own_record_saved_offer_never_signed_after_an_unknown_store_result() {
     // Loaded again without publishing, the replacement of the saved offer meets a store that
     // can't tell whether it applied, and didn't. The next read never signs the offer.
@@ -232,13 +233,12 @@ async fn test_own_record_saved_offer_never_signed_after_an_unknown_store_result(
         &recorded,
     )
     .await;
-    let _ = shop.receive(None).await;
-    let _ = shop.receive(None).await;
+    shop.receive(None).await.unwrap();
+    shop.receive(None).await.unwrap();
     assert!(!recorded.sent("lno1tips"));
 }
 
 #[tokio::test]
-#[ignore = "needs the Switch revision that keeps a saved edit dormant after a reload or a restore"]
 async fn test_own_record_saved_capabilities_never_signed_once_the_method_drops_them() {
     // The app's upkeep saves capabilities while the service time can't be read. Loaded again
     // after the payment method stopped paying one of them, the app never signs it.
@@ -265,4 +265,181 @@ async fn test_own_record_saved_capabilities_never_signed_once_the_method_drops_t
     let mut shop = load_recorded(&w, kept, app_id, publishing(), &recorded).await;
     shop.receive(None).await.unwrap();
     assert!(!recorded.sent("btc-dropped-method"));
+}
+
+/// Whether `shop` tells its host that an endpoint change saved earlier wasn't published.
+async fn told_not_published(shop: &Paykit) -> bool {
+    shop.notices()
+        .await
+        .unwrap()
+        .iter()
+        .any(|notice| notice.kind == NoticeKind::PublicEndpointChangeNotPublished)
+}
+
+/// Whether `shop` still holds a change of Paykit's member aside, or owes Paykit the duty
+/// that tells of one.
+async fn still_held(shop: &mut Paykit) -> bool {
+    shop.app_mut()
+        .held_record_edit("paykit")
+        .await
+        .unwrap()
+        .is_some()
+        || shop
+            .app_mut()
+            .pending_duty_events()
+            .await
+            .unwrap()
+            .iter()
+            .any(|duty| {
+                matches!(duty.event, AppEvent::RecordEditsHeld { .. })
+                    && duty.owners.iter().any(|owner| owner == "paykit")
+            })
+}
+
+/// `shop` withdraws its offered endpoint while the service time can't be read: the
+/// withdrawal is saved, unsigned, and the offer is still the signed one.
+async fn save_withdrawal_unsigned(w: &World, shop: &mut Paykit) {
+    shop.set_public_endpoint(endpoint("btc-lightning-bolt12"), payload("lno1tips"))
+        .await
+        .unwrap();
+    time_read_fails(w, &w.bob);
+    assert!(shop
+        .remove_public_endpoint(&endpoint("btc-lightning-bolt12"))
+        .await
+        .is_err());
+    assert!(
+        shop.app_mut()
+            .protocol_record("paykit")
+            .await
+            .unwrap()
+            .pending
+    );
+    assert!(!shop.own_public_endpoints().unwrap().is_empty());
+}
+
+fn published_endpoints(w: &World, shop: &Paykit) -> usize {
+    PaykitMember::read(&super::on_homeserver(w, shop).unwrap())
+        .unwrap()
+        .public_endpoints
+        .len()
+}
+
+#[tokio::test]
+async fn test_own_record_withdrawal_saved_during_an_outage_is_published_after_a_restart() {
+    // A withdrawal saved while the service time can't be read, then a restart: the load
+    // holds it aside and Paykit completes it (Paykit spec 4, "Changes saved and not yet
+    // signed"). Nothing tells the host: the change it asked for is published.
+    let w = World::new();
+    let kept = store();
+    let mut shop = shop_on(&w, false, Arc::clone(&kept)).await;
+    save_withdrawal_unsigned(&w, &mut shop).await;
+    assert_eq!(published_endpoints(&w, &shop), 1);
+    let app_id = shop.app_id();
+    drop(shop);
+    let recorded = Recorded::over(Arc::clone(&w.router) as Arc<dyn Transport>);
+    let mut shop = load_recorded(&w, kept, app_id, publishing(), &recorded).await;
+    shop.receive(None).await.unwrap();
+    assert!(shop.own_public_endpoints().unwrap().is_empty());
+    assert_eq!(published_endpoints(&w, &shop), 0);
+    assert!(!told_not_published(&shop).await);
+    assert!(!still_held(&mut shop).await);
+}
+
+#[tokio::test]
+async fn test_own_record_withdrawal_saved_during_an_outage_is_published_after_a_restore() {
+    // The backup carries a withdrawal saved during the outage; restored onto a new store,
+    // it is held aside until the first read, then completed.
+    let w = World::new();
+    let mut shop = shop_on(&w, false, store()).await;
+    save_withdrawal_unsigned(&w, &mut shop).await;
+    let backup = shop.backup().await.unwrap();
+    drop(shop);
+    let mut restored = Paykit::restore(
+        w.env(&w.bob, store()),
+        publishing(),
+        &backup,
+        w.rail.clone(),
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    restored.receive(None).await.unwrap();
+    assert!(restored.own_public_endpoints().unwrap().is_empty());
+    assert_eq!(published_endpoints(&w, &restored), 0);
+    assert!(!told_not_published(&restored).await);
+    assert!(!still_held(&mut restored).await);
+}
+
+#[tokio::test]
+async fn test_own_record_restored_withdrawal_wins_over_an_offer_signed_after_it() {
+    // The cost of the rule: the backup carries a withdrawal saved during the outage, and the
+    // user offers the same endpoint again after it. Restoring that backup completes the
+    // withdrawal over the later offer, and the user then makes the offer again.
+    let w = World::new();
+    let mut shop = shop_on(&w, false, store()).await;
+    save_withdrawal_unsigned(&w, &mut shop).await;
+    let backup = shop.backup().await.unwrap();
+    shop.receive(None).await.unwrap();
+    assert!(shop.own_public_endpoints().unwrap().is_empty());
+    shop.set_public_endpoint(endpoint("btc-lightning-bolt12"), payload("lno1again"))
+        .await
+        .unwrap();
+    assert_eq!(published_endpoints(&w, &shop), 1);
+    drop(shop);
+    let mut restored = Paykit::restore(
+        w.env(&w.bob, store()),
+        publishing(),
+        &backup,
+        w.rail.clone(),
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    restored.receive(None).await.unwrap();
+    assert!(restored.own_public_endpoints().unwrap().is_empty());
+    assert_eq!(published_endpoints(&w, &restored), 0);
+    assert!(!still_held(&mut restored).await);
+}
+
+#[tokio::test]
+async fn test_own_record_offer_saved_during_an_outage_is_not_published_after_a_restart_and_is_told(
+) {
+    // An offer saved during the outage, then a restart: the load holds it aside and Paykit
+    // never signs it, and tells the host, which keeps knowing through a restore until it
+    // acknowledges it.
+    let w = World::new();
+    let kept = store();
+    let mut shop = shop_on(&w, false, Arc::clone(&kept)).await;
+    save_offer_unsigned(&w, &mut shop).await;
+    let app_id = shop.app_id();
+    drop(shop);
+    let recorded = Recorded::over(Arc::clone(&w.router) as Arc<dyn Transport>);
+    let mut shop = load_recorded(&w, kept, app_id, publishing(), &recorded).await;
+    shop.receive(None).await.unwrap();
+    assert!(shop.own_public_endpoints().unwrap().is_empty());
+    assert!(!recorded.sent("lno1tips"));
+    assert!(told_not_published(&shop).await);
+    assert!(!still_held(&mut shop).await);
+
+    let backup = shop.backup().await.unwrap();
+    let mut restored = Paykit::restore(
+        w.env(&w.bob, store()),
+        publishing(),
+        &backup,
+        w.rail.clone(),
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    assert!(told_not_published(&restored).await);
+    let notice = restored
+        .notices()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|notice| notice.kind == NoticeKind::PublicEndpointChangeNotPublished)
+        .unwrap();
+    restored.acknowledge_notice(&notice.id).await.unwrap();
+    restored.receive(None).await.unwrap();
+    assert!(!told_not_published(&restored).await);
 }

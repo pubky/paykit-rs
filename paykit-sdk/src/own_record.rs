@@ -251,41 +251,119 @@ impl Paykit {
         }
     }
 
-    /// Replace a saved, unsigned edit that carries public endpoints this app no longer
-    /// publishes, as after a load that stopped publishing its record or a certificate
-    /// without `paykit_request`, before the client's read signs what is saved (Paykit spec 4;
-    /// Switch spec 4.2). The client saves an edit before it reads the service time to sign
-    /// it, so an edit whose signing failed is signed at a later read: without this, that
-    /// read would sign the endpoints and the upkeep after it withdraw them. The replacement
-    /// is saved without them, whether or not its own signing goes through now.
+    /// Decide what this app's record changes held aside become (Paykit spec 4, "Changes saved
+    /// and not yet signed"). The client saves a change of the record before it signs it, and a
+    /// later run of the app or a restore holds a change it saved and didn't sign aside for
+    /// its protocol (Switch spec 4.2). Paykit completes a held change of its member that only
+    /// removes public endpoints, the others unchanged: a withdrawal always wins, also over an
+    /// offer of the same endpoint signed after it was saved. It never signs one that adds an
+    /// endpoint or changes a payload, nor one whose member doesn't read: it tells the host
+    /// ([`crate::NoticeKind::PublicEndpointChangeNotPublished`]). A held change of the
+    /// capabilities, the deadline or a renewal, and held accepted kinds, are worked out again
+    /// here and at the upkeep from what the app holds now. What is held is cleared once
+    /// decided, and the client's `RecordEditsHeld` duty for Paykit is then acknowledged.
+    ///
+    /// Run at a load and at each receive's upkeep. After a restore, the client refuses a
+    /// change of the record until the first read: a held withdrawal stays held until then.
     ///
     /// # Errors
     ///
     /// A store failure, an alarm, or Paykit's own refusal of the record. The client's other
-    /// failures, a change a sibling's record holds back included, are left to the read that
-    /// follows.
-    pub(crate) async fn withhold_saved_endpoints(&mut self) -> Result<()> {
-        if self.own_record_unknown
-            || holds_public_endpoints(self.app.cert(), self.app.publishes_record())
-        {
+    /// failures leave the held change for the next run of this step.
+    pub(crate) async fn settle_held_record_edits(&mut self) -> Result<()> {
+        if self.own_record_unknown {
             return Ok(());
         }
-        let tended = async {
-            let desired = self.desired_record().await?;
-            let held = PaykitMember::from_member(desired.member.as_ref())?;
-            if desired.pending && !held.public_endpoints.is_empty() {
-                Box::pin(self.tend_own_record()).await?;
+        // The accepted kinds are Paykit's registrations, and every protocol's: worked out
+        // again from them, so a held list only says that they may differ.
+        match self.app.held_accepts().await {
+            Ok(None) => {}
+            Ok(Some(_)) | Err(AppError::InvalidData(_)) => {
+                self.app.clear_held_accepts().await?;
+                Box::pin(self.align_accepts()).await?;
             }
-            Ok(())
-        };
-        match tended.await {
-            Err(PaykitError::Client(error) | PaykitError::PublicEndpointChangePending(error))
-                if !matches!(error, AppError::Store(_) | AppError::Alarm(_)) =>
-            {
-                Ok(())
-            }
-            result => result,
+            Err(error) => return Err(error.into()),
         }
+        let held = match self.app.held_record_edit(PROTOCOL_NAME).await {
+            Ok(held) => held,
+            // An entry that doesn't read is no change Paykit can complete.
+            Err(AppError::InvalidData(_)) => {
+                self.endpoint_change_not_published().await?;
+                self.app.clear_held_record_edit(PROTOCOL_NAME).await?;
+                None
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if let Some(held) = held {
+            if !Box::pin(self.settle_held_member(held)).await? {
+                return Ok(());
+            }
+        }
+        self.ack_record_edits_held().await
+    }
+
+    /// Decide a held change of Paykit's member ([`Paykit::settle_held_record_edits`]).
+    /// Returns whether it was decided and cleared; a withdrawal the client didn't take now
+    /// stays held for a later run.
+    async fn settle_held_member(
+        &mut self,
+        held: pubky_switch_client::app::HeldRecordEdit,
+    ) -> Result<bool> {
+        let desired = self.desired_record().await?;
+        let base = PaykitMember::from_member(desired.member.as_ref())?.public_endpoints;
+        let asked = match PaykitMember::from_member(held.member.as_ref()) {
+            Ok(member) => member.public_endpoints,
+            Err(_) => {
+                self.endpoint_change_not_published().await?;
+                self.app.clear_held_record_edit(PROTOCOL_NAME).await?;
+                return Ok(true);
+            }
+        };
+        let within_base = asked
+            .iter()
+            .all(|(id, payload)| base.get(id) == Some(payload));
+        if !within_base {
+            // An offer or a changed payload saved earlier: never signed now.
+            self.endpoint_change_not_published().await?;
+        } else if asked.len() < base.len() {
+            // A withdrawal saved earlier: completed, with the deadline the record has now.
+            let result = Box::pin(self.offer_endpoints(asked.clone(), desired.clone(), desired.expiry))
+                .await;
+            let now = PaykitMember::from_member(self.desired_record().await?.member.as_ref())?;
+            if now.public_endpoints != asked {
+                return match result {
+                    Err(PaykitError::Client(error) | PaykitError::PublicEndpointChangePending(error))
+                        if matches!(error, AppError::Store(_) | AppError::Alarm(_)) =>
+                    {
+                        Err(PaykitError::Client(error))
+                    }
+                    Err(error @ PaykitError::Lib(_)) => Err(error),
+                    _ => Ok(false),
+                };
+            }
+        }
+        self.app.clear_held_record_edit(PROTOCOL_NAME).await?;
+        Ok(true)
+    }
+
+    /// Acknowledge for Paykit the client's `RecordEditsHeld` duties, once nothing is held for
+    /// it ([`Paykit::settle_held_record_edits`]).
+    async fn ack_record_edits_held(&mut self) -> Result<()> {
+        let ids: Vec<_> = self
+            .app
+            .pending_duty_events()
+            .await?
+            .into_iter()
+            .filter(|duty| {
+                matches!(duty.event, pubky_switch_client::app::AppEvent::RecordEditsHeld { .. })
+                    && duty.owners.iter().any(|owner| owner == PROTOCOL_NAME)
+            })
+            .filter_map(|duty| duty.event.id())
+            .collect();
+        for id in ids {
+            self.ack_taken(id).await?;
+        }
+        Ok(())
     }
 
     /// Bring the app's record up to date at a receive (module docs): its capabilities to
@@ -379,6 +457,12 @@ impl Paykit {
     /// app is loaded again.
     pub(crate) async fn tend_own_record_at_receive(&mut self) -> Result<Option<String>> {
         let before = self.own_standing();
+        // Changes of the record held aside are decided first, so the upkeep signs on what was
+        // decided (Paykit spec 4, "Changes saved and not yet signed"), and a failure there is
+        // the upkeep's.
+        if let Err(error) = Box::pin(self.settle_held_record_edits()).await {
+            return upkeep_outcome(error, &before, &self.own_standing());
+        }
         match Box::pin(self.tend_own_record()).await {
             // Nothing is signed while the record this handle holds may not be the one stored,
             // so the record isn't brought up to date until the app is loaded again.
@@ -677,11 +761,13 @@ fn publication_owed(publication: &Publication) -> Option<&'static str> {
             "the app record's copy on the Homeserver couldn't be written; it is written again \
              at a later receive",
         ),
-        // The copy is missing and the app shares its keys with other devices: it is written
-        // back once the switch has shown the app current, at a later receive.
+        // The copy is missing and the app shares its keys with other devices, or a restore's
+        // first read hasn't happened yet: nothing is written until a read shows the app
+        // current (Switch spec 4.2).
         Publication::AwaitingRead => Some(
-            "the app record's copy on the Homeserver is missing; it is written back once the \
-             switch shows the app current, at a later receive",
+            "the app record's copy on the Homeserver waits for a read: a missing copy is \
+             written back once the switch shows the app current, and after a restore nothing \
+             is written before the first receive",
         ),
         // The switch has accepted no record of the app yet, as after a provider loss or a
         // restore from a backup that carries none: nothing is published until it does.

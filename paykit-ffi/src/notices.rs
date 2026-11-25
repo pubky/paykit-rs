@@ -62,6 +62,10 @@ pub enum WalletNoticeKind {
     /// still be paid by hand, and Billing Periods and payments without a request go on.
     /// Shown once, and again after each reopen.
     AutomaticPaymentsHeld,
+    /// A change of the app's public endpoints that it saved and didn't sign, an offer or a
+    /// changed payload, wasn't published after a restart or a restore (Paykit spec 4). Read
+    /// the public endpoints and make the change again. Kept until acknowledged.
+    PublicEndpointChangeNotPublished,
     /// A native case that this binding does not recognize.
     Other,
 }
@@ -86,6 +90,7 @@ impl From<paykit_sdk::NoticeKind> for WalletNoticeKind {
             K::BlockFloorHeld => Self::BlockFloorHeld,
             K::FloorRaiseWaiting => Self::FloorRaiseWaiting,
             K::AutomaticPaymentsHeld => Self::AutomaticPaymentsHeld,
+            K::PublicEndpointChangeNotPublished => Self::PublicEndpointChangeNotPublished,
             _ => Self::Other,
         }
     }

@@ -126,13 +126,24 @@ client retained the requested edit. Show the withdrawal as pending until the
 client signs the updated record and reports its publication.
 
 The client saves an endpoint edit before it reads the service time to sign it.
-So an edit whose time read failed may already be saved, and the next `receive`
+So an edit whose time read failed may already be saved, though the call returned
+that error and never `Publication::Published`, and the same run's next `receive`
 signs and publishes it. That read fails on a `transport` error, and on an error
 answer of the service such as `switch_unavailable`. Call `receive` and read
 `own_public_endpoints` before trying again: sending the same map again changes
 nothing, while a different map replaces the saved edit.
 
-After restoring a backup, drive the wallet's first receive. When publication
+A reload or a restore before that holds the saved edit aside, and the wallet
+decides it at the load or, after a restore, at the first `receive` (Paykit spec
+4, "Changes saved and not yet signed"). A withdrawal is published, also over an
+offer of the same endpoint made after it: the user then makes that offer again.
+An offer or a changed payload is not published, and
+`NoticeKind::PublicEndpointChangeNotPublished` tells the host: read
+`own_public_endpoints` and make the change again.
+
+After restoring a backup, drive the wallet's first receive: until it has read,
+the record isn't changed or published, and publication reports
+`Publication::AwaitingRead`. When publication
 returns `Publication::AwaitingRecord`, the wallet still has a newer record
 choice to settle. Keep the change pending and continue normal receives.
 A restore carrying only the accepted offer can repair its missing public copy.
@@ -528,6 +539,8 @@ A selling app that publishes a Private Payment List keeps a counter for each rec
 
 These three are not kept after the call returns. A crash before the host handles them, or a Paykit error after the read, can lose them; `SeenMarksIncomplete` is held in memory from the restore until the first `receive`, so a crash before that first `receive` loses it too. Duty events are kept until acknowledged and can be read again with `unacknowledged_events`.
 
+`AppEvent::RecordEditsHeld` is a duty event the wallet takes for Paykit: it decides Paykit's held record change as the public endpoints section above says, and acknowledges the event for `"paykit"`. Another protocol it names decides its own.
+
 ### Withdrawing public endpoints and paying offline
 
 To stop offering public endpoints, call `set_public_endpoints` with an empty set while publication is on, and check the result. `Published` means the Homeserver holds the record without them. For any other result, check that the withdrawal is visible before going further. Turn `publishes_record` off only if the app should stop publishing its record on the Homeserver altogether; it still gives its app record to the Switch. Until the withdrawal is visible, the old endpoints expire, or the app is revoked, a payer can still pay the endpoints it read before.
@@ -646,6 +659,7 @@ the new cursor to the service. Acknowledging the deletion notice leaves the cred
 | `NoticeKind::BlockFloorHeld` | Tell the user that the wallet saw the identity's block floor diverge after a provider loss and holds it for good: no one-time request is paid automatically, each can still be paid by hand, and an unblock or a widening that needs the floor raised waits, with the unblocked sender's one-time requests and, after a restore that isn't clean or a missed item, every re-send request, unless the shared post-loss hold stands too (`NoticeKind::AutomaticPaymentsHeld`), when they go without the raise. Billing Periods and payments without a request go on. Shown once, and again after each reopen while the hold stands; acknowledge it after showing it. |
 | `NoticeKind::FloorRaiseWaiting` | Tell the user that the wallet owes a block floor raise it can't write now, because the floor doesn't read or the switch refuses the write for now: until it is written, an unblocked sender's one-time requests wait and it is asked nothing, and while the raise of a restore that isn't clean or of a missed item waits, no one is asked to re-send. Payments by hand, Billing Periods and payments without a request go on. The wallet tries again at the next receive, and from its second unwritten try in a row after a wait of one minute, doubling to ten; the wait ends early when the floor record changes, the floor becomes readable or a new raise is owed. Shown once per load while it stands, and again after a reopen while the raise stays unwritten; the notice goes when the raise is written, or when the divergence hold stands (`NoticeKind::BlockFloorHeld`). Acknowledge it after showing it. |
 | `NoticeKind::AutomaticPaymentsHeld` | Tell the user that, after a provider loss, no one-time request of the identity is paid automatically any more, on any of its wallets, and no payment of one is repeated at a resume, one the user started included; each can still be paid by hand. Billing Periods and payments without a request go on. Shown once, and again after each reopen; acknowledge it after showing it. |
+| `NoticeKind::PublicEndpointChangeNotPublished` | Tell the user that a change of the wallet's public endpoints saved while the switch couldn't sign it, an offer or a changed payload, wasn't published after a restart or a restore. Read `own_public_endpoints` and make the change again. A withdrawal saved that way is published instead and raises nothing. Kept until acknowledged, also through a restore. |
 | `PaykitError::Client` | Handle the enclosed Switch outcome. Preserve any kept batch and its ID. |
 | `PaykitError::Lib` | Use the rule error to distinguish invalid input from invalid network or shared data. |
 | `PaykitError::Rail` | Preserve any unresolved attempt unless the method established definitive refusal. |

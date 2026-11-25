@@ -414,7 +414,7 @@ impl Paykit {
     /// One acknowledged already, as by a commit whose outcome was unknown, is no longer owed
     /// to Paykit, and nothing is left to do; one still owed that the client refuses to
     /// acknowledge is the call's error.
-    async fn ack_taken(&mut self, id: pubky_switch_client::app::EventId) -> Result<()> {
+    pub(crate) async fn ack_taken(&mut self, id: pubky_switch_client::app::EventId) -> Result<()> {
         match self
             .app
             .ack_event_with(crate::protocol::BACKUP_NAME, id, &[])

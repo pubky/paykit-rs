@@ -55,7 +55,9 @@ pub enum PublicationState {
         /// The transport failure code (Switch spec 4.2).
         error: String,
     },
-    /// The missing Homeserver copy awaits a read confirming the app is current (Switch spec 4.2).
+    /// The Homeserver copy awaits a read: a missing copy is written back once a read shows the
+    /// app current, and after a restore nothing is written before the first read (Switch spec
+    /// 4.2).
     AwaitingRead,
     /// Any publication state added by the Switch client maps here without content (Switch spec 4.2).
     Other,

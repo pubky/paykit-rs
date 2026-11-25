@@ -903,7 +903,6 @@ async fn test_extensions_unverifiable_mailbox_entry_refused_on_read_and_restore(
 }
 
 #[tokio::test]
-#[ignore = "needs the Switch revision that keeps a saved edit dormant after a reload or a restore"]
 async fn test_extensions_registration_undone_before_it_is_signed_is_never_accepted() {
     // A registration change the client saves while it can't read the service time stays
     // unsigned. Undone before the app reads again, it is never advertised (Switch spec 3.4).

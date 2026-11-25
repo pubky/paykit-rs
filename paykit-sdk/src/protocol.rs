@@ -656,6 +656,21 @@ pub(crate) fn restore_paykit_layer(
             .map_err(|_| "an outgoing delivery notice is invalid")?;
         delivery_notices.insert(key, notice);
     }
+    // An endpoint change not published can't be told again once its held change is cleared:
+    // the installation's notice is kept over the backup's (Paykit spec 4, "Changes saved and
+    // not yet signed").
+    let mut endpoint_notice = None;
+    for (key, value) in restoring
+        .previous_local_scan(
+            key::identity_notice(crate::notices::NoticeKind::PublicEndpointChangeNotPublished)
+                .as_bytes(),
+        )
+        .map_err(|_| "the endpoint change notice cannot be read")?
+    {
+        state::restored::<KeptNotice>(&key, &value, &binder)
+            .map_err(|_| "an endpoint change notice is invalid")?;
+        endpoint_notice = Some((key, value));
+    }
     let mut history = crate::deletions::RestoredReceipts::default();
     for prefix in [
         key::PAYEE_DELETIONS,
@@ -1310,6 +1325,14 @@ pub(crate) fn restore_paykit_layer(
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
+            // Kept: a held change cleared can't tell it again.
+            StateKey::IdentityNotice(
+                crate::notices::NoticeKind::PublicEndpointChangeNotPublished,
+            ) => {
+                state::restored::<KeptNotice>(&key, &value, &binder).map_err(|_| unread())?;
+                endpoint_notice.get_or_insert((key, value));
+                continue;
+            }
             // Not restored: the restored app tells its host again at its load.
             StateKey::IdentityNotice(_) => {
                 state::restored::<KeptNotice>(&key, &value, &binder).map_err(|_| unread())?;
@@ -1543,6 +1566,9 @@ pub(crate) fn restore_paykit_layer(
     }
     for (key, notice) in delivery_notices {
         let value = state::encode(&notice).map_err(|_| "a delivery notice cannot be written")?;
+        writes.push(LocalWrite::Put { key, value });
+    }
+    if let Some((key, value)) = endpoint_notice {
         writes.push(LocalWrite::Put { key, value });
     }
     for (key, stop) in previous_stops {

@@ -605,14 +605,13 @@ async fn test_own_record_edit_after_an_unknown_store_result_waits_for_a_load() {
     assert!(owed.contains("loaded again"), "{owed}");
     let app_id = shop.app_id();
     drop(shop);
-    // Loaded again, the app holds the withdrawal: the client saved it before signing, so
-    // the signed offer still names A until the next receive signs and publishes the saved
-    // edit. Adding B after it never brings A back.
+    // Loaded again, the app holds the withdrawal: the client saved it before signing, the
+    // load held it aside, and Paykit completes it there (Paykit spec 4, "Changes saved and
+    // not yet signed"). Adding B after it never brings A back.
     let mut shop = w
         .load_with(&w.bob, base, app_id, Arc::clone(&w.clock), publishing())
         .await;
-    let signed = shop.own_public_endpoints().unwrap();
-    assert_eq!(signed.keys().collect::<Vec<_>>(), [&a]);
+    assert!(shop.own_public_endpoints().unwrap().is_empty());
     shop.receive(None).await.unwrap();
     assert!(shop.own_public_endpoints().unwrap().is_empty());
     shop.set_public_endpoint(b.clone(), payload("bc1q"))

@@ -136,6 +136,13 @@ pub enum NoticeKind {
     /// Shared post-loss hold). Raised once, and again after each reopen, while the hold
     /// stands; it names no attempt, message or counterparty.
     AutomaticPaymentsHeld,
+    /// A change of the app's public endpoints that it saved and didn't sign, an offer or a
+    /// changed payload, wasn't published: a later run of the app or a restore held it aside,
+    /// and Paykit never signs such a change then (Paykit spec 4, "Changes saved and not yet
+    /// signed"). Read [`Paykit::own_public_endpoints`] and make the change again. A withdrawal
+    /// held that way is published instead, and raises nothing. Kept until acknowledged, and
+    /// through a restore; it names no attempt, message or counterparty.
+    PublicEndpointChangeNotPublished,
 }
 
 impl NoticeKind {
@@ -165,6 +172,7 @@ impl NoticeKind {
             Self::BlockFloorHeld => "floor_held",
             Self::FloorRaiseWaiting => "raise_waiting",
             Self::AutomaticPaymentsHeld => "loss_hold",
+            Self::PublicEndpointChangeNotPublished => "endpoint_change_not_published",
         }
     }
 
@@ -175,6 +183,7 @@ impl NoticeKind {
             Self::BlockFloorHeld,
             Self::FloorRaiseWaiting,
             Self::AutomaticPaymentsHeld,
+            Self::PublicEndpointChangeNotPublished,
         ]
         .into_iter()
         .find(|kind| kind.tag() == tag)
@@ -1052,6 +1061,24 @@ impl Paykit {
         Ok(())
     }
 
+    /// Tell the host that a change of public endpoints saved earlier wasn't published
+    /// ([`NoticeKind::PublicEndpointChangeNotPublished`]). One kept and not yet acknowledged
+    /// already tells it.
+    ///
+    /// # Errors
+    ///
+    /// A store failure, or a kept notice that doesn't read.
+    pub(crate) async fn endpoint_change_not_published(&mut self) -> Result<()> {
+        let kind = NoticeKind::PublicEndpointChangeNotPublished;
+        let key = key::identity_notice(kind);
+        if self.kept_notice(&key).await?.is_none() {
+            let at = self.service_time().unwrap_or(0);
+            self.local_put(&key, &KeptNotice::identity(kind, at))
+                .await?;
+        }
+        Ok(())
+    }
+
     /// The notice kept at `key`, read whole and bound to it ([`bind_notice`]).
     ///
     /// # Errors
@@ -1144,6 +1171,7 @@ mod tests {
             NoticeKind::BlockFloorHeld,
             NoticeKind::FloorRaiseWaiting,
             NoticeKind::AutomaticPaymentsHeld,
+            NoticeKind::PublicEndpointChangeNotPublished,
         ] {
             let key = key::identity_notice(kind);
             let notice = KeptNotice::identity(kind, 5);

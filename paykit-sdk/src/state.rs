@@ -4342,6 +4342,12 @@ mod tests {
                 key::identity_notice(crate::notices::NoticeKind::AutomaticPaymentsHeld),
                 StateKey::IdentityNotice(crate::notices::NoticeKind::AutomaticPaymentsHeld),
             ),
+            (
+                key::identity_notice(crate::notices::NoticeKind::PublicEndpointChangeNotPublished),
+                StateKey::IdentityNotice(
+                    crate::notices::NoticeKind::PublicEndpointChangeNotPublished,
+                ),
+            ),
             (key::LOSS_RECORDED.into(), StateKey::LossRecorded),
             (key::RAISE_RETRY.into(), StateKey::RaiseRetry),
             (key::BLOCK_FLOOR.into(), StateKey::BlockFloor),
