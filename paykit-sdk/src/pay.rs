@@ -1481,9 +1481,8 @@ fn resume_disagreement(
                 )
                 | None => false,
             }
-        } else if now.told_as_it_stands() {
-            outcome.is_none()
-        } else if now.stage == Stage::Abandoned && !now.proof {
+        } else if now.told_as_it_stands() || now.stage == Stage::Abandoned && !now.proof {
+            // Told as it stands, or abandoned before its attempt reached the claim.
             outcome.is_none()
         } else {
             match outcome {
