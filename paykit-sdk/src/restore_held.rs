@@ -83,6 +83,22 @@ pub(crate) enum HeldPass {
     HeldOnly,
 }
 
+/// Whether a held original is within the one bound on every wait: "A copy reconstructed
+/// from stored plaintext may go only until 30 days after its `created_at`, less the clock
+/// tolerance" (Paykit spec 7.2). The client gives a carried copy up by its own deadline too,
+/// so the earlier of the two applies. Judged on the service time the reads verified (`now`),
+/// never the device clock; with none verified yet, it isn't past.
+fn within_window(original: &Message, now: Option<u64>) -> bool {
+    now.is_none_or(|now| !crate::send_holds::past_replay_window(original.created_at_ms, now))
+}
+
+/// The original a held stop or proof is decided on: one within its window whose body
+/// parses. With no original read, past its window, or with a body that doesn't parse,
+/// `None`: every wait ends, and the message is withdrawn and told (Paykit spec 7.2).
+fn decidable(original: Option<&Message>, now: Option<u64>) -> Option<&Message> {
+    original.filter(|original| within_window(original, now) && Body::parse(original).is_ok())
+}
+
 /// What becomes of the owed mark (`hm`) at the end of a pass.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MarkAfter {
@@ -220,7 +236,7 @@ fn paykit_kind(kind: &str) -> bool {
 // - The counts are this receive's, best effort: a receive that fails reports none, and what
 //   it decided is told by the client's give-up events and the notices.
 // One message that can't be decided now, for an error other than a stop of the app,
-// waits for the next receive, never past its window (`held_window_open`); it never fails
+// waits for the next receive, never past its window (`within_window`); it never fails
 // the pass for the others.
 impl Paykit {
     /// The one gate for deciding held messages: Paykit's own first read is complete, its
@@ -242,7 +258,7 @@ impl Paykit {
 
     /// Give up each held Paykit message past its deadline, telling the host, whatever the
     /// gate: the deadline doesn't wait for Paykit's first read. One past the 30 days from
-    /// its `created_at` is withdrawn (`Paykit::held_window_open`); the client gives up one
+    /// its `created_at` is withdrawn (`within_window`); the client gives up one
     /// past its own replay deadline at a flush. A non-stop error makes the step best
     /// effort, tried again at the next call; a stop of the wallet is returned, typed.
     pub(crate) async fn give_up_expired_held(&mut self) -> Result<()> {
@@ -268,7 +284,7 @@ impl Paykit {
             let past = originals
                 .get(&q.msg_id)
                 .and_then(Option::as_ref)
-                .is_some_and(|original| !self.held_window_open(Some(original)));
+                .is_some_and(|original| !within_window(original, self.service_time()));
             // A held message isn't tried: the flush only gives it up once it is too old. A
             // stopped client gives up nothing, and delivers nothing, until it can act.
             let given_up = if past {
@@ -319,20 +335,6 @@ impl Paykit {
             }
         }
         Ok(Some(queued))
-    }
-
-    /// Whether a held original may still be decided: past its 30 days, or with no
-    /// original to read its time from, it is withdrawn and told. "A copy reconstructed
-    /// from stored plaintext may go only until 30 days after its `created_at`, less the
-    /// clock tolerance" (Paykit spec 7.2). The client gives a carried copy up by its own
-    /// deadline too, so the earlier of the two applies. Judged on the service time the
-    /// reads verified, never the device clock; with none verified yet, it isn't past.
-    fn held_window_open(&self, original: Option<&Message>) -> bool {
-        original.is_some_and(|message| {
-            self.service_time().is_none_or(|now| {
-                !crate::send_holds::past_replay_window(message.created_at_ms, now)
-            })
-        })
     }
 
     /// The Paykit messages the client still holds after a restore; `None` when the client
@@ -470,21 +472,17 @@ impl Paykit {
         };
         let mut decision = decide(role, StopEvidence::Unreadable);
         // Every wait ends: past its 30 days, with no original read, or with a body that
-        // doesn't parse, a stop or proof is withdrawn and told (`held_window_open`).
+        // doesn't parse, a stop or proof is withdrawn and told (`within_window`).
         if decision == Decision::Wait {
-            decision = match msg {
-                Some(original)
-                    if self.held_window_open(Some(original)) && Body::parse(original).is_ok() =>
-                {
-                    match self.stop_evidence(report, q, original).await {
-                        Ok(evidence) => decide(role, evidence),
-                        Err(error) => {
-                            crate::pay::unless_stop(error)?;
-                            Decision::Wait
-                        }
+            decision = match decidable(msg, self.service_time()) {
+                Some(original) => match self.stop_evidence(report, q, original).await {
+                    Ok(evidence) => decide(role, evidence),
+                    Err(error) => {
+                        crate::pay::unless_stop(error)?;
+                        Decision::Wait
                     }
-                }
-                Some(_) | None => Decision::Withdraw,
+                },
+                None => Decision::Withdraw,
             };
         }
         let notice = key::unrecorded_stop(&q.to, &q.msg_id);
@@ -847,8 +845,6 @@ mod tests {
         use crate::stored::StoredNote;
         use crate::testkit::{object, Dispatches};
         use crate::AppScopes;
-        use pubky_dispatch_client::app::FeedPosition;
-        use pubky_dispatch_client::clock::Clock;
         use pubky_dispatch_client::testing::Fault;
         use pubky_dispatch_core::http::ErrorCode;
         use serde_json::json;
@@ -942,24 +938,9 @@ mod tests {
                 seq
             };
             match prefix {
-                "pc/" => {
-                    let accepted_at = w.clock.now_ms();
-                    let seq = receive(&mut wallet).await;
-                    let stored = StoredMessage::new(
-                        bob,
-                        cert.signed(),
-                        message.plaintext().clone(),
-                        Some(accepted_at),
-                        &alice,
-                    )
-                    .unwrap();
-                    competing = Some(KeptMessage::taken_at(
-                        &stored,
-                        FeedPosition { generation, seq },
-                    ));
-                }
                 "cf/" => {
-                    // The same competing proposal at the permanent Allowance key.
+                    // A proposal of the counterparty's for the Allowance, kept as received
+                    // (the `pr/` row's), now at the permanent Allowance key as its conflict.
                     wallet
                         .local_put(&at, competing.as_ref().expect("cf/ competing proposal"))
                         .await
@@ -1026,6 +1007,7 @@ mod tests {
             match prefix {
                 // Placing the original removes the kept reply and opens the pending record.
                 "pr/" => {
+                    competing = wallet.local_get::<KeptMessage>(&at).await.unwrap();
                     Box::pin(wallet.receive(None)).await.unwrap();
                 }
                 "se/" => {
@@ -1040,6 +1022,42 @@ mod tests {
                 "{prefix} after placement or removal"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn test_restore_held_decidable_original() {
+        use crate::testkit::{object, Dispatches};
+        use crate::AppScopes;
+        use pubky_dispatch_client::app::SENT_RETENTION_MS;
+        use serde_json::json;
+
+        let w = Dispatches::new();
+        let shop =
+            Box::pin(w.join(&w.bob, "shop", AppScopes::new().request().build().unwrap())).await;
+        let signed = shop
+            .sign(
+                w.alice.identity().public(),
+                Kind::PaymentRequestCancellation,
+                vec![[7; 32]],
+                object(json!({})),
+            )
+            .unwrap();
+        let original = Message::parse(signed.plaintext().json(), &[]).unwrap();
+        let within = original.created_at_ms + 1;
+        let past = original.created_at_ms + SENT_RETENTION_MS;
+        assert!(decidable(Some(&original), Some(within)).is_some());
+        // With no service time verified yet, the window isn't past.
+        assert!(decidable(Some(&original), None).is_some());
+        // No original read: withdrawn and told.
+        assert!(decidable(None, Some(within)).is_none());
+        assert!(decidable(None, None).is_none());
+        // Past its 30 days, less the clock tolerance.
+        assert!(!within_window(&original, Some(past)));
+        assert!(decidable(Some(&original), Some(past)).is_none());
+        // A body that doesn't parse for its kind.
+        let mut malformed = Message::parse(signed.plaintext().json(), &[]).unwrap();
+        malformed.kind = Kind::PaymentRequest.as_str().to_owned();
+        assert!(decidable(Some(&malformed), Some(within)).is_none());
     }
 
     #[test]

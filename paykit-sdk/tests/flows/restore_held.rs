@@ -1997,6 +1997,62 @@ async fn test_restore_held_stop_notice_shown_whichever_hold_listing_fails() {
     }
 }
 
+/// A restored wallet whose carried stop stays held: a scope key it needs isn't held yet, so
+/// nothing is decided, on a store that can fail a listing.
+async fn held_while_a_key_is_missing(w: &World) -> (Paykit, Arc<FaultStore>, String) {
+    let (wallet, _, stop, _shop, backup) = Box::pin(carried_rejection(w, store())).await;
+    drop(wallet);
+    let storage = Arc::new(FaultStore::new(store(), StoreFault::None));
+    let mut wallet = Box::pin(restore(w, &w.alice, storage.clone(), &backup)).await;
+    read_restored_client(&mut wallet).await;
+    w.alice.next_doc(|body| body.data_epoch += 1).unwrap();
+    wallet.app_mut().refresh_identity().await.unwrap();
+    assert_eq!(
+        wallet.receive(None).await.unwrap().held_messages.still_held,
+        Some(1)
+    );
+    (wallet, storage, stop)
+}
+
+// paykit.rs read_before_effects: a store failure the expiry step meets before the read is
+// left to the read, which goes on; it doesn't meet that failure, so the receive succeeds.
+#[tokio::test]
+async fn test_restore_held_expiry_failure_before_the_read_leaves_it_to_the_read() {
+    let w = World::new();
+    let (mut wallet, storage, stop) = Box::pin(held_while_a_key_is_missing(&w)).await;
+    // The receive's first listing of the outbox is the expiry step's, before the read.
+    storage.fail_scan(b"out/", 0);
+    let read = wallet.receive(None).await.unwrap();
+    assert!(!read.report.stopped);
+    assert_eq!(read.held_messages.still_held, Some(1));
+    // The failure was met: the next listing passes.
+    assert!(wallet.app().queued_messages("paykit").await.is_ok());
+    assert!(held(&wallet, &stop).await);
+}
+
+// paykit.rs held_messages_now: a summary that can't list the held messages reports them
+// as unknown, the receive still returning its read; the next one lists them again.
+#[tokio::test]
+async fn test_restore_held_still_held_unknown_when_the_summary_cannot_list() {
+    let mut unknown = 0;
+    // Every listing of the outbox the receive makes, failed in turn.
+    for after in 0..24 {
+        let w = World::new();
+        let (mut wallet, storage, _) = Box::pin(held_while_a_key_is_missing(&w)).await;
+        storage.fail_scan(b"out/", after);
+        if let Ok(read) = wallet.receive(None).await {
+            if read.held_messages.still_held.is_none() {
+                unknown += 1;
+                let next = wallet.receive(None).await.unwrap();
+                assert_eq!(next.held_messages.still_held, Some(1), "after {after}");
+            }
+        }
+    }
+    // The summary's own listing, the receive's last, reports unknown; earlier ones are the
+    // expiry step's, left to the read, or fail the receive.
+    assert!(unknown > 0);
+}
+
 // Held messages are decided only in a Paykit receive, after its own read succeeded
 // (`Paykit::held_decisions_open`): a read made through the client, as another protocol's,
 // decides nothing, and nor does a flush until a Paykit receive has read.
