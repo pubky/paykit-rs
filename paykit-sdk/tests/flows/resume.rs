@@ -493,6 +493,14 @@ async fn test_resume_reports_a_payment_found_made_after_its_failure_once() {
 /// Two payments in flight, the user's resolution of the second as failed kept after a
 /// timeout, and the transport set to time out the next write too.
 async fn second_resolved_failed_and_kept(w: &World) -> (Paykit, [AttemptId; 2], Arc<RefusingOps>) {
+    second_resolved_and_kept(w, paykit_sdk::Resolution::Failed).await
+}
+
+/// [`second_resolved_failed_and_kept`], the user resolving it as `resolution`.
+async fn second_resolved_and_kept(
+    w: &World,
+    resolution: paykit_sdk::Resolution,
+) -> (Paykit, [AttemptId; 2], Arc<RefusingOps>) {
     let (mut wallet, [first, second], transport) = in_flight_behind(w).await;
     let obligation = wallet
         .payments()
@@ -507,7 +515,7 @@ async fn second_resolved_failed_and_kept(w: &World) -> (Paykit, [AttemptId; 2], 
         .resolve_attempt(
             &obligation,
             second,
-            paykit_sdk::Resolution::Failed,
+            resolution,
             pubky_switch_client::app::UserConfirmed::new(),
         )
         .await
@@ -515,6 +523,77 @@ async fn second_resolved_failed_and_kept(w: &World) -> (Paykit, [AttemptId; 2], 
     assert!(kept.kept_batch().is_some(), "{kept:?}");
     assert_eq!(stage(&wallet, &second).await, Stage::Paying);
     (wallet, [first, second], transport)
+}
+
+#[tokio::test]
+async fn test_resume_keeps_the_users_done_applied_over_the_methods_failure() {
+    // The user's resolution of the second payment as done timed out and is kept. The
+    // method's history shows it failed, which the history pass journals; the first payment's
+    // write then sends the kept resolution, which finishes the entry as the user said. The
+    // method's failure doesn't undo the user's word: the journal keeps the resolution, and
+    // the payment is reported resolved, never failed.
+    let w = World::new();
+    let (mut wallet, [first, second], transport) =
+        second_resolved_and_kept(&w, paykit_sdk::Resolution::Done).await;
+    w.rail.settle(&first, true);
+    w.rail.settle(&second, false);
+    *transport.next.lock().unwrap() = Some(TransportError::Timeout);
+    let outcomes = wallet.resume_payments().await.unwrap();
+    assert!(
+        matches!(
+            outcomes.as_slice(),
+            [
+                PayOutcome::Paid { attempt_id: paid, proof_msg_id: Some(_), .. },
+                PayOutcome::Resolved { attempt_id: resolved, .. },
+            ] if *paid == first && *resolved == second
+        ),
+        "{outcomes:?}"
+    );
+    let journal = wallet.payments().await.unwrap();
+    let entry = journal.iter().find(|p| p.attempt_id == second).unwrap();
+    assert_eq!(entry.stage, Stage::Finished, "{journal:?}");
+    assert!(!entry.paid_by_method, "{journal:?}");
+    // Nothing reopens it.
+    assert!(wallet.resume_payments().await.unwrap().is_empty());
+    assert_eq!(stage(&wallet, &second).await, Stage::Finished);
+    assert_eq!(w.rail.pay_calls(&second), 1);
+}
+
+#[tokio::test]
+async fn test_resume_reports_a_method_refusal_whose_write_was_lost_as_failed() {
+    // The method refused the first call, so nothing was submitted, and the failed outcome's
+    // write wasn't answered. The next resume writes it and reports it failed, no payment
+    // started, not as resolved without a word; nor does it ask the method's history about
+    // it, since nothing was submitted.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    w.rail.next(Behaviour::Refuse);
+    // The attempt's write goes through; the outcome's is never answered.
+    w.alice.switch().fail_next(Fault::Unanswered {
+        path: "/ops".into(),
+        after: 1,
+    });
+    let paid = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .outcome;
+    assert!(
+        !matches!(paid, Ok(PayOutcome::Failed { .. })),
+        "the write went through: {paid:?}"
+    );
+    let outcomes = wallet.resume_payments().await.unwrap();
+    assert!(
+        matches!(
+            outcomes.as_slice(),
+            [PayOutcome::Failed { reason, .. }] if reason == "Paykit spec 7.2: no payment started"
+        ),
+        "{paid:?} then {outcomes:?}"
+    );
+    assert!(w.rail.all_executions().is_empty());
+    assert!(wallet.resume_payments().await.unwrap().is_empty());
 }
 
 #[tokio::test]

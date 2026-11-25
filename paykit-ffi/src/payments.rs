@@ -144,8 +144,14 @@ pub enum PaymentOutcome {
         record: Vec<u8>,
     },
     /// Over, with nothing of this call's to tell: the attempt was resolved by the user or by
-    /// another app, or it finished with nothing of this call's to report. The claim and the
-    /// wallet's payments say which. It is not a statement that no payment was made.
+    /// another app, or it finished with nothing of this call's to report. It is not a
+    /// statement that no payment was made.
+    ///
+    /// These bindings leave it opaque: they expose no claim read and no typed resolution. A
+    /// host can tell that nothing new is paid for it, whether the method gave a proof
+    /// ([`PaymentEntry::paid_by_method`], while the wallet keeps the entry), and for a
+    /// request, its status in `requests` and its receipts (`request_receipts`). It can't
+    /// tell who resolved the attempt or how.
     Resolved {
         /// The attempt.
         attempt_id: String,

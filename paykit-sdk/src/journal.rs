@@ -420,10 +420,11 @@ pub(crate) struct JournalEntry {
     /// the claim is gone raises [`crate::NoticeKind::PaidAfterFailed`] (Paykit spec 7.2,
     /// "What a payment method declares").
     pub(crate) failed_on_claim: bool,
-    /// This app wrote `failed` on the claim for this attempt while it was still before the
-    /// payment method's call: no payment started for it (Paykit spec 7.2). Set in the journal
+    /// No payment started for this attempt (Paykit spec 7.2): this app wrote `failed` on the
+    /// claim while it was still before the payment method's call, or the method refused its
+    /// first call, which says nothing was and nothing will be submitted. Set in the journal
     /// copy the failed outcome's own batch carries, so the entry holds it however that batch
-    /// came to apply.
+    /// came to apply, and on the `RailFailed` entry a refusal leaves.
     pub(crate) failed_before_call: bool,
     /// How the user resolved this attempt ([`crate::Resolution`]), on its claim or, for a
     /// restored dispatch no claim shows, off it (Paykit spec 7.3). Set in the journal copy the
@@ -789,9 +790,12 @@ impl JournalEntry {
         if (self.record_held || self.failed_on_claim) && self.rail_proof.is_none() {
             return bad();
         }
-        // "No payment started" is this app's own finished failure, never a method's word.
+        // "No payment started" is this app's own finished failure, or a refused call's before
+        // its outcome is written, never a method's word that it failed.
         if self.failed_before_call
-            && (self.stage != Stage::Finished || self.rail_proof.is_some() || self.failed_by_method)
+            && (!matches!(self.stage, Stage::Finished | Stage::RailFailed)
+                || self.rail_proof.is_some()
+                || self.failed_by_method)
         {
             return bad();
         }

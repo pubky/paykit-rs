@@ -1003,13 +1003,68 @@ pub(crate) fn entry_waits(error: &PaykitError) -> bool {
     }
     match error {
         PaykitError::Client(client) => client_waits(client),
-        // This SDK's own wait: every reason of it clears with no one acting.
-        PaykitError::Refused(
-            Refusal::SwitchUnavailable(_) | Refusal::IdentityUnavailable(_) | Refusal::NotNow(_),
-        )
-        | PaykitError::Conflict(_)
-        | PaykitError::Rail(RailError::Unavailable(_)) => true,
-        _ => false,
+        PaykitError::Refused(refusal) => refusal_waits(refusal),
+        PaykitError::Conflict(_) | PaykitError::Rail(RailError::Unavailable(_)) => true,
+        PaykitError::Rail(RailError::Refused(_) | RailError::InvalidSelection(_))
+        | PaykitError::SettlementNoticeUnavailable { .. }
+        | PaykitError::PublicEndpointChangePending(_)
+        | PaykitError::Lib(_)
+        | PaykitError::Homeserver(_) => false,
+    }
+}
+
+/// Whether a refusal of this SDK's own is a wait: the switch or the wallet's own
+/// `identity.json` not answering now, and `NotNow`, every reason of which clears with no one
+/// acting. Every other refusal waits for the user, the host or the counterparty, or is final.
+fn refusal_waits(refusal: &Refusal) -> bool {
+    match refusal {
+        Refusal::SwitchUnavailable(_) | Refusal::IdentityUnavailable(_) | Refusal::NotNow(_) => {
+            true
+        }
+        Refusal::NotFound
+        | Refusal::ScopeMissing(_)
+        | Refusal::Label(_)
+        | Refusal::Rejected
+        | Refusal::HeldAfterRestore { .. }
+        | Refusal::Cancelled
+        | Refusal::AllowanceEnded
+        | Refusal::AllowanceConflicted
+        | Refusal::AllowanceConfirmationNeeded { .. }
+        | Refusal::CreditHistoryLost
+        | Refusal::AlreadyPaid
+        | Refusal::BeingHandledByOtherWallet
+        | Refusal::MayBePaid { .. }
+        | Refusal::LossChanged { .. }
+        | Refusal::DeadlinePassed
+        | Refusal::Recurring
+        | Refusal::MaybeCredited
+        | Refusal::PaymentTimeOutside { .. }
+        | Refusal::SettlementBucketFull { .. }
+        | Refusal::Subscribed
+        | Refusal::NotSubscribed
+        | Refusal::PeriodNotStarted
+        | Refusal::ManualOnly
+        | Refusal::NotAutomatic(_)
+        | Refusal::AttemptedPeriodsFull
+        | Refusal::Destination(_)
+        | Refusal::AttemptFailed(_)
+        | Refusal::NoDestination(_)
+        | Refusal::UnsupportedEndpoint(_)
+        | Refusal::WaitingForList { .. }
+        | Refusal::ListDeliveryUnknown(_)
+        | Refusal::Transfer { .. }
+        | Refusal::PricedByRate { .. }
+        | Refusal::IdentityUnconfirmed
+        | Refusal::PaymentInProgress
+        | Refusal::NotCurrent(_)
+        | Refusal::HeldForUser(_)
+        | Refusal::RecoveryNeeded(_)
+        | Refusal::FloorHeld
+        | Refusal::Usage(_)
+        | Refusal::RecordHeld(_)
+        | Refusal::CertificateRefused(_)
+        | Refusal::Blocked { .. }
+        | Refusal::Divergent { .. } => false,
     }
 }
 
@@ -1079,7 +1134,8 @@ pub(crate) fn client_waits(error: &AppError) -> bool {
             | C::Usage(_)
             | C::BodyOverCap { .. }
             | C::Unpinned => false,
-            // A failure a later pin adds is no wait until it is classified here.
+            // Open to new variants (`#[non_exhaustive]`): every variant of the pinned client is
+            // named above, and one a later pin adds is no wait until it is classified here.
             _ => false,
         },
         AppError::Refused(ClientRefusal::KeptBatchesAhead(_)) => true,
@@ -1088,6 +1144,11 @@ pub(crate) fn client_waits(error: &AppError) -> bool {
         | AppError::Protocol(_)
         | AppError::InvalidData(_)
         | AppError::Alarm(_) => false,
+        // `unkept` took the failure out of either: none is left here.
+        AppError::Kept { .. } | AppError::Ahead { .. } => false,
+        // The client's error is open to new variants (`#[non_exhaustive]`), so the compiler
+        // asks for this arm: every variant of the pinned client is named above, and one a
+        // later pin adds is no wait until it is classified here.
         _ => false,
     }
 }
@@ -1113,7 +1174,8 @@ fn transport_waits(error: &pubky_switch_client::error::TransportError) -> bool {
         | T::Refused(_)
         | T::TooLarge(_)
         | T::InvalidRequest(_) => false,
-        // A failure a later pin adds is no wait until it is classified here.
+        // Open to new variants (`#[non_exhaustive]`): every variant of the pinned client is
+        // named above, and one a later pin adds is no wait until it is classified here.
         _ => false,
     }
 }
@@ -1291,7 +1353,8 @@ fn open_outcome(now: &EntryFacts, turns: &Turns) -> PayOutcome {
 /// 3. the method's word that the payment failed, held by the entry before the call, now,
 ///    or right after its step: failed, as the method reported;
 /// 4. this app's own `failed` written on the claim while the attempt was before the
-///    method's call ([`JournalEntry::failed_before_call`]): failed, no payment started. The
+///    method's call, or the method's refusal of a first call
+///    ([`JournalEntry::failed_before_call`]): failed, no payment started. The
 ///    mark is in the journal copy that write's batch carries, so it is there only once the
 ///    write applied; a write that didn't go through leaves the entry open, and it is
 ///    reported pending;
@@ -1420,15 +1483,21 @@ fn resume_disagreement(
 /// Whether the journal's entry `held` lost what the method's history told for `answered`, the
 /// same entry as this call left it: a write kept from before the answer replaced it. A
 /// proof gone is always lost. A failure the method reported is lost unless the entry holds a
-/// proof or the user resolved it as paid, which a method's failure doesn't undo (Paykit spec
-/// 7.2, 8.4).
+/// proof or the user resolved it as paid or unknown, on the claim or off it, which a
+/// method's failure doesn't undo (Paykit spec 7.2, 8.4).
 fn replaced_by_an_older_write(answered: &JournalEntry, held: &JournalEntry) -> bool {
+    use crate::journal::UserResolution;
     if answered.rail_proof.is_some() {
         return held.rail_proof.is_none();
     }
+    let user_paid_or_unknown = held.user_paid
+        || matches!(
+            held.user_resolved,
+            Some(UserResolution::Done | UserResolution::Unknown)
+        );
     answered.failed_by_method
         && !held.failed_by_method
-        && !held.user_paid
+        && !user_paid_or_unknown
         && held.rail_proof.is_none()
 }
 
@@ -4394,6 +4463,10 @@ impl Paykit {
             // (Paykit spec 7.2). A repeat's refusal says nothing of the dispatch before it,
             // which may have paid: the attempt stays open.
             Err(RailError::Refused(why)) if matches!(kind, Dispatch::First { .. }) => {
+                // No payment started, kept with the stage: a restart before the outcome is
+                // written reports it failed. Not the method's failure, whose history the
+                // recheck would ask again: nothing was submitted to ask about.
+                entry.failed_before_call = true;
                 self.set_stage(&mut entry, Stage::RailFailed).await?;
                 self.report(&mut entry).await.map(|outcome| match outcome {
                     PayOutcome::Failed { attempt_id, .. } => PayOutcome::Failed {
@@ -4746,11 +4819,13 @@ impl Paykit {
             } else {
                 finished.end_before_the_call();
                 // This app's own `failed` on the claim, for an attempt of this installation
-                // still before the method's call: no payment started for it.
-                finished.failed_before_call = step.is_some()
-                    && !entry.failed_by_method
-                    && !entry.restored
-                    && matches!(entry.stage, Stage::Recorded | Stage::Attempted);
+                // still before the method's call, or a first call the method refused: no
+                // payment started for it.
+                finished.failed_before_call = entry.failed_before_call
+                    || step.is_some()
+                        && !entry.failed_by_method
+                        && !entry.restored
+                        && matches!(entry.stage, Stage::Recorded | Stage::Attempted);
             }
             // An acceptance still owed keeps the entry where a resume visits it: the outcome
             // is written, the acceptance not yet sent or placed.
@@ -5149,13 +5224,14 @@ impl Paykit {
     /// paid").
     ///
     /// **Every entry is visited.** Before any entry's step, the method's history is asked
-    /// about every payment this app left in flight, which needs no switch, and one it reports
-    /// made is journaled with its proof. Then each entry's work goes on its own: a failure of one entry's step short of
+    /// about every payment this app left at [`Stage::Paying`] that is neither restored nor
+    /// offline, which needs no switch, and one it reports made is journaled with its proof; a
+    /// restored or offline entry does any lookup in its own step. Then each entry's work goes on its own: a failure of one entry's step short of
     /// a wallet-wide stop leaves that entry for the next resume, reported as its outcome,
     /// [`PayOutcome::PaidOutcomeUnwritten`] when the method reported it paid and
     /// [`PayOutcome::Pending`] otherwise, and the next entry goes on. Such a failure that is
     /// a wait, which may pass by itself, such as the network, the switch's answer that a
-    /// retry may pass, the Switch client's refusal for now, a method that can't tell now, or
+    /// retry may pass, this SDK's own [`Refusal::NotNow`], a method that can't tell now, or
     /// [`Refusal::IdentityUnavailable`] when a repeat is due and the own `identity.json`
     /// isn't confirmed in the last 60 s, says nothing more, and every outcome reached is in
     /// the result.
@@ -5175,7 +5251,7 @@ impl Paykit {
     /// once, whichever step or kept batch ended it. That one is [`PayOutcome::Paid`] with
     /// the method's proof, [`PayOutcome::Failed`] only where the journal holds that no
     /// payment was made (the method's word, this app's own failure written before the
-    /// method's call, or the user's), and [`PayOutcome::Resolved`] otherwise. An entry
+    /// method's call, the method's refusal of a first call, or the user's), and [`PayOutcome::Resolved`] otherwise. An entry
     /// already over before the call is reported only when its payment was found made after
     /// all (Paykit spec 7.2 steps 3 and 4). The client's
     /// and the rail's errors from the work before and after the entries (the first read, the
