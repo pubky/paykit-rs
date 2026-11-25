@@ -4245,11 +4245,13 @@ impl Paykit {
     /// can end it, so no crash between them leaves a resume that signs another.
     pub(crate) async fn acceptance_withdrawn_at_restore(&mut self, msg_id: &str) -> Result<()> {
         for mut entry in self.journal().await? {
+            // Released or not as the journal last saw it: a crash between queueing it and
+            // marking it released leaves it queued all the same, and held now.
             if entry.restored
-                && entry.acceptance_released
                 && !entry.acceptance_withdrawn
                 && entry.acceptance_msg_id.as_deref() == Some(msg_id)
             {
+                entry.acceptance_released = true;
                 entry.acceptance_withdrawn = true;
                 self.save(&entry).await?;
             }
