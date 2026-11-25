@@ -595,6 +595,19 @@ impl Stored for crate::floor::FloorKept {
     }
 }
 
+impl sealed::Sealed for crate::own_record::OwedRemovals {}
+
+impl Stored for crate::own_record::OwedRemovals {
+    fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
+        // No writer keeps an empty one: the last removal deletes the key.
+        if matches!(family, StateKey::OwedRemovals) && !self.ids.is_empty() {
+            Ok(())
+        } else {
+            corrupt()
+        }
+    }
+}
+
 impl sealed::Sealed for crate::floor::RaiseRetry {}
 
 impl Stored for crate::floor::RaiseRetry {
@@ -858,6 +871,7 @@ impl Stored for bool {
     fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
         match family {
             StateKey::ListDiscovery
+            | StateKey::RestoreRelease
             | StateKey::RecordsUnlisted
             | StateKey::MissedUnlisted
             | StateKey::MissedEndUnknown
@@ -2011,6 +2025,12 @@ pub(crate) mod key {
     pub(crate) const LOSS_RECORDED: &str = "rl";
     /// A floor raise tried and left unwritten (`crate::floor::RaiseRetry`).
     pub(crate) const RAISE_RETRY: &str = "rr";
+    /// The public endpoints the user withdrew that a signed record may still hold
+    /// (`crate::own_record::OwedRemovals`).
+    pub(crate) const OWED_REMOVALS: &str = "ow";
+    /// A restore onto an empty store whose held messages are still to be released
+    /// (`crate::outbound`).
+    pub(crate) const RESTORE_RELEASE: &str = "hr";
     pub(crate) const NOT_PAID_BEFORE_LOSS: &str = "pn/";
     /// A `missed` item's hold whose end isn't known yet (`Paykit::bound_missed_hold`).
     pub(crate) const MISSED_END_UNKNOWN: &str = "mu";
@@ -2728,6 +2748,8 @@ pub(crate) enum StateKey {
     LossRecorded,
     /// `rr`: a floor raise tried and left unwritten.
     RaiseRetry,
+    OwedRemovals,
+    RestoreRelease,
     /// The local identifier of an unanswered floor write.
     FloorBatch,
     /// `fo/<record key>`: a request record a read opened without `manual_only`, to check
@@ -2880,6 +2902,8 @@ impl StateKey {
             "pl" => Self::LossBoundary,
             "rl" => Self::LossRecorded,
             "rr" => Self::RaiseRetry,
+            "ow" => Self::OwedRemovals,
+            "hr" => Self::RestoreRelease,
             "mu" => Self::MissedEndUnknown,
             "nl" => Self::RecordsUnlisted,
             "ml" => Self::MissedUnlisted,
@@ -4350,6 +4374,8 @@ mod tests {
             ),
             (key::LOSS_RECORDED.into(), StateKey::LossRecorded),
             (key::RAISE_RETRY.into(), StateKey::RaiseRetry),
+            (key::OWED_REMOVALS.into(), StateKey::OwedRemovals),
+            (key::RESTORE_RELEASE.into(), StateKey::RestoreRelease),
             (key::BLOCK_FLOOR.into(), StateKey::BlockFloor),
             (key::FLOOR_BATCH.into(), StateKey::FloorBatch),
             (key::floor_opened(&pubky), StateKey::FloorOpened(pubky)),

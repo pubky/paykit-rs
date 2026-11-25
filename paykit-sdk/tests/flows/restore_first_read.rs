@@ -273,6 +273,38 @@ async fn test_restore_first_read_releases_a_held_message_only_once_it_is_complet
         restored.app().held_messages("paykit").await.unwrap(),
         vec![msg_id.clone()]
     );
+    // The receive's read releases it.
+    restored.receive(None).await.unwrap();
+    assert!(restored
+        .app()
+        .held_messages("paykit")
+        .await
+        .unwrap()
+        .is_empty());
+    restored.flush().await.unwrap();
+    let summary = wallet.receive(None).await.unwrap();
+    assert!(summary.applied.contains(&msg_id));
+}
+
+#[tokio::test]
+async fn test_restore_first_read_a_flush_after_the_hosts_own_read_releases_a_held_message() {
+    // The host makes the restore's first read through the client itself; Paykit's flush then
+    // releases what the restore holds and delivers it.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let msg_id = queued_request(&w, &mut shop).await;
+    let reads = Arc::new(ScriptedIdentityReads::new(
+        Arc::clone(&w.homeserver),
+        Arc::clone(&w.clock),
+    ));
+    let mut restored = restore_shop(&w, &mut shop, &reads).await;
+    restored.app_mut().refresh_identity().await.unwrap();
+    restored.app_mut().receive(None).await.unwrap();
+    assert_eq!(
+        restored.app().held_messages("paykit").await.unwrap(),
+        vec![msg_id.clone()]
+    );
     restored.flush().await.unwrap();
     assert!(restored
         .app()
@@ -282,6 +314,80 @@ async fn test_restore_first_read_releases_a_held_message_only_once_it_is_complet
         .is_empty());
     let summary = wallet.receive(None).await.unwrap();
     assert!(summary.applied.contains(&msg_id));
+}
+
+#[tokio::test]
+async fn test_restore_first_read_keeps_a_hosts_hold_through_a_flush() {
+    // A message the host holds itself is held through every read and flush: only a
+    // restore's holds are released (Switch spec 11, "Held or withdrawn by the app").
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let msg_id = queued_request(&w, &mut shop).await;
+    assert!(shop
+        .app_mut()
+        .hold_message("paykit", &msg_id)
+        .await
+        .unwrap());
+    shop.receive(None).await.unwrap();
+    shop.flush().await.unwrap();
+    assert_eq!(
+        shop.app().held_messages("paykit").await.unwrap(),
+        vec![msg_id.clone()]
+    );
+    wallet.receive(None).await.unwrap();
+    assert!(wallet.requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_restore_first_read_in_place_keeps_held_a_message_queued_after_the_backup() {
+    // A restore in place holds the request the store queued after the backup (Switch spec
+    // 12.4, "The outbox"). Before the restore, Paykit delivered only what the backup carried,
+    // so nothing such a restore holds is released, and the duty that tells it stays owed.
+    use paykit_sdk::AppScopes;
+    use pubky_switch_client::app::AppEvent;
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let kept = store();
+    let mut shop = w
+        .join_with(
+            &w.bob,
+            "shop",
+            AppScopes::new().request().build().unwrap(),
+            PaykitConfig::default(),
+            Arc::clone(&kept),
+        )
+        .await;
+    let backup = shop.backup().await.unwrap();
+    let msg_id = queued_request(&w, &mut shop).await;
+    drop(shop);
+    let mut restored = Paykit::restore(
+        w.env(&w.bob, kept),
+        PaykitConfig::default(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    restored.receive(None).await.unwrap();
+    restored.flush().await.unwrap();
+    assert_eq!(
+        restored.app().held_messages("paykit").await.unwrap(),
+        vec![msg_id.clone()]
+    );
+    wallet.receive(None).await.unwrap();
+    assert!(wallet.requests().await.unwrap().is_empty());
+    assert!(restored
+        .app_mut()
+        .pending_duty_events()
+        .await
+        .unwrap()
+        .iter()
+        .any(
+            |duty| matches!(duty.event, AppEvent::MessagesHeldAtRestore { .. })
+                && duty.owners.iter().any(|owner| owner == "paykit")
+        ));
 }
 
 #[tokio::test]

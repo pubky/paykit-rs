@@ -148,23 +148,24 @@ impl Paykit {
 
     pub(crate) async fn send_outbox(&mut self) -> std::result::Result<OutboxReport, AppError> {
         self.require_first_read()?;
-        // What a restore holds goes once its first read is complete, also when the host read
-        // through the client itself.
+        // What a restore onto an empty store holds goes once its first read is complete, also
+        // when the host read through the client itself.
         self.release_restore_holds().await?;
         let _delivery = self.delivery_operation();
         self.service_time_for_delivery().await?;
         Box::pin(self.app.flush_outbox()).await
     }
 
-    /// Release every message of Paykit's that a restore holds, at each read and each flush once
-    /// the restore's first read is complete ([`Paykit::require_first_read`]), with the reply
-    /// grant each asks for
-    /// (Switch spec 12.4, "The outbox"). Paykit delivered these messages at that point before
-    /// the client held them, and this head keeps that: the decisions of Paykit spec 7.2,
-    /// "What a restore loses", for a message carried through a restore are not made here. A
-    /// message whose release fails stays held for the next read, and the others are
-    /// released; one past its replay deadline is the client's to give up. The client's
-    /// `MessagesHeldAtRestore` duty is acknowledged for Paykit once none is held.
+    /// After a restore onto an empty store, release once every message of Paykit's it holds,
+    /// once its first read is complete ([`Paykit::require_first_read`]), with the reply grant
+    /// each asks for (Switch spec 12.4, "The outbox"). Such a restore holds only what the
+    /// backup's outbox carried, which Paykit delivered at that point before the client held
+    /// it. After a restore in place, which also holds what that store queued after the backup,
+    /// nothing is released: the decisions of Paykit spec 7.2, "What a restore loses", aren't
+    /// made yet, and the client's `MessagesHeldAtRestore` duty stays owed. A message whose
+    /// release fails stays held for the next read or flush, and the others are released; one
+    /// past its replay deadline is the client's to give up. The duty is acknowledged for
+    /// Paykit once none is held. A message the host holds itself is never released here.
     ///
     /// # Errors
     ///
@@ -172,6 +173,18 @@ impl Paykit {
     pub(crate) async fn release_restore_holds(&mut self) -> std::result::Result<(), AppError> {
         use pubky_switch_client::app::{AppEvent, ReplyGrantOnRelease};
         let protocol = crate::protocol::BACKUP_NAME;
+        let to_corrupt = |error: crate::error::PaykitError| match error {
+            crate::error::PaykitError::Client(error) => error,
+            _ => AppError::Store(pubky_switch_client::store::StoreError::Corrupt),
+        };
+        if self
+            .local_get::<bool>(crate::state::key::RESTORE_RELEASE)
+            .await
+            .map_err(to_corrupt)?
+            .is_none()
+        {
+            return Ok(());
+        }
         let mut failed = None;
         for msg_id in self.app.held_messages(protocol).await? {
             match self
@@ -192,6 +205,9 @@ impl Paykit {
         if !self.app.held_messages(protocol).await?.is_empty() {
             return Ok(());
         }
+        self.local_delete(crate::state::key::RESTORE_RELEASE)
+            .await
+            .map_err(to_corrupt)?;
         let told: Vec<_> = self
             .app
             .pending_duty_events()
@@ -204,10 +220,7 @@ impl Paykit {
             .filter_map(|duty| duty.event.id())
             .collect();
         for id in told {
-            self.ack_taken(id).await.map_err(|error| match error {
-                crate::error::PaykitError::Client(error) => error,
-                _ => AppError::Store(pubky_switch_client::store::StoreError::Corrupt),
-            })?;
+            self.ack_taken(id).await.map_err(to_corrupt)?;
         }
         Ok(())
     }

@@ -512,6 +512,14 @@ async fn withdraw_public_offer(
     ))
     .await?;
     let publication = if paykit_first {
+        // The reload held the withdrawal aside; Paykit saves it again from the withdrawal it
+        // keeps, which waits for the chat (Paykit spec 4, "Changes saved and not yet
+        // signed").
+        let waiting = wallet.update_own_record().await.unwrap_err();
+        assert!(
+            matches!(waiting, PaykitError::PublicEndpointChangePending(_)),
+            "{waiting:?}"
+        );
         assert!(wallet.app_mut().protocol_record("paykit").await?.pending);
         if withdraw_early {
             world.lose_answer("POST", "/ops");

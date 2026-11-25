@@ -134,15 +134,18 @@ answer of the service such as `switch_unavailable`. Call `receive` and read
 nothing, while a different map replaces the saved edit.
 
 A reload or a restore before that holds the saved edit aside, and the wallet
-decides it at the load or, after a restore, at the first `receive` (Paykit spec
-4, "Changes saved and not yet signed"). A withdrawal is published, also over an
-offer of the same endpoint made after it: the user then makes that offer again.
-An offer or a changed payload is not published, and
-`NoticeKind::PublicEndpointChangeNotPublished` tells the host: read
+decides it at the first `receive` after its read (Paykit spec 4, "Changes saved
+and not yet signed"); a load sends and signs nothing. A withdrawal is kept by the
+wallet itself from the moment it is asked, and published then, also over an offer
+of the same endpoint made after it on another device: the user then makes that
+offer again. Until that `receive`, another protocol's change of the record can
+still sign the endpoint withdrawn. An offer or a changed payload is not published,
+and `NoticeKind::PublicEndpointChangeNotPublished` tells the host: read
 `own_public_endpoints` and make the change again.
 
 After restoring a backup, drive the wallet's first receive: until it has read,
-the record isn't changed or published, and publication reports
+the record isn't changed or published. A change asked before it is refused with
+`Refusal::NotNow`, and the client's own publication reports
 `Publication::AwaitingRead`. When publication
 returns `Publication::AwaitingRecord`, the wallet still has a newer record
 choice to settle. Keep the change pending and continue normal receives.
@@ -541,6 +544,8 @@ These three are not kept after the call returns. A crash before the host handles
 
 `AppEvent::RecordEditsHeld` is a duty event the wallet takes for Paykit: it decides Paykit's held record change as the public endpoints section above says, and acknowledges the event for `"paykit"`. Another protocol it names decides its own.
 
+`AppEvent::MessagesHeldAtRestore` is a duty event about the messages a restore holds until their protocol releases or withdraws each. After a restore onto an empty store, which holds only what the backup carried, the wallet releases Paykit's once the first read is complete, and acknowledges the event for `"paykit"`. After a restore in place, which also holds what that store queued after the backup, the wallet releases none of them: they stay held, the event stays owed, and one past its replay deadline is given up and told. Show the user that messages from before the restore wait. A message the host holds itself is never released by the wallet.
+
 ### Withdrawing public endpoints and paying offline
 
 To stop offering public endpoints, call `set_public_endpoints` with an empty set while publication is on, and check the result. `Published` means the Homeserver holds the record without them. For any other result, check that the withdrawal is visible before going further. Turn `publishes_record` off only if the app should stop publishing its record on the Homeserver altogether; it still gives its app record to the Switch. Until the withdrawal is visible, the old endpoints expire, or the app is revoked, a payer can still pay the endpoints it read before.
@@ -602,7 +607,9 @@ backup, keeps, kind by kind:
 
 A notice the host acknowledged after the backup, which acknowledging deleted, can be
 listed again after the restore: the same occurrence comes back with the same `id` and
-`raised_at_ms`, and the host may skip one it recorded acknowledging with both. A notice
+`raised_at_ms`, and the host may skip one it recorded acknowledging with both.
+`NoticeKind::PublicEndpointChangeNotPublished` can be told again for the same change,
+and acknowledging it again does no harm. A notice
 raised again is a new occurrence with the same `id` and a later `raised_at_ms`, such as a
 `HeldWithoutPay` whose hold started again, or an identity notice told again while its
 hold stands: show it as the table below says. Handle Switch

@@ -143,6 +143,9 @@ pub struct PaykitProtocol {
     extensions: Vec<ExtensionKind>,
     /// The service time the current Paykit delivery operation observed (Paykit spec 8.1).
     pub(crate) delivery: crate::send_holds::DeliveryClock,
+    /// The public endpoints still owed removed, as the app last read them, for a
+    /// certificate renewal's member (`crate::own_record::OwedRemovals`).
+    owed_removals: std::sync::Mutex<crate::own_record::OwedRemovals>,
 }
 
 /// [`PaykitProtocol`]'s publishing setting: not told yet.
@@ -173,6 +176,7 @@ impl PaykitProtocol {
             rail: None,
             extensions: Vec::new(),
             delivery: crate::send_holds::DeliveryClock::default(),
+            owed_removals: std::sync::Mutex::default(),
         }
     }
 
@@ -189,6 +193,13 @@ impl PaykitProtocol {
     }
 
     /// Whether the app publishes its record: `None` when Paykit wasn't told.
+    /// Keep `owed` as the public endpoints a certificate renewal's member leaves out.
+    pub(crate) fn set_owed_removals(&self, owed: &crate::own_record::OwedRemovals) {
+        if let Ok(mut held) = self.owed_removals.lock() {
+            held.clone_from(owed);
+        }
+    }
+
     fn publishes_record(&self) -> Option<bool> {
         match self
             .publishes_record
@@ -641,6 +652,21 @@ pub(crate) fn restore_paykit_layer(
     }
     // A repeated import on this installation preserves notices the host has already seen,
     // and unresolved ones first observed since the backup (Paykit spec 7.2).
+    let mut owed_removals = crate::own_record::OwedRemovals::default();
+    for (key, value) in restoring
+        .previous_local_scan(key::OWED_REMOVALS.as_bytes())
+        .map_err(|_| "the installation's withdrawn endpoints cannot be read")?
+    {
+        let owed = state::restored::<crate::own_record::OwedRemovals>(&key, &value, &binder)
+            .map_err(|_| "the installation's withdrawn endpoints are invalid")?;
+        owed_removals.ids.extend(owed.ids);
+    }
+    // A restore onto a store with no state of Paykit's holds only what the backup's outbox
+    // carried, which Paykit delivered before the client held it (`crate::outbound`).
+    let onto_empty = restoring
+        .previous_local_scan(b"")
+        .map_err(|_| "the installation's state cannot be read")?
+        .is_empty();
     let mut delivery_notices = std::collections::BTreeMap::new();
     let mut unresolved = std::collections::BTreeMap::new();
     let mut pending_conflicts = std::collections::BTreeMap::new();
@@ -951,6 +977,17 @@ pub(crate) fn restore_paykit_layer(
             StateKey::ListsRead | StateKey::ListsReadUnder | StateKey::ListsTold => continue,
             // How a raise was last tried belongs to the installation that tried it.
             StateKey::RaiseRetry => continue,
+            // A withdrawal the backup keeps owed joins the installation's: a withdrawal wins
+            // (Paykit spec 4, "Changes saved and not yet signed").
+            StateKey::OwedRemovals => {
+                let owed =
+                    state::restored::<crate::own_record::OwedRemovals>(&key, &value, &binder)
+                        .map_err(|_| unread())?;
+                owed_removals.ids.extend(owed.ids);
+                continue;
+            }
+            // Which restore still releases what it holds is this restore's own (below).
+            StateKey::RestoreRelease => continue,
             // Nor the service time the delivery hook judges by: the restore's first read
             // writes it again, and until then the device clock alone judges.
             StateKey::ServiceTime => continue,
@@ -1571,6 +1608,18 @@ pub(crate) fn restore_paykit_layer(
     if let Some((key, value)) = endpoint_notice {
         writes.push(LocalWrite::Put { key, value });
     }
+    if !owed_removals.ids.is_empty() {
+        writes.push(
+            state::local_put(key::OWED_REMOVALS, &owed_removals)
+                .map_err(|_| "the withdrawn endpoints cannot be written")?,
+        );
+    }
+    if onto_empty {
+        writes.push(
+            state::local_put(key::RESTORE_RELEASE, &true)
+                .map_err(|_| "the restore's release cannot be written")?,
+        );
+    }
     for (key, stop) in previous_stops {
         let value = state::encode(&stop).map_err(|_| "a queued stop cannot be written")?;
         writes.push(LocalWrite::Put { key, value });
@@ -2112,7 +2161,16 @@ impl Protocol for PaykitProtocol {
         ask: RecordExpiry,
         cert: &AppCert,
     ) -> (Option<Map<String, Value>>, RecordExpiry) {
-        crate::own_record::member_under(member, ask, cert, self.publishes_record())
+        let (mut member, ask) =
+            crate::own_record::member_under(member, ask, cert, self.publishes_record());
+        // Never an endpoint the user withdrew; a lock a panic poisoned keeps none out, as the
+        // upkeep after the read withdraws them again.
+        let left = match (member.as_mut(), self.owed_removals.lock()) {
+            (Some(member), Ok(owed)) => crate::own_record::apply_owed_removals(&owed, member),
+            (Some(member), Err(_)) => member.contains_key("public_endpoints"),
+            (None, _) => false,
+        };
+        (member, if left { ask } else { RecordExpiry::Never })
     }
 
     /// The kinds this SDK handles that the certificate's scopes receive (Switch spec 3.4):

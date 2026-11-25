@@ -279,7 +279,10 @@ impl Paykit {
         held.retain(is_extension);
         wanted.sort();
         held.sort();
-        if wanted == held {
+        // A change of the accepted kinds signs Paykit's member as the record holds it: while
+        // that still has an endpoint the user withdrew, it waits for the upkeep that withdraws
+        // it, which aligns them after.
+        if wanted == held || self.record_holds_owed_removal().await? {
             return Ok(());
         }
         match self.app.update_accepts().await {
