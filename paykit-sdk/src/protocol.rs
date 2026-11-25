@@ -2183,6 +2183,15 @@ impl Protocol for PaykitProtocol {
     /// (`crate::own_record::member_under`): signed once with the certificate, so a record
     /// under it never lists a public endpoint or a capability it doesn't cover (Paykit spec,
     /// "What this pin adopts", "Renewing a certificate").
+    ///
+    /// Security: the one path that signs Paykit's member outside the gate that tells a held
+    /// change first (`Paykit::held_change_settled`). The client calls it to take a renewal or
+    /// adopt a certificate, which it must take (Dispatch spec 3.2), and the trait gives it no
+    /// way to refuse: it is pure and synchronous. It is safe only because `member` is the
+    /// member of the record the client holds as signed, with this run's own changes, and
+    /// never a change held aside (Dispatch spec 4.2): a held change, a withdrawal included,
+    /// has no effect on what it signs, and stays held until it is told. It reads nothing
+    /// else, so nothing of a held change can reach it.
     fn member_for(
         &self,
         member: Option<&Map<String, Value>>,

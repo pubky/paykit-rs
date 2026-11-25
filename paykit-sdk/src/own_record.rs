@@ -1114,6 +1114,49 @@ mod gate_tests {
         ]);
         assert_eq!(counts, expected);
     }
+
+    #[test]
+    fn test_own_record_member_for_is_the_one_signing_path_outside_the_gate() {
+        // The client signs Paykit's member without the gate in one place only: the renewal
+        // callback, which it must call to take a renewal and which can't refuse. It is given
+        // only the member signed and this run's changes, never a held one, so a held change
+        // has no effect on what it signs (`PaykitProtocol::member_for`). A second callback
+        // that builds Paykit's member fails this test until it is shown safe the same way.
+        let mut callbacks = Vec::new();
+        fn walk(dir: &std::path::Path, out: &mut Vec<String>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    walk(&path, out);
+                } else if path.extension().is_some_and(|ext| ext == "rs") {
+                    let text = std::fs::read_to_string(&path).unwrap();
+                    let code = text.split("\n#[cfg(test)]").next().unwrap_or_default();
+                    let name = path.file_name().unwrap().to_string_lossy().into_owned();
+                    for needle in ["fn member_for(", "member_under("] {
+                        for _ in code.match_indices(needle) {
+                            out.push(format!("{name}: {needle}"));
+                        }
+                    }
+                }
+            }
+        }
+        walk(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut callbacks,
+        );
+        callbacks.sort();
+        assert_eq!(
+            callbacks,
+            [
+                "own_record.rs: member_under(",
+                "protocol.rs: fn member_for(",
+                "protocol.rs: member_under(",
+            ],
+            "the renewal callback is the one signing of Paykit's member outside the gate: it \
+             must take a renewal and can't refuse, and is safe only while it is given no held \
+             change"
+        );
+    }
 }
 
 #[cfg(test)]
