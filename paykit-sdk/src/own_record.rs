@@ -365,9 +365,11 @@ impl Paykit {
     /// app is loaded again.
     pub(crate) async fn tend_own_record_at_receive(&mut self) -> Result<Option<String>> {
         let before = self.own_standing();
-        // What a reload or a restore held aside is decided first, whatever the rest of the
-        // upkeep then meets; it signs nothing of Paykit's member. A failure there is the
-        // upkeep's.
+        // What a reload or a restore held aside is decided first. The order is safe: the step
+        // signs nothing of Paykit's member, so the upkeep after it signs as it would without it.
+        // A failing upkeep, such as one a sibling's expired policy refuses, can then no longer
+        // leave a held change untold, nor keep it held, which would keep the record's
+        // publication waiting. A failure of the step itself is the upkeep's.
         if let Err(error) = Box::pin(self.settle_held_record_edits()).await {
             return upkeep_outcome(error, &before, &self.own_standing());
         }
