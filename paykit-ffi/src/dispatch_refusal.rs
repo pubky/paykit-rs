@@ -1,18 +1,18 @@
-use pubky_switch_client::app::{AppError, Refusal, WontDeliver};
+use pubky_dispatch_client::app::{AppError, Refusal, WontDeliver};
 use std::sync::Arc;
 
-/// The Switch rule that held the operation, including an earlier batch waiting for an answer.
+/// The Dispatch rule that held the operation, including an earlier batch waiting for an answer.
 #[derive(uniffi::Object)]
-pub struct SwitchRefusal(pub(crate) Refusal);
+pub struct DispatchRefusal(pub(crate) Refusal);
 
 /// No text: the client's refusal can carry what a counterparty or the service gave.
-impl std::fmt::Debug for SwitchRefusal {
+impl std::fmt::Debug for DispatchRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SwitchRefusal").finish_non_exhaustive()
+        f.debug_struct("DispatchRefusal").finish_non_exhaustive()
     }
 }
 
-impl SwitchRefusal {
+impl DispatchRefusal {
     pub(crate) fn from_error(error: &AppError) -> Option<Arc<Self>> {
         let rule = match error {
             AppError::Refused(rule) => rule.clone(),
@@ -26,16 +26,16 @@ impl SwitchRefusal {
 }
 
 #[uniffi::export]
-impl SwitchRefusal {
+impl DispatchRefusal {
     /// Read the rule and its original evidence.
-    pub fn kind(&self) -> SwitchRefusalKind {
+    pub fn kind(&self) -> DispatchRefusalKind {
         (&self.0).into()
     }
 }
 
-/// The Switch rule and the evidence required to act on it.
+/// The Dispatch rule and the evidence required to act on it.
 #[derive(uniffi::Enum)]
-pub enum SwitchRefusalKind {
+pub enum DispatchRefusalKind {
     /// The installation stopped on an alarm.
     Stopped,
     /// The installation left its identity or was removed.
@@ -106,7 +106,7 @@ pub enum SwitchRefusalKind {
     Unknown,
 }
 
-impl From<&Refusal> for SwitchRefusalKind {
+impl From<&Refusal> for DispatchRefusalKind {
     fn from(value: &Refusal) -> Self {
         match value {
             Refusal::Stopped => Self::Stopped,

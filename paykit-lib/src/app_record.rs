@@ -1,7 +1,7 @@
 //! Paykit's member of an app record, `protocols.paykit` (Paykit spec 4, Paykit wire 3.2).
 //!
-//! The Switch checks only the form of `protocols`: an object of objects under names of a
-//! scope name's syntax (Switch wire 3.2). A Paykit reader then reads Paykit's member here: the
+//! The Dispatch checks only the form of `protocols`: an object of objects under names of a
+//! scope name's syntax (Dispatch wire 3.2). A Paykit reader then reads Paykit's member here: the
 //! Payment Endpoint Identifiers the app can pay to, and its public endpoints. It refuses a
 //! record whose member isn't of the form of Paykit wire 3.2, whose identifiers or payloads
 //! break Paykit wire 1.4. A public record may have a finite deadline or none.
@@ -13,13 +13,13 @@
 
 use std::collections::BTreeMap;
 
-use pubky_switch_core::records::AppRecord;
+use pubky_dispatch_core::records::AppRecord;
 use serde_json::{Map, Value};
 
 use crate::error::{invalid, Result};
 use crate::identifiers::{PaymentEndpointIdentifier, PaymentEndpointPayload};
 
-/// Paykit's protocol name, the name of its member under an app record's `protocols` (Switch
+/// Paykit's protocol name, the name of its member under an app record's `protocols` (Dispatch
 /// wire 3.2 "Protocols' members").
 pub const PROTOCOL_NAME: &str = "paykit";
 

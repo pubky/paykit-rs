@@ -17,8 +17,8 @@ use paykit_lib::records::{
     ActivityRecord, ActivitySide, AllowanceRecord, PaymentListRecord, StoredMessage,
 };
 use paykit_lib::scopes::{check_scopes, permissions_for, verify_certificate, Label};
-use pubky_switch_core::message::Message;
-use pubky_switch_core::scopes::permission_names;
+use pubky_dispatch_core::message::Message;
+use pubky_dispatch_core::scopes::permission_names;
 use serde_json::{json, Value};
 
 use crate::common::{
@@ -47,7 +47,7 @@ fn body_round_trips(body: &Body, refs: usize, name: &str) -> bool {
                 kind: body.kind().as_str().into(),
                 msg_id: "1b4e28ba-2fa1-41d2-883f-0016d3cca427".into(),
                 created_at_ms: 0,
-                from: pubky_switch_core::message::Sender {
+                from: pubky_dispatch_core::message::Sender {
                     identity: [1; 32],
                     app_id: [2; 16],
                 },
@@ -544,7 +544,7 @@ fn writers_refuse_every_rejection_case() {
         assert!(terms.to_json().is_err(), "{name}");
     }
     // documents.json: the scopes and permissions Paykit gives the signer never make a
-    // certificate its verifiers refuse: the signer runs the Switch's scope rule and Paykit's,
+    // certificate its verifiers refuse: the signer runs the Dispatch's scope rule and Paykit's,
     // and signs the permissions Paykit's scopes need, beside another protocol's.
     let d = paykit("documents.json");
     let cases = arr(&d["certificate_rejections"], "cases")
@@ -563,7 +563,7 @@ fn writers_refuse_every_rejection_case() {
         let covered = given.iter().all(|p| permissions.contains(p))
             && (other_protocol || given == permissions);
         assert!(
-            pubky_switch_core::scopes::check_scopes(&scopes).is_err()
+            pubky_dispatch_core::scopes::check_scopes(&scopes).is_err()
                 || check_scopes(&scopes).is_err()
                 || !covered,
             "{name}: the signer would issue it"

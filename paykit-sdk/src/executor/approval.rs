@@ -4,9 +4,9 @@ use paykit_lib::allowances::Ledger;
 use paykit_lib::bodies::ProposerRole;
 use paykit_lib::records::{bind_ledger, AllowanceRecord, PendingAllowanceRecord};
 use paykit_lib::{Body, Collection};
-use pubky_switch_client::app::{App, KeptOp};
-use pubky_switch_core::ops::{Condition, RecordVersion};
-use pubky_switch_core::shared::ApplicationRef;
+use pubky_dispatch_client::app::{App, KeptOp};
+use pubky_dispatch_core::ops::{Condition, RecordVersion};
+use pubky_dispatch_core::shared::ApplicationRef;
 
 use super::checkpoint::ledger_target;
 use super::evidence::{AppliedRecord, Purpose};
@@ -28,7 +28,7 @@ pub(super) struct ApprovedOpening {
 
 impl ApprovedOpening {
     /// The retained proofs date the original writes. A grant checkpoint records that this
-    /// installation verified them before the signer retired their key (Switch spec 4.3).
+    /// installation verified them before the signer retired their key (Dispatch spec 4.3).
     fn verify(
         app: &App,
         key: &[u8; 32],

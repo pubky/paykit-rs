@@ -13,7 +13,7 @@
 //!   proposal while the acceptance awaits placement. The original recipient-signed
 //!   acceptance opens a permanent Allowance together with the original ledger on the payer’s account.
 //! - **The stop:** a counterparty's `allowance_end` is kept in the app's own state in the
-//!   commit that passes its entry, with no write at the switch (`ae/`): at once for an
+//!   commit that passes its entry, with no write at the Dispatch (`ae/`): at once for an
 //!   Allowance whose record the app holds, whatever the record's value, never waiting for
 //!   a scope key; for one it holds no record of, as new state, bounded together with the
 //!   payees' cancellations kept for requests not held. Such a stop goes 30 days after the
@@ -38,7 +38,7 @@
 //!
 //! Security: the stop is the kept end, not the record, so an own app that rewrites the
 //! record, or a record write that fails, never lifts it; the record's seen roles keep an own
-//! app from dropping a message another app recorded (Paykit wire 5.4, Switch spec 8.2).
+//! app from dropping a message another app recorded (Paykit wire 5.4, Dispatch spec 8.2).
 
 use paykit_lib::allowances::AllowanceTerms;
 use paykit_lib::bodies::{
@@ -51,11 +51,11 @@ use paykit_lib::records::{
     bounded_msg_ids, AllowanceRecord, PendingAllowanceRecord, StoredMessage,
 };
 use paykit_lib::{AllowanceId, Body};
-use pubky_switch_client::app::{
+use pubky_dispatch_client::app::{
     Delivery, LocalWrite, OpBatch, ReceiveContext, RecordContent, RecordTarget, SignedMessage,
 };
-use pubky_switch_core::enc::serde_b64;
-use pubky_switch_core::http::ErrorCode;
+use pubky_dispatch_core::enc::serde_b64;
+use pubky_dispatch_core::http::ErrorCode;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{PaykitError, Refusal, Result};
@@ -394,7 +394,7 @@ pub(crate) struct EndOrigin {
 }
 
 impl EndOrigin {
-    fn matches(&self, message: &pubky_switch_core::message::Message, hash: [u8; 32]) -> bool {
+    fn matches(&self, message: &pubky_dispatch_core::message::Message, hash: [u8; 32]) -> bool {
         let Ok(Body::AllowanceEnd(end)) = Body::parse(message) else {
             return false;
         };
@@ -458,9 +458,9 @@ impl EndOrigin {
 
 /// Authorize this exact counterparty end at each delivery attempt (Paykit spec 3.1, 8.1).
 pub(crate) fn may_deliver_end(
-    delivery: &pubky_switch_client::app::DeliveryView<'_>,
+    delivery: &pubky_dispatch_client::app::DeliveryView<'_>,
 ) -> Result<bool> {
-    use pubky_switch_client::app::DeliveryOrigin;
+    use pubky_dispatch_client::app::DeliveryOrigin;
 
     let message = delivery.message();
     let scopes = delivery.cert().scopes();
@@ -494,12 +494,12 @@ pub(crate) fn may_deliver_end(
 
 /// Whether `delivery` is the original delivery of an `allowance_end` the user initiated,
 /// by the durable origin kept for exactly that signed end (Paykit spec 3.1, 8.3).
-pub(crate) fn user_end(delivery: &pubky_switch_client::app::DeliveryView<'_>) -> Result<bool> {
+pub(crate) fn user_end(delivery: &pubky_dispatch_client::app::DeliveryView<'_>) -> Result<bool> {
     let message = delivery.message();
     let origin = state::delivery_get::<EndOrigin>(delivery, &key::end_origin(&message.msg_id))?;
     Ok(origin.is_some_and(|origin| {
         origin.cause == EndCause::User && origin.matches(message, delivery.hash())
-    }) && delivery.origin() == pubky_switch_client::app::DeliveryOrigin::Original)
+    }) && delivery.origin() == pubky_dispatch_client::app::DeliveryOrigin::Original)
 }
 
 /// The client's target of the `allowances` record of `counterparty`'s Allowance
@@ -615,7 +615,7 @@ pub(crate) type AnswerOrder = crate::records::KeptOrder;
 struct HeldAnswer {
     message: StoredMessage,
     order: AnswerOrder,
-    position: Option<pubky_switch_client::app::FeedPosition>,
+    position: Option<pubky_dispatch_client::app::FeedPosition>,
     source: Option<crate::divergent::SeenVersion>,
 }
 
@@ -802,7 +802,7 @@ fn keep_earlier_acceptance_for_report(
     cx: &mut ReceiveContext<'_>,
     target: &RecordTarget,
     q: &StoredMessage,
-    position: pubky_switch_client::app::FeedPosition,
+    position: pubky_dispatch_client::app::FeedPosition,
 ) -> std::result::Result<(), Fail> {
     if matches!(q.body(), Body::AllowanceAcceptance(_)) {
         let key = key::original_allowance(&cx.record_key(target)?);
@@ -833,7 +833,7 @@ fn keep_earlier_acceptance_for_report(
 pub(crate) fn receive_effect(
     cx: &mut ReceiveContext<'_>,
     stored: &StoredMessage,
-    position: pubky_switch_client::app::FeedPosition,
+    position: pubky_dispatch_client::app::FeedPosition,
     scopes: &[String],
 ) -> std::result::Result<(), Fail> {
     let sender = stored.sender();
@@ -959,7 +959,7 @@ fn keep_answer(
     cx: &mut ReceiveContext<'_>,
     target: &RecordTarget,
     stored: &StoredMessage,
-    position: pubky_switch_client::app::FeedPosition,
+    position: pubky_dispatch_client::app::FeedPosition,
     over_held: bool,
     source: Option<crate::divergent::SeenVersion>,
 ) -> std::result::Result<(), Fail> {
@@ -978,7 +978,7 @@ fn keep_answer(
 /// A proposal or an answer whose Allowance record the app holds as a value it can't read
 /// for a reason other than a missing key: never written over, since it may hold what another
 /// own app stored, and not dropped at once. The entry is stored locally, the
-/// cursor passing it (Switch spec 8.2), and its step is tried again at each read, so the
+/// cursor passing it (Dispatch spec 8.2), and its step is tried again at each read, so the
 /// message goes into the record once the record reads. Once [`KEPT_MESSAGE_MS`] have passed
 /// since acceptance, ordinary placement may end. Unresolved conflict evidence survives
 /// with its own host notice (Paykit spec 8.1, "Stored entries"). A value only waiting for its scope key holds the entry
@@ -986,7 +986,7 @@ fn keep_answer(
 fn stored_entry(
     cx: &mut ReceiveContext<'_>,
     stored: &StoredMessage,
-    position: pubky_switch_client::app::FeedPosition,
+    position: pubky_dispatch_client::app::FeedPosition,
     unresolved: Option<(&RecordTarget, Option<crate::divergent::SeenVersion>)>,
 ) -> std::result::Result<(), Fail> {
     // Past its window on the highest service time verified (Paykit spec 8.1). A stored
@@ -1017,7 +1017,7 @@ fn stored_entry(
     }
     Err(Fail::Defer {
         reason: "Allowance record unresolved",
-        custody: pubky_switch_client::app::DeferCustody::Immediate,
+        custody: pubky_dispatch_client::app::DeferCustody::Immediate,
     })
 }
 
@@ -1030,7 +1030,7 @@ fn put_placed(
     target: &RecordTarget,
     mut record: AllowanceRecord,
     stored: &StoredMessage,
-    position: pubky_switch_client::app::FeedPosition,
+    position: pubky_dispatch_client::app::FeedPosition,
     scopes: &[String],
 ) -> std::result::Result<(), Fail> {
     let seq = position.seq;
@@ -1172,7 +1172,7 @@ fn answers_kept(
 
 /// A second, different proposal or response, received (Paykit spec 8.3, "Conflicted"):
 /// kept durably as the stop in the commit that passes the entry, before anything else is
-/// done with it, with no write at the switch (`cf/<record key>`); the app writes it into the
+/// done with it, with no write at the Dispatch (`cf/<record key>`); the app writes it into the
 /// record's `conflicted` by a later write of its own ([`Paykit::place_conflicts`]). The first
 /// one kept stays: one record holds one `conflicted`. An executor's consent list drops the
 /// Allowance for good in the same commit.
@@ -1184,7 +1184,7 @@ fn keep_conflict(
     cx: &mut ReceiveContext<'_>,
     target: &RecordTarget,
     stored: &StoredMessage,
-    position: pubky_switch_client::app::FeedPosition,
+    position: pubky_dispatch_client::app::FeedPosition,
     scopes: &[String],
 ) -> std::result::Result<(), Fail> {
     let record_key = cx.record_key(target)?;
@@ -1246,7 +1246,7 @@ fn conflict_writes(
 }
 
 /// A counterparty's end (Paykit spec 8.3, "Ends reach the executor"): kept as the stop in
-/// the commit that passes the entry, with no write at the switch.
+/// the commit that passes the entry, with no write at the dispatch.
 ///
 /// One for an Allowance whose record the app holds ([`receive::holds_record`]: any content
 /// but a delete, a value that doesn't read and one sealed under a scope key the app doesn't
@@ -1282,7 +1282,7 @@ fn keep_end(
     target: &RecordTarget,
     allowance_id: &AllowanceId,
     stored: &StoredMessage,
-    position: pubky_switch_client::app::FeedPosition,
+    position: pubky_dispatch_client::app::FeedPosition,
     scopes: &[String],
 ) -> std::result::Result<(), Fail> {
     let sender = stored.sender();
@@ -1309,7 +1309,7 @@ fn keep_end(
                 }
                 None => original.keep_loss_return(stored, &evidence, &record_key, |d| {
                     cx.received_order(
-                        pubky_switch_client::app::FeedPosition {
+                        pubky_dispatch_client::app::FeedPosition {
                             generation: d.generation,
                             seq: d.version,
                         },
@@ -1487,13 +1487,13 @@ pub(crate) fn end_names_acceptance(end: &StoredMessage, q: &StoredMessage) -> bo
 /// signed proposal after deletion does not make either old message current.
 fn pending_end_acceptance(
     end: &StoredMessage,
-    end_at: pubky_switch_client::app::FeedPosition,
+    end_at: pubky_dispatch_client::app::FeedPosition,
     q: &StoredMessage,
-    q_at: Option<pubky_switch_client::app::FeedPosition>,
-    source: pubky_switch_core::ops::RecordVersion,
+    q_at: Option<pubky_dispatch_client::app::FeedPosition>,
+    source: pubky_dispatch_core::ops::RecordVersion,
     order: impl Fn(
-        pubky_switch_client::app::FeedPosition,
-        pubky_switch_client::app::FeedPosition,
+        pubky_dispatch_client::app::FeedPosition,
+        pubky_dispatch_client::app::FeedPosition,
     ) -> Option<std::cmp::Ordering>,
 ) -> Option<Box<KeptMessage>> {
     let q_at = q_at?;
@@ -1696,7 +1696,7 @@ impl Paykit {
     /// Reconstruct only the same classified end, under ordinary contact authorization.
     pub(crate) async fn may_queue_stored_end(
         &self,
-        message: &pubky_switch_core::message::Message,
+        message: &pubky_dispatch_core::message::Message,
         hash: [u8; 32],
     ) -> Result<bool> {
         if !Box::pin(self.allowance_end_send_permitted(&message.to)).await? {
@@ -1763,11 +1763,11 @@ impl Paykit {
         &mut self,
         peer: &[u8; 32],
         id: &AllowanceId,
-        deletion: pubky_switch_core::shared::ApplicationRef,
+        deletion: pubky_dispatch_core::shared::ApplicationRef,
         deletion_write: &crate::executor::OwnWrite,
-    ) -> Result<Option<pubky_switch_core::ops::Condition>> {
-        use pubky_switch_client::app::{KeptReason, RecordRead};
-        use pubky_switch_core::ops::{Condition, RecordVersion};
+    ) -> Result<Option<pubky_dispatch_core::ops::Condition>> {
+        use pubky_dispatch_client::app::{KeptReason, RecordRead};
+        use pubky_dispatch_core::ops::{Condition, RecordVersion};
         let target = allowance_record_target(Collection::AllowanceProposals, peer, id);
         let key = self.app.record_key(&target)?;
         if self.unresolved_allowance(&key).await?
@@ -1783,7 +1783,7 @@ impl Paykit {
         // app's own retained write (`OwnWrite`).
         let own_deletion = matches!(&read, RecordRead::Fresh(r)
             if replies::qualified_as(r, &target, &key, deletion_write)
-                && r.content == pubky_switch_client::app::RecordContent::Deleted);
+                && r.content == pubky_dispatch_client::app::RecordContent::Deleted);
         if !own_deletion && !matches!(delivery::current(&target, &key, &read, true), Some(None)) {
             return Ok(None);
         }
@@ -1807,7 +1807,7 @@ impl Paykit {
                         current.application == deletion
                             && replies::qualified_as(&current.record, &target, &key, deletion_write)
                             && current.record.content
-                                == pubky_switch_client::app::RecordContent::Deleted
+                                == pubky_dispatch_client::app::RecordContent::Deleted
                     })
                     .then_some(Condition::RecordCurrent {
                         key,
@@ -2101,7 +2101,7 @@ impl Paykit {
         Ok(())
     }
 
-    /// Retire an end's fact only after every source of its delivery has ended (Switch
+    /// Retire an end's fact only after every source of its delivery has ended (Dispatch
     /// spec 11). A positively bound pre-queue owed end keeps it even before the client
     /// has the message. Every retained sent or failed delivery keeps it too.
     ///
@@ -2156,7 +2156,7 @@ impl Paykit {
             if let Some(id) = self.local_get::<[u8; 16]>(&batch_key).await? {
                 if matches!(
                     self.app.kept_batch(id).await?,
-                    Some(pubky_switch_client::app::KeptBatchStatus::Kept { .. })
+                    Some(pubky_dispatch_client::app::KeptBatchStatus::Kept { .. })
                 ) {
                     continue;
                 }
@@ -2366,7 +2366,7 @@ impl Paykit {
     }
 
     /// Write `next` at `target` and queue `queue`, with `locals`, in one batch: the
-    /// messages go out only if the write is applied. A batch kept for a switch not
+    /// messages go out only if the write is applied. A batch kept for a Dispatch not
     /// answering now counts as written: it goes with the app's next write or read. After
     /// `409 conflict` the record is read again. This and [`Paykit::propose_allowance`] are
     /// the only writes of an Allowance record: a write storing a message this app signed
@@ -2376,19 +2376,19 @@ impl Paykit {
     /// A write of `value` over the Allowance record at `target`, with `conditions`, built on
     /// the version the service holds the record's current write at. After a recovery upload
     /// that can be lower than the version this app holds for the same write, and the
-    /// compare-and-swap is on the service's version (Pubky Switch wire 6.3, 7.6): the write
+    /// compare-and-swap is on the service's version (Pubky Dispatch wire 6.3, 7.6): the write
     /// keeps the client's `record_current` on that exact write and takes the installed
     /// version as its `expected_version`.
     pub(crate) async fn allowance_record_op(
         &mut self,
         target: &RecordTarget,
         value: &[u8],
-        conditions: Vec<pubky_switch_core::ops::Condition>,
+        conditions: Vec<pubky_dispatch_core::ops::Condition>,
     ) -> Result<(
-        Vec<pubky_switch_core::ops::Condition>,
-        pubky_switch_core::ops::OpKind,
+        Vec<pubky_dispatch_core::ops::Condition>,
+        pubky_dispatch_core::ops::OpKind,
     )> {
-        use pubky_switch_core::ops::{Condition, OpKind};
+        use pubky_dispatch_core::ops::{Condition, OpKind};
         let (conditions, mut kind) = self.app.record_op(target, Some(value), conditions).await?;
         if let OpKind::RecordPut(put) = &mut kind {
             // Only a write the client conditions on an exact earlier write can be over an
@@ -2810,7 +2810,7 @@ impl Paykit {
     /// kept, stops payment before the record shows it. Nor is one whose record isn't held
     /// now as a value that reads and binds and shows no end, rejection or conflict, read
     /// here, so a record that changed outside a receive counts at once: one held as deleted
-    /// pays nothing, and neither does one whose current write the app ignores (Switch spec
+    /// pays nothing, and neither does one whose current write the app ignores (Dispatch spec
     /// 8.2; Paykit spec 8.3, "Executor", "Ending"): the user's confirmation of such a write
     /// comes with the executor, so until then it pays nothing.
     pub(crate) async fn consents(&self, record: &[u8; 32]) -> Result<bool> {
@@ -2920,7 +2920,7 @@ impl Paykit {
         {
             if matches!(
                 self.app.kept_batch(id).await?,
-                Some(pubky_switch_client::app::KeptBatchStatus::Kept { .. })
+                Some(pubky_dispatch_client::app::KeptBatchStatus::Kept { .. })
             ) {
                 return Ok(ConsentState::GrantKept);
             }
@@ -3016,7 +3016,7 @@ impl Paykit {
                 if now
                     > reply
                         .created_at_ms
-                        .saturating_add(pubky_switch_client::app::SENT_RETENTION_MS)
+                        .saturating_add(pubky_dispatch_client::app::SENT_RETENTION_MS)
                 {
                     tx.delete(&format!("{}{rest}", key::APPLIED_REPLIES));
                 }
@@ -3194,7 +3194,7 @@ impl Paykit {
                 }
                 Some(RecordContent::Value(_)) => {
                     if let Some(held) = Box::pin(self.held_allowance(&record)).await? {
-                        // A write the switch refuses now is tried at the next run; the stop
+                        // A write the Dispatch refuses now is tried at the next run; the stop
                         // stands meanwhile. Any other failure is the call's error.
                         written(
                             Box::pin(self.record_end(&target, record, held, end, &stop)).await,
@@ -3258,7 +3258,7 @@ impl Paykit {
                 // rules: the stop stands, as the stop of the conflict it was.
                 continue;
             }
-            // A write the switch refuses now is tried at the next run; the stop stands
+            // A write the Dispatch refuses now is tried at the next run; the stop stands
             // meanwhile. Any other failure is the call's error.
             written(
                 Box::pin(self.submit_with_record(&target, &next, Vec::new(), locals, None)).await,
@@ -3402,7 +3402,7 @@ impl Paykit {
     /// from its record.
     pub(crate) async fn place_kept_allowance_responses(
         &mut self,
-        pending_read: Option<&pubky_switch_client::app::ReceiveReport>,
+        pending_read: Option<&pubky_dispatch_client::app::ReceiveReport>,
     ) -> Result<()> {
         let own = self.identity();
         let mut kept = Vec::new();
@@ -3433,9 +3433,9 @@ impl Paykit {
     /// of an Allowance message ([`Paykit::place_allowance_later`]) and its one rule
     /// ([`crate::stored::later_write`]), as a payer's kept reply does: one not written now,
     /// its record sealed under a scope key not held yet, a value that doesn't read or bind,
-    /// or a write the switch refuses, is kept, and given up past its window with the host's
+    /// or a write the Dispatch refuses, is kept, and given up past its window with the host's
     /// notice ([`crate::NoticeKind::MessageGivenUp`]) in the commit that drops it. A write
-    /// that can't be built or sent now, for a store failure or a switch that doesn't answer,
+    /// that can't be built or sent now, for a store failure or a Dispatch that doesn't answer,
     /// is the call's error, and the reply stays kept. The reply was read bound to its key
     /// (`state::Stored`): one kept under another sender, record or `msg_id` is a corrupt
     /// store.
@@ -3444,7 +3444,7 @@ impl Paykit {
         kept_key: &str,
         reply: StoredMessage,
         evidence: &KeptMessage,
-        pending_read: Option<&pubky_switch_client::app::ReceiveReport>,
+        pending_read: Option<&pubky_dispatch_client::app::ReceiveReport>,
     ) -> Result<()> {
         if Box::pin(self.side_unlisted(RecordSide::Allowances)).await? {
             return Ok(());
@@ -3554,7 +3554,7 @@ impl Paykit {
         stored: StoredMessage,
         evidence: &KeptMessage,
         stored_id: u64,
-        pending_read: Option<&pubky_switch_client::app::ReceiveReport>,
+        pending_read: Option<&pubky_dispatch_client::app::ReceiveReport>,
     ) -> Result<Placed> {
         if matches!(stored.body(), Body::AllowanceProposal(_)) {
             if let Some(placed) = Box::pin(self.place_incoming_proposal(
@@ -3611,11 +3611,11 @@ impl Paykit {
     ///   permanent record isn't written by this path either.
     /// - It isn't written now ([`Placed::Not`]) while the current epoch's `paykit_allowance`
     ///   key is missing or the record waits for its key, for an answer over a deleted record,
-    ///   or when the switch refuses the write ([`crate::stored::submitted`]). The caller
+    ///   or when the Dispatch refuses the write ([`crate::stored::submitted`]). The caller
     ///   applies the retry, retention and give-up rules; this result alone doesn't give up
     ///   the message (Paykit spec 8.1, "Stored entries").
     /// - A permanent value that cannot be read or bound is never overwritten. Before the
-    ///   30-day placement window ends, measured from the message's original Switch acceptance
+    ///   30-day placement window ends, measured from the message's original Dispatch acceptance
     ///   using verified service time, [`Self::expire_allowance_placement`] returns
     ///   [`Placed::Not`]. At or after expiry it commits retained conflict evidence before
     ///   returning [`Placed::Done`]. First retention queues
@@ -3627,7 +3627,7 @@ impl Paykit {
     /// - An acceptance that would fill an existing permanent record's empty response
     ///   ([`would_accept`]) isn't written now ([`Placed::Not`]). The first acceptance belongs
     ///   to the original conditional batch (Paykit spec 8.3.1).
-    /// - A failure of the app's own store, or a switch that doesn't answer, is the call's
+    /// - A failure of the app's own store, or a Dispatch that doesn't answer, is the call's
     ///   error, never a message not written.
     async fn place_allowance_later(
         &mut self,
@@ -3780,13 +3780,13 @@ impl Paykit {
 /// the client keeps of a write made for the Allowance's own sake goes again by itself, so it is
 /// taken as written; one of a kept message's later write (`held`) is held, not written, and is
 /// judged by the later write's rule ([`crate::stored::submitted`]), which waits on it.
-fn kept_as_written(error: &pubky_switch_client::app::AppError, held: bool) -> bool {
+fn kept_as_written(error: &pubky_dispatch_client::app::AppError, held: bool) -> bool {
     error.kept_batch().is_some() && !held
 }
 
 /// What a later write of an Allowance record came to, by the rule every later write follows
-/// ([`crate::stored::submitted`]): written, refused by the switch and so not written now, or
-/// not sent now for want of a key. A failure of the app's own store, a switch that doesn't
+/// ([`crate::stored::submitted`]): written, refused by the Dispatch and so not written now, or
+/// not sent now for want of a key. A failure of the app's own store, a Dispatch that doesn't
 /// answer, or a write that can't be built is the error, never a write not made.
 fn written(result: Result<()>) -> Result<Placed> {
     match result {
@@ -4154,7 +4154,7 @@ mod tests {
 mod consent_state_tests {
     use super::*;
     use crate::testkit::Party;
-    use pubky_switch_core::enc::{b64, hash};
+    use pubky_dispatch_core::enc::{b64, hash};
     use serde_json::{json, Value};
 
     const ID: &str = "d0efffb7-191b-4709-b6c7-e343af5500b4";
@@ -4180,7 +4180,7 @@ mod consent_state_tests {
     fn consent(consent: Consent) -> (String, Value) {
         let id = AllowanceId::parse(ID).unwrap();
         let target = allowance_target(&[3; 32], &id);
-        let record = pubky_switch_core::ident::record_key_from_blinded(
+        let record = pubky_dispatch_core::ident::record_key_from_blinded(
             &target.collection.name,
             &hash(&target.natural_key),
             &target.collection.policy.hash().unwrap(),
@@ -4361,21 +4361,21 @@ mod consent_state_tests {
 
 #[cfg(test)]
 mod held_write_tests {
-    use pubky_switch_client::app::AppError;
-    use pubky_switch_client::error::TransportError;
-    use pubky_switch_client::testing::Fault;
-    use pubky_switch_core::http::ErrorCode;
+    use pubky_dispatch_client::app::AppError;
+    use pubky_dispatch_client::error::TransportError;
+    use pubky_dispatch_client::testing::Fault;
+    use pubky_dispatch_core::http::ErrorCode;
     use serde_json::json;
 
     use super::*;
-    use crate::testkit::{object, Party, Switches};
+    use crate::testkit::{object, Dispatches, Party};
 
     #[test]
     fn test_allowances_kept_batch_of_a_kept_message_is_held_not_written() {
         let kept = AppError::Kept {
             batch_id: [7; 16],
             error: Box::new(AppError::Switch(
-                pubky_switch_client::error::ClientError::Switch {
+                pubky_dispatch_client::error::ClientError::Switch {
                     status: 429,
                     code: ErrorCode::RateLimited,
                     message: String::new(),
@@ -4402,7 +4402,7 @@ mod held_write_tests {
     /// write waits, and writes nothing, until that batch applies or is dropped.
     #[tokio::test]
     async fn test_allowances_later_write_waits_while_its_batch_is_kept() {
-        let w = Switches::new();
+        let w = Dispatches::new();
         let mut wallet = w
             .join(
                 &w.alice,
@@ -4424,7 +4424,7 @@ mod held_write_tests {
         let kept = wallet
             .app_mut()
             .submit_batch(
-                OpBatch::new().op(pubky_switch_core::ops::OpKind::DenyPut { pubky: [9; 32] }),
+                OpBatch::new().op(pubky_dispatch_core::ops::OpKind::DenyPut { pubky: [9; 32] }),
             )
             .await
             .unwrap_err();
@@ -4469,7 +4469,7 @@ mod held_write_tests {
             .app_mut()
             .protocol_commit(
                 "paykit",
-                &[pubky_switch_client::app::LocalWrite::Put {
+                &[pubky_dispatch_client::app::LocalWrite::Put {
                     key: marker.clone().into_bytes(),
                     value: batch_id.to_vec(),
                 }],

@@ -9,12 +9,12 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use paykit_lib::kinds::Kind;
-use pubky_switch_core::enc::{hash, pubky_key, unb64_array};
-use pubky_switch_core::keys::{AppKeys, IdentityKey};
-use pubky_switch_core::records::{AppCert, AppCertBody, AppRecord, AppRecordBody};
-use pubky_switch_core::scopes::Permission;
-use pubky_switch_core::sig::SignedDoc;
-use pubky_switch_core::time::parse_rfc3339;
+use pubky_dispatch_core::enc::{hash, pubky_key, unb64_array};
+use pubky_dispatch_core::keys::{AppKeys, IdentityKey};
+use pubky_dispatch_core::records::{AppCert, AppCertBody, AppRecord, AppRecordBody};
+use pubky_dispatch_core::scopes::Permission;
+use pubky_dispatch_core::sig::SignedDoc;
+use pubky_dispatch_core::time::parse_rfc3339;
 use serde_json::Value;
 
 /// alice's Pubky ID, the payer of the vectors.
@@ -109,7 +109,7 @@ pub fn b64n<const N: usize>(text: &str) -> [u8; N] {
 
 /// The prefix of every seed label: each secret of the set is
 /// `BLAKE3("paykit/v1/test-vectors/" + seed label)`, an Ed25519 seed as it is and an X25519
-/// secret clamped as RFC 7748 requires (Switch wire 1.3).
+/// secret clamped as RFC 7748 requires (Dispatch wire 1.3).
 pub const SEED_PREFIX: &str = "paykit/v1/test-vectors/";
 
 /// The 32 secret bytes of a seed label, `BLAKE3(SEED_PREFIX + label)`.
@@ -312,7 +312,7 @@ impl Keys {
 }
 
 /// The base certificate of an app: its [`APPS`] scopes with the permissions Paykit's scopes
-/// need, issued at [`CERT_ISSUED_AT`] by its identity key (Switch wire 3.1).
+/// need, issued at [`CERT_ISSUED_AT`] by its identity key (Dispatch wire 3.1).
 pub fn base_cert(keys: &Keys, app: &str) -> AppCert {
     let app = keys.app(app);
     let body = AppCertBody::new(
@@ -352,7 +352,7 @@ pub const BOB_ENDPOINT_IDENTIFIERS: [&str; 2] = ["btc-lightning-bolt11", "btc-bi
 /// The shop's public BOLT12 offer, in its Paykit member.
 pub const SHOP_BOLT12_OFFER: &str = "lno1qgsqvgnwgcg35z6ee2h3yczraddm72xrfua9uve2rlrm9deu7xyfzr";
 
-/// An app record of bob's, signed by the app's signing key (Switch wire 3.2): it carries the
+/// An app record of bob's, signed by the app's signing key (Dispatch wire 3.2): it carries the
 /// app's base certificate, accepts `accepts`, and holds a Paykit member stating
 /// [`BOB_ENDPOINT_IDENTIFIERS`] and `public_endpoints`.
 fn bob_app_record(
@@ -396,7 +396,7 @@ pub fn shop_app_record(keys: &Keys) -> AppRecord {
     )
 }
 
-/// The Switch's current shop-record envelope, varying only the members an app-record
+/// The Dispatch's current shop-record envelope, varying only the members an app-record
 /// case tests. Substitute their JSON in the writer's bytes to retain its field order,
 /// including an explicit null protocol member which the typed reader normalizes.
 pub fn app_record_case_text(keys: &Keys, protocols: &Value, expires_at: &Value) -> String {
@@ -475,8 +475,9 @@ pub fn paykit_cert(keys: &Keys, app: &str) -> AppCert {
     let scopes = paykit_signed_scopes(app).unwrap_or_else(|| panic!("{app} isn't Paykit's"));
     let mut body = base_cert(keys, app).body().clone();
     let scopes: Vec<String> = scopes.iter().map(|s| (*s).to_owned()).collect();
-    body.permissions =
-        pubky_switch_core::scopes::permission_names(&paykit_lib::scopes::permissions_for(&scopes));
+    body.permissions = pubky_dispatch_core::scopes::permission_names(
+        &paykit_lib::scopes::permissions_for(&scopes),
+    );
     body.scopes = scopes;
     AppCert::issue(keys.identity(&keys.app(app).identity), body).unwrap()
 }
@@ -508,7 +509,7 @@ pub fn signed(v: &Value) -> SignedDoc {
     }
 }
 
-/// An app's certificate, verified as the Switch verifies it.
+/// An app's certificate, verified as the Dispatch verifies it.
 pub fn cert(app: &App) -> AppCert {
     AppCert::verify(&cert_doc(&app.name), &app.identity).unwrap()
 }
@@ -539,12 +540,12 @@ pub fn body_text(doc: &SignedDoc) -> String {
 }
 
 /// The certificate of `app` with `scopes` and `permissions` changed, signed again
-/// by its identity key: the switch's checks take it (Switch wire 3.1).
+/// by its identity key: the Dispatch's checks take it (Dispatch wire 3.1).
 pub fn reissued(keys: &Keys, app: &str, scopes: &[&str], permissions: &[Permission]) -> AppCert {
     let app = keys.app(app);
     let mut body = cert(app).body().clone();
     body.scopes = scopes.iter().map(|s| (*s).to_owned()).collect();
-    body.permissions = pubky_switch_core::scopes::permission_names(permissions);
+    body.permissions = pubky_dispatch_core::scopes::permission_names(permissions);
     AppCert::issue(keys.identity(&app.identity), body).unwrap()
 }
 

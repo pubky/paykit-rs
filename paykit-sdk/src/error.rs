@@ -3,9 +3,9 @@
 //! No text quotes a body, a payload, a key or a document: each names the rule or the member
 //! that failed.
 
-use pubky_switch_client::app::AppError;
-use pubky_switch_client::error::{StoreError, TransportError};
-use pubky_switch_core::http::ErrorCode;
+use pubky_dispatch_client::app::AppError;
+use pubky_dispatch_client::error::{StoreError, TransportError};
+use pubky_dispatch_core::http::ErrorCode;
 
 use crate::rail::RailError;
 
@@ -182,12 +182,12 @@ pub enum Refusal {
     /// don't authorize this automatic Billing Period (Paykit spec 8.2); the request or
     /// Billing Period doesn't qualify under the Allowance it is paid under, outside its terms
     /// or with its lifetime limit used up and nothing reserved or to release; the Allowance
-    /// the payment was reserved under expired before its first dispatch; or the Allowance was
+    /// the payment was reserved under expired before its first handoff; or the Allowance was
     /// set up before a provider loss and never granted here, so it can't be granted now and
     /// the user can end it and set up a new one (Paykit spec 8.3, "After provider loss"); or,
     /// after a provider loss, the request is one-time, under the shared post-loss hold
     /// (Paykit spec 8.1). The user may still pay it by hand. At an open
-    /// attempt's first dispatch this is an [`Self::AttemptFailed`].
+    /// attempt's first handoff this is an [`Self::AttemptFailed`].
     #[error("Paykit spec 8.2, 8.3: not paid automatically: {0}")]
     NotAutomatic(String),
     /// The request record lists 16 Billing Periods that may have an open attempt and none of
@@ -267,7 +267,7 @@ pub enum Refusal {
     /// the user or apply the user's bounded policy for this payment and return the quote
     /// through [`crate::PayOptions::with_rate_authorized`] or [`crate::Paykit::pay_period_automatically`].
     /// An Allowance cannot authorize repricing. A quote whose rate expired or whose computed
-    /// amount changed before dispatch fails the first attempt. A repeat that may already
+    /// amount changed before handoff fails the first attempt. A repeat that may already
     /// have been submitted stays [`crate::PayOutcome::Uncertain`] on its original terms.
     #[error(
         "Paykit spec 7.2 step 1: the rate and computed amount need authorization for this payment"
@@ -280,12 +280,12 @@ pub enum Refusal {
     /// before money moves (Paykit spec 4, 7.2).
     #[error("Paykit spec 7.2: {0}")]
     IdentityUnavailable(String),
-    /// The payee's switch couldn't confirm its `identity.json` in time: a payment the user
-    /// started goes on only once the user confirms paying although the identity's switch
-    /// couldn't confirm its apps (Switch spec 4.3, "No silent fallback"; Paykit spec 7.2).
+    /// The payee's Dispatch couldn't confirm its `identity.json` in time: a payment the user
+    /// started goes on only once the user confirms paying although the identity's Dispatch
+    /// couldn't confirm its apps (Dispatch spec 4.3, "No silent fallback"; Paykit spec 7.2).
     /// Nothing was written.
     #[error(
-        "Switch spec 4.3: the payee's switch couldn't confirm its apps; the user must confirm"
+        "Dispatch spec 4.3: the payee's Dispatch couldn't confirm its apps; the user must confirm"
     )]
     IdentityUnconfirmed,
     /// The claim's attempt is open: a rejection or cancellation is refused while a payment is
@@ -294,7 +294,7 @@ pub enum Refusal {
     PaymentInProgress,
     /// The own `identity.json` doesn't authorize the payment: it doesn't list this app with
     /// the certificate it holds, or names another service or generation than the one the
-    /// attempt was written at, after a provider change (Paykit spec 4, Switch spec 12.5,
+    /// attempt was written at, after a provider change (Paykit spec 4, Dispatch spec 12.5,
     /// 12.6). Nothing is paid; the attempt is resolved by the move rules: the claim at the
     /// service followed, or else "may be paid".
     #[error("not current here: {0}")]
@@ -327,19 +327,19 @@ pub enum Refusal {
     /// trusts, or is gone with nothing to rebuild it from. Nothing was written.
     #[error("the payer's activity record can't be updated now: {0}")]
     RecordHeld(String),
-    /// The app's certificate fails Paykit's checks (Paykit wire 3.1), though the Switch took
+    /// The app's certificate fails Paykit's checks (Paykit wire 3.1), though the Dispatch took
     /// it: at a join, before anything is written, or after a renewal the client adopted. The
     /// app takes no Paykit action under it until a certificate that passes replaces it.
     /// Nothing was written.
     #[error("Paykit wire 3.1: the app's certificate fails Paykit's checks: {0}")]
     CertificateRefused(String),
-    /// The app's own switch doesn't answer: the network, a `503`, a `5xx` its key didn't sign,
+    /// The app's own Dispatch doesn't answer: the network, a `503`, a `5xx` its key didn't sign,
     /// or, while the account may have been erased, the wait before the app takes it as gone
-    /// (`AppError::NotAnsweringAsAccount`, Switch spec 12.7). Paykit spec 8.4 lets a payment
+    /// (`AppError::NotAnsweringAsAccount`, Dispatch spec 12.7). Paykit spec 8.4 lets a payment
     /// without a request to a reusable public endpoint go ahead without it; this SDK doesn't
     /// make one, and pays only attempt-first (Paykit spec 7.2). Nothing was written or paid.
-    #[error("Paykit spec 8.4: the own switch doesn't answer: {0}")]
-    SwitchUnavailable(String),
+    #[error("Paykit spec 8.4: the own Dispatch doesn't answer: {0}")]
+    DispatchUnavailable(String),
     /// The identity's deny list holds the payee: what is open with it is paused, and its
     /// request is paid only once the user confirms (Paykit spec 8.1, "Blocked
     /// counterparties"). `payment` is what the user is shown; paying anyway carries it back
@@ -380,7 +380,7 @@ pub enum Refusal {
 #[derive(Clone, Debug, PartialEq, thiserror::Error)]
 #[non_exhaustive]
 pub enum PaykitError {
-    /// A failure of the Switch client, carried as it reports it: the switch's answers with
+    /// A failure of the Dispatch client, carried as it reports it: the Dispatch's answers with
     /// their error codes and retry rules, the transport, the store, alarms and the client's
     /// own refusals.
     #[error(transparent)]
@@ -392,7 +392,7 @@ pub enum PaykitError {
     SettlementNoticeUnavailable {
         /// The settlement bucket to which the verified record-slot refusal applies.
         bucket: u16,
-        /// The original Switch error, including the ID of the kept merchant submission.
+        /// The original Dispatch error, including the ID of the kept merchant submission.
         #[source]
         submission: Box<AppError>,
         /// Why the warning could not be saved or its existing status checked.
@@ -416,14 +416,14 @@ pub enum PaykitError {
     /// A rule of Paykit refused the call.
     #[error("refused: {0}")]
     Refused(Refusal),
-    /// What the call was built on changed meanwhile, at the switch or in another own app: the
+    /// What the call was built on changed meanwhile, at the Dispatch or in another own app: the
     /// caller reads again and decides again. The text names what changed.
     #[error("conflict: {0}")]
     Conflict(String),
 }
 
 impl PaykitError {
-    /// The switch's error code, when the failure is an answer of the switch, also one that
+    /// The Dispatch's error code, when the failure is an answer of the Dispatch, also one that
     /// left the call's batch kept ([`AppError::Kept`]).
     pub fn code(&self) -> Option<ErrorCode> {
         match self {
@@ -489,9 +489,9 @@ impl From<paykit_lib::Error> for PaykitError {
     }
 }
 
-impl From<pubky_switch_core::Error> for PaykitError {
-    fn from(error: pubky_switch_core::Error) -> Self {
-        Self::Lib(paykit_lib::Error::Switch(error))
+impl From<pubky_dispatch_core::Error> for PaykitError {
+    fn from(error: pubky_dispatch_core::Error) -> Self {
+        Self::Lib(paykit_lib::Error::Dispatch(error))
     }
 }
 
@@ -513,10 +513,10 @@ pub type Result<T> = std::result::Result<T, PaykitError>;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pubky_switch_client::error::ClientError;
+    use pubky_dispatch_client::error::ClientError;
 
     #[test]
-    fn test_error_carries_the_switch_code() {
+    fn test_error_carries_the_dispatch_code() {
         let error = PaykitError::from(AppError::Switch(ClientError::Switch {
             status: 409,
             code: ErrorCode::Conflict,

@@ -1,7 +1,7 @@
 //! The bodies of Paykit's kinds (Paykit spec 5, Paykit wire 4.4 to 4.17): check 10 of the
-//! recipient checks (Switch wire 5.1, Paykit wire 4.1), and the writers.
+//! recipient checks (Dispatch wire 5.1, Paykit wire 4.1), and the writers.
 //!
-//! Readers ignore unknown members (Switch wire 1.1) and read `null` as a missing member.
+//! Readers ignore unknown members (Dispatch wire 1.1) and read `null` as a missing member.
 //! Every member a recipient reads must have its type, and the rules of the kind's section
 //! must hold; a body that fails is dropped at check 10. Writers omit absent optional
 //! members, except those a table says are always written.
@@ -9,10 +9,10 @@
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
-use pubky_switch_core::claims::attempt_deadline;
-use pubky_switch_core::enc::{b64, zbase32_encode};
-use pubky_switch_core::message::Message;
-use pubky_switch_core::time::rfc3339;
+use pubky_dispatch_core::claims::attempt_deadline;
+use pubky_dispatch_core::enc::{b64, zbase32_encode};
+use pubky_dispatch_core::message::Message;
+use pubky_dispatch_core::time::rfc3339;
 use serde_json::{Map, Value};
 
 use crate::allowances::AllowanceTerms;
@@ -585,14 +585,14 @@ impl PaymentRequest {
     /// period's start plus the payment deadline's `seconds`. `None` when there is no `d`.
     ///
     /// A `d + 1 ms` past the last time the grammar writes, 9999-12-31T23:59:59.999Z, is that
-    /// last time, which means "never": a sum past the last time Switch wire 1.6 can write
-    /// means "never" (Switch wire 1.1), and the Switch's `attempt_deadline` saturates there.
+    /// last time, which means "never": a sum past the last time Dispatch wire 1.6 can write
+    /// means "never" (Dispatch wire 1.1), and the Dispatch's `attempt_deadline` saturates there.
     ///
     /// # Errors
     ///
     /// [`Error::Invalid`] for a period with a one-time request, none with a recurring one, a
     /// period that isn't one of this request's (Paykit wire 4.4), or a `seconds` so large the
-    /// sum overflows 64 bits, which no request read from the wire carries (Switch wire 1.1
+    /// sum overflows 64 bits, which no request read from the wire carries (Dispatch wire 1.1
     /// integers are at most 2^53 - 1).
     pub fn attempt_deadline(&self, period: Option<&BillingPeriod>) -> Result<Option<u64>> {
         let d = match (self.is_recurring(), period) {
@@ -1163,7 +1163,7 @@ impl ResendRequest {
             let id = id
                 .as_str()
                 .ok_or_else(|| bad(RESEND, "msg_ids", "not a string"))?;
-            pubky_switch_core::json::check_uuid_v4(id)
+            pubky_dispatch_core::json::check_uuid_v4(id)
                 .map_err(|_| bad(RESEND, "msg_ids", "not a lower-case UUID v4"))?;
             out.msg_ids.push(id.to_owned());
         }
@@ -1843,7 +1843,7 @@ pub fn check_body_handling(message: &Message, json: &[u8], handled: &[&str]) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pubky_switch_core::message::Sender;
+    use pubky_dispatch_core::message::Sender;
     use serde_json::json;
 
     fn body(value: Value) -> Map<String, Value> {
@@ -1880,7 +1880,7 @@ mod tests {
         let d = r.attempt_deadline(None).unwrap().unwrap();
         assert_eq!(
             d,
-            pubky_switch_core::time::parse_rfc3339("2026-01-02T00:00:00.001Z").unwrap()
+            pubky_dispatch_core::time::parse_rfc3339("2026-01-02T00:00:00.001Z").unwrap()
         );
         assert!(r
             .attempt_deadline(Some(&BillingPeriod {
@@ -2139,7 +2139,7 @@ mod tests {
         let d = r.one_time_deadline().unwrap();
         assert_eq!(
             d,
-            pubky_switch_core::time::parse_rfc3339("2026-01-02T00:00:00.000Z").unwrap()
+            pubky_dispatch_core::time::parse_rfc3339("2026-01-02T00:00:00.000Z").unwrap()
         );
         assert_eq!(r.attempt_deadline(None).unwrap(), Some(d + 1));
         let mut b = request();
@@ -2147,7 +2147,7 @@ mod tests {
         b["payment_deadline"] = json!(null);
         let open = PaymentRequest::from_body(&body(b)).unwrap();
         assert_eq!(open.one_time_deadline(), None);
-        let at = |text: &str| pubky_switch_core::time::parse_rfc3339(text).unwrap();
+        let at = |text: &str| pubky_dispatch_core::time::parse_rfc3339(text).unwrap();
         for (expiry, deadline, earlier) in [
             (
                 json!("2026-01-04T00:00:00.000Z"),
@@ -2179,7 +2179,7 @@ mod tests {
         let r = PaymentRequest::from_body(&body(request())).unwrap();
         assert_eq!(
             r.payment_deadline_ms(),
-            Some(pubky_switch_core::time::parse_rfc3339("2026-01-03T00:00:00.000Z").unwrap())
+            Some(pubky_dispatch_core::time::parse_rfc3339("2026-01-03T00:00:00.000Z").unwrap())
         );
         let mut b = request();
         b["payment_deadline"] = json!(null);
@@ -2218,7 +2218,7 @@ mod tests {
 
     #[test]
     fn test_request_deadline_past_the_grammar_means_never() {
-        use pubky_switch_core::time::MAX_TIME_MS;
+        use pubky_dispatch_core::time::MAX_TIME_MS;
         let mut b = request();
         b["payment_deadline"] = json!({ "type": "period_start", "seconds": 1 });
         b["recurrence"] = json!({ "anchor": "2026-01-31T00:00:00.000Z", "every": 1, "unit": "month",

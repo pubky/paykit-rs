@@ -1,4 +1,4 @@
-//! An enrolled shop for exercising the native host clients on the local Switch harness.
+//! An enrolled shop for exercising the native host clients on the local Dispatch harness.
 use crate::{
     Amount, EndpointSupport, HostRail, MethodDeclaration, PaymentMethod, RequestId, RuntimeTimer,
     WalletConfig, WalletError, WalletHost, WalletStore,
@@ -8,16 +8,16 @@ use paykit_lib::{
     PaymentReference,
 };
 use paykit_sdk::{AppScopes, Paykit, RequestDestination, RequestDraft, RequestRef};
-use pubky_switch_client::{
+use pubky_dispatch_client::{
     store::MemoryStore,
     transport::{BoxFuture, FirstSend, Request, Response, Transport, TransportError},
 };
-use pubky_switch_core::{
+use pubky_dispatch_core::{
     records::{AppRequest, AuthRequest},
     sig::SignedDoc,
 };
-use pubky_switch_harness::{parties::Asking, World};
-use pubky_switch_signer::Signer;
+use pubky_dispatch_harness::{parties::Asking, World};
+use pubky_dispatch_signer::Signer;
 use std::{collections::BTreeMap, error::Error, sync::Arc, time::Duration};
 use tokio::sync::Mutex;
 
@@ -234,7 +234,7 @@ impl CheckoutFixture {
             let world = world
                 .as_ref()
                 .ok_or(WalletError::invalid("test service closed"))?;
-            world.advance_ms(pubky_switch_client::app::DEFAULT_ROTATION_MS + 1);
+            world.advance_ms(pubky_dispatch_client::app::DEFAULT_ROTATION_MS + 1);
             Ok(())
         })
         .await
@@ -493,11 +493,11 @@ impl CheckoutFixture {
         crate::runtime::run(async move {
             let app_id = crate::fixed(app_id, "test app ID")?;
             let record: [u8; 32] = crate::fixed(record, "test record key")?;
-            let namespace = pubky_switch_client::store::client_namespace(&app_id);
+            let namespace = pubky_dispatch_client::store::client_namespace(&app_id);
             let session =
                 crate::WalletStoreSession::open(self.host.store.clone(), namespace).await?;
             let owner = session.ownership.clone();
-            let key = format!("rcdiv/{}", pubky_switch_core::enc::b64(&record));
+            let key = format!("rcdiv/{}", pubky_dispatch_core::enc::b64(&record));
             let result = session
                 .put(key.as_bytes(), br#"{"v":3,"d":null}"#.to_vec())
                 .await;
@@ -538,7 +538,7 @@ impl CheckoutFixture {
                 let mut signer = self.signer.lock().await;
                 Box::pin(signer.declare_provider_loss(
                     next,
-                    pubky_switch_signer::UserConfirmed::shown_and_confirmed(),
+                    pubky_dispatch_signer::UserConfirmed::shown_and_confirmed(),
                 ))
                 .await
                 .map_err(|_| WalletError::invalid("test provider loss declaration"))?;
@@ -796,9 +796,9 @@ pub fn test_method_answers(
     })
 }
 
-/// A wallet error whose SDK refusal quotes `text`, as one quoting the switch's own message
+/// A wallet error whose SDK refusal quotes `text`, as one quoting the Dispatch's own message
 /// does, for the host tests to check that none of it leaves the bindings.
 #[uniffi::export]
 pub fn test_outside_text_error(text: String) -> Result<(), WalletError> {
-    Err(paykit_sdk::PaykitError::Refused(paykit_sdk::Refusal::SwitchUnavailable(text)).into())
+    Err(paykit_sdk::PaykitError::Refused(paykit_sdk::Refusal::DispatchUnavailable(text)).into())
 }

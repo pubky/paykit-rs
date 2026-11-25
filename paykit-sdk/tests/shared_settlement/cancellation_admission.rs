@@ -2,7 +2,7 @@
 
 use super::*;
 use paykit_lib::records::StoredMessage;
-use pubky_switch_client::app::{
+use pubky_dispatch_client::app::{
     AppEvent, Collection, DropReason, FeedPosition, OutgoingMessage, ParkReason, RecordTarget,
     SignedMessage, WaitingReason,
 };
@@ -103,7 +103,7 @@ async fn follow_wallet(
     world.add_switch(next, &[&owner]).await?;
     Box::pin(signer.declare_provider_loss(
         next,
-        pubky_switch_signer::UserConfirmed::shown_and_confirmed(),
+        pubky_dispatch_signer::UserConfirmed::shown_and_confirmed(),
     ))
     .await?;
     Box::pin(signer.end_staged_admission()).await?;
@@ -178,14 +178,14 @@ async fn dual_role_wallet(world: &World, outcome: WaitingReply) -> TestResult {
     let other_sale = original_request(&wallet, other)?;
     for (old, next, original) in [(first, second, &sale), (second, third, &other_sale)] {
         let reply = answer(&peer, own, "paykit.payment_request_rejection", original)?;
-        let plain = pubky_switch_core::enc::b64(&reply.plaintext().encode());
+        let plain = pubky_dispatch_core::enc::b64(&reply.plaintext().encode());
         let sent = peer.app_mut().queue_signed(reply).await?;
         peer.flush().await?;
         let delivery = peer.app().delivery(&sent).await?;
         assert!(
             matches!(
                 delivery,
-                Some(pubky_switch_client::app::Delivery::Accepted { .. })
+                Some(pubky_dispatch_client::app::Delivery::Accepted { .. })
             ),
             "{old}: {delivery:?}"
         );
@@ -248,7 +248,7 @@ async fn dual_role_wallet(world: &World, outcome: WaitingReply) -> TestResult {
     assert_eq!(saved.len(), 1);
     assert_eq!(
         saved[0]["plaintext"],
-        pubky_switch_core::enc::b64(&stop.plaintext().encode())
+        pubky_dispatch_core::enc::b64(&stop.plaintext().encode())
     );
     assert_eq!(saved[0]["cert"], json!(original.cert));
     assert_eq!(saved[0]["accepted_at"], original.accepted_at_ms);
@@ -294,7 +294,7 @@ async fn dual_role_wallet(world: &World, outcome: WaitingReply) -> TestResult {
     assert_eq!(read_duties(&wallet, b"kc/").await?, saved);
     match outcome {
         WaitingReply::Expired => {
-            world.advance_ms(22 * pubky_switch_core::records::DAY_MS);
+            world.advance_ms(22 * pubky_dispatch_core::records::DAY_MS);
             wallet.receive(None).await?;
         }
         WaitingReply::Admitted => {
@@ -443,7 +443,7 @@ async fn fill_replies(
         assert!(
             matches!(
                 delivery,
-                Some(pubky_switch_client::app::Delivery::Accepted { .. })
+                Some(pubky_dispatch_client::app::Delivery::Accepted { .. })
             ),
             "{delivery:?}"
         );

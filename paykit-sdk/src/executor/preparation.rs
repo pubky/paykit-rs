@@ -1,9 +1,9 @@
 //! Bind the native kept batch to its exact proposed ledger and preceding application.
 
 use paykit_lib::allowances::Ledger;
-use pubky_switch_client::app::{KeptBatchDrop, KeptBatchStatus, KeptOp, OpBatch};
-use pubky_switch_core::enc::{b64, hash, serde_b64_vec};
-use pubky_switch_core::ops::{Condition, OpKind, SignedOp};
+use pubky_dispatch_client::app::{KeptBatchDrop, KeptBatchStatus, KeptOp, OpBatch};
+use pubky_dispatch_core::enc::{b64, hash, serde_b64_vec};
+use pubky_dispatch_core::ops::{Condition, OpKind, SignedOp};
 use serde::{Deserialize, Serialize};
 
 use super::checkpoint::{ledger_target, AcceptedLedger};
@@ -12,8 +12,8 @@ use super::spend::JournalAllowance;
 use crate::state::{self, key, Binder};
 use crate::{Paykit, PaykitError, Refusal, Result};
 
-/// The wallet stages the complete proposal before handing the batch to Switch. Only
-/// the ID Switch commits with its signed batch makes this a submitted preparation.
+/// The wallet stages the complete proposal before handing the batch to Dispatch. Only
+/// the ID Dispatch commits with its signed batch makes this a submitted preparation.
 /// A crash before that commit leaves a proposal that was never sent.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -73,7 +73,7 @@ impl LedgerProposal {
                 .ok()?;
             let op = SignedOp::verify_with_cert(&self.before.op, &cert, binder.identity()).ok()?;
             let proof =
-                pubky_switch_core::chain::TransitionProof::peek(self.before.proof.as_ref()?)
+                pubky_dispatch_core::chain::TransitionProof::peek(self.before.proof.as_ref()?)
                     .ok()?;
             proof.check_binds(&op).ok()?;
             proof.record_revision().ok()?;
@@ -99,7 +99,7 @@ impl LedgerProposal {
 }
 
 impl super::restore::ReconciledLedger {
-    /// Stage the proposed plaintext and its verified base, then give Switch the key
+    /// Stage the proposed plaintext and its verified base, then give Dispatch the key
     /// where it records the actual batch ID with the sealed and signed operations.
     pub(super) async fn stage(
         self,
@@ -182,11 +182,11 @@ impl Paykit {
                             || !matches!(grant, Condition::RecordCurrent { revision: r, .. } if *r == revision)
                             // Written at the grant's generation or a later one of the
                             // same history: an orderly change or a cooperative move carries
-                            // the grant it is conditioned on (Pubky Switch spec, Section 12.5).
+                            // the grant it is conditioned on (Pubky Dispatch spec, Section 12.5).
                             || write.revision.generation < revision.generation
                             || write.value != proposal.result
                             // Staging retained the verified base. The signed write must still
-                            // pin its exact revision after key retirement (Switch spec 4.3).
+                            // pin its exact revision after key retirement (Dispatch spec 4.3).
                             || AppliedRecord::established(&self.app, &target, &proposal.before)
                                 .is_none_or(|base| !write.follows(&base))
                         {
@@ -236,7 +236,7 @@ pub(super) fn no_executor_base() -> PaykitError {
     .into()
 }
 
-/// The ledger write was applied, but the switch's proof doesn't show the ledger at the
+/// The ledger write was applied, but the Dispatch's proof doesn't show the ledger at the
 /// revision written: an answer that breaks a rule, never a refusal, which would say nothing
 /// was written. The write stands; a later read shows the ledger.
 pub(super) fn written_unverified() -> PaykitError {

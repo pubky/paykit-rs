@@ -2,7 +2,7 @@
 //! record whose upload conflicts with the current write shows `divergent` until a newer write
 //! clears it. The app pauses it once it has seen it so, until its user confirms.
 //!
-//! The view's flag is the client's durable mark of the latest view it read (Switch wire
+//! The view's flag is the client's durable mark of the latest view it read (Dispatch wire
 //! 7.4.9, `rcdiv/<key>` in its namespace, `SharedRecord::divergent`): these flows set it
 //! there, as a divergent view leaves it, and clear it as a view that isn't divergent does. The
 //! client itself clears it on a newer write it takes, its own or one from the feed.
@@ -17,18 +17,18 @@ use paykit_sdk::{
     AppScopes, NoticeKind, PayOptions, PayOutcome, PayeeStatus, Paykit, PaykitConfig, Rail,
     RailDeclaration, Refusal, RequestRef, RequestStatus, UnrequestedPayment,
 };
-use pubky_switch_client::app::{Collection as SwitchCollection, RecordTarget, UserConfirmed};
-use pubky_switch_client::clock::Clock;
-use pubky_switch_client::store::{StateStore, WriteBatch};
-use pubky_switch_core::claims::ClaimStatus;
+use pubky_dispatch_client::app::{Collection as DispatchCollection, RecordTarget, UserConfirmed};
+use pubky_dispatch_client::clock::Clock;
+use pubky_dispatch_client::store::{StateStore, WriteBatch};
+use pubky_dispatch_core::claims::ClaimStatus;
 
 use crate::common::{btc, draft, endpoint, list_version, request_from, store, World, HOUR_MS};
 
 /// Set (`on`) or clear the client's flag that the latest view of `record` shows it divergent,
 /// in the namespace of `app` on `store`.
 pub fn set_divergent(store: &Arc<dyn StateStore>, app: &Paykit, record: &[u8; 32], on: bool) {
-    let ns = pubky_switch_client::store::client_namespace(&app.app_id());
-    let key = format!("rcdiv/{}", pubky_switch_core::enc::b64(record));
+    let ns = pubky_dispatch_client::store::client_namespace(&app.app_id());
+    let key = format!("rcdiv/{}", pubky_dispatch_core::enc::b64(record));
     let mut batch = WriteBatch::new();
     if on {
         batch
@@ -88,7 +88,7 @@ async fn mark_past_its_record(app: &mut Paykit) {
     for (key, value) in app.app().protocol_scan("paykit", b"dv/").await.unwrap() {
         let mut mark: serde_json::Value = serde_json::from_slice(&value).unwrap();
         mark["d"]["seen"]["generation"] = serde_json::json!(u64::MAX);
-        writes.push(pubky_switch_client::app::LocalWrite::Put {
+        writes.push(pubky_dispatch_client::app::LocalWrite::Put {
             key,
             value: serde_json::to_vec(&mark).unwrap(),
         });
@@ -248,7 +248,7 @@ fn requiring(app: [u8; 16], now: u64) -> paykit_sdk::RequestDraft {
 #[tokio::test]
 async fn test_divergent_request_requiring_a_removed_app_refused_for_its_destination() {
     // The request record is divergent, and the request requires the shop, which Bob's
-    // signer has since removed: a removed app is never listed again (Switch spec 4.3), so no
+    // signer has since removed: a removed app is never listed again (Dispatch spec 4.3), so no
     // confirmation could let it be paid, and the payment is refused for that, naming no
     // record and asking no app for a list (Paykit spec 8.1).
     let w = World::new();
@@ -307,7 +307,7 @@ async fn test_divergent_request_requiring_an_app_not_listed_yet_still_paused() {
 #[tokio::test]
 async fn test_divergent_request_unjudged_while_the_payees_identity_is_unreadable() {
     // The request record is divergent, and bob's identity.json can be read neither from his
-    // Homeserver nor from his switch, the copy held more than 10 minutes old. Whether the
+    // Homeserver nor from his Dispatch, the copy held more than 10 minutes old. Whether the
     // shop is still current can't be told: the payment is refused for that, naming no record.
     let w = World::new();
     let base = store();
@@ -318,7 +318,7 @@ async fn test_divergent_request_unjudged_while_the_payees_identity_is_unreadable
     let record = wallet.request(&request).await.unwrap().record;
     set_divergent(&base, &wallet, &record, true);
     w.homeserver
-        .remove(w.bob_id(), pubky_switch_core::records::IDENTITY_PATH);
+        .remove(w.bob_id(), pubky_dispatch_core::records::IDENTITY_PATH);
     w.router.remove(crate::common::BOB_ORIGIN);
     w.clock.advance_ms(11 * 60_000);
     let refused = wallet
@@ -520,7 +520,7 @@ async fn test_divergent_two_own_apps_each_pause_until_their_own_user_confirms() 
 /// The `payment_lists` record of bob's shop at `wallet`.
 fn list_record(w: &World, wallet: &Paykit, shop: &Paykit) -> [u8; 32] {
     let target = RecordTarget::new(
-        SwitchCollection::new(
+        DispatchCollection::new(
             Collection::PaymentLists.name(),
             Collection::PaymentLists.fixed_policy(),
         ),
@@ -908,7 +908,7 @@ async fn test_divergent_receipt_settles_its_claim_only_once_confirmed() {
     assert!(shop.confirm_payment(&sold).await.unwrap().is_some());
     wallet.receive(None).await.unwrap();
     let obligation = wallet.payments().await.unwrap()[0].obligation;
-    let status = |view: Option<pubky_switch_client::app::ClaimRead>| view.unwrap().view.status;
+    let status = |view: Option<pubky_dispatch_client::app::ClaimRead>| view.unwrap().view.status;
     let claim = wallet.app_mut().read_claim(&obligation).await.unwrap();
     assert_ne!(status(claim), ClaimStatus::Settled);
     crate::divergent::confirm(&mut wallet, &record)
@@ -932,11 +932,11 @@ async fn test_divergent_kept_value_that_doesnt_read_holds_the_new_message() {
     let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
     let record = sale(&shop, &request).await.record;
     set_divergent(&base, &shop, &record, true);
-    let ns = pubky_switch_client::store::client_namespace(&shop.app_id());
+    let ns = pubky_dispatch_client::store::client_namespace(&shop.app_id());
     let kept = format!(
         "p/paykit/dw/{}/proof/{}/123e4567-e89b-42d3-a456-426614174000",
-        pubky_switch_core::enc::b64(&record),
-        pubky_switch_core::enc::b64(&w.alice_id())
+        pubky_dispatch_core::enc::b64(&record),
+        pubky_dispatch_core::enc::b64(&w.alice_id())
     );
     let mut batch = WriteBatch::new();
     batch
@@ -1000,7 +1000,7 @@ async fn test_divergent_kept_write_waits_while_its_record_may_be_missing_from_th
     );
     seller_wallet.receive(None).await.unwrap();
     let target = RecordTarget::new(
-        SwitchCollection::new(
+        DispatchCollection::new(
             Collection::PayeeActivity.name(),
             Collection::PayeeActivity.policy(None),
         ),
@@ -1019,7 +1019,7 @@ async fn test_divergent_kept_write_waits_while_its_record_may_be_missing_from_th
     // the end of the receive fails.
     w.bob
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+        .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
             path: "records?collection".into(),
             after: crate::certificate::client_listing_requests(shop.app().cert()),
         });
@@ -1109,7 +1109,7 @@ async fn test_divergent_kept_write_pointing_past_its_record_never_written() {
     for (key, value) in shop.app().protocol_scan("paykit", b"dw/").await.unwrap() {
         let mut kept: serde_json::Value = serde_json::from_slice(&value).unwrap();
         kept["d"]["seen"]["generation"] = serde_json::json!(u64::MAX);
-        writes.push(pubky_switch_client::app::LocalWrite::Put {
+        writes.push(pubky_dispatch_client::app::LocalWrite::Put {
             key,
             value: serde_json::to_vec(&kept).unwrap(),
         });
@@ -1204,7 +1204,7 @@ async fn test_divergent_older_kept_list_leaves_a_newer_held_list() {
     wallet.receive(None).await.unwrap();
     let record = list_record(&w, &wallet, &shop);
     let target = RecordTarget::new(
-        SwitchCollection::new(
+        DispatchCollection::new(
             Collection::PaymentLists.name(),
             Collection::PaymentLists.fixed_policy(),
         ),
@@ -1483,7 +1483,7 @@ async fn test_divergent_resume_records_a_payment_made_once_confirmed_over_a_dive
     // is released. The request record is then divergent: the resume holds the outcome, and
     // the acceptance with it, until the user confirms; then both go, the view still
     // divergent, so the payee gets the proof of the payment made.
-    use pubky_switch_client::store::{Fault, FaultStore};
+    use pubky_dispatch_client::store::{Fault, FaultStore};
     for n in 1..96 {
         let w = World::new();
         let base = store();
@@ -1677,7 +1677,7 @@ async fn test_divergent_mismatched_mark_beside_a_held_list_fails_no_receive() {
     wallet.receive(None).await.unwrap();
     let record = list_record(&w, &wallet, &shop);
     let target = RecordTarget::new(
-        SwitchCollection::new(
+        DispatchCollection::new(
             Collection::PaymentLists.name(),
             Collection::PaymentLists.fixed_policy(),
         ),
@@ -1781,8 +1781,11 @@ async fn test_divergent_kept_value_at_a_key_without_its_msg_id_holds_the_new_mes
     let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
     let record = sale(&shop, &request).await.record;
     set_divergent(&base, &shop, &record, true);
-    let ns = pubky_switch_client::store::client_namespace(&shop.app_id());
-    let kept = format!("p/paykit/dw/{}/proof", pubky_switch_core::enc::b64(&record));
+    let ns = pubky_dispatch_client::store::client_namespace(&shop.app_id());
+    let kept = format!(
+        "p/paykit/dw/{}/proof",
+        pubky_dispatch_core::enc::b64(&record)
+    );
     let mut batch = WriteBatch::new();
     batch
         .put(&ns, kept.clone().into_bytes(), b"not a kept write".to_vec())
@@ -2029,8 +2032,8 @@ impl OverUnread {
         crate::outcome_record::phone_writes(&mut self.phone, &self.request, Some(&value)).await;
     }
 
-    /// The attempt's outcome on its claim, read from the switch.
-    async fn outcome(&mut self) -> pubky_switch_core::claims::Outcome {
+    /// The attempt's outcome on its claim, read from the dispatch.
+    async fn outcome(&mut self) -> pubky_dispatch_core::claims::Outcome {
         let obligation = self
             .wallet
             .payments()
@@ -2076,7 +2079,7 @@ async fn test_divergent_receipt_over_a_record_that_doesnt_read_kept_until_confir
     // divergent and can't read it. The pause comes first: the receipt is kept over the
     // divergent record, not as a reply before its record, and neither it nor the claim's
     // `done` goes once a newer write that reads clears the view: only once the user confirms.
-    use pubky_switch_core::claims::Outcome;
+    use pubky_dispatch_core::claims::Outcome;
     let w = World::new();
     let mut s = over_unread(&w, false).await;
     set_divergent(&s.store, &s.wallet, &s.record, true);
@@ -2107,7 +2110,7 @@ async fn test_divergent_receipt_over_a_record_that_doesnt_read_confirmed_waits_u
     // kept, the record shown with writes waiting, and a later receipt is kept beside it, not
     // as a reply before its record. Once the record reads both are written, in the order the
     // inbox accepted them, and the attempt is settled once; the pause then ends.
-    use pubky_switch_core::claims::Outcome;
+    use pubky_dispatch_core::claims::Outcome;
     let w = World::new();
     let mut s = over_unread(&w, false).await;
     set_divergent(&s.store, &s.wallet, &s.record, true);
@@ -2155,7 +2158,7 @@ async fn test_divergent_receipt_kept_before_its_record_read_moves_over_it_once_i
     // message kept over it and moves there. Neither a newer write that clears the view nor
     // the user's confirmation writes it: until the next receive does, a payment by hand is
     // refused as while kept messages wait, and once it is written the attempt is done.
-    use pubky_switch_core::claims::Outcome;
+    use pubky_dispatch_core::claims::Outcome;
     let w = World::new();
     let mut s = over_unread(&w, true).await;
     s.deliver_receipt(&w);
@@ -2268,7 +2271,7 @@ async fn receipt_without_request_over_unread_paused_held(stranger: bool, batch_h
     };
     let collection = Collection::PayerActivity;
     let target = RecordTarget::new(
-        SwitchCollection::new(collection.name(), collection.policy(None)),
+        DispatchCollection::new(collection.name(), collection.policy(None)),
         &natural_key::payer_payment_record(&w.alice_id(), &attempt_id),
     );
     phone.receive(None).await.unwrap();
@@ -2291,7 +2294,7 @@ async fn receipt_without_request_over_unread_paused_held(stranger: bool, batch_h
         .unwrap();
     phone
         .app_mut()
-        .submit_batch(pubky_switch_client::app::OpBatch::for_protocol("paykit").entry(op))
+        .submit_batch(pubky_dispatch_client::app::OpBatch::for_protocol("paykit").entry(op))
         .await
         .unwrap();
     wallet.receive(None).await.unwrap();
@@ -2334,7 +2337,7 @@ async fn receipt_without_request_over_unread_paused_held(stranger: bool, batch_h
         .unwrap();
     phone
         .app_mut()
-        .submit_batch(pubky_switch_client::app::OpBatch::for_protocol("paykit").entry(op))
+        .submit_batch(pubky_dispatch_client::app::OpBatch::for_protocol("paykit").entry(op))
         .await
         .unwrap();
     if batch_held {
@@ -2345,7 +2348,7 @@ async fn receipt_without_request_over_unread_paused_held(stranger: bool, batch_h
         crate::common::resend_kept_batch(
             &w,
             &w.alice,
-            pubky_switch_core::http::ErrorCode::PermissionMissing,
+            pubky_dispatch_core::http::ErrorCode::PermissionMissing,
         );
         wallet.receive(None).await.unwrap();
     }
@@ -2375,7 +2378,7 @@ async fn test_divergent_kept_messages_of_two_senders_with_one_msg_id_both_kept()
     // bob's, the record's counterparty, under the same `msg_id`: both are kept. Once the
     // record reads naming bob, carol's goes; once the user confirms, bob's is written and the
     // attempt is done.
-    use pubky_switch_core::claims::Outcome;
+    use pubky_dispatch_core::claims::Outcome;
     let w = World::new();
     let seen = Arc::new(crate::outcome_record::NoSeenMarks::default());
     let base = Arc::clone(&seen) as Arc<dyn StateStore>;
@@ -2416,7 +2419,7 @@ async fn test_divergent_kept_messages_of_two_senders_with_one_msg_id_both_kept()
     };
     let collection = Collection::PayerActivity;
     let target = RecordTarget::new(
-        SwitchCollection::new(collection.name(), collection.policy(None)),
+        DispatchCollection::new(collection.name(), collection.policy(None)),
         &natural_key::payer_payment_record(&w.alice_id(), &attempt_id),
     );
     phone.receive(None).await.unwrap();
@@ -2441,7 +2444,7 @@ async fn test_divergent_kept_messages_of_two_senders_with_one_msg_id_both_kept()
             .unwrap();
         phone
             .app_mut()
-            .submit_batch(pubky_switch_client::app::OpBatch::for_protocol("paykit").entry(op))
+            .submit_batch(pubky_dispatch_client::app::OpBatch::for_protocol("paykit").entry(op))
             .await
             .unwrap();
     };
@@ -2459,9 +2462,9 @@ async fn test_divergent_kept_messages_of_two_senders_with_one_msg_id_both_kept()
     let msg_id = "123e4567-e89b-42d3-a456-426614174000";
     for from in [&w.carol, &w.bob] {
         let keys = from.identity().app_keys("shop");
-        let mut message = pubky_switch_core::message::Message::new(
+        let mut message = pubky_dispatch_core::message::Message::new(
             "paykit.payment_receipt",
-            pubky_switch_core::message::Sender::of_app(from.identity().public(), &keys),
+            pubky_dispatch_core::message::Sender::of_app(from.identity().public(), &keys),
             w.alice.identity().public(),
             w.clock.now_ms(),
             vec![[7; 32]],
@@ -2481,7 +2484,7 @@ async fn test_divergent_kept_messages_of_two_senders_with_one_msg_id_both_kept()
     assert_eq!(kept.len(), 1, "{kept:?}");
     assert!(String::from_utf8_lossy(&kept[0]).ends_with(&format!(
         "/{}/{msg_id}",
-        pubky_switch_core::enc::b64(&w.bob_id())
+        pubky_dispatch_core::enc::b64(&w.bob_id())
     )));
     confirm(&mut wallet, &record).await.unwrap();
     wallet.receive(None).await.unwrap();
@@ -2639,7 +2642,7 @@ async fn test_divergent_receipt_from_another_identity_never_kept_over_a_paused_r
     // receipt naming its attempt while alice's record of the payment, which reads, is paused
     // as divergent. The record names its counterparty: the receipt does nothing, is never
     // kept over the record, holds none of its gates and leaves the pause as it is.
-    use pubky_switch_core::claims::Outcome;
+    use pubky_dispatch_core::claims::Outcome;
     let w = World::new();
     let base = store();
     let mut wallet = w.wallet_on("wallet", Arc::clone(&base)).await;
@@ -2669,7 +2672,7 @@ async fn test_divergent_receipt_from_another_identity_never_kept_over_a_paused_r
     };
     let collection = Collection::PayerActivity;
     let target = RecordTarget::new(
-        SwitchCollection::new(collection.name(), collection.policy(None)),
+        DispatchCollection::new(collection.name(), collection.policy(None)),
         &natural_key::payer_payment_record(&w.alice_id(), &attempt_id),
     );
     let record = wallet.app().record_key(&target).unwrap();
@@ -2759,7 +2762,7 @@ async fn acceptance_over_unread_paused(blocked: bool) {
     seller_wallet.receive(None).await.unwrap();
     let collection = Collection::PayeeActivity;
     let target = RecordTarget::new(
-        SwitchCollection::new(collection.name(), collection.policy(None)),
+        DispatchCollection::new(collection.name(), collection.policy(None)),
         &natural_key::request_record(&w.bob_id(), &request.request_hash),
     );
     assert_eq!(seller_wallet.app().record_key(&target).unwrap(), record);
@@ -2783,7 +2786,7 @@ async fn acceptance_over_unread_paused(blocked: bool) {
             .unwrap();
         seller_wallet
             .app_mut()
-            .submit_batch(pubky_switch_client::app::OpBatch::for_protocol("paykit").entry(op))
+            .submit_batch(pubky_dispatch_client::app::OpBatch::for_protocol("paykit").entry(op))
             .await
             .unwrap();
     };
@@ -3015,7 +3018,7 @@ async fn test_divergent_held_answer_kept_while_its_paused_record_is_deleted() {
     assert!(held.divergent);
     assert_eq!(
         held.content,
-        pubky_switch_client::app::RecordContent::Deleted
+        pubky_dispatch_client::app::RecordContent::Deleted
     );
     assert_eq!(
         wallet
@@ -3064,7 +3067,7 @@ async fn test_divergent_held_answer_lacking_in_a_record_never_paused_given_up_wi
 /// The client's durable divergence report: `AppEvent::RecordDivergent { id, key }` is a duty
 /// event, delivered until acknowledged, kept through a restart and a cleared flag, and raised
 /// again under a new ID after a restore; `ScriptedSwitch::make_divergent` makes a record
-/// divergent at the switch, as a conflicting upload does.
+/// divergent at the Dispatch, as a conflicting upload does.
 mod durable_event {
     use super::*;
 
@@ -3164,14 +3167,14 @@ mod durable_event {
     }
 
     /// After the user confirmed `record`, held by `app` on `base`, its record turns divergent
-    /// again at `signer`'s switch: the client reads it so and keeps its report untaken. Then
+    /// again at `signer`'s dispatch: the client reads it so and keeps its report untaken. Then
     /// `other`, another own app, writes the record at `target` again, a newer write that
     /// clears the view, before `app` takes the report, at its next receive.
     async fn divergent_again_cleared(
         base: &Arc<dyn StateStore>,
         app: &mut Paykit,
         other: &mut Paykit,
-        signer: &pubky_switch_client::testing::TestSigner,
+        signer: &pubky_dispatch_client::testing::TestSigner,
         target: &RecordTarget,
         record: &[u8; 32],
     ) {
@@ -3208,7 +3211,7 @@ mod durable_event {
             .unwrap();
         other
             .app_mut()
-            .submit_batch(pubky_switch_client::app::OpBatch::for_protocol("paykit").entry(op))
+            .submit_batch(pubky_dispatch_client::app::OpBatch::for_protocol("paykit").entry(op))
             .await
             .unwrap();
     }
@@ -3401,7 +3404,7 @@ mod durable_event {
         confirm_refused(&mut shop, &refused).await;
         let collection = Collection::PayeeActivity;
         let target = RecordTarget::new(
-            SwitchCollection::new(collection.name(), collection.policy(None)),
+            DispatchCollection::new(collection.name(), collection.policy(None)),
             &natural_key::request_record(&w.bob_id(), &request.request_hash),
         );
         divergent_again_cleared(&base, &mut shop, &mut seller_wallet, &w.bob, &target, &paid).await;
@@ -3427,7 +3430,7 @@ mod durable_event {
     /// client delivers the report again.
     #[derive(Default)]
     struct FailsTaken {
-        inner: pubky_switch_client::store::MemoryStore,
+        inner: pubky_dispatch_client::store::MemoryStore,
         armed: std::sync::atomic::AtomicBool,
     }
 
@@ -3436,7 +3439,7 @@ mod durable_event {
             &self,
             ns: &str,
             key: &[u8],
-        ) -> Result<Option<Vec<u8>>, pubky_switch_client::error::StoreError> {
+        ) -> Result<Option<Vec<u8>>, pubky_dispatch_client::error::StoreError> {
             self.inner.get(ns, key)
         }
 
@@ -3446,19 +3449,21 @@ mod durable_event {
             prefix: &[u8],
             after: Option<&[u8]>,
             limit: u32,
-        ) -> Result<Vec<pubky_switch_client::store::KeyValue>, pubky_switch_client::error::StoreError>
-        {
+        ) -> Result<
+            Vec<pubky_dispatch_client::store::KeyValue>,
+            pubky_dispatch_client::error::StoreError,
+        > {
             self.inner.scan(ns, prefix, after, limit)
         }
 
         fn commit(
             &self,
-            batch: pubky_switch_client::store::WriteBatch,
-        ) -> Result<(), pubky_switch_client::error::StoreError> {
+            batch: pubky_dispatch_client::store::WriteBatch,
+        ) -> Result<(), pubky_dispatch_client::error::StoreError> {
             self.commit_with(batch, |batch| {
                 self.inner
                     .commit(batch)
-                    .map(|()| pubky_switch_client::store::CommitOutcome::Applied)
+                    .map(|()| pubky_dispatch_client::store::CommitOutcome::Applied)
             })
             .map(|_| ())
         }
@@ -3466,10 +3471,10 @@ mod durable_event {
         fn acquire(
             &self,
             ns: &str,
-            owner: pubky_switch_client::store::StoreOwner,
+            owner: pubky_dispatch_client::store::StoreOwner,
         ) -> Result<
-            pubky_switch_client::store::AcquireOutcome,
-            pubky_switch_client::error::StoreError,
+            pubky_dispatch_client::store::AcquireOutcome,
+            pubky_dispatch_client::error::StoreError,
         > {
             self.inner.acquire(ns, owner)
         }
@@ -3477,30 +3482,34 @@ mod durable_event {
         fn commit_if(
             &self,
             ns: &str,
-            owner: pubky_switch_client::store::StoreOwner,
-            batch: pubky_switch_client::store::WriteBatch,
-        ) -> Result<pubky_switch_client::store::CommitOutcome, pubky_switch_client::error::StoreError>
-        {
+            owner: pubky_dispatch_client::store::StoreOwner,
+            batch: pubky_dispatch_client::store::WriteBatch,
+        ) -> Result<
+            pubky_dispatch_client::store::CommitOutcome,
+            pubky_dispatch_client::error::StoreError,
+        > {
             self.commit_with(batch, |batch| self.inner.commit_if(ns, owner, batch))
         }
     }
     impl FailsTaken {
         fn commit_with(
             &self,
-            batch: pubky_switch_client::store::WriteBatch,
+            batch: pubky_dispatch_client::store::WriteBatch,
             apply: impl FnOnce(
-                pubky_switch_client::store::WriteBatch,
+                pubky_dispatch_client::store::WriteBatch,
             ) -> Result<
-                pubky_switch_client::store::CommitOutcome,
-                pubky_switch_client::error::StoreError,
+                pubky_dispatch_client::store::CommitOutcome,
+                pubky_dispatch_client::error::StoreError,
             >,
-        ) -> Result<pubky_switch_client::store::CommitOutcome, pubky_switch_client::error::StoreError>
-        {
+        ) -> Result<
+            pubky_dispatch_client::store::CommitOutcome,
+            pubky_dispatch_client::error::StoreError,
+        > {
             let taken = batch.writes().iter().any(|write| {
-                matches!(write, pubky_switch_client::store::Write::Put { key, .. } if key.starts_with(b"p/paykit/dt/"))
+                matches!(write, pubky_dispatch_client::store::Write::Put { key, .. } if key.starts_with(b"p/paykit/dt/"))
             });
             if taken && self.armed.swap(false, std::sync::atomic::Ordering::SeqCst) {
-                return Err(pubky_switch_client::error::StoreError::Unavailable);
+                return Err(pubky_dispatch_client::error::StoreError::Unavailable);
             }
             apply(batch)
         }
@@ -3552,7 +3561,7 @@ mod durable_event {
 
     #[tokio::test]
     async fn test_divergent_repeat_withheld_when_its_fresh_read_shows_the_record_divergent() {
-        // The wallet's own copy shows the request record clear; the switch holds it
+        // The wallet's own copy shows the request record clear; the Dispatch holds it
         // divergent. The repeat's fresh read of the record is the first view that shows it:
         // the repeat is withheld on that view.
         let w = World::new();
@@ -3686,7 +3695,7 @@ async fn test_divergent_proof_after_a_confirmation_leaves_the_kept_one_credited(
         .into_iter()
         .find(|sent| sent.kind == "paykit.payment_proof")
         .unwrap();
-    let message = pubky_switch_core::message::Message::parse(
+    let message = pubky_dispatch_core::message::Message::parse(
         sent.plaintext.json(),
         paykit_lib::kinds::OPAQUE_MEMBERS,
     )
@@ -3718,7 +3727,7 @@ async fn test_divergent_proof_after_a_confirmation_leaves_the_kept_one_credited(
 async fn test_divergent_later_write_waits_behind_a_kept_one_not_written_yet() {
     // The kept acceptance can't be written at the receive after the confirmation: its write
     // meets the quota. A later acceptance in that read waits behind it, kept, and the kept
-    // one goes first once the switch takes it.
+    // one goes first once the Dispatch takes it.
     let w = World::new();
     let base = store();
     let mut wallet = w.wallet("wallet").await;
@@ -3752,9 +3761,9 @@ async fn test_divergent_later_write_waits_behind_a_kept_one_not_written_yet() {
     let second = acceptance(&w);
     w.bob
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::Error {
+        .fail_next(pubky_dispatch_client::testing::Fault::Error {
             path: "/ops".into(),
-            code: pubky_switch_core::http::ErrorCode::QuotaExceeded,
+            code: pubky_dispatch_core::http::ErrorCode::QuotaExceeded,
             current: serde_json::Value::Null,
         });
     shop.receive(None).await.unwrap();
@@ -3856,7 +3865,7 @@ async fn test_divergent_mark_with_a_credit_confirmation_no_writer_leaves_credits
         };
         mark["d"]["credit_shown"] = shown;
         mark["d"]["credit_confirmed"] = credit;
-        let put = |value: Vec<u8>| pubky_switch_client::app::LocalWrite::Put {
+        let put = |value: Vec<u8>| pubky_dispatch_client::app::LocalWrite::Put {
             key: key.clone(),
             value,
         };
@@ -3868,8 +3877,8 @@ async fn test_divergent_mark_with_a_credit_confirmation_no_writer_leaves_credits
         assert!(
             matches!(
                 refused,
-                paykit_sdk::PaykitError::Client(pubky_switch_client::app::AppError::Store(
-                    pubky_switch_client::error::StoreError::Corrupt
+                paykit_sdk::PaykitError::Client(pubky_dispatch_client::app::AppError::Store(
+                    pubky_dispatch_client::error::StoreError::Corrupt
                 ))
             ),
             "{case}: {refused:?}"
@@ -3899,7 +3908,7 @@ async fn list_asks(w: &World, wallet: &Paykit) -> Vec<Option<[u8; 16]>> {
     sent.iter()
         .filter(|sent| sent.kind == "paykit.private_payment_list_request")
         .map(|sent| {
-            let message = pubky_switch_core::message::Message::parse(
+            let message = pubky_dispatch_core::message::Message::parse(
                 sent.plaintext.json(),
                 paykit_lib::kinds::OPAQUE_MEMBERS,
             )
@@ -4021,7 +4030,7 @@ fn remove_from_bob(w: &World, app: [u8; 16]) {
     w.bob
         .next_doc(|body| {
             body.apps.retain(|a| a.app_id != app);
-            body.removed.push(pubky_switch_core::records::RemovedApp {
+            body.removed.push(pubky_dispatch_core::records::RemovedApp {
                 app_id: app,
                 distrust_from: now,
             });
@@ -4140,7 +4149,7 @@ async fn test_divergent_list_of_a_removed_app_leaves_a_current_list_paid() {
 #[tokio::test]
 async fn test_divergent_paused_list_unjudged_while_the_payees_identity_is_unreadable() {
     // Bob's shop's list is paused as divergent, and bob's identity.json can be read neither
-    // from his Homeserver nor from his switch, the copy held more than 10 minutes old. Whether
+    // from his Homeserver nor from his Dispatch, the copy held more than 10 minutes old. Whether
     // the shop is still current can't be told: the payment is refused for that, neither
     // naming the shop's record for a confirmation nor asking for a newer list.
     let w = World::new();
@@ -4153,7 +4162,7 @@ async fn test_divergent_paused_list_unjudged_while_the_payees_identity_is_unread
     let record = list_record(&w, &wallet, &shop);
     set_divergent(&base, &wallet, &record, true);
     w.homeserver
-        .remove(w.bob_id(), pubky_switch_core::records::IDENTITY_PATH);
+        .remove(w.bob_id(), pubky_dispatch_core::records::IDENTITY_PATH);
     w.router.remove(crate::common::BOB_ORIGIN);
     w.clock.advance_ms(11 * 60_000);
     let payment = UnrequestedPayment::new(w.bob_id(), btc("1"))
@@ -4250,8 +4259,8 @@ async fn test_divergent_acceptance_dropped_for_the_bound_taken_again_from_a_rese
             .len(),
         17
     );
-    let msg_id = |plaintext: &pubky_switch_core::message::MessagePlaintext| {
-        pubky_switch_core::message::Message::parse(
+    let msg_id = |plaintext: &pubky_dispatch_core::message::MessagePlaintext| {
+        pubky_dispatch_core::message::Message::parse(
             plaintext.json(),
             paykit_lib::kinds::OPAQUE_MEMBERS,
         )
@@ -4292,7 +4301,7 @@ async fn test_divergent_credit_waits_for_a_deleted_record_seen_divergent() {
     let paid = sale(&shop, &first).await.record;
     let other = sale(&shop, &second).await.record;
     let target = RecordTarget::new(
-        SwitchCollection::new(
+        DispatchCollection::new(
             Collection::PayeeActivity.name(),
             Collection::PayeeActivity.policy(None),
         ),
@@ -4312,7 +4321,7 @@ async fn test_divergent_credit_waits_for_a_deleted_record_seen_divergent() {
 
 #[tokio::test]
 async fn test_divergent_failure_goes_on_the_claim_alone_while_divergent() {
-    // A payment dispatched before the record turned divergent fails: its `failed` goes on the
+    // A payment handed off before the record turned divergent fails: its `failed` goes on the
     // claim at once, alone, and the payer's record, divergent and unconfirmed, is left as it
     // is (Paykit spec 7.2 step 4, 6).
     let w = World::new();
@@ -4402,7 +4411,7 @@ async fn test_divergent_stored_entry_neither_written_nor_given_up_while_its_reco
     shop.receive(None).await.unwrap();
     seller_wallet.receive(None).await.unwrap();
     let target = RecordTarget::new(
-        SwitchCollection::new(
+        DispatchCollection::new(
             Collection::PayeeActivity.name(),
             Collection::PayeeActivity.policy(None),
         ),
@@ -4422,7 +4431,7 @@ async fn test_divergent_stored_entry_neither_written_nor_given_up_while_its_reco
     // the end of the receive fails.
     w.bob
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+        .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
             path: "records?collection".into(),
             after: crate::certificate::client_listing_requests(shop.app().cert()),
         });
@@ -4468,8 +4477,8 @@ async fn test_divergent_messages_of_one_millisecond_kept_dropped_and_written_in_
             body.clone(),
         )
     };
-    let msg_id = |plaintext: &pubky_switch_core::message::MessagePlaintext| {
-        pubky_switch_core::message::Message::parse(
+    let msg_id = |plaintext: &pubky_dispatch_core::message::MessagePlaintext| {
+        pubky_dispatch_core::message::Message::parse(
             plaintext.json(),
             paykit_lib::kinds::OPAQUE_MEMBERS,
         )
@@ -4593,8 +4602,8 @@ async fn test_divergent_request_to_an_app_whose_list_certificate_no_longer_count
     // The request queued names the pair: its mark keeps what it named.
     let key = format!(
         "lq/{}/{}",
-        pubky_switch_core::enc::b64(&w.bob_id()),
-        pubky_switch_core::enc::b64(&shop_id)
+        pubky_dispatch_core::enc::b64(&w.bob_id()),
+        pubky_dispatch_core::enc::b64(&shop_id)
     );
     let mark = wallet
         .app()
@@ -4636,7 +4645,7 @@ async fn test_divergent_stored_request_never_reopens_a_divergent_delete() {
     );
     phone.receive(None).await.unwrap();
     let target = RecordTarget::new(
-        SwitchCollection::new(
+        DispatchCollection::new(
             Collection::PayerActivity.name(),
             Collection::PayerActivity.policy(None),
         ),
@@ -4664,13 +4673,13 @@ async fn test_divergent_stored_request_never_reopens_a_divergent_delete() {
     assert!(held.divergent);
     assert_eq!(
         held.content,
-        pubky_switch_client::app::RecordContent::Deleted
+        pubky_dispatch_client::app::RecordContent::Deleted
     );
     confirm(&mut wallet, &record).await.unwrap();
     for _ in 0..2 {
         wallet.receive(None).await.unwrap();
     }
-    let deleted = pubky_switch_client::app::RecordContent::Deleted;
+    let deleted = pubky_dispatch_client::app::RecordContent::Deleted;
     let held = wallet.app().shared_record(&record).await.unwrap().unwrap();
     assert_eq!(held.content, deleted);
     w.clock.advance_ms(31 * 24 * HOUR_MS);

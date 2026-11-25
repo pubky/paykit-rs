@@ -26,7 +26,7 @@ use paykit_lib::allowances::{
 };
 use paykit_lib::AttemptId;
 
-use crate::rail::{AllowanceDispatch, Rail, RailOutcome};
+use crate::rail::{AllowanceHandoff, Rail, RailOutcome};
 
 /// The proposal must belong to the Allower's surviving history as of the grant.
 pub(crate) fn in_grant_history(
@@ -49,7 +49,7 @@ struct ReservationClaim {
 /// original attempt must be attributed before a missing service entry is an alarm.
 struct Accounting {
     counted: Usage,
-    unclassified: Vec<AllowanceDispatch>,
+    unclassified: Vec<AllowanceHandoff>,
     /// The ledger's entries `counted` holds reserved that the method's inventory doesn't
     /// show, each with its amount, scaled: the only reservations whose room an outcome may
     /// still give back (Paykit spec 8.3). Judged entry by entry on the evidence `counted`
@@ -57,7 +57,7 @@ struct Accounting {
     reserved_before_call: Vec<(AttemptId, u128)>,
 }
 
-async fn wallet_inventory(rail: &dyn Rail, payer: [u8; 32]) -> Option<Vec<AllowanceDispatch>> {
+async fn wallet_inventory(rail: &dyn Rail, payer: [u8; 32]) -> Option<Vec<AllowanceHandoff>> {
     let declaration = rail.declaration();
     if !declaration.history || !declaration.history_survives_restore {
         return None;
@@ -66,7 +66,7 @@ async fn wallet_inventory(rail: &dyn Rail, payer: [u8; 32]) -> Option<Vec<Allowa
 }
 
 fn reconciled_usage(
-    inventory: Vec<AllowanceDispatch>,
+    inventory: Vec<AllowanceHandoff>,
     terms: &AllowanceTerms,
     ledger: &Ledger,
     claims: &HashMap<AttemptId, ReservationClaim>,
@@ -84,8 +84,8 @@ fn reconciled_usage(
             evidence.entry(entry.attempt_id).or_default().claim = Some(claim.state);
         }
     }
-    for dispatch in inventory {
-        let id = dispatch.attempt_id;
+    for handoff in inventory {
+        let id = handoff.attempt_id;
         if !seen.insert(id) {
             return None;
         }
@@ -96,9 +96,9 @@ fn reconciled_usage(
             .or_else(|| failed.map(|f| (&f.obligation, &terms.asset, &f.value)));
         let Some((obligation, asset, value)) = member else {
             if let Some(entry) = retired.get(&id).filter(|entry| {
-                matches!(&dispatch.outcome, RailOutcome::Failed)
+                matches!(&handoff.outcome, RailOutcome::Failed)
                     || matches!(
-                        (entry, &dispatch.outcome),
+                        (entry, &handoff.outcome),
                         (
                             compaction::Retired::PreviouslyFailed(_),
                             RailOutcome::Paid(_)
@@ -112,21 +112,21 @@ fn reconciled_usage(
                     compaction::Retired::Paid(e) => (&e.asset, &e.value),
                     compaction::Retired::PreviouslyFailed(e) => (&terms.asset, &e.value),
                 };
-                if &dispatch.amount.asset != asset || &dispatch.amount.value != value {
+                if &handoff.amount.asset != asset || &handoff.amount.value != value {
                     return None;
                 }
                 retired.remove(&id);
                 continue;
             }
-            unclassified.push(dispatch);
+            unclassified.push(handoff);
             continue;
         };
         let claim = claims.get(&id);
         let payer_proved = evidence.get(&id).is_some_and(|fact| fact.paid);
         if claim.is_some_and(|claim| *obligation != claim.obligation)
             || (claim.is_none() && !payer_proved)
-            || asset != &dispatch.amount.asset
-            || value != &dispatch.amount.value
+            || asset != &handoff.amount.asset
+            || value != &handoff.amount.value
         {
             return None;
         }
@@ -136,18 +136,18 @@ fn reconciled_usage(
             if payer_proved || claim.is_some_and(|claim| claim.state == ClaimState::Done) {
                 continue;
             }
-            match &dispatch.outcome {
+            match &handoff.outcome {
                 RailOutcome::Failed
                     if claim.is_some_and(|claim| {
                         matches!(claim.state, ClaimState::Failed { by_owner: true })
                     }) => {}
-                RailOutcome::Paid(_) => unclassified.push(dispatch),
+                RailOutcome::Paid(_) => unclassified.push(handoff),
                 _ => return None,
             }
             // The ledger already counts this failure in full. Its method history cannot release it.
             continue;
         }
-        evidence.get_mut(&id)?.paid |= matches!(dispatch.outcome, RailOutcome::Paid(_));
+        evidence.get_mut(&id)?.paid |= matches!(handoff.outcome, RailOutcome::Paid(_));
     }
     let reserved_before_call = ledger
         .entries
@@ -177,7 +177,7 @@ mod tests {
         AllowanceId, Asset, Decimal, PaymentAmount, PaymentEndpointIdentifier,
         PaymentEndpointPayload,
     };
-    use pubky_switch_client::clock::TestClock;
+    use pubky_dispatch_client::clock::TestClock;
     use std::sync::Arc;
 
     #[test]
@@ -235,7 +235,7 @@ mod tests {
                 state: ClaimState::Failed { by_owner: true },
             },
         )]);
-        let dispatch = AllowanceDispatch {
+        let handoff = AllowanceHandoff {
             attempt_id: id,
             amount: PaymentAmount {
                 asset: terms.asset.clone(),
@@ -243,9 +243,9 @@ mod tests {
             },
             outcome: RailOutcome::Failed,
         };
-        let read = |dispatch, claims: &HashMap<_, _>| {
+        let read = |handoff, claims: &HashMap<_, _>| {
             reconciled_usage(
-                vec![dispatch],
+                vec![handoff],
                 &terms,
                 &ledger,
                 claims,
@@ -254,21 +254,21 @@ mod tests {
                 100_000_000,
             )
         };
-        let accounting = read(dispatch.clone(), &claims).unwrap();
+        let accounting = read(handoff.clone(), &claims).unwrap();
         assert_eq!(accounting.counted.lifetime().as_str(), "70");
         assert!(accounting.unclassified.is_empty());
-        assert!(read(dispatch.clone(), &HashMap::new()).is_none());
-        let mut different = dispatch.clone();
+        assert!(read(handoff.clone(), &HashMap::new()).is_none());
+        let mut different = handoff.clone();
         different.amount.value = Decimal::new("69").unwrap();
         assert!(read(different, &claims).is_none());
-        let mut pending = dispatch;
+        let mut pending = handoff;
         pending.outcome = RailOutcome::Pending;
         assert!(read(pending, &claims).is_none());
     }
 
     #[tokio::test]
     async fn test_account_history_charges_the_open_seventy_after_restore() {
-        // The wallet clock runs behind the Switch that dated the reservation at 1,001.
+        // The wallet clock runs behind the Dispatch that dated the reservation at 1,001.
         let clock = Arc::new(TestClock::new(16));
         let rail = FakeRail::with_clock(clock.clone());
         let payer = [3; 32];

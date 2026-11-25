@@ -1,6 +1,6 @@
 use crate::*;
-use pubky_switch_core::{records::AuthRequest, sig::SignedDoc};
-use pubky_switch_harness::{Backend, World};
+use pubky_dispatch_core::{records::AuthRequest, sig::SignedDoc};
+use pubky_dispatch_harness::{Backend, World};
 use std::{error::Error, sync::Arc};
 
 mod allowances;
@@ -64,7 +64,7 @@ async fn approval(world: &World) -> TestResult {
         Err(WalletError::InvalidInput { .. })
     ));
     let backup =
-        pubky_switch_core::records::app_backup_path(&first.app_id.clone().try_into().unwrap());
+        pubky_dispatch_core::records::app_backup_path(&first.app_id.clone().try_into().unwrap());
     let auth = AuthRequest {
         caps: format!("{backup}:rw,{}", auth.caps),
         ..auth

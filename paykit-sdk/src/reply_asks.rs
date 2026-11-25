@@ -1,12 +1,12 @@
 //! Delivery evidence for requests to recover a sender's dropped replies (Paykit spec 7.2).
 //! The drop mark can expire or be evicted independently of an uncertain delivery.
 
-use pubky_switch_core::enc::b64;
+use pubky_dispatch_core::enc::b64;
 use std::collections::{BTreeMap, BTreeSet};
 
 use paykit_lib::bodies::{Body, ResendRequest};
-use pubky_switch_client::app::{AppEvent, Delivery, LocalWrite, RestoreContext};
-use pubky_switch_core::enc::serde_b64;
+use pubky_dispatch_client::app::{AppEvent, Delivery, LocalWrite, RestoreContext};
+use pubky_dispatch_core::enc::serde_b64;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{PaykitError, Result};
@@ -259,7 +259,7 @@ fn joined_loss(mut notice: KeptNotice, previous: Option<&KeptNotice>) -> KeptNot
 /// Retire the recovery obligation in the intake commit. If the native outbox could have
 /// accepted an identified request, the next SDK pass checks it before telling the host.
 pub(crate) fn retire_in_receive(
-    cx: &mut pubky_switch_client::app::ReceiveContext<'_>,
+    cx: &mut pubky_dispatch_client::app::ReceiveContext<'_>,
     retired: &[([u8; 32], u64, u64)],
 ) -> std::result::Result<(), crate::receive::Fail> {
     if retired.is_empty() {
@@ -420,7 +420,7 @@ pub(crate) fn restore(
 /// A queued re-send request may proceed when the sender has no overlapping uncertainty,
 /// or when the mark still identifies this exact pending original (Paykit spec 7.2).
 pub(crate) fn may_deliver_request(
-    delivery: &pubky_switch_client::app::DeliveryView<'_>,
+    delivery: &pubky_dispatch_client::app::DeliveryView<'_>,
 ) -> Result<bool> {
     let message = delivery.message();
     let Some(asks) = state::delivery_get::<ReplyAsks>(delivery, &key::reply_asks(&message.to))?
@@ -539,7 +539,7 @@ impl Paykit {
             if held.originals.is_empty() && held.retired.is_empty() {
                 continue;
             }
-            let sender = pubky_switch_core::enc::unb64_array::<32>(&peer)
+            let sender = pubky_dispatch_core::enc::unb64_array::<32>(&peer)
                 .map_err(|_| PaykitError::corrupt())?;
             let k = key::reply_asks(&sender);
             let mark_key = key::dropped_replies(&sender);

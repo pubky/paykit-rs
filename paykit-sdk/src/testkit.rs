@@ -3,20 +3,20 @@
 
 use paykit_lib::records::StoredMessage;
 use paykit_lib::scopes::permissions_for;
-use pubky_switch_core::keys::{AppKeys, IdentityKey};
-use pubky_switch_core::message::{Message, Sender};
-use pubky_switch_core::records::{
+use pubky_dispatch_core::keys::{AppKeys, IdentityKey};
+use pubky_dispatch_core::message::{Message, Sender};
+use pubky_dispatch_core::records::{
     AppCert, AppCertBody, AppRecord, AppRecordBody, IdentityBody, IdentityDoc, IdentityPolicy,
     Inbox, ListedApp, DEFAULT_CERT_LIFETIME_MS,
 };
-use pubky_switch_core::scopes::Permission;
+use pubky_dispatch_core::scopes::Permission;
 use serde_json::{Map, Value};
 
 /// 2026-01-01T00:00:00Z.
 pub(crate) const NOW: u64 = 1_767_225_600_000;
 
 fn seed(label: &str) -> [u8; 32] {
-    pubky_switch_core::enc::hash(format!("paykit-sdk/test/{label}").as_bytes())
+    pubky_dispatch_core::enc::hash(format!("paykit-sdk/test/{label}").as_bytes())
 }
 
 /// An identity and one of its apps.
@@ -32,7 +32,7 @@ impl Party {
         Self::with_permissions(name, app, scopes, &permissions_for(&owned))
     }
 
-    /// As [`Party::new`], its certificate granting `permissions`, which the Switch takes
+    /// As [`Party::new`], its certificate granting `permissions`, which the Dispatch takes
     /// even when they aren't what its Paykit scopes need.
     pub(crate) fn with_permissions(
         name: &str,
@@ -186,31 +186,31 @@ pub(crate) fn object(value: Value) -> Map<String, Value> {
 
 /// Two identities' switches, alice's and bob's, on one clock and Homeserver, for the unit
 /// tests that drive a whole app: the setup of the flow tests' world, cut to what they use.
-pub(crate) struct Switches {
-    pub(crate) clock: std::sync::Arc<pubky_switch_client::clock::TestClock>,
-    pub(crate) alice: pubky_switch_client::testing::TestSigner,
-    pub(crate) bob: pubky_switch_client::testing::TestSigner,
-    router: std::sync::Arc<pubky_switch_client::testing::Router>,
+pub(crate) struct Dispatches {
+    pub(crate) clock: std::sync::Arc<pubky_dispatch_client::clock::TestClock>,
+    pub(crate) alice: pubky_dispatch_client::testing::TestSigner,
+    pub(crate) bob: pubky_dispatch_client::testing::TestSigner,
+    router: std::sync::Arc<pubky_dispatch_client::testing::Router>,
 }
 
-/// The host's timer, on the switches' clock.
-struct ClockTimer(std::sync::Arc<pubky_switch_client::clock::TestClock>);
+/// The host's timer, on the Dispatches' clock.
+struct ClockTimer(std::sync::Arc<pubky_dispatch_client::clock::TestClock>);
 
 impl crate::Timer for ClockTimer {
-    fn sleep(&self, ms: u64) -> pubky_switch_client::transport::BoxFuture<'static, ()> {
+    fn sleep(&self, ms: u64) -> pubky_dispatch_client::transport::BoxFuture<'static, ()> {
         self.0.advance_ms(ms);
         Box::pin(async {})
     }
 }
 
-impl Switches {
+impl Dispatches {
     pub(crate) fn new() -> Self {
-        use pubky_switch_client::testing::{
+        use pubky_dispatch_client::testing::{
             ProtocolSpec, Router, Seeds, TestHomeserver, TestIdentity, TestSigner, START_MS,
         };
         use std::sync::Arc;
         let seeds = Seeds::default();
-        let clock = Arc::new(pubky_switch_client::clock::TestClock::new(START_MS));
+        let clock = Arc::new(pubky_dispatch_client::clock::TestClock::new(START_MS));
         let homeserver = Arc::new(TestHomeserver::new());
         let spec = ProtocolSpec {
             keyed_scopes: [
@@ -252,23 +252,23 @@ impl Switches {
     /// App `name` of `signer`, joined with `scopes` on a store of its own, its first read done.
     pub(crate) async fn join(
         &self,
-        signer: &pubky_switch_client::testing::TestSigner,
+        signer: &pubky_dispatch_client::testing::TestSigner,
         name: &str,
         scopes: crate::RequestedScopes,
     ) -> crate::Paykit {
         use std::sync::Arc;
         let keys = signer.identity().app_keys(name);
         let names: Vec<&str> = scopes.scopes.iter().map(String::as_str).collect();
-        let spec = pubky_switch_client::testing::AppSpec::new(&names)
+        let spec = pubky_dispatch_client::testing::AppSpec::new(&names)
             .with_permissions(&scopes.permissions);
         let request = signer.approve(&keys, &spec).unwrap();
-        let store = Arc::new(pubky_switch_client::store::MemoryStore::new());
+        let store = Arc::new(pubky_dispatch_client::store::MemoryStore::new());
         let env = signer.env_with(
             store,
-            Arc::clone(&self.router) as Arc<dyn pubky_switch_client::transport::Transport>,
+            Arc::clone(&self.router) as Arc<dyn pubky_dispatch_client::transport::Transport>,
         );
         let rail = Arc::new(crate::rail::FakeRail::with_clock(
-            Arc::clone(&self.clock) as Arc<dyn pubky_switch_client::clock::Clock>
+            Arc::clone(&self.clock) as Arc<dyn pubky_dispatch_client::clock::Clock>
         ));
         let mut app = crate::Paykit::join(
             env,
@@ -293,16 +293,16 @@ impl Switches {
     ) -> [u8; 16] {
         self.alice
             .switch()
-            .fail_next(pubky_switch_client::testing::Fault::Error {
+            .fail_next(pubky_dispatch_client::testing::Fault::Error {
                 path: "/ops".into(),
-                code: pubky_switch_core::http::ErrorCode::RateLimited,
+                code: pubky_dispatch_core::http::ErrorCode::RateLimited,
                 current: serde_json::Value::Null,
             });
         let kept = app
             .app_mut()
             .submit_batch(
-                pubky_switch_client::app::OpBatch::new()
-                    .op(pubky_switch_core::ops::OpKind::DenyPut { pubky: [9; 32] }),
+                pubky_dispatch_client::app::OpBatch::new()
+                    .op(pubky_dispatch_core::ops::OpKind::DenyPut { pubky: [9; 32] }),
             )
             .await
             .unwrap_err();
@@ -310,7 +310,7 @@ impl Switches {
         app.app_mut()
             .protocol_commit(
                 crate::protocol::BACKUP_NAME,
-                &[pubky_switch_client::app::LocalWrite::Put {
+                &[pubky_dispatch_client::app::LocalWrite::Put {
                     key: crate::stored::held_write(stored).into_bytes(),
                     value: batch_id.to_vec(),
                 }],

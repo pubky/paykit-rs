@@ -3,14 +3,14 @@
 
 use paykit_sdk::rail::Behaviour;
 use paykit_sdk::{PayOptions, PayOutcome, Paykit, RequestRef};
-use pubky_switch_client::app::{OpBatch, RecordTarget};
-use pubky_switch_client::clock::Clock;
+use pubky_dispatch_client::app::{OpBatch, RecordTarget};
+use pubky_dispatch_client::clock::Clock;
 use serde_json::{json, Value};
 
 use crate::common::{draft, request_from, World};
 use crate::outcome_record::payer_record;
 
-/// The value at `target`, read again from the switch by `app`.
+/// The value at `target`, read again from the Dispatch by `app`.
 async fn value_at(app: &mut Paykit, target: &RecordTarget) -> Value {
     let held = app.app_mut().read_record(target).await.unwrap().unwrap();
     serde_json::from_slice(held.content.value().unwrap()).unwrap()

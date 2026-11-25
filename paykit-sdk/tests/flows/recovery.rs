@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use paykit_sdk::rail::Behaviour;
 use paykit_sdk::{PayOptions, PayOutcome, RailDeclaration, Stage};
-use pubky_switch_client::clock::{Clock, TestClock};
-use pubky_switch_core::claims::{ClaimStatus, Outcome};
+use pubky_dispatch_client::clock::{Clock, TestClock};
+use pubky_dispatch_core::claims::{ClaimStatus, Outcome};
 
 use crate::common::{draft, list_version, request_from, store, World, HOUR_MS};
 
@@ -17,7 +17,7 @@ const DAY_MS: u64 = 24 * HOUR_MS;
 /// attempt and the wallet's App ID.
 async fn in_flight(
     w: &World,
-    base: &Arc<dyn pubky_switch_client::store::StateStore>,
+    base: &Arc<dyn pubky_dispatch_client::store::StateStore>,
 ) -> (paykit_lib::AttemptId, [u8; 16]) {
     in_flight_with(w, base, crate::common::day_window()).await
 }
@@ -25,7 +25,7 @@ async fn in_flight(
 /// As [`in_flight`], the wallet planning the payment under `config`.
 async fn in_flight_with(
     w: &World,
-    base: &Arc<dyn pubky_switch_client::store::StateStore>,
+    base: &Arc<dyn pubky_dispatch_client::store::StateStore>,
     config: paykit_sdk::PaykitConfig,
 ) -> (paykit_lib::AttemptId, [u8; 16]) {
     let mut wallet = w.wallet_with("wallet", Arc::clone(base), config).await;
@@ -54,7 +54,7 @@ async fn test_recovery_clock_gone_back_empty_history_stays_uncertain() {
     let w = World::new();
     let base = store();
     let (attempt_id, app_id) = in_flight(&w, &base).await;
-    // A history kept for a day: empty, it shows a dispatch never started only within that
+    // A history kept for a day: empty, it shows a handoff never started only within that
     // day of the journaling, which a clock now behind it can't tell.
     w.rail.set_declaration(
         RailDeclaration::new(
@@ -89,7 +89,7 @@ async fn test_recovery_clock_gone_back_empty_history_stays_uncertain() {
 }
 
 #[tokio::test]
-async fn test_recovery_clock_gone_back_idempotent_rail_not_dispatched_again() {
+async fn test_recovery_clock_gone_back_idempotent_rail_not_handed_off_again() {
     let w = World::new();
     let base = store();
     let (attempt_id, app_id) = in_flight(&w, &base).await;
@@ -173,7 +173,7 @@ async fn test_recovery_clock_gone_back_own_identity_read_again() {
     // The own identity.json goes missing, and the device clock goes back 10 minutes: the
     // confirmation it now puts in the future shows nothing recent (Paykit spec 4).
     w.homeserver
-        .remove(w.alice_id(), pubky_switch_core::records::IDENTITY_PATH);
+        .remove(w.alice_id(), pubky_dispatch_core::records::IDENTITY_PATH);
     device.set_ms(device.now_ms() - 10 * 60_000);
     let refused = wallet
         .pay_request(&request, PayOptions::default())
@@ -224,7 +224,7 @@ async fn test_recovery_attempt_resolved_failed_may_be_paid_again() {
             &obligation,
             attempt_id,
             paykit_sdk::Resolution::Failed,
-            pubky_switch_client::app::UserConfirmed::new(),
+            pubky_dispatch_client::app::UserConfirmed::new(),
         )
         .await
         .unwrap();
@@ -264,7 +264,7 @@ async fn test_recovery_attempt_resolved_done_never_dispatched_again() {
             &obligation,
             attempt_id,
             paykit_sdk::Resolution::Done,
-            pubky_switch_client::app::UserConfirmed::new(),
+            pubky_dispatch_client::app::UserConfirmed::new(),
         )
         .await
         .unwrap();
@@ -274,7 +274,7 @@ async fn test_recovery_attempt_resolved_done_never_dispatched_again() {
 }
 
 #[tokio::test]
-async fn test_recovery_attempt_resolved_on_the_claim_not_dispatched_again() {
+async fn test_recovery_attempt_resolved_on_the_claim_not_handed_off_again() {
     let w = World::new();
     w.rail.set_declaration(idempotent_without_history());
     let base = store();
@@ -301,16 +301,16 @@ async fn test_recovery_attempt_resolved_on_the_claim_not_dispatched_again() {
     wallet
         .app_mut()
         .write_claim(
-            pubky_switch_client::app::ClaimOp::done(
+            pubky_dispatch_client::app::ClaimOp::done(
                 obligation,
                 step,
                 attempt_id.to_bytes(),
-                pubky_switch_core::claims::Basis::Owner,
+                pubky_dispatch_core::claims::Basis::Owner,
                 None,
             )
             .unwrap(),
             Vec::new(),
-            pubky_switch_client::app::ObligationDeadline::NotKnown,
+            pubky_dispatch_client::app::ObligationDeadline::NotKnown,
         )
         .await
         .unwrap();
@@ -326,10 +326,10 @@ async fn test_recovery_repeat_refused_without_a_fresh_own_identity() {
     let base = store();
     let (attempt_id, app_id) = in_flight(&w, &base).await;
     // The payer's identity.json goes missing, and its last confirmation is over 60 s old:
-    // a repeat may execute money, so it needs the check a first dispatch does (Paykit spec
+    // a repeat may execute money, so it needs the check a first handoff does (Paykit spec
     // 4, 7.2).
     w.homeserver
-        .remove(w.alice_id(), pubky_switch_core::records::IDENTITY_PATH);
+        .remove(w.alice_id(), pubky_dispatch_core::records::IDENTITY_PATH);
     w.clock.advance_ms(61_000);
     let mut wallet = w
         .load_on_clock(
@@ -365,7 +365,7 @@ async fn test_recovery_repeat_to_a_revoked_payee_app_held() {
     w.bob
         .next_doc(|body| {
             body.apps.retain(|a| a.app_id != shop_id);
-            body.removed.push(pubky_switch_core::records::RemovedApp {
+            body.removed.push(pubky_dispatch_core::records::RemovedApp {
                 app_id: shop_id,
                 distrust_from: now,
             });
@@ -380,7 +380,7 @@ async fn test_recovery_repeat_to_a_revoked_payee_app_held() {
             Arc::new(TestClock::new(w.clock.now_ms())),
         )
         .await;
-    // Not repeated, and not written `failed`: the first dispatch may have paid.
+    // Not repeated, and not written `failed`: the first handoff may have paid.
     let resumed = wallet.resume_payments().await.unwrap();
     assert!(
         matches!(resumed.as_slice(), [PayOutcome::Uncertain { .. }]),
@@ -406,7 +406,7 @@ async fn test_recovery_slow_failed_own_identity_read_refuses_the_repeat() {
             &w.alice,
             Arc::clone(&base),
             app_id,
-            Arc::clone(&homeserver) as Arc<dyn pubky_switch_client::app::HomeserverReader>,
+            Arc::clone(&homeserver) as Arc<dyn pubky_dispatch_client::app::HomeserverReader>,
         )
         .await;
     // Confirmed now; then the refresh before the repeat takes 61 s and fails. The 60 s are
@@ -439,9 +439,9 @@ async fn stopped_before_the_rail() -> (
     World,
     paykit_lib::AttemptId,
     [u8; 16],
-    Arc<dyn pubky_switch_client::store::StateStore>,
+    Arc<dyn pubky_dispatch_client::store::StateStore>,
 ) {
-    use pubky_switch_client::store::{Fault, FaultStore, StateStore};
+    use pubky_dispatch_client::store::{Fault, FaultStore, StateStore};
     for n in 1..64 {
         let w = World::new();
         w.rail.set_declaration(idempotent_without_history());
@@ -481,15 +481,15 @@ async fn stopped_before_the_rail() -> (
 }
 
 /// Alice's signer publishes her next identity.json at `generation`, naming `inbox`, on her
-/// Homeserver only: the switch her wallet follows isn't told.
-fn publish_provider(w: &World, generation: u64, inbox: pubky_switch_core::records::Inbox) {
+/// Homeserver only: the Dispatch her wallet follows isn't told.
+fn publish_provider(w: &World, generation: u64, inbox: pubky_dispatch_core::records::Inbox) {
     let held = w.homeserver.identity_doc(&w.alice_id()).unwrap();
     let old = held.body().inbox.clone();
     let old_generation = held.generation();
     w.alice
         .sign_next(|body| {
             body.service_keys
-                .push(pubky_switch_core::records::ServiceKeyEntry {
+                .push(pubky_dispatch_core::records::ServiceKeyEntry {
                     generation: old_generation,
                     key: old.service_key,
                 });
@@ -507,7 +507,7 @@ async fn resume_after_provider_change(change: impl FnOnce(&World)) {
         .await;
     // The attempt was written at a service or generation the identity no longer names:
     // nothing is paid on it, and it stays "may be paid" until the move rules resolve it
-    // (Paykit spec 4, 7.2; Switch spec 12.5, 12.6).
+    // (Paykit spec 4, 7.2; Dispatch spec 12.5, 12.6).
     let resumed = wallet.resume_payments().await.unwrap();
     assert!(
         matches!(resumed.as_slice(), [PayOutcome::Uncertain { .. }]),
@@ -526,7 +526,7 @@ async fn test_recovery_not_paid_after_a_provider_change() {
         publish_provider(
             w,
             held.generation() + 1,
-            pubky_switch_core::records::Inbox::new("https://alice-next.example", w.bob_id()),
+            pubky_dispatch_core::records::Inbox::new("https://alice-next.example", w.bob_id()),
         );
     })
     .await;
@@ -658,7 +658,7 @@ async fn test_recovery_failure_past_the_history_window_not_asked_again() {
     let PayOutcome::Failed { attempt_id, .. } = outcome else {
         panic!("{outcome:?}");
     };
-    // Past the day the history keeps a dispatch, it is no evidence either way.
+    // Past the day the history keeps a handoff, it is no evidence either way.
     w.clock.advance_ms(2 * DAY_MS);
     w.rail.complete_after_failure(&attempt_id);
     assert!(wallet.resume_payments().await.unwrap().is_empty());
@@ -729,7 +729,7 @@ async fn test_recovery_list_expiring_during_the_own_identity_read_not_paid() {
             &w.alice,
             Arc::clone(&base),
             app_id,
-            Arc::clone(&reads) as Arc<dyn pubky_switch_client::app::HomeserverReader>,
+            Arc::clone(&reads) as Arc<dyn pubky_dispatch_client::app::HomeserverReader>,
         )
         .await;
     let resumed = wallet.resume_payments().await.unwrap();
@@ -778,7 +778,7 @@ async fn test_recovery_empty_history_proves_nothing_from_the_retention_end() {
             )
             .await;
         let resumed = wallet.resume_payments().await.unwrap();
-        // Within the retention an empty history shows the dispatch never started; from its
+        // Within the retention an empty history shows the handoff never started; from its
         // end on, the history may have dropped it (Paykit spec 7.2).
         if kept {
             assert!(
@@ -895,7 +895,7 @@ async fn proofs_received(shop: &mut paykit_sdk::Paykit) -> usize {
         .filter(|e| {
             matches!(
                 e,
-                pubky_switch_client::app::AppEvent::MessageReceived { kind, .. }
+                pubky_dispatch_client::app::AppEvent::MessageReceived { kind, .. }
                     if kind == "paykit.payment_proof"
             )
         })
@@ -906,7 +906,7 @@ async fn proofs_received(shop: &mut paykit_sdk::Paykit) -> usize {
 async fn test_recovery_repeat_of_a_request_cancelled_since_withheld_and_paid_once() {
     // The payment is in flight, and the method keeps no history: a resume would repeat it.
     // Bob cancels the request meanwhile, and the wallet places his cancellation. The repeat
-    // is withheld: the first dispatch may have paid, so the attempt stays open, nothing
+    // is withheld: the first handoff may have paid, so the attempt stays open, nothing
     // written. The method's history then shows the payment made: it ends paid, once, its
     // outcome written and its proof sent once.
     let w = World::new();
@@ -1000,9 +1000,9 @@ async fn test_recovery_repeat_withheld_by_a_kept_stop_it_couldnt_place() {
     let refuse_next_batch = || {
         w.alice
             .switch()
-            .fail_next(pubky_switch_client::testing::Fault::Error {
+            .fail_next(pubky_dispatch_client::testing::Fault::Error {
                 path: "/ops".into(),
-                code: pubky_switch_core::http::ErrorCode::PermissionMissing,
+                code: pubky_dispatch_core::http::ErrorCode::PermissionMissing,
                 current: serde_json::Value::Null,
             });
     };
@@ -1079,16 +1079,16 @@ async fn in_flight_without_history(
 
 #[tokio::test]
 async fn test_recovery_repeat_over_a_request_record_not_found_withheld() {
-    // The switch answers the request record's read `404`, though the wallet keeps its open
+    // The Dispatch answers the request record's read `404`, though the wallet keeps its open
     // copy: nothing shows the request still open, so the repeat is withheld and the attempt
     // stays "may be paid".
     let w = World::new();
     let (mut wallet, _request, attempt_id) = in_flight_without_history(&w).await;
     w.alice
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::Error {
+        .fail_next(pubky_dispatch_client::testing::Fault::Error {
             path: "/records/".into(),
-            code: pubky_switch_core::http::ErrorCode::NotFound,
+            code: pubky_dispatch_core::http::ErrorCode::NotFound,
             current: serde_json::Value::Null,
         });
     let resumed = wallet.resume_payments().await.unwrap();
@@ -1125,11 +1125,11 @@ async fn test_recovery_repeat_ends_the_resume_at_a_store_failure_in_its_identity
     // published, so the first repeat's read commits it, and that one commit fails. A store
     // failure stops the wallet as a whole: the resume returns it, and the later payment is
     // neither repeated nor written.
-    use pubky_switch_client::store::{Fault, FaultStore};
+    use pubky_dispatch_client::store::{Fault, FaultStore};
     let w = World::new();
     w.rail.set_declaration(idempotent_without_history());
     let faulty = Arc::new(FaultStore::new(store(), Fault::None));
-    let base = Arc::clone(&faulty) as Arc<dyn pubky_switch_client::store::StateStore>;
+    let base = Arc::clone(&faulty) as Arc<dyn pubky_dispatch_client::store::StateStore>;
     let mut wallet = w
         .wallet_with("wallet", Arc::clone(&base), crate::common::day_window())
         .await;
@@ -1156,14 +1156,17 @@ async fn test_recovery_repeat_ends_the_resume_at_a_store_failure_in_its_identity
     // Past the 60 s of the last confirmation, a repeat reads the own identity.json again.
     w.clock.advance_ms(61_000);
     // The first commit of the own identity copy fails.
-    let own = format!("ident/{}/", pubky_switch_core::enc::pubky_id(&w.alice_id()));
+    let own = format!(
+        "ident/{}/",
+        pubky_dispatch_core::enc::pubky_id(&w.alice_id())
+    );
     faulty.fail_put_once(own.as_bytes());
     let resumed = wallet.resume_payments().await;
     assert!(
         matches!(
             &resumed,
             Err(paykit_sdk::PaykitError::Client(
-                pubky_switch_client::app::AppError::Store(_)
+                pubky_dispatch_client::app::AppError::Store(_)
             ))
         ),
         "{resumed:?}"

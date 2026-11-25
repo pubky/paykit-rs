@@ -1,6 +1,6 @@
 //! Private Payment List ordering (Paykit wire 4.13).
 
-use pubky_switch_core::json::MAX_INT;
+use pubky_dispatch_core::json::MAX_INT;
 use std::fmt;
 
 use serde::de::{MapAccess, Visitor};
@@ -20,7 +20,7 @@ pub struct ListVersion {
 }
 
 impl ListVersion {
-    /// Construct a pair of positive Switch integers (Paykit wire 4.13).
+    /// Construct a pair of positive Dispatch integers (Paykit wire 4.13).
     ///
     /// # Errors
     ///
@@ -71,7 +71,7 @@ impl ListVersion {
         )
     }
 
-    /// The wire object (Paykit wire 4.13). Members may be written in any order (Switch
+    /// The wire object (Paykit wire 4.13). Members may be written in any order (Dispatch
     /// wire 1.1); this writes them sorted by name, as every Paykit body.
     pub fn to_value(self) -> Value {
         let mut map = Map::new();
@@ -88,7 +88,7 @@ impl Serialize for ListVersion {
 }
 
 impl<'de> Deserialize<'de> for ListVersion {
-    /// Refuse a repeated member name (Switch wire 1.1), then the one reader,
+    /// Refuse a repeated member name (Dispatch wire 1.1), then the one reader,
     /// [`ListVersion::from_value`], for every copy of a pair.
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
         struct Members;
@@ -162,7 +162,7 @@ mod tests {
 
     #[test]
     fn test_list_version_one_reader_for_every_copy() {
-        // Unknown members are ignored and members may come in any order (Switch wire 1.1),
+        // Unknown members are ignored and members may come in any order (Dispatch wire 1.1),
         // by the wire reader and by serde alike.
         for text in [
             r#"{"generation":1,"counter":2,"extra":true}"#,

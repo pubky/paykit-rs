@@ -1,4 +1,4 @@
-//! Entries the client stored locally for good, and what Paykit does with each (Switch spec
+//! Entries the client stored locally for good, and what Paykit does with each (Dispatch spec
 //! 8.2; Paykit spec 8.1): the duty events that tell of them are taken at every receive and
 //! kept in Paykit's own state.
 //!
@@ -15,7 +15,7 @@
 //!   placed as any held list is ([`Paykit::place_held_lists`]); a
 //!   request is shown unrecorded ([`crate::RequestStatus::Unrecorded`]). A payee's
 //!   cancellation needs nothing here: its stop is kept with the cursor move, with no write
-//!   at the switch (`kc/`, Paykit spec 8.1). An Allowance proposal or answer is tried
+//!   at the Dispatch (`kc/`, Paykit spec 8.1). An Allowance proposal or answer is tried
 //!   against its `allowances` record. An acceptance that would fill the empty `response`
 //!   stays unplaced (Paykit spec 8.3.1). An end is kept as the stop at once (`ae/`, Paykit
 //!   spec 8.3). A later write has the effects the message has at its first read, in the
@@ -26,7 +26,7 @@
 //!   acceptance, such as a reply whose record never comes, is given up: its note goes, its
 //!   entry stays stored, and the host is told
 //!   ([`crate::NoticeKind::MessageGivenUp`]). One whose batch the client keeps to send again,
-//!   whatever the switch answered, is never written again nor given up while the client keeps
+//!   whatever the Dispatch answered, is never written again nor given up while the client keeps
 //!   that batch, which may still land ([`submitted`], [`held_write`]).
 //! - **An effect of unknown fate** (`EffectUncertain`, or `Parked` as `Uncertain`): the same
 //!   write compensates for it, since placing a message a record already holds writes
@@ -35,7 +35,7 @@
 //! - **A released entry that ran as a duplicate** (`ReleasedDuplicate`): its note goes.
 //! - **An input awaiting protocol admission:** its informational parked notice creates no
 //!   later-write note. Its unsupported admission-drop duty stays owed; custody alone does
-//!   not authorize a later record write (Switch spec 8.2).
+//!   not authorize a later record write (Dispatch spec 8.2).
 //! - **An entry dropped unverified** (`StoredEntryDropped`): it counts in its sender's mark
 //!   of entries dropped unverified (`ud/<sender>`, `marks.rs`), and the sender is asked at
 //!   once to send again what its inbox accepted from the mark's earliest time to its latest,
@@ -67,11 +67,11 @@
 use paykit_lib::derive::natural_key;
 use paykit_lib::records::{ActivityRecord, StoredMessage};
 use paykit_lib::Body;
-use pubky_switch_client::app::{
+use pubky_dispatch_client::app::{
     AppError, AppEvent, OpBatch, ParkReason, RecordContent, Refusal as ClientRefusal,
 };
-use pubky_switch_core::enc::serde_b64;
-use pubky_switch_core::scopes::Permission;
+use pubky_dispatch_core::enc::serde_b64;
+use pubky_dispatch_core::scopes::Permission;
 use serde::{Deserialize, Serialize};
 
 use crate::activity::{ActivityTarget, Role};
@@ -80,8 +80,8 @@ use crate::notices::{KeptNotice, NoticeKind, StoredHandle};
 use crate::paykit::Paykit;
 use crate::publish::FirstDelivery;
 use crate::receive::{
-    failure_view, receipt_claim, receipt_deadline, receipt_on_record, receipt_settles, FailureView,
-    ReceiptClaim, ReceiptSettles, SwitchClaim,
+    failure_view, receipt_claim, receipt_deadline, receipt_on_record, receipt_settles,
+    DispatchClaim, FailureView, ReceiptClaim, ReceiptSettles,
 };
 use crate::records::{list_target, KeptMessage};
 use crate::requests::{RequestRef, RequestStatus, RequestView};
@@ -104,35 +104,35 @@ pub(crate) enum Placed {
 }
 
 /// What a later write's batch came to, judged first by whether the client still holds a batch
-/// of it (Paykit spec 8.1, Stored entries; Switch spec 12.5, "Kept batches"):
+/// of it (Paykit spec 8.1, Stored entries; Dispatch spec 12.5, "Kept batches"):
 ///
 /// - the client keeps the write's own batch to send again (`AppError::Kept`), whatever the
-///   switch answered inside it: the write may still land, so it waits ([`Placed::Waits`]),
+///   Dispatch answered inside it: the write may still land, so it waits ([`Placed::Waits`]),
 ///   never counted nor given up while the batch is held: given up meanwhile, the message
 ///   would go while its write may still be applied, and a stop kept beside it, a payee's
 ///   cancellation or an Allowance end, could go with it. The client saves the held batch's ID
 ///   ([`held_write`]), and the message isn't written again nor given up while the client
 ///   keeps that batch ([`Paykit::held_write_kept`]);
 /// - otherwise nothing of the write is held, and it was not written now ([`Placed::Not`]),
-///   counted toward the message's 30 days as any write not made: the switch answered it with
+///   counted toward the message's 30 days as any write not made: the Dispatch answered it with
 ///   its error code, or it waited behind a batch the client keeps from an earlier call
 ///   (`AppError::Ahead`), which sent nothing of it and whose answer is that earlier batch's;
 /// - not sent now for want of a key (the client's bare `NotNow`): waiting.
 ///
-/// A wallet-wide stop ([`crate::pay::stops_resume`]) and an own switch that doesn't answer
-/// ([`crate::pay::switch_unavailable`]) are returned, held batch or not. Any other error that
-/// isn't the switch's answer, such as a store failure or an answer that doesn't verify, is
+/// A wallet-wide stop ([`crate::pay::stops_resume`]) and an own Dispatch that doesn't answer
+/// ([`crate::pay::dispatch_unavailable`]) are returned, held batch or not. Any other error that
+/// isn't the Dispatch's answer, such as a store failure or an answer that doesn't verify, is
 /// returned too: the write wasn't evaluated, and nothing is given up on it.
 ///
 /// The receive goes on past a failed upkeep of the app record only on answers that end
-/// nothing here: a switch that doesn't answer, returned, or a refusal of the Switch client
+/// nothing here: a Dispatch that doesn't answer, returned, or a refusal of the Dispatch client
 /// before anything is sent, which no later write meets
 /// ([`crate::own_record::own_record_left_owed`]).
 pub(crate) fn submitted<T>(result: std::result::Result<T, AppError>) -> Result<Placed> {
     let Err(error) = result else {
         return Ok(Placed::Done);
     };
-    if crate::pay::switch_unavailable(&error) {
+    if crate::pay::dispatch_unavailable(&error) {
         return Err(error.into());
     }
     let held = matches!(error, AppError::Kept { .. });
@@ -152,10 +152,10 @@ pub(crate) fn submitted<T>(result: std::result::Result<T, AppError>) -> Result<P
     Err(error)
 }
 
-/// Whether `error` is the switch's refusal of a read, an answer with its error code, rather
-/// than a switch that doesn't answer or a failure of the app's own.
+/// Whether `error` is the Dispatch's refusal of a read, an answer with its error code, rather
+/// than a Dispatch that doesn't answer or a failure of the app's own.
 fn refused(error: &AppError) -> bool {
-    !crate::pay::switch_unavailable(error) && error.unkept().code().is_some()
+    !crate::pay::dispatch_unavailable(error) && error.unkept().code().is_some()
 }
 
 /// The local key at which the client saves the ID of the batch it keeps of `stored`'s later
@@ -170,7 +170,7 @@ pub(crate) fn holding(batch: OpBatch, stored: &StoredMessage) -> OpBatch {
     let marker = held_write(stored).into_bytes();
     batch
         .keep_id_at(marker.clone())
-        .local(pubky_switch_client::app::LocalWrite::Delete { key: marker })
+        .local(pubky_dispatch_client::app::LocalWrite::Delete { key: marker })
 }
 
 /// What the client reports of the batch it kept of a kept message's later write
@@ -225,14 +225,14 @@ pub(crate) enum LaterWrite {
 
 /// The one rule of the later-write paths, a stored entry's note (`se/`), a reply kept before
 /// its record (`pr/`) and a message kept over a divergent record (`dw/`): a message written,
-/// or reflected already, is done; one not written now ([`Placed::Not`]: the switch answered
+/// or reflected already, is done; one not written now ([`Placed::Not`]: the Dispatch answered
 /// its write, the record can't take it, its value doesn't open, or a scope key it waits for
 /// hasn't come) is kept within [`crate::KEPT_MESSAGE_MS`] of its acceptance, `accepted_at`,
 /// and given up from then on, judged on `service`, the highest service time verified (Paykit
 /// spec 8.1: 30 days for a stored entry, a reply before its record, a message kept over a
 /// divergent record and an Allowance message alike). One that waits ([`Placed::Waits`]),
 /// while its record's absence decides nothing or while the client holds a batch of it, is
-/// kept. An error, such as a switch that doesn't answer or a store failure, never reaches
+/// kept. An error, such as a Dispatch that doesn't answer or a store failure, never reaches
 /// this: it is returned, and the message stays kept. A give-up checks once more that the
 /// client holds no batch of the write ([`Paykit::give_up_stored`]).
 pub(crate) fn later_write(placed: Placed, accepted_at: u64, service: Option<u64>) -> LaterWrite {
@@ -264,7 +264,7 @@ pub(crate) struct StoredNote {
     /// The entry's local ID at the client, its handle there; it orders nothing.
     pub(crate) stored_id: u64,
     /// The entry's message hash, which the client checks a forget by
-    /// ([`pubky_switch_client::app::App::forget_parked`]): the note's message's own, so the
+    /// ([`pubky_dispatch_client::app::App::forget_parked`]): the note's message's own, so the
     /// ID is followed only to the entry of that message.
     #[serde(with = "serde_b64")]
     pub(crate) hash: [u8; 32],
@@ -354,7 +354,7 @@ pub(crate) fn named_request(stored: &StoredMessage) -> Option<[u8; 32]> {
 }
 
 /// Whether a released entry with `note` kept for its message is declined: only once the app
-/// has written its effect itself (Switch spec 8.2). Without a note, or before the write, the
+/// has written its effect itself (Dispatch spec 8.2). Without a note, or before the write, the
 /// released run applies it.
 pub(crate) fn declines(note: Option<&StoredNote>) -> bool {
     note.is_some_and(|note| note.placed)
@@ -411,7 +411,7 @@ pub(crate) enum PeriodPlace {
 
 /// Bind a parked message to the original admitted sender, recipient and service time.
 pub(crate) fn parked_message(
-    entry: &pubky_switch_client::app::ParkedMessage,
+    entry: &pubky_dispatch_client::app::ParkedMessage,
     own: &[u8; 32],
 ) -> Option<StoredMessage> {
     StoredMessage::new(
@@ -430,7 +430,7 @@ impl Paykit {
         self.local_get::<StoredNote>(key).await
     }
 
-    /// The requests received whose record write the switch refused, kept to write later,
+    /// The requests received whose record write the Dispatch refused, kept to write later,
     /// as the payer sees them ([`RequestStatus::Unrecorded`]).
     pub(crate) async fn unrecorded_requests(&self) -> Result<Vec<RequestView>> {
         let mut out = Vec::new();
@@ -508,11 +508,11 @@ impl Paykit {
         self.local_commit(gone).await
     }
 
-    /// Acknowledge for Paykit the duty event `id`, which it took, by itself (Switch spec 8.2).
+    /// Acknowledge for Paykit the duty event `id`, which it took, by itself (Dispatch spec 8.2).
     /// One acknowledged already, as by a commit whose outcome was unknown, is no longer owed
     /// to Paykit, and nothing is left to do; one still owed that the client refuses to
     /// acknowledge is the call's error.
-    async fn ack_taken(&mut self, id: pubky_switch_client::app::EventId) -> Result<()> {
+    async fn ack_taken(&mut self, id: pubky_dispatch_client::app::EventId) -> Result<()> {
         match self
             .app
             .ack_event_with(crate::protocol::BACKUP_NAME, id, &[])
@@ -582,7 +582,7 @@ impl Paykit {
             AppEvent::StoredEntryDropped {
                 sender,
                 accepted_at_ms,
-                waiting: pubky_switch_client::app::WaitingReason::Key { data_epoch },
+                waiting: pubky_dispatch_client::app::WaitingReason::Key { data_epoch },
                 message,
                 ..
             } => {
@@ -595,7 +595,7 @@ impl Paykit {
             AppEvent::StoredEntryDropped {
                 sender,
                 accepted_at_ms,
-                waiting: pubky_switch_client::app::WaitingReason::Sender,
+                waiting: pubky_dispatch_client::app::WaitingReason::Sender,
                 ..
             } => {
                 self.count_dropped_unverified(&mut tx, *sender, *accepted_at_ms)
@@ -610,7 +610,7 @@ impl Paykit {
                 Box::pin(self.take_divergent_event(record, id)).await?;
                 true
             }
-            // The Switch owns the member and its expiry policy, including any pending
+            // The Dispatch owns the member and its expiry policy, including any pending
             // edit. Normal record upkeep runs after this receive completes.
             AppEvent::MemberChanged { protocol, .. }
                 if protocol == paykit_lib::app_record::PROTOCOL_NAME =>
@@ -729,7 +729,7 @@ impl Paykit {
             ) {
                 KeptMessage::taken_at(
                     &stored,
-                    pubky_switch_client::app::FeedPosition {
+                    pubky_dispatch_client::app::FeedPosition {
                         generation: entry.generation,
                         seq: entry.seq,
                     },
@@ -1004,7 +1004,7 @@ impl Paykit {
     /// the order of their `msg_id`s nor of their entries' local IDs.
     pub(crate) async fn place_stored(
         &mut self,
-        pending_read: Option<&pubky_switch_client::app::ReceiveReport>,
+        pending_read: Option<&pubky_dispatch_client::app::ReceiveReport>,
     ) -> Result<()> {
         // Every note in the order its inbox accepted its message, never in the order of the
         // keys, which end in a `msg_id` its sender chooses: by acceptance time, then by the
@@ -1114,7 +1114,7 @@ impl Paykit {
     /// notice is raised once: none is raised over one kept already. A `msg_id` that isn't
     /// one a message carries raises none, since no notice could be kept for it.
     async fn give_up_key_wait(&self, tx: &mut Tx, sender: [u8; 32], msg_id: &str) -> Result<()> {
-        if pubky_switch_core::json::check_uuid_v4(msg_id).is_err() {
+        if pubky_dispatch_core::json::check_uuid_v4(msg_id).is_err() {
             return Ok(());
         }
         let notice = key::message_notice(&sender, msg_id);
@@ -1270,7 +1270,7 @@ impl Paykit {
             let kept = match batch_id {
                 Some(batch_id) => matches!(
                     self.app.kept_batch(batch_id).await?,
-                    Some(pubky_switch_client::app::KeptBatchStatus::Kept { .. })
+                    Some(pubky_dispatch_client::app::KeptBatchStatus::Kept { .. })
                 ),
                 None => false,
             };
@@ -1291,7 +1291,7 @@ impl Paykit {
     /// applied, dropped or holds nothing of any more goes, and the write is tried as any.
     ///
     /// The client keeps a batch it sent at most
-    /// [`pubky_switch_client::app::KEPT_BATCH_ANSWER_MS`] after its first send, the service's
+    /// [`pubky_dispatch_client::app::KEPT_BATCH_ANSWER_MS`] after its first send, the service's
     /// 30 days for a batch's proofs less a one-hour margin, then applies or drops it; one never
     /// sent goes at its first answered send, or is dropped at its first-handoff cutoff. So a
     /// message waits on a held batch at most about 30 days after that batch's first send
@@ -1313,7 +1313,7 @@ impl Paykit {
 
     /// What the client reports of the batch it kept of `stored`'s later write
     /// ([`held_write`]), in its own terms: still kept, or applied, its operations then
-    /// committed as one transaction (Pubky Switch spec, Section 10.1, Batches), so the write
+    /// committed as one transaction (Pubky Dispatch spec, Section 10.1, Batches), so the write
     /// is in its record. A marker whose batch the client dropped, or holds no status of any
     /// more, establishes nothing ([`HeldWrite::None`]): it goes, and the record decides as
     /// for a message with no batch kept (Paykit spec 8.1, Stored entries, Kept batch). An
@@ -1329,8 +1329,8 @@ impl Paykit {
             return Ok(HeldWrite::None);
         };
         match self.app.kept_batch(batch_id).await? {
-            Some(pubky_switch_client::app::KeptBatchStatus::Kept { .. }) => Ok(HeldWrite::Kept),
-            Some(pubky_switch_client::app::KeptBatchStatus::Applied { .. }) => {
+            Some(pubky_dispatch_client::app::KeptBatchStatus::Kept { .. }) => Ok(HeldWrite::Kept),
+            Some(pubky_dispatch_client::app::KeptBatchStatus::Applied { .. }) => {
                 Ok(HeldWrite::Applied)
             }
             // Dropped, whatever the reason (one dropped as uncertain may have been
@@ -1370,7 +1370,7 @@ impl Paykit {
     /// A record that is absent or deleted is opened only by a message that may open it
     /// (`creates`), and a receipt goes only beside the proof it names (Paykit wire 5.3). A
     /// record held as a value that doesn't read, or that the app can't open, is never
-    /// written over (Switch spec 8.2: a reader doesn't act on a record it can't read, and a
+    /// written over (Dispatch spec 8.2: a reader doesn't act on a record it can't read, and a
     /// write over one that is only unopenable for now could drop what its writer stored). A
     /// value sealed at a key the app doesn't hold yet (`Unopened::KeyNotHeld`) and a record
     /// whose scope's key at the current data epoch the app doesn't hold yet wait for the key:
@@ -1621,18 +1621,18 @@ impl Paykit {
                 journaled.as_ref(),
             );
             // The claim view as the first read takes it, by the same rule
-            // (`receive::failure_view`): the view the app keeps, or the switch's read only
-            // when it asks for it. A read the switch refuses settles nothing.
+            // (`receive::failure_view`): the view the app keeps, or the Dispatch's read only
+            // when it asks for it. A read the Dispatch refuses settles nothing.
             let kept = self
                 .app
                 .claim_evidence(&obligation)
                 .await?
                 .map(|kept| kept.view);
             let mut view = failure_view(kept, None);
-            if matches!(view, FailureView::ReadSwitch) {
+            if matches!(view, FailureView::ReadDispatch) {
                 let read = match self.app.read_claim(&obligation).await {
-                    Ok(read) => SwitchClaim::Read(read.map(|read| read.view)),
-                    Err(error) if refused(&error) => SwitchClaim::Refused,
+                    Ok(read) => DispatchClaim::Read(read.map(|read| read.view)),
+                    Err(error) if refused(&error) => DispatchClaim::Refused,
                     Err(error) => return Err(error.into()),
                 };
                 view = failure_view(None, Some(read));
@@ -1648,7 +1648,7 @@ impl Paykit {
                     journaled,
                     first_receipt: found.first_receipt,
                 })?,
-                FailureView::Refused | FailureView::ReadSwitch => ReceiptSettles::default(),
+                FailureView::Refused | FailureView::ReadDispatch => ReceiptSettles::default(),
             };
             if let Some((op, deadline)) = settles.claim {
                 batch = batch
@@ -1852,18 +1852,18 @@ mod tests {
     }
     use crate::testkit::{object, Party};
 
-    /// The later write's rule over every answer of the switch, bare and with the batch held by
-    /// the client (Switch spec 6.4, 12.5; Paykit spec 8.1). A batch held is judged first:
+    /// The later write's rule over every answer of the Dispatch, bare and with the batch held by
+    /// the client (Dispatch spec 6.4, 12.5; Paykit spec 8.1). A batch held is judged first:
     /// whatever the code inside it, the write waits, never counted nor given up, but for a
-    /// wallet-wide stop or an own switch that doesn't answer, which are returned. A bare answer
+    /// wallet-wide stop or an own Dispatch that doesn't answer, which are returned. A bare answer
     /// counts toward the 30 days as any write not made. Every answer the receive goes past at
     /// a failed upkeep of the app record is never counted. (A write waiting
     /// behind an earlier kept batch, `AppError::Ahead`, can't be built here, its `KeptAhead`
     /// being the client's own; the flows take it.)
     #[test]
     fn test_stored_later_write_rule_over_every_answer_bare_and_held() {
-        use pubky_switch_client::error::ClientError;
-        use pubky_switch_core::http::ErrorCode;
+        use pubky_dispatch_client::error::ClientError;
+        use pubky_dispatch_core::http::ErrorCode;
         for code in ErrorCode::ALL {
             let bare = AppError::Switch(ClientError::Switch {
                 status: code.status(),
@@ -1877,7 +1877,7 @@ mod tests {
                 batch_id: [7; 16],
                 error: Box::new(bare.clone()),
             };
-            // Returned, held or bare: the own switch not answering, and the switch's
+            // Returned, held or bare: the own Dispatch not answering, and the Dispatch's
             // wallet-wide stops, by name.
             let returned = matches!(
                 code,
@@ -1940,7 +1940,7 @@ mod tests {
     /// batch stays marked.
     #[tokio::test]
     async fn test_stored_give_ups_wait_while_the_batch_is_held() {
-        let w = crate::testkit::Switches::new();
+        let w = crate::testkit::Dispatches::new();
         let mut wallet = w
             .join(
                 &w.alice,
@@ -1990,7 +1990,7 @@ mod tests {
     /// the client holds no status of establishes nothing: the give-up goes ahead, told.
     #[tokio::test]
     async fn test_stored_give_up_places_an_applied_batch_and_gives_up_one_with_no_status() {
-        let w = crate::testkit::Switches::new();
+        let w = crate::testkit::Dispatches::new();
         let mut wallet = w
             .join(
                 &w.alice,
@@ -2043,7 +2043,7 @@ mod tests {
             .app_mut()
             .protocol_commit(
                 crate::protocol::BACKUP_NAME,
-                &[pubky_switch_client::app::LocalWrite::Put {
+                &[pubky_dispatch_client::app::LocalWrite::Put {
                     key: held_write(&stored).into_bytes(),
                     value: vec![3; 16],
                 }],

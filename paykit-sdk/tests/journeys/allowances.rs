@@ -10,9 +10,9 @@ use paykit_sdk::{
     AllowanceRole, AllowanceStatus, AppScopes, PayOptions, PayOutcome, Paykit, PaykitConfig,
     ReceiptsOf, Refusal, RequestDraft, RequestRef, RequestStatus,
 };
-use pubky_switch_client::app::UserConfirmed;
-use pubky_switch_client::store::MemoryStore;
-use pubky_switch_harness::World;
+use pubky_dispatch_client::app::UserConfirmed;
+use pubky_dispatch_client::store::MemoryStore;
+use pubky_dispatch_harness::World;
 use serde_json::json;
 
 use super::periods::{at_start, hourly, hourly_periods, period_paid_and_receipted, Due, How};

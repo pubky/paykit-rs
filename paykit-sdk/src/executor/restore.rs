@@ -8,9 +8,9 @@ use paykit_lib::allowances::{
 };
 use paykit_lib::records::{bind_ledger, ActivityRecord, RecordBinding, StoredMessage};
 use paykit_lib::{AllowanceId, Asset, Body, EndpointAmount, PaymentAmount};
-use pubky_switch_client::app::{Alarm, KeptOp, KeptReason, RecordRead};
-use pubky_switch_core::ops::Condition;
-use pubky_switch_core::shared::ApplicationRef;
+use pubky_dispatch_client::app::{Alarm, KeptOp, KeptReason, RecordRead};
+use pubky_dispatch_core::ops::Condition;
+use pubky_dispatch_core::shared::ApplicationRef;
 
 use super::approval::ApprovedOpening;
 use super::checkpoint::{ledger_target, ExecutorCheckpoint};
@@ -91,7 +91,7 @@ fn restored_behind(
     restored: bool,
     current: &AppliedRecord,
     accepted: &AppliedRecord,
-    own: impl Fn(&pubky_switch_core::ops::OpBody) -> bool,
+    own: impl Fn(&pubky_dispatch_core::ops::OpBody) -> bool,
 ) -> bool {
     restored
         && !current.follows(accepted)
@@ -103,14 +103,14 @@ fn restored_behind(
 /// already accepted under this grant, never a new reservation (Paykit spec 8.3).
 /// The caller must also verify the dated payer proof and the method's exact transfer.
 fn settled_after_accepted_payment(
-    read: &pubky_switch_client::app::ClaimRead,
+    read: &pubky_dispatch_client::app::ClaimRead,
     previous: Option<&LedgerEntry>,
     accepted_at: u64,
     entry: &LedgerEntry,
     executor: [u8; 16],
 ) -> bool {
     use paykit_lib::allowances::EntryOutcome;
-    use pubky_switch_core::claims::{ClaimStatus, Outcome};
+    use pubky_dispatch_core::claims::{ClaimStatus, Outcome};
 
     let claim = &read.view;
     claim.tombstone
@@ -308,8 +308,8 @@ pub(super) fn ledger_change<'a>(
 }
 
 impl Paykit {
-    /// The Switch alarm that stopped this wallet after an Allowance ledger rollback
-    /// (Paykit spec 8.3, Switch spec 10.1). Show its reason until the signer resolves
+    /// The Dispatch alarm that stopped this wallet after an Allowance ledger rollback
+    /// (Paykit spec 8.3, Dispatch spec 10.1). Show its reason until the signer resolves
     /// the provider move or loss. The alarm survives reopening the wallet.
     pub fn ledger_alarm(&self) -> Option<Alarm> {
         self.app
@@ -465,7 +465,7 @@ impl Paykit {
                     .app
                     .raise_rollback(crate::protocol::BACKUP_NAME, MISSING_LEDGER)
                     .await?;
-                return Err(pubky_switch_client::app::AppError::Alarm(alarm).into());
+                return Err(pubky_dispatch_client::app::AppError::Alarm(alarm).into());
             }
             RecordRead::Kept { reason, .. } => {
                 return crate::pay::kept_read_stop(&reason).map_or(Ok(None), Err)
@@ -517,7 +517,7 @@ impl Paykit {
                 .app
                 .raise_rollback(crate::protocol::BACKUP_NAME, EARLIER_LEDGER)
                 .await?;
-            return Err(pubky_switch_client::app::AppError::Alarm(alarm).into());
+            return Err(pubky_dispatch_client::app::AppError::Alarm(alarm).into());
         }
         let Some(applied_proposals) =
             Box::pin(self.prepared_ledger(permanent_key, &accepted, &current, &exact_grant))
@@ -723,9 +723,9 @@ impl Paykit {
                 compactions.push((receipt.clone(), Purpose::Evidence));
             }
         }
-        // An open claim reserves its entry even before dispatch (Paykit spec 8.3).
+        // An open claim reserves its entry even before handoff (Paykit spec 8.3).
         // Terminal entries only need a claim read when attributing a wallet attempt.
-        let dispatched: HashMap<_, _> = inventory.iter().map(|d| (d.attempt_id, d)).collect();
+        let handed_off: HashMap<_, _> = inventory.iter().map(|d| (d.attempt_id, d)).collect();
         let mut settled_payments = Vec::new();
         let entries: Vec<_> = ledger
             .entries
@@ -733,7 +733,7 @@ impl Paykit {
             .filter(|entry| {
                 !claims.contains_key(&entry.attempt_id)
                     && (entry.outcome != Some(EntryOutcome::Done)
-                        || dispatched.contains_key(&entry.attempt_id))
+                        || handed_off.contains_key(&entry.attempt_id))
             })
             .collect();
         let failed = &ledger.failed;
@@ -788,7 +788,7 @@ impl Paykit {
                         .then_some(claim)
                 }) {
                     claims.insert(entry.attempt_id, opening);
-                } else if let Some(payment) = dispatched.get(&entry.attempt_id).filter(|payment| {
+                } else if let Some(payment) = handed_off.get(&entry.attempt_id).filter(|payment| {
                     matches!(payment.outcome, crate::rail::RailOutcome::Paid(_))
                         && settled_after_accepted_payment(
                             read,
@@ -843,7 +843,7 @@ impl Paykit {
             &proposed.terms.asset,
             &exact_grant,
             &claims,
-            &dispatched,
+            &handed_off,
         ))
         .await?;
         let mut counting = facts.signed.clone();
@@ -890,8 +890,8 @@ impl Paykit {
         };
         if !unclassified.is_empty() || !settled_payments.is_empty() {
             let records = self.payer_records().await?;
-            for dispatch in unclassified.into_iter().chain(settled_payments) {
-                let crate::rail::RailOutcome::Paid(method) = &dispatch.outcome else {
+            for handoff in unclassified.into_iter().chain(settled_payments) {
+                let crate::rail::RailOutcome::Paid(method) = &handoff.outcome else {
                     return Ok(None);
                 };
                 let mut related = records.iter().filter_map(|activity| {
@@ -899,7 +899,7 @@ impl Paykit {
                     let Body::PaymentProof(paid) = proof.body() else {
                         return None;
                     };
-                    (paid.attempt_id == dispatch.attempt_id).then_some((activity, proof, paid))
+                    (paid.attempt_id == handoff.attempt_id).then_some((activity, proof, paid))
                 });
                 let Some((activity, proof, paid)) = related.next() else {
                     return Ok(None);
@@ -963,7 +963,7 @@ impl Paykit {
                 if let Some(entry) = ledger
                     .entries
                     .iter()
-                    .find(|e| e.attempt_id == dispatch.attempt_id)
+                    .find(|e| e.attempt_id == handoff.attempt_id)
                 {
                     // Only a paid tombstone reaches this branch. Its accepted reservation
                     // pins the amount already matched to the method, including rounding.
@@ -979,8 +979,8 @@ impl Paykit {
                 let failed = ledger
                     .failed
                     .iter()
-                    .find(|entry| entry.attempt_id == dispatch.attempt_id);
-                let compacted = retired.get(&dispatch.attempt_id);
+                    .find(|entry| entry.attempt_id == handoff.attempt_id);
+                let compacted = retired.get(&handoff.attempt_id);
                 let (compacted, failed) = match (compacted, failed) {
                     (Some(Retired::PreviouslyFailed(_)), Some(_)) => return Ok(None),
                     (Some(Retired::PreviouslyFailed(entry)), None) => (None, Some(entry)),
@@ -989,12 +989,11 @@ impl Paykit {
                 };
                 if compacted.is_some() || failed.is_some() {
                     if !this_allowance
-                        || signed_amount
-                            .is_none_or(|nominal| nominal.asset != dispatch.amount.asset)
+                        || signed_amount.is_none_or(|nominal| nominal.asset != handoff.amount.asset)
                         || !obligation.is_some_and(|obligation| {
                             compacted_transfer_matches(
                                 obligation,
-                                &dispatch.amount,
+                                &handoff.amount,
                                 compacted,
                                 failed,
                                 &proposed.terms.asset,
@@ -1003,23 +1002,23 @@ impl Paykit {
                     {
                         return Ok(None);
                     }
-                    retired.remove(&dispatch.attempt_id);
+                    retired.remove(&handoff.attempt_id);
                     continue;
                 }
-                if signed_amount != Some(&dispatch.amount) {
+                if signed_amount != Some(&handoff.amount) {
                     let Some(obligation) = obligation.filter(|_| !this_allowance) else {
                         return Ok(None);
                     };
                     let entry = self
-                        .journal_entry_on(&dispatch.attempt_id, &obligation)
+                        .journal_entry_on(&handoff.attempt_id, &obligation)
                         .await?;
                     let amount_proven = match entry {
                         Some(entry) if entry.transfer_bound.is_some() => {
-                            entry.paid_amount()?.as_ref() == Some(&dispatch.amount)
+                            entry.paid_amount()?.as_ref() == Some(&handoff.amount)
                                 && self.journal_matches_paid_proof(&entry, proof)?
                         }
                         _ => requested.as_ref().is_some_and(|verified| {
-                            verified.receipted_amount(activity, &dispatch.amount)
+                            verified.receipted_amount(activity, &handoff.amount)
                         }),
                     };
                     if !amount_proven {
@@ -1042,14 +1041,14 @@ impl Paykit {
                             op,
                             &exact_grant,
                             &obligation,
-                            dispatch.attempt_id,
+                            handoff.attempt_id,
                         )
                     }) {
                         let alarm = self
                             .app
                             .raise_rollback(crate::protocol::BACKUP_NAME, MISSING_PAYMENT)
                             .await?;
-                        return Err(pubky_switch_client::app::AppError::Alarm(alarm).into());
+                        return Err(pubky_dispatch_client::app::AppError::Alarm(alarm).into());
                     }
                 }
                 return Ok(None);
@@ -1160,7 +1159,7 @@ mod tests {
             let proof = payer.message(&shop, "paykit.payment_proof", vec![request.hash()], object(json!({
                 "attempt_id": AttemptId::from_bytes([2; 16]).to_text(),
                 "payment_reference": reference, "payment_endpoint_identifier": "btc-lightning-bolt11",
-                "payment_app_id": pubky_switch_core::enc::zbase32_encode(&shop.app_id()), "proof": {}
+                "payment_app_id": pubky_dispatch_core::enc::zbase32_encode(&shop.app_id()), "proof": {}
             })));
             assert_eq!(
                 RequestedPayment::bind(&record, &request, &proof, None)
@@ -1219,7 +1218,7 @@ mod tests {
             subscription.insert("per_period_endpoints".into(), json!(true));
             subscription.insert(
                 "required_app_id".into(),
-                json!(pubky_switch_core::enc::zbase32_encode(&shop.app_id())),
+                json!(pubky_dispatch_core::enc::zbase32_encode(&shop.app_id())),
             );
             subscription.insert(
                 "accepted_payment_endpoint_identifiers".into(),
@@ -1254,7 +1253,7 @@ mod tests {
         let mut proof_body = object(json!({
             "attempt_id": attempt.to_text(), "billing_period": period.to_json(),
             "payment_endpoint_identifier": "btc-lightning-bolt11",
-            "payment_app_id": pubky_switch_core::enc::zbase32_encode(&shop.app_id()),
+            "payment_app_id": pubky_dispatch_core::enc::zbase32_encode(&shop.app_id()),
             "label": proof_label, "proof": {}
         }));
         if let Some(reference) = payment_reference {
@@ -1331,8 +1330,8 @@ mod tests {
 
     #[test]
     fn test_settled_claim_needs_an_exact_previously_accepted_payment() {
-        use pubky_switch_client::app::ClaimRead;
-        use pubky_switch_core::claims::{AttemptView, ClaimStatus, ClaimView, Outcome};
+        use pubky_dispatch_client::app::ClaimRead;
+        use pubky_dispatch_core::claims::{AttemptView, ClaimStatus, ClaimView, Outcome};
 
         let executor = [7; 16];
         let entry = LedgerEntry {

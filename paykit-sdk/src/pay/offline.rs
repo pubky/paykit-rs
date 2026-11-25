@@ -1,9 +1,9 @@
-//! A manually selected public endpoint while the payer's switch is unavailable
+//! A manually selected public endpoint while the payer's Dispatch is unavailable
 //! (Paykit spec 8.4). Only this entry point calls the payment method.
 
 use super::*;
 use crate::journal::OfflineRecording;
-use pubky_switch_client::app::{server_time_in, KeptBatchDrop, ProviderStatus};
+use pubky_dispatch_client::app::{server_time_in, KeptBatchDrop, ProviderStatus};
 
 impl Paykit {
     pub(super) async fn pay_public_offline(
@@ -15,18 +15,18 @@ impl Paykit {
         self.own_identity_confirmed(true).await??;
         match self.app.follow_provider().await? {
             ProviderStatus::Current => {}
-            // The app's own authority ended: a recovery, not a wait (Switch spec 12.2, 12.4).
+            // The app's own authority ended: a recovery, not a wait (Dispatch spec 12.2, 12.4).
             ProviderStatus::RecoveryRequired { .. } | ProviderStatus::Gone => {
                 return Err(Refusal::NotCurrent(
-                    "follow the payer's current switch before paying".into(),
+                    "follow the payer's current Dispatch before paying".into(),
                 )
                 .into());
             }
             // A move waiting, followed or cancelled: the next call reads at the service it
-            // follows (Switch spec 12.5).
+            // follows (Dispatch spec 12.5).
             _ => {
                 return Err(Refusal::NotNow(crate::NotNowReason::ReadAgain(
-                    "follow the payer's current switch before paying",
+                    "follow the payer's current Dispatch before paying",
                 ))
                 .into());
             }
@@ -46,7 +46,7 @@ impl Paykit {
         self.save(&entry).await?;
         self.set_stage(&mut entry, Stage::Paying).await?;
         if let Err(error) = self
-            .offline_dispatch_check(&entry, &mut peer, &carrier, options)
+            .offline_handoff_check(&entry, &mut peer, &carrier, options)
             .await
         {
             self.set_stage(&mut entry, Stage::Abandoned).await?;
@@ -70,7 +70,7 @@ impl Paykit {
         }
     }
 
-    async fn offline_dispatch_check(
+    async fn offline_handoff_check(
         &mut self,
         entry: &JournalEntry,
         peer: &mut PeerIdentity,
@@ -93,14 +93,15 @@ impl Paykit {
         self.require_pay()?;
         self.transfer_holds(entry, peer, false)??;
         self.app.may_attempt(false).map_err(held_back)?;
-        let (now, own_fresh) = self.dispatch_time();
+        let (now, own_fresh) = self.handoff_time();
         let Some((_, denied)) = read
             .zip(copy)
             .filter(|(at, _)| crate::receive::lists_read_is_fresh(*at, now))
         else {
-            return Err(
-                Refusal::SwitchUnavailable("the current deny list is unavailable".into()).into(),
-            );
+            return Err(Refusal::DispatchUnavailable(
+                "the current deny list is unavailable".into(),
+            )
+            .into());
         };
         if changed == Some(None) {
             return Err(Refusal::NotNow(crate::NotNowReason::ReadAgain(

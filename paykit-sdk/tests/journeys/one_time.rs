@@ -8,8 +8,8 @@ use paykit_sdk::{
     AppScopes, PayOptions, PayeeStatus, Paykit, PaykitConfig, ReceiptsOf, Refusal, RequestRef,
     RequestStatus,
 };
-use pubky_switch_client::store::MemoryStore;
-use pubky_switch_harness::World;
+use pubky_dispatch_client::store::MemoryStore;
+use pubky_dispatch_harness::World;
 
 use super::{
     btc, checkout, endpoint, invoice, on_both_backends, paid_and_receipted, sale_of, Checkout,
