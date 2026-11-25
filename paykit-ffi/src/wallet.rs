@@ -2,8 +2,8 @@ use crate::flights::{AppId, Flights, Wake};
 use crate::{fixed, runtime, WalletError, WalletHost};
 use paykit_sdk::Stage;
 use paykit_sdk::{AppEnv, Paykit, PaykitError};
-use pubky_switch_client::store::StoreHandle;
-use pubky_switch_client::transport::BoxFuture;
+use pubky_dispatch_client::store::StoreHandle;
+use pubky_dispatch_client::transport::BoxFuture;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -35,7 +35,7 @@ enum Command {
 pub struct NativeWallet {
     commands: mpsc::UnboundedSender<Command>,
     rail: Arc<crate::HostRail>,
-    pub(crate) pace: Arc<Mutex<pubky_switch_client::app::WaitPace>>,
+    pub(crate) pace: Arc<Mutex<pubky_dispatch_client::app::WaitPace>>,
 }
 
 impl NativeWallet {
@@ -288,7 +288,7 @@ impl WalletHost {
     ) -> Result<(AppEnv, Arc<crate::LeaseOwner>), WalletError> {
         let session = crate::WalletStoreSession::open(
             self.store.clone(),
-            pubky_switch_client::store::client_namespace(&id),
+            pubky_dispatch_client::store::client_namespace(&id),
         )
         .await?;
         let owner = session.ownership.clone();

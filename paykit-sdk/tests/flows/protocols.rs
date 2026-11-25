@@ -1,15 +1,15 @@
-//! Certificates holding several protocols' scopes (Switch wire 3.1 "Several protocols",
+//! Certificates holding several protocols' scopes (Dispatch wire 3.1 "Several protocols",
 //! Paykit wire 3.1): another protocol's scopes authorize nothing in Paykit.
 
 use paykit_sdk::Paykit;
-use pubky_switch_client::app::AppEvent;
-use pubky_switch_client::testing::AppSpec;
-use pubky_switch_core::scopes::Permission;
+use pubky_dispatch_client::app::AppEvent;
+use pubky_dispatch_client::testing::AppSpec;
+use pubky_dispatch_core::scopes::Permission;
 use serde_json::json;
 
 use crate::common::World;
 
-/// Bob's app `name`, registered at his switch with `scopes` and `permissions`, sends alice's
+/// Bob's app `name`, registered at his Dispatch with `scopes` and `permissions`, sends alice's
 /// `wallet` a `paykit.payment_request`. Returns whether the wallet dropped it at check 8 and
 /// whether it recorded the request.
 async fn request_from_app(scopes: &[&str], permissions: &[Permission]) -> (bool, bool) {
@@ -74,7 +74,7 @@ async fn test_protocols_payee_that_also_chats_request_recorded() {
 #[tokio::test]
 async fn test_protocols_chat_only_app_requires_its_registered_protocol() {
     // A valid chat certificate holds no Paykit kind, but Paykit alone cannot own its
-    // scope root (Switch wire 3.1): the host must register the chat protocol too.
+    // scope root (Dispatch wire 3.1): the host must register the chat protocol too.
     let w = World::new();
     let scopes = paykit_sdk::RequestedScopes::new(vec!["chat".into()], vec![Permission::ListsRead]);
     let request = w.approve(&w.alice, "chat", &scopes);
@@ -89,16 +89,16 @@ async fn test_protocols_chat_only_app_requires_its_registered_protocol() {
     assert!(matches!(
         result,
         Err(paykit_sdk::PaykitError::Client(
-            pubky_switch_client::app::AppError::Refused(pubky_switch_client::app::Refusal::Usage(
-                _
-            ))
+            pubky_dispatch_client::app::AppError::Refused(
+                pubky_dispatch_client::app::Refusal::Usage(_)
+            )
         ))
     ));
 }
 
 #[tokio::test]
 async fn test_protocols_local_writes_require_the_registered_owner() {
-    use pubky_switch_client::app::{AppError, LocalWrite, OpBatch, Refusal};
+    use pubky_dispatch_client::app::{AppError, LocalWrite, OpBatch, Refusal};
 
     let w = World::new();
     let storage = crate::common::store();

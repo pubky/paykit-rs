@@ -1,9 +1,9 @@
-//! Public Payment Endpoints on the app record (Paykit spec 4) and outbox delivery (Switch spec 11).
+//! Public Payment Endpoints on the app record (Paykit spec 4) and outbox delivery (Dispatch spec 11).
 
 use crate::{NativeWallet, WalletError};
 use paykit_lib::{PaymentEndpointIdentifier, PaymentEndpointPayload};
-use pubky_switch_client::{app::Publication, transport::TransportError};
-use pubky_switch_core::http::ErrorCode;
+use pubky_dispatch_client::{app::Publication, transport::TransportError};
+use pubky_dispatch_core::http::ErrorCode;
 use std::{collections::BTreeMap, fmt};
 
 /// A public Payment Endpoint in the app's signed record (Paykit spec 4).
@@ -32,34 +32,34 @@ fn endpoint_payload(payload: &str) -> Result<PaymentEndpointPayload, WalletError
     PaymentEndpointPayload::new(payload).map_err(|_| WalletError::invalid("payload"))
 }
 
-/// Where the app's signed record stands on its Homeserver (Switch spec 4.2).
+/// Where the app's signed record stands on its Homeserver (Dispatch spec 4.2).
 #[derive(Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum PublicationState {
-    /// The app publishes its record only to the Switch (Switch spec 4.2).
+    /// The app publishes its record only to the Dispatch (Dispatch spec 4.2).
     NotPublishing,
-    /// The app knows of no record accepted by the Switch (Switch spec 4.2).
+    /// The app knows of no record accepted by the Dispatch (Dispatch spec 4.2).
     NothingAccepted,
-    /// The Homeserver holds the latest accepted record (Switch spec 4.2).
+    /// The Homeserver holds the latest accepted record (Dispatch spec 4.2).
     Published,
-    /// A newer local record choice must settle before publication (Switch spec 4.2).
+    /// A newer local record choice must settle before publication (Dispatch spec 4.2).
     AwaitingRecord,
-    /// The Homeserver already holds a newer record (Switch spec 4.2).
+    /// The Homeserver already holds a newer record (Dispatch spec 4.2).
     Superseded,
-    /// A failed Homeserver read or write leaves publication owed (Switch spec 4.2).
+    /// A failed Homeserver read or write leaves publication owed (Dispatch spec 4.2).
     Owed {
-        /// The transport failure code (Switch spec 4.2).
+        /// The transport failure code (Dispatch spec 4.2).
         error: String,
     },
-    /// The read to check the Homeserver copy failed (Switch spec 4.2).
+    /// The read to check the Homeserver copy failed (Dispatch spec 4.2).
     Unchecked {
-        /// The transport failure code (Switch spec 4.2).
+        /// The transport failure code (Dispatch spec 4.2).
         error: String,
     },
     /// The Homeserver copy awaits a read: a missing copy is written back once a read shows the
-    /// app current, and after a restore nothing is written before the first read (Switch spec
+    /// app current, and after a restore nothing is written before the first read (Dispatch spec
     /// 4.2).
     AwaitingRead,
-    /// Any publication state added by the Switch client maps here without content (Switch spec 4.2).
+    /// Any publication state added by the Dispatch client maps here without content (Dispatch spec 4.2).
     Other,
 }
 
@@ -97,50 +97,50 @@ fn transport_code(error: TransportError) -> &'static str {
     }
 }
 
-/// Where a message sent by this app stands (Switch spec 11).
+/// Where a message sent by this app stands (Dispatch spec 11).
 #[derive(Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum MessageDelivery {
-    /// The client keeps the signed batch that queues the message (Switch wire 6.4).
+    /// The client keeps the signed batch that queues the message (Dispatch wire 6.4).
     Kept {
-        /// The 16-byte ID of the kept batch (Switch wire 6.4).
+        /// The 16-byte ID of the kept batch (Dispatch wire 6.4).
         batch_id: Vec<u8>,
     },
-    /// The message remains in the outbox (Switch spec 11).
+    /// The message remains in the outbox (Dispatch spec 11).
     Queued {
-        /// How many times delivery has been tried (Switch spec 11).
+        /// How many times delivery has been tried (Dispatch spec 11).
         tries: u64,
-        /// The last failure code, or `unknown` for an unrecognized failure (Switch spec 11).
+        /// The last failure code, or `unknown` for an unrecognized failure (Dispatch spec 11).
         last_error: Option<String>,
     },
-    /// The recipient's switch is waiting for admission (Switch spec 7).
+    /// The recipient's Dispatch is waiting for admission (Dispatch spec 7).
     WaitingForAdmission {
-        /// The first refusal, in Unix milliseconds on the app clock (Switch spec 11).
+        /// The first refusal, in Unix milliseconds on the app clock (Dispatch spec 11).
         since_ms: u64,
-        /// How many times delivery has been tried (Switch spec 11).
+        /// How many times delivery has been tried (Dispatch spec 11).
         tries: u64,
     },
-    /// The sender's own certificate must become current (Switch wire 3.8).
+    /// The sender's own certificate must become current (Dispatch wire 3.8).
     CertificateNotCurrent {
-        /// The first refusal, in Unix milliseconds on the app clock (Switch spec 11).
+        /// The first refusal, in Unix milliseconds on the app clock (Dispatch spec 11).
         since_ms: u64,
-        /// How many times delivery has been tried (Switch spec 11).
+        /// How many times delivery has been tried (Dispatch spec 11).
         tries: u64,
     },
-    /// The recipient's inbox accepted the message (Switch spec 11).
+    /// The recipient's inbox accepted the message (Dispatch spec 11).
     Accepted {
-        /// The acceptance time in Unix milliseconds (Switch spec 11).
+        /// The acceptance time in Unix milliseconds (Dispatch spec 11).
         accepted_at_ms: u64,
     },
-    /// The delivery ended or its kept batch was dropped (Switch spec 11, Switch wire 6.4).
+    /// The delivery ended or its kept batch was dropped (Dispatch spec 11, Dispatch wire 6.4).
     /// A retry may be refused after an accepted try lost its answer. Check the request or
-    /// record before sending a replacement (Switch spec 11).
+    /// record before sending a replacement (Dispatch spec 11).
     Failed {
-        /// The reason code, or `unknown` for an unrecognized reason (Switch spec 11).
+        /// The reason code, or `unknown` for an unrecognized reason (Dispatch spec 11).
         reason: String,
-        /// The failure time in Unix milliseconds on the app clock (Switch spec 11).
+        /// The failure time in Unix milliseconds on the app clock (Dispatch spec 11).
         failed_at_ms: u64,
     },
-    /// A delivery state the binding does not recognize, without content (Switch spec 11).
+    /// A delivery state the binding does not recognize, without content (Dispatch spec 11).
     Other,
 }
 
@@ -174,8 +174,8 @@ impl From<paykit_sdk::MessageDelivery> for MessageDelivery {
     }
 }
 
-// The outbox can store a formatted Switch answer, including the service's message.
-// Only a recognized code crosses the binding (Switch wire 7.6).
+// The outbox can store a formatted Dispatch answer, including the service's message.
+// Only a recognized code crosses the binding (Dispatch wire 7.6).
 fn delivery_code(error: &str) -> &'static str {
     match error {
         "the batch carrying it was dropped" => "batch_dropped",
@@ -272,20 +272,20 @@ impl NativeWallet {
         .await
     }
 
-    /// Refresh the app's own record and retry any publication owed (Switch spec 4.2).
+    /// Refresh the app's own record and retry any publication owed (Dispatch spec 4.2).
     pub async fn update_own_record(&self) -> Result<PublicationState, WalletError> {
         self.with_wallet(|app| Box::pin(async move { Ok(app.update_own_record().await?.into()) }))
             .await
     }
 
-    /// Try queued outbox messages again (Switch spec 11).
+    /// Try queued outbox messages again (Dispatch spec 11).
     pub async fn flush(&self) -> Result<(), WalletError> {
         self.with_wallet(|app| Box::pin(async move { Ok(app.flush().await?) }))
             .await
     }
 
     /// Read the delivery retained for a message ID, or none if the client keeps no entry, including
-    /// after retention expires or after a restore (Switch spec 11, 12.4).
+    /// after retention expires or after a restore (Dispatch spec 11, 12.4).
     pub async fn message_delivery(
         &self,
         msg_id: String,

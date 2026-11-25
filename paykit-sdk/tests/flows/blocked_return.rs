@@ -5,10 +5,10 @@
 use std::sync::Arc;
 
 use paykit_sdk::{AppScopes, NoticeKind, Paykit, PaykitConfig};
-use pubky_switch_client::app::Initiator;
-use pubky_switch_client::clock::Clock;
-use pubky_switch_client::store::StateStore;
-use pubky_switch_client::transport::Transport;
+use pubky_dispatch_client::app::Initiator;
+use pubky_dispatch_client::clock::Clock;
+use pubky_dispatch_client::store::StateStore;
+use pubky_dispatch_client::transport::Transport;
 
 use crate::common::{asked, draft, request_from, store, ListsStore, ReadHook, World};
 
@@ -217,16 +217,16 @@ async fn test_blocked_return_own_unblock_unanswered_asks_nothing() {
     let mut wallet = contacts_wallet(&w, store()).await;
     let mut shop = w.shop().await;
     dropped_for_the_block(&w, &mut wallet, &mut shop).await;
-    // The wallet unblocks bob while its switch doesn't answer: the lists still show him
+    // The wallet unblocks bob while its Dispatch doesn't answer: the lists still show him
     // blocked. The own unblock isn't enough to ask for his messages, the permissive
     // direction: no ask.
     // One for the unblock's own call, one for the receive's call again.
     for _ in 0..2 {
         w.alice
             .switch()
-            .fail_next(pubky_switch_client::testing::Fault::Error {
+            .fail_next(pubky_dispatch_client::testing::Fault::Error {
                 path: "/ops".into(),
-                code: pubky_switch_core::http::ErrorCode::Unavailable,
+                code: pubky_dispatch_core::http::ErrorCode::Unavailable,
                 current: serde_json::Value::Null,
             });
     }
@@ -235,7 +235,7 @@ async fn test_blocked_return_own_unblock_unanswered_asks_nothing() {
     w.clock.advance_ms(11 * MINUTE_MS);
     let _ = wallet.receive(None).await;
     // No ask queued, delivered or not: the unfinished raise didn't write the unblock.
-    let mark = format!("bd/{}", pubky_switch_core::enc::b64(&w.bob_id()));
+    let mark = format!("bd/{}", pubky_dispatch_core::enc::b64(&w.bob_id()));
     let mark: serde_json::Value = serde_json::from_slice(
         &wallet
             .app()
@@ -248,7 +248,7 @@ async fn test_blocked_return_own_unblock_unanswered_asks_nothing() {
     assert!(mark["d"]["queued"].is_null(), "{mark}");
     assert!(mark["d"]["asked_at_ms"].is_null(), "{mark}");
     // No unblock was submitted before the raise applied.
-    let own_unblock = format!("bk/{}", pubky_switch_core::enc::b64(&w.bob_id()));
+    let own_unblock = format!("bk/{}", pubky_dispatch_core::enc::b64(&w.bob_id()));
     assert!(wallet
         .app()
         .protocol_get("paykit", own_unblock.as_bytes())
@@ -465,7 +465,7 @@ async fn test_blocked_return_proof_comes_back_credited_without_a_hold() {
     );
     let payment = paykit_sdk::UnrequestedPayment::new(w.bob_id(), crate::common::btc("0.001"))
         .with_options(paykit_sdk::PayOptions::default().with_mode(
-            paykit_sdk::PaymentMode::Public(pubky_switch_client::app::UserConfirmed::new()),
+            paykit_sdk::PaymentMode::Public(pubky_dispatch_client::app::UserConfirmed::new()),
         ));
     let outcome = wallet.pay_without_request(payment).await.outcome.unwrap();
     assert!(
@@ -541,7 +541,7 @@ async fn test_blocked_return_late_start_asks_what_is_kept_and_tells_the_rest_los
     let mark = serde_json::json!({
         "v": 1,
         "d": {
-            "sender": pubky_switch_core::enc::b64(&w.bob_id()),
+            "sender": pubky_dispatch_core::enc::b64(&w.bob_id()),
             "earliest_ms": earliest,
             "latest_ms": now - 1_000,
             "due": false,
@@ -553,8 +553,8 @@ async fn test_blocked_return_late_start_asks_what_is_kept_and_tells_the_rest_los
         .app_mut()
         .protocol_commit(
             "paykit",
-            &[pubky_switch_client::app::LocalWrite::Put {
-                key: format!("bd/{}", pubky_switch_core::enc::b64(&w.bob_id())).into_bytes(),
+            &[pubky_dispatch_client::app::LocalWrite::Put {
+                key: format!("bd/{}", pubky_dispatch_core::enc::b64(&w.bob_id())).into_bytes(),
                 value: serde_json::to_vec(&mark).unwrap(),
             }],
         )
@@ -663,7 +663,7 @@ async fn delivery_not_written_into_the_mark(w: &World, wallet: &mut Paykit, spec
         .into_iter()
         .find(|m| m.kind == "paykit.resend_request")
         .expect("the request");
-    let key = format!("bd/{}", pubky_switch_core::enc::b64(&w.bob_id()));
+    let key = format!("bd/{}", pubky_dispatch_core::enc::b64(&w.bob_id()));
     let marks = wallet
         .app()
         .protocol_scan("paykit", key.as_bytes())
@@ -674,7 +674,7 @@ async fn delivery_not_written_into_the_mark(w: &World, wallet: &mut Paykit, spec
     mark["d"]["asked_at_ms"] = serde_json::Value::Null;
     mark["d"]["queued"] = serde_json::json!({
         "msg_id": sent.msg_id,
-        "hash": pubky_switch_core::enc::b64(&sent.plaintext.hash()),
+        "hash": pubky_dispatch_core::enc::b64(&sent.plaintext.hash()),
     });
     if speculative {
         mark["d"]["speculative"] = serde_json::Value::Bool(true);
@@ -683,7 +683,7 @@ async fn delivery_not_written_into_the_mark(w: &World, wallet: &mut Paykit, spec
         .app_mut()
         .protocol_commit(
             "paykit",
-            &[pubky_switch_client::app::LocalWrite::Put {
+            &[pubky_dispatch_client::app::LocalWrite::Put {
                 key: key.into_bytes(),
                 value: serde_json::to_vec(&mark).unwrap(),
             }],
@@ -739,7 +739,7 @@ async fn test_blocked_return_window_delivered_not_told_lost_when_a_widening_drop
 /// answer on that message can't be read.
 #[derive(Default)]
 struct FailingDeliveryReads {
-    inner: pubky_switch_client::store::MemoryStore,
+    inner: pubky_dispatch_client::store::MemoryStore,
     msg_id: std::sync::Mutex<Option<String>>,
 }
 
@@ -755,12 +755,12 @@ impl StateStore for FailingDeliveryReads {
         &self,
         ns: &str,
         key: &[u8],
-    ) -> Result<Option<Vec<u8>>, pubky_switch_client::error::StoreError> {
+    ) -> Result<Option<Vec<u8>>, pubky_dispatch_client::error::StoreError> {
         if let Some(id) = self.msg_id.lock().unwrap().as_deref() {
             if key.ends_with(format!("out/{id}").as_bytes())
                 || key.ends_with(format!("sent/{id}").as_bytes())
             {
-                return Err(pubky_switch_client::error::StoreError::Unavailable);
+                return Err(pubky_dispatch_client::error::StoreError::Unavailable);
             }
         }
         self.inner.get(ns, key)
@@ -772,19 +772,19 @@ impl StateStore for FailingDeliveryReads {
         prefix: &[u8],
         after: Option<&[u8]>,
         limit: u32,
-    ) -> Result<Vec<pubky_switch_client::store::KeyValue>, pubky_switch_client::error::StoreError>
+    ) -> Result<Vec<pubky_dispatch_client::store::KeyValue>, pubky_dispatch_client::error::StoreError>
     {
         self.inner.scan(ns, prefix, after, limit)
     }
 
     fn commit(
         &self,
-        batch: pubky_switch_client::store::WriteBatch,
-    ) -> Result<(), pubky_switch_client::error::StoreError> {
+        batch: pubky_dispatch_client::store::WriteBatch,
+    ) -> Result<(), pubky_dispatch_client::error::StoreError> {
         self.commit_with(batch, |batch| {
             self.inner
                 .commit(batch)
-                .map(|()| pubky_switch_client::store::CommitOutcome::Applied)
+                .map(|()| pubky_dispatch_client::store::CommitOutcome::Applied)
         })
         .map(|_| ())
     }
@@ -792,18 +792,20 @@ impl StateStore for FailingDeliveryReads {
     fn acquire(
         &self,
         ns: &str,
-        owner: pubky_switch_client::store::StoreOwner,
-    ) -> Result<pubky_switch_client::store::AcquireOutcome, pubky_switch_client::error::StoreError>
-    {
+        owner: pubky_dispatch_client::store::StoreOwner,
+    ) -> Result<
+        pubky_dispatch_client::store::AcquireOutcome,
+        pubky_dispatch_client::error::StoreError,
+    > {
         self.inner.acquire(ns, owner)
     }
 
     fn commit_if(
         &self,
         ns: &str,
-        owner: pubky_switch_client::store::StoreOwner,
-        batch: pubky_switch_client::store::WriteBatch,
-    ) -> Result<pubky_switch_client::store::CommitOutcome, pubky_switch_client::error::StoreError>
+        owner: pubky_dispatch_client::store::StoreOwner,
+        batch: pubky_dispatch_client::store::WriteBatch,
+    ) -> Result<pubky_dispatch_client::store::CommitOutcome, pubky_dispatch_client::error::StoreError>
     {
         self.commit_with(batch, |batch| self.inner.commit_if(ns, owner, batch))
     }
@@ -811,14 +813,14 @@ impl StateStore for FailingDeliveryReads {
 impl FailingDeliveryReads {
     fn commit_with(
         &self,
-        batch: pubky_switch_client::store::WriteBatch,
+        batch: pubky_dispatch_client::store::WriteBatch,
         apply: impl FnOnce(
-            pubky_switch_client::store::WriteBatch,
+            pubky_dispatch_client::store::WriteBatch,
         ) -> Result<
-            pubky_switch_client::store::CommitOutcome,
-            pubky_switch_client::error::StoreError,
+            pubky_dispatch_client::store::CommitOutcome,
+            pubky_dispatch_client::error::StoreError,
         >,
-    ) -> Result<pubky_switch_client::store::CommitOutcome, pubky_switch_client::error::StoreError>
+    ) -> Result<pubky_dispatch_client::store::CommitOutcome, pubky_dispatch_client::error::StoreError>
     {
         apply(batch)
     }
@@ -863,7 +865,7 @@ async fn bound_drops_bob_at_the_next_receive_step(
     came_back(w, wallet, shop).await;
     delivery_not_written_into_the_mark(w, wallet, true).await;
     if let Some(msg_id) = undelivered {
-        let key = format!("bd/{}", pubky_switch_core::enc::b64(&w.bob_id()));
+        let key = format!("bd/{}", pubky_dispatch_core::enc::b64(&w.bob_id()));
         let marks = wallet
             .app()
             .protocol_scan("paykit", key.as_bytes())
@@ -875,7 +877,7 @@ async fn bound_drops_bob_at_the_next_receive_step(
             .app_mut()
             .protocol_commit(
                 "paykit",
-                &[pubky_switch_client::app::LocalWrite::Put {
+                &[pubky_dispatch_client::app::LocalWrite::Put {
                     key: key.into_bytes(),
                     value: serde_json::to_vec(&mark).unwrap(),
                 }],
@@ -1084,7 +1086,7 @@ async fn test_blocked_return_restore_owed_lost_notice_delivered_after_the_restor
     wallet.app_mut().hold_queued(&w.bob_id()).await.unwrap();
     w.clock.advance_ms(11 * MINUTE_MS);
     wallet.receive(None).await.unwrap();
-    let key = format!("bd/{}", pubky_switch_core::enc::b64(&w.bob_id()));
+    let key = format!("bd/{}", pubky_dispatch_core::enc::b64(&w.bob_id()));
     let marks = wallet
         .app()
         .protocol_scan("paykit", key.as_bytes())
@@ -1100,7 +1102,7 @@ async fn test_blocked_return_restore_owed_lost_notice_delivered_after_the_restor
         .app_mut()
         .protocol_commit(
             "paykit",
-            &[pubky_switch_client::app::LocalWrite::Put {
+            &[pubky_dispatch_client::app::LocalWrite::Put {
                 key: key.into_bytes(),
                 value: serde_json::to_vec(&mark).unwrap(),
             }],
@@ -1139,7 +1141,7 @@ async fn test_blocked_return_restore_owed_lost_notice_delivered_after_the_restor
     Box::pin(restored.flush()).await.unwrap();
     assert!(matches!(
         restored.app().delivery(&msg_id).await.unwrap(),
-        Some(pubky_switch_client::app::Delivery::Accepted { .. })
+        Some(pubky_dispatch_client::app::Delivery::Accepted { .. })
     ));
     w.clock.advance_ms(11 * MINUTE_MS);
     Box::pin(restored.receive(None)).await.unwrap();
@@ -1207,9 +1209,9 @@ async fn test_blocked_return_queued_ask_not_flushed_by_a_receive_once_blocked_ag
     w.clock.advance_ms(11 * MINUTE_MS);
     w.bob
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::Error {
+        .fail_next(pubky_dispatch_client::testing::Fault::Error {
             path: "/inbox".into(),
-            code: pubky_switch_core::http::ErrorCode::Unavailable,
+            code: pubky_dispatch_core::http::ErrorCode::Unavailable,
             current: serde_json::Value::Null,
         });
     wallet.receive(None).await.unwrap();
@@ -1252,7 +1254,7 @@ async fn test_blocked_return_sixty_five_in_one_read_all_come_back() {
 
 #[tokio::test]
 async fn test_blocked_return_repeat_of_a_request_paid_only_by_hand_not_made() {
-    // The request that came back is paid by hand; its dispatch is left in flight, and a
+    // The request that came back is paid by hand; its handoff is left in flight, and a
     // resume makes no repeat: a repeat is an automatic payment.
     let w = World::new();
     w.rail.set_declaration(
@@ -1295,7 +1297,7 @@ async fn test_blocked_return_entry_held_while_no_mark_may_go() {
         let value = serde_json::json!({
             "v": 1,
             "d": {
-                "sender": pubky_switch_core::enc::b64(&sender),
+                "sender": pubky_dispatch_core::enc::b64(&sender),
                 "earliest_ms": now - 2_000 - i as u64,
                 "latest_ms": now - 1_000 - i as u64,
                 "due": true,
@@ -1304,8 +1306,8 @@ async fn test_blocked_return_entry_held_while_no_mark_may_go() {
                 "pending_forget": ["123e4567-e89b-42d3-a456-426614174000"],
             }
         });
-        writes.push(pubky_switch_client::app::LocalWrite::Put {
-            key: format!("bd/{}", pubky_switch_core::enc::b64(&sender)).into_bytes(),
+        writes.push(pubky_dispatch_client::app::LocalWrite::Put {
+            key: format!("bd/{}", pubky_dispatch_core::enc::b64(&sender)).into_bytes(),
             value: serde_json::to_vec(&value).unwrap(),
         });
     }
@@ -1332,7 +1334,7 @@ async fn seed_block_mark(app: &mut Paykit, sender: &[u8; 32], earliest: u64, lat
     let mark = serde_json::json!({
         "v": 1,
         "d": {
-            "sender": pubky_switch_core::enc::b64(sender),
+            "sender": pubky_dispatch_core::enc::b64(sender),
             "earliest_ms": earliest,
             "latest_ms": latest,
             "due": false,
@@ -1343,8 +1345,8 @@ async fn seed_block_mark(app: &mut Paykit, sender: &[u8; 32], earliest: u64, lat
     app.app_mut()
         .protocol_commit(
             "paykit",
-            &[pubky_switch_client::app::LocalWrite::Put {
-                key: format!("bd/{}", pubky_switch_core::enc::b64(sender)).into_bytes(),
+            &[pubky_dispatch_client::app::LocalWrite::Put {
+                key: format!("bd/{}", pubky_dispatch_core::enc::b64(sender)).into_bytes(),
                 value: serde_json::to_vec(&mark).unwrap(),
             }],
         )
@@ -1387,7 +1389,7 @@ async fn test_blocked_return_marks_and_widenings_dated_past_the_backup_bounded_a
     let mut wallet = contacts_wallet(&w, store()).await;
     let ahead = w.clock.now_ms() + 2 * 24 * 60 * MINUTE_MS;
     crate::common::seed_marks(&mut wallet, "bd/", 1, ahead).await;
-    let id = pubky_switch_core::enc::b64(&[19; 16]);
+    let id = pubky_dispatch_core::enc::b64(&[19; 16]);
     let widening = serde_json::json!({ "v": 1, "d": {
         "id": id, "deny": null,
         "windows": [{ "from_ms": ahead, "until_ms": ahead, "floor_ms": ahead }]
@@ -1396,7 +1398,7 @@ async fn test_blocked_return_marks_and_widenings_dated_past_the_backup_bounded_a
         .app_mut()
         .protocol_commit(
             "paykit",
-            &[pubky_switch_client::app::LocalWrite::Put {
+            &[pubky_dispatch_client::app::LocalWrite::Put {
                 key: format!("bw/{id}").into_bytes(),
                 value: serde_json::to_vec(&widening).unwrap(),
             }],
@@ -1414,7 +1416,7 @@ async fn test_blocked_return_marks_and_widenings_dated_past_the_backup_bounded_a
     )
     .await
     .unwrap();
-    let bound = w.clock.now_ms() + pubky_switch_core::records::CLOCK_TOLERANCE_MS;
+    let bound = w.clock.now_ms() + pubky_dispatch_core::records::CLOCK_TOLERANCE_MS;
     let marks = restored
         .app()
         .protocol_scan("paykit", b"bd/")
@@ -1461,9 +1463,9 @@ async fn test_blocked_return_mark_of_a_sender_still_blocked_spares_the_lists_rea
         w.clock.advance_ms(MINUTE_MS);
         w.alice
             .switch()
-            .fail_next(pubky_switch_client::testing::Fault::Error {
+            .fail_next(pubky_dispatch_client::testing::Fault::Error {
                 path: "/allow".into(),
-                code: pubky_switch_core::http::ErrorCode::Unavailable,
+                code: pubky_dispatch_core::http::ErrorCode::Unavailable,
                 current: serde_json::Value::Null,
             });
         wallet.receive(None).await.unwrap();
@@ -1505,7 +1507,7 @@ async fn test_blocked_return_request_after_its_mark_went_for_the_bound_paid_only
         let value = serde_json::json!({
             "v": 1,
             "d": {
-                "sender": pubky_switch_core::enc::b64(&sender),
+                "sender": pubky_dispatch_core::enc::b64(&sender),
                 "earliest_ms": now - 1_000 + i as u64,
                 "latest_ms": now - 1_000 + i as u64,
                 "due": true,
@@ -1513,8 +1515,8 @@ async fn test_blocked_return_request_after_its_mark_went_for_the_bound_paid_only
                 "queued": null,
             }
         });
-        writes.push(pubky_switch_client::app::LocalWrite::Put {
-            key: format!("bd/{}", pubky_switch_core::enc::b64(&sender)).into_bytes(),
+        writes.push(pubky_dispatch_client::app::LocalWrite::Put {
+            key: format!("bd/{}", pubky_dispatch_core::enc::b64(&sender)).into_bytes(),
             value: serde_json::to_vec(&value).unwrap(),
         });
     }
@@ -1615,7 +1617,7 @@ async fn test_blocked_return_recurring_request_dated_in_a_window_opens_with_no_m
     let body = serde_json::json!({
         "amount": { "asset": "btc", "value": "1" },
         "payment_reference": "plan-1",
-        "proposal_expires_at": pubky_switch_core::time::rfc3339(w.clock.now_ms() + 24 * 60 * MINUTE_MS),
+        "proposal_expires_at": pubky_dispatch_core::time::rfc3339(w.clock.now_ms() + 24 * 60 * MINUTE_MS),
         "payment_endpoints": { "btc-lightning-bolt11": "lnbc1invoice" },
         "recurrence": {
             "anchor": "2026-01-31T00:00:00.000Z",
@@ -1769,7 +1771,7 @@ async fn test_blocked_return_payer_records_another_apps_unblock_with_the_floor()
         .app()
         .highest_service_time()
         .unwrap()
-        .saturating_add(pubky_switch_core::records::CLOCK_TOLERANCE_MS);
+        .saturating_add(pubky_dispatch_core::records::CLOCK_TOLERANCE_MS);
     assert_eq!(shared_floor(&payer).await, Some(expected));
 
     w.clock.advance_ms(paykit_sdk::LISTS_REFRESH_MS);
@@ -1794,12 +1796,12 @@ async fn test_blocked_return_observed_unblock_retries_its_original_cutoff_after_
     payer.receive(None).await.unwrap();
     contacts.unblock(&w.bob_id()).await.unwrap();
     w.clock.advance_ms(paykit_sdk::LISTS_REFRESH_MS);
-    let expected = w.clock.now_ms() + pubky_switch_core::records::CLOCK_TOLERANCE_MS;
+    let expected = w.clock.now_ms() + pubky_dispatch_core::records::CLOCK_TOLERANCE_MS;
     w.alice
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::Error {
+        .fail_next(pubky_dispatch_client::testing::Fault::Error {
             path: "/ops".into(),
-            code: pubky_switch_core::http::ErrorCode::PermissionMissing,
+            code: pubky_dispatch_core::http::ErrorCode::PermissionMissing,
             current: serde_json::Value::Null,
         });
     assert!(payer.receive(None).await.is_err());
@@ -1831,10 +1833,10 @@ async fn test_blocked_return_observed_unblock_and_a_later_own_block_survive_a_lo
         .await;
     contacts.unblock(&w.bob_id()).await.unwrap();
     w.clock.advance_ms(paykit_sdk::LISTS_REFRESH_MS);
-    let expected = w.clock.now_ms() + pubky_switch_core::records::CLOCK_TOLERANCE_MS;
+    let expected = w.clock.now_ms() + pubky_dispatch_core::records::CLOCK_TOLERANCE_MS;
     w.alice
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::LoseAnswer {
+        .fail_next(pubky_dispatch_client::testing::Fault::LoseAnswer {
             path: "/ops".into(),
         });
     let result = payer.receive(None).await;
@@ -1867,7 +1869,7 @@ async fn test_blocked_return_own_unblock_raises_once_without_a_dropped_message()
     wallet.block(&w.bob_id()).await.unwrap();
     let app_id = wallet.app_id();
     drop(wallet);
-    let ahead = Arc::new(pubky_switch_client::clock::TestClock::new(
+    let ahead = Arc::new(pubky_dispatch_client::clock::TestClock::new(
         w.clock.now_ms() + crate::common::HOUR_MS,
     ));
     let mut wallet = w.load_on_clock(&w.alice, base, app_id, ahead).await;
@@ -1875,7 +1877,7 @@ async fn test_blocked_return_own_unblock_raises_once_without_a_dropped_message()
     assert_eq!(block_marks(&wallet).await, 0);
     let at = w.clock.now_ms();
     wallet.unblock(&w.bob_id()).await.unwrap();
-    let floor = Some(at + pubky_switch_core::records::CLOCK_TOLERANCE_MS);
+    let floor = Some(at + pubky_dispatch_core::records::CLOCK_TOLERANCE_MS);
     assert_eq!(shared_floor(&wallet).await, floor);
     assert!(!wallet
         .app_mut()
@@ -1917,7 +1919,7 @@ async fn test_blocked_return_own_unblock_waits_for_a_refused_raise() {
         .contains(&w.bob_id()));
     assert_eq!(
         shared_floor(&wallet).await,
-        Some(w.clock.now_ms() + pubky_switch_core::records::CLOCK_TOLERANCE_MS)
+        Some(w.clock.now_ms() + pubky_dispatch_core::records::CLOCK_TOLERANCE_MS)
     );
 }
 
@@ -1930,7 +1932,7 @@ async fn test_blocked_return_own_unblock_waits_for_applied_evidence_after_a_lost
     wallet.block(&w.bob_id()).await.unwrap();
     w.alice
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::LoseAnswer {
+        .fail_next(pubky_dispatch_client::testing::Fault::LoseAnswer {
             path: "/ops".into(),
         });
     let result = wallet.unblock(&w.bob_id()).await;
@@ -1957,7 +1959,7 @@ async fn test_blocked_return_own_unblock_waits_for_applied_evidence_after_a_lost
     let floor = shared_floor(&wallet).await;
     assert_eq!(
         floor,
-        Some(w.clock.now_ms() + pubky_switch_core::records::CLOCK_TOLERANCE_MS)
+        Some(w.clock.now_ms() + pubky_dispatch_core::records::CLOCK_TOLERANCE_MS)
     );
     wallet.unblock(&w.bob_id()).await.unwrap();
     assert_eq!(shared_floor(&wallet).await, floor);
@@ -1997,7 +1999,7 @@ async fn test_blocked_return_contacts_only_unblock_needs_no_floor() {
 #[tokio::test]
 async fn test_blocked_return_own_unblock_reads_a_concurrent_floor_first() {
     // The phone raises the floor; the wallet's copy doesn't hold it yet. The unblock reads the
-    // floor from the switch before it writes, so it builds on the phone's floor, which already
+    // floor from the Dispatch before it writes, so it builds on the phone's floor, which already
     // covers its window: nothing is written over it, and the floor stays the phone's.
     let w = World::new();
     let mut wallet = contacts_wallet(&w, store()).await;
@@ -2072,7 +2074,7 @@ async fn test_blocked_return_own_unblock_is_held_while_the_floor_record_doesnt_r
     wallet.unblock(&w.bob_id()).await.unwrap();
     assert_eq!(
         shared_floor(&wallet).await,
-        Some(w.clock.now_ms() + pubky_switch_core::records::CLOCK_TOLERANCE_MS)
+        Some(w.clock.now_ms() + pubky_dispatch_core::records::CLOCK_TOLERANCE_MS)
     );
 }
 
@@ -2206,8 +2208,8 @@ async fn test_blocked_return_floor_that_does_not_read_holds_every_one_time_reque
     let w = World::new();
     let mut wallet = contacts_wallet(&w, store()).await;
     let mut shop = w.shop().await;
-    let target = pubky_switch_client::app::RecordTarget::new(
-        pubky_switch_client::app::Collection::new(
+    let target = pubky_dispatch_client::app::RecordTarget::new(
+        pubky_dispatch_client::app::Collection::new(
             "block_floor",
             paykit_lib::collections::Collection::BlockFloor.fixed_policy(),
         ),
@@ -2228,9 +2230,9 @@ async fn test_blocked_return_floor_that_does_not_read_holds_every_one_time_reque
 }
 
 /// The identity's `block_floor` record.
-fn floor_record(w: &World) -> pubky_switch_client::app::RecordTarget {
-    pubky_switch_client::app::RecordTarget::new(
-        pubky_switch_client::app::Collection::new(
+fn floor_record(w: &World) -> pubky_dispatch_client::app::RecordTarget {
+    pubky_dispatch_client::app::RecordTarget::new(
+        pubky_dispatch_client::app::Collection::new(
             "block_floor",
             paykit_lib::collections::Collection::BlockFloor.fixed_policy(),
         ),
@@ -2465,12 +2467,12 @@ async fn test_blocked_return_divergent_floor_held_for_good() {
 }
 
 #[tokio::test]
-async fn test_blocked_return_dispatch_of_a_request_dated_before_the_floor_not_repeated() {
+async fn test_blocked_return_handoff_of_a_request_dated_before_the_floor_not_repeated() {
     // Carol's request opens as any other, and its payment is left in flight. Bob's request
     // is then dropped for a block and asked for again, which raises the floor past carol's
     // request. Whatever its record holds, no app pays automatically a one-time request
     // dated before the floor: another app may have opened it before it held the floor. So
-    // a resume makes no repeat of its dispatch.
+    // a resume makes no repeat of its handoff.
     let w = World::new();
     w.rail.set_declaration(
         paykit_sdk::RailDeclaration::new(
@@ -2517,7 +2519,7 @@ async fn test_blocked_return_dispatch_of_a_request_dated_before_the_floor_not_re
 }
 
 /// Alice's wallet and phone, carol's request opened on the phone, and bob's request on its
-/// way to being dropped for the block: the setup of the floor's two windows at a dispatch.
+/// way to being dropped for the block: the setup of the floor's two windows at a handoff.
 async fn phone_paying_carol(w: &World) -> (Paykit, Paykit, Paykit, paykit_sdk::RequestRef) {
     // On the heap: the setup nests deep.
     Box::pin(phone_paying_carol_on(w, store())).await
@@ -2573,10 +2575,10 @@ async fn phone_paying_carol_through(
 
 /// A store that runs a hook once, during the commit that journals `Paying`: after the final
 /// payment check and before the payment method's call; and another once, during the next
-/// commit that keeps the deny list as read from the switch.
+/// commit that keeps the deny list as read from the dispatch.
 #[derive(Default)]
 pub(crate) struct PayingStore {
-    inner: pubky_switch_client::store::MemoryStore,
+    inner: pubky_dispatch_client::store::MemoryStore,
     fail_payer_activity_read: std::sync::atomic::AtomicBool,
     hook: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
     lists_hook: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
@@ -2602,7 +2604,7 @@ impl StateStore for PayingStore {
         &self,
         ns: &str,
         key: &[u8],
-    ) -> Result<Option<Vec<u8>>, pubky_switch_client::error::StoreError> {
+    ) -> Result<Option<Vec<u8>>, pubky_dispatch_client::error::StoreError> {
         let value = self.inner.get(ns, key)?;
         if self
             .fail_payer_activity_read
@@ -2615,7 +2617,7 @@ impl StateStore for PayingStore {
         {
             self.fail_payer_activity_read
                 .store(false, std::sync::atomic::Ordering::SeqCst);
-            return Err(pubky_switch_client::error::StoreError::Unavailable);
+            return Err(pubky_dispatch_client::error::StoreError::Unavailable);
         }
         Ok(value)
     }
@@ -2626,19 +2628,19 @@ impl StateStore for PayingStore {
         prefix: &[u8],
         after: Option<&[u8]>,
         limit: u32,
-    ) -> Result<Vec<pubky_switch_client::store::KeyValue>, pubky_switch_client::error::StoreError>
+    ) -> Result<Vec<pubky_dispatch_client::store::KeyValue>, pubky_dispatch_client::error::StoreError>
     {
         self.inner.scan(ns, prefix, after, limit)
     }
 
     fn commit(
         &self,
-        batch: pubky_switch_client::store::WriteBatch,
-    ) -> Result<(), pubky_switch_client::error::StoreError> {
+        batch: pubky_dispatch_client::store::WriteBatch,
+    ) -> Result<(), pubky_dispatch_client::error::StoreError> {
         self.commit_with(batch, |batch| {
             self.inner
                 .commit(batch)
-                .map(|()| pubky_switch_client::store::CommitOutcome::Applied)
+                .map(|()| pubky_dispatch_client::store::CommitOutcome::Applied)
         })
         .map(|_| ())
     }
@@ -2646,18 +2648,20 @@ impl StateStore for PayingStore {
     fn acquire(
         &self,
         ns: &str,
-        owner: pubky_switch_client::store::StoreOwner,
-    ) -> Result<pubky_switch_client::store::AcquireOutcome, pubky_switch_client::error::StoreError>
-    {
+        owner: pubky_dispatch_client::store::StoreOwner,
+    ) -> Result<
+        pubky_dispatch_client::store::AcquireOutcome,
+        pubky_dispatch_client::error::StoreError,
+    > {
         self.inner.acquire(ns, owner)
     }
 
     fn commit_if(
         &self,
         ns: &str,
-        owner: pubky_switch_client::store::StoreOwner,
-        batch: pubky_switch_client::store::WriteBatch,
-    ) -> Result<pubky_switch_client::store::CommitOutcome, pubky_switch_client::error::StoreError>
+        owner: pubky_dispatch_client::store::StoreOwner,
+        batch: pubky_dispatch_client::store::WriteBatch,
+    ) -> Result<pubky_dispatch_client::store::CommitOutcome, pubky_dispatch_client::error::StoreError>
     {
         self.commit_with(batch, |batch| self.inner.commit_if(ns, owner, batch))
     }
@@ -2665,25 +2669,25 @@ impl StateStore for PayingStore {
 impl PayingStore {
     fn commit_with(
         &self,
-        batch: pubky_switch_client::store::WriteBatch,
+        batch: pubky_dispatch_client::store::WriteBatch,
         apply: impl FnOnce(
-            pubky_switch_client::store::WriteBatch,
+            pubky_dispatch_client::store::WriteBatch,
         ) -> Result<
-            pubky_switch_client::store::CommitOutcome,
-            pubky_switch_client::error::StoreError,
+            pubky_dispatch_client::store::CommitOutcome,
+            pubky_dispatch_client::error::StoreError,
         >,
-    ) -> Result<pubky_switch_client::store::CommitOutcome, pubky_switch_client::error::StoreError>
+    ) -> Result<pubky_dispatch_client::store::CommitOutcome, pubky_dispatch_client::error::StoreError>
     {
         const PAYING: &[u8] = b"\"stage\":\"paying\"";
         let paying = batch.writes().iter().any(|write| {
-            matches!(write, pubky_switch_client::store::Write::Put { key, value, .. }
+            matches!(write, pubky_dispatch_client::store::Write::Put { key, value, .. }
                 if key.starts_with(b"p/paykit/j/") && value.windows(PAYING.len()).any(|w| w == PAYING))
         });
         let deny_list = batch.writes().iter().any(|write| {
-            matches!(write, pubky_switch_client::store::Write::Put { key, .. } if key == b"p/paykit/dl")
+            matches!(write, pubky_dispatch_client::store::Write::Put { key, .. } if key == b"p/paykit/dl")
         });
         let applied = apply(batch)?;
-        if applied != pubky_switch_client::store::CommitOutcome::Applied {
+        if applied != pubky_dispatch_client::store::CommitOutcome::Applied {
             return Ok(applied);
         }
         if paying {
@@ -2696,7 +2700,7 @@ impl PayingStore {
                 hook();
             }
         }
-        Ok(pubky_switch_client::store::CommitOutcome::Applied)
+        Ok(pubky_dispatch_client::store::CommitOutcome::Applied)
     }
 }
 
@@ -2709,19 +2713,19 @@ async fn wallet_about_to_raise_the_floor(w: &World, wallet: &mut Paykit, shop: &
     w.clock.advance_ms(11 * MINUTE_MS);
 }
 
-/// The phone starts carol's payment automatically, a first dispatch, and `during` runs
+/// The phone starts carol's payment automatically, a first handoff, and `during` runs
 /// while its journal write of `Paying` commits, the wallet about to raise the floor. Returns
 /// the attempt, left open.
-async fn automatic_first_dispatch(
+async fn automatic_first_handoff(
     w: &Arc<World>,
     during: impl FnOnce(&World, Paykit, Paykit) + Send + 'static,
 ) -> (Paykit, paykit_lib::AttemptId) {
-    automatic_first_dispatch_with(w, true, during).await
+    automatic_first_handoff_with(w, true, during).await
 }
 
-/// [`automatic_first_dispatch`], the wallet about to raise the floor when `about_to_raise`;
+/// [`automatic_first_handoff`], the wallet about to raise the floor when `about_to_raise`;
 /// `during` also gets carol's request.
-async fn automatic_first_dispatch_with(
+async fn automatic_first_handoff_with(
     w: &Arc<World>,
     about_to_raise: bool,
     during: impl FnOnce(&World, Paykit, Paykit) + Send + 'static,
@@ -2751,13 +2755,13 @@ async fn automatic_first_dispatch_with(
 }
 
 #[tokio::test]
-async fn test_blocked_return_floor_raised_during_the_paying_commit_holds_a_first_dispatch() {
-    // An automatic first dispatch reads the floor, which no app has raised, and journals
+async fn test_blocked_return_floor_raised_during_the_paying_commit_holds_a_first_handoff() {
+    // An automatic first handoff reads the floor, which no app has raised, and journals
     // `Paying`. While that write commits, the wallet asks for bob's request again, raising
     // the floor past carol's request. The floor read again after the commit holds the
     // payment: the method isn't called, and the attempt is known unsubmitted.
     let w = Arc::new(World::new());
-    let (phone, attempt_id) = automatic_first_dispatch(&w, |w, mut wallet, _shop| {
+    let (phone, attempt_id) = automatic_first_handoff(&w, |w, mut wallet, _shop| {
         let bob = w.bob_id();
         // The wallet runs on its own thread while the phone's commit waits for it.
         let raised = std::thread::spawn(move || {
@@ -2782,16 +2786,15 @@ async fn test_blocked_return_floor_raised_during_the_paying_commit_holds_a_first
 }
 
 #[tokio::test]
-async fn test_blocked_return_floor_read_that_fails_after_the_paying_commit_holds_a_first_dispatch()
-{
+async fn test_blocked_return_floor_read_that_fails_after_the_paying_commit_holds_a_first_handoff() {
     // No raise at all, but the read of the floor after the journal write of `Paying` fails:
     // it never counts as a floor that doesn't hold the request, so the method isn't called.
     let w = Arc::new(World::new());
-    let (phone, attempt_id) = automatic_first_dispatch(&w, |w, _wallet, _shop| {
+    let (phone, attempt_id) = automatic_first_handoff(&w, |w, _wallet, _shop| {
         // The request record is read again first, then the floor, which fails.
         w.alice
             .switch()
-            .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+            .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
                 path: "/records/".into(),
                 after: 1,
             });
@@ -2807,7 +2810,7 @@ async fn test_blocked_return_request_back_by_a_live_mark_not_paid_automatically(
     // Bob's request is dropped for the block and he is unblocked; whether he is flagged
     // isn't known, so nothing asks him. The unblock has already raised the floor. He sends
     // a request again on his own: its record is `manual_only`. An automatic first
-    // dispatch reads the record and holds: the method isn't called. The user pays it by
+    // handoff reads the record and holds: the method isn't called. The user pays it by
     // hand.
     let w = World::new();
     let lists = Arc::new(ListsStore::default());
@@ -2849,12 +2852,12 @@ async fn test_blocked_return_request_back_by_a_live_mark_not_paid_automatically(
 
 #[tokio::test]
 async fn test_blocked_return_request_marked_manual_only_during_the_paying_commit_not_paid() {
-    // An automatic first dispatch reads carol's record, open and not `manual_only`, and
+    // An automatic first handoff reads carol's record, open and not `manual_only`, and
     // journals `Paying`. While that write commits, another payer app marks the record
     // `manual_only`, raising no floor. The record read again after the commit holds the
     // payment: the method isn't called, and the attempt is known unsubmitted.
     let w = Arc::new(World::new());
-    let (phone, attempt_id) = automatic_first_dispatch_with(&w, false, |w, mut wallet, _shop| {
+    let (phone, attempt_id) = automatic_first_handoff_with(&w, false, |w, mut wallet, _shop| {
         let carol = w.carol_id();
         // The wallet runs on its own thread while the phone's commit waits for it.
         std::thread::spawn(move || {
@@ -2878,12 +2881,12 @@ async fn test_blocked_return_request_marked_manual_only_during_the_paying_commit
 
 #[tokio::test]
 async fn test_blocked_return_payee_blocked_during_the_paying_commit_not_paid() {
-    // An automatic first dispatch reads the deny list, which doesn't hold carol, and journals
+    // An automatic first handoff reads the deny list, which doesn't hold carol, and journals
     // `Paying`. While that write commits, another payer app blocks her. The deny list read
     // again after the commit holds the payment: the method isn't called, and the attempt is
     // known unsubmitted.
     let w = Arc::new(World::new());
-    let (phone, attempt_id) = automatic_first_dispatch_with(&w, false, |w, mut wallet, _shop| {
+    let (phone, attempt_id) = automatic_first_handoff_with(&w, false, |w, mut wallet, _shop| {
         let carol = w.carol_id();
         // The wallet runs on its own thread while the phone's commit waits for it.
         std::thread::spawn(move || {
@@ -2921,12 +2924,12 @@ async fn test_blocked_return_request_cancelled_after_the_repeat_read_not_repeate
 
 #[tokio::test]
 async fn test_blocked_return_request_cancelled_during_the_paying_commit_not_paid() {
-    // An automatic first dispatch reads carol's record, open, and journals `Paying`. While
+    // An automatic first handoff reads carol's record, open, and journals `Paying`. While
     // that write commits, carol cancels her request, and another payer app receives the
     // cancellation and records it. The record read again after the commit holds the payment:
     // the method isn't called, and the attempt is known unsubmitted.
     let w = Arc::new(World::new());
-    let (phone, attempt_id) = automatic_first_dispatch_with(&w, false, |w, mut wallet, _shop| {
+    let (phone, attempt_id) = automatic_first_handoff_with(&w, false, |w, mut wallet, _shop| {
         let carol = w.carol_id();
         // Carol and the wallet run on their own thread while the phone's commit waits.
         std::thread::scope(|scope| {
@@ -3048,8 +3051,8 @@ async fn mark_manual_only(app: &mut Paykit, payee: &[u8; 32]) {
         .expect("the request")
         .request;
     let collection = paykit_lib::collections::Collection::PayerActivity;
-    let target = pubky_switch_client::app::RecordTarget::new(
-        pubky_switch_client::app::Collection::new(collection.name(), collection.policy(None)),
+    let target = pubky_dispatch_client::app::RecordTarget::new(
+        pubky_dispatch_client::app::Collection::new(collection.name(), collection.policy(None)),
         &paykit_lib::derive::natural_key::request_record(payee, &request.request_hash),
     );
     let key = app.app().record_key(&target).unwrap();
@@ -3067,7 +3070,7 @@ async fn mark_manual_only(app: &mut Paykit, payee: &[u8; 32]) {
         .unwrap();
 }
 
-/// Which of the phone's reads at an automatic dispatch another payer app's write lands
+/// Which of the phone's reads at an automatic handoff another payer app's write lands
 /// after: the deny list, carol's request record, or the block floor, each answered before
 /// the write.
 #[derive(Clone, Copy)]
@@ -3084,15 +3087,15 @@ impl LandsAfter {
     /// A part of the path of the phone's read.
     fn path(self, w: &World, phone: &Paykit, carols: &paykit_sdk::RequestRef) -> String {
         let target = |collection: paykit_lib::collections::Collection, natural: Vec<u8>| {
-            let target = pubky_switch_client::app::RecordTarget::new(
-                pubky_switch_client::app::Collection::new(
+            let target = pubky_dispatch_client::app::RecordTarget::new(
+                pubky_dispatch_client::app::Collection::new(
                     collection.name(),
                     collection.policy(None),
                 ),
                 &natural,
             );
             let key = phone.app().record_key(&target).unwrap();
-            format!("/records/{}", pubky_switch_core::enc::b64(&key))
+            format!("/records/{}", pubky_dispatch_core::enc::b64(&key))
         };
         match self {
             Self::DenyList => "/allow".into(),
@@ -3136,10 +3139,10 @@ impl LandsAfter {
     }
 }
 
-/// The phone starts carol's payment automatically, a first dispatch; after its journal
+/// The phone starts carol's payment automatically, a first handoff; after its journal
 /// write of `Paying`, the wallet makes `write` right after the phone's next read of it. The
 /// method isn't called, and the attempt is known unsubmitted.
-async fn first_dispatch_with_a_write_after_its_read(w: &Arc<World>, write: LandsAfter) {
+async fn first_handoff_with_a_write_after_its_read(w: &Arc<World>, write: LandsAfter) {
     let phone_store = Arc::new(PayingStore::default());
     let reads = Arc::new(ReadHook::new(Arc::clone(&w.router)));
     // On the heap: the setup nests deep.
@@ -3226,7 +3229,7 @@ async fn test_blocked_return_payee_blocked_after_the_deny_list_read_not_paid() {
     // carol; right after that read, another payer app blocks her. The second read of the deny
     // list holds the payment.
     let w = Arc::new(World::new());
-    Box::pin(first_dispatch_with_a_write_after_its_read(
+    Box::pin(first_handoff_with_a_write_after_its_read(
         &w,
         LandsAfter::DenyList,
     ))
@@ -3239,7 +3242,7 @@ async fn test_blocked_return_request_marked_manual_only_after_the_record_read_no
     // `manual_only`; right after that read, another payer app marks it `manual_only`. The
     // second read of the record shows another write and holds the payment.
     let w = Arc::new(World::new());
-    Box::pin(first_dispatch_with_a_write_after_its_read(
+    Box::pin(first_handoff_with_a_write_after_its_read(
         &w,
         LandsAfter::Record,
     ))
@@ -3252,7 +3255,7 @@ async fn test_blocked_return_floor_raised_after_the_floor_read_not_paid() {
     // raised; right after that read, another payer app raises it past carol's request. The
     // second read of the floor shows another write and holds the payment.
     let w = Arc::new(World::new());
-    Box::pin(first_dispatch_with_a_write_after_its_read(
+    Box::pin(first_handoff_with_a_write_after_its_read(
         &w,
         LandsAfter::Floor,
     ))
@@ -3287,11 +3290,11 @@ async fn test_blocked_return_floor_raised_after_the_repeat_floor_read_not_repeat
 }
 
 #[tokio::test]
-async fn test_blocked_return_floor_kept_copy_not_taken_for_the_switch_at_a_dispatch() {
+async fn test_blocked_return_floor_kept_copy_not_taken_for_the_dispatch_at_a_handoff() {
     // The phone holds the floor of a first raise, under carol's request. The wallet raises it
     // again, past her request, and the phone reads nothing meanwhile. At the phone's
-    // automatic dispatch, the switch answers the floor's reads `404`: the copy the phone keeps
-    // isn't taken for the switch's write, and the absence of a permanent floor it holds live
+    // automatic handoff, the Dispatch answers the floor's reads `404`: the copy the phone keeps
+    // isn't taken for the Dispatch's write, and the absence of a permanent floor it holds live
     // is the rollback alarm, so the method isn't called.
     let w = World::new();
     w.rail.set_declaration(
@@ -3342,9 +3345,9 @@ async fn test_blocked_return_floor_kept_copy_not_taken_for_the_switch_at_a_dispa
     for _ in 0..4 {
         w.alice
             .switch()
-            .fail_next(pubky_switch_client::testing::Fault::Error {
+            .fail_next(pubky_dispatch_client::testing::Fault::Error {
                 path: path.clone(),
-                code: pubky_switch_core::http::ErrorCode::NotFound,
+                code: pubky_dispatch_core::http::ErrorCode::NotFound,
                 current: serde_json::Value::Null,
             });
     }
@@ -3358,7 +3361,7 @@ async fn test_blocked_return_floor_kept_copy_not_taken_for_the_switch_at_a_dispa
         matches!(
             outcome,
             Err(paykit_sdk::PaykitError::Client(
-                pubky_switch_client::app::AppError::Alarm(_)
+                pubky_dispatch_client::app::AppError::Alarm(_)
             ))
         ),
         "{outcome:?}"
@@ -3381,7 +3384,7 @@ async fn wallet_raises_the_floor(w: &World, wallet: &mut Paykit, shop: &mut Payk
     assert!(shared_floor(wallet).await.is_some());
 }
 
-/// Start the named kind of attempt and leave its dispatch in flight.
+/// Start the named kind of attempt and leave its handoff in flight.
 async fn paid_in_flight(
     w: &World,
     phone: &mut Paykit,
@@ -3491,7 +3494,7 @@ async fn still_pays_by_hand(
     );
     let payment = paykit_sdk::UnrequestedPayment::new(w.bob_id(), crate::common::btc("0.001"))
         .with_options(paykit_sdk::PayOptions::default().with_mode(
-            paykit_sdk::PaymentMode::Public(pubky_switch_client::app::UserConfirmed::new()),
+            paykit_sdk::PaymentMode::Public(pubky_dispatch_client::app::UserConfirmed::new()),
         ));
     let unrequested = wallet.pay_without_request(payment).await.outcome.unwrap();
     assert!(
@@ -3618,7 +3621,7 @@ async fn reconciled(app: &mut Paykit) {
         done = app.reconcile().await;
     }
     done.unwrap();
-    app.end_reconcile(pubky_switch_client::app::UserConfirmed::new())
+    app.end_reconcile(pubky_dispatch_client::app::UserConfirmed::new())
         .await
         .unwrap();
 }
@@ -3655,7 +3658,7 @@ async fn test_blocked_return_held_floor_told_to_the_host_once_and_after_reopen()
 #[tokio::test]
 async fn test_blocked_return_floor_seen_then_gone_after_a_restore_holds() {
     // Paykit wire 5.6, Seen floor and permanence: restored on a fresh device, the wallet
-    // holds no copy of the floor it saw live; the switch then answers that it has none, with
+    // holds no copy of the floor it saw live; the Dispatch then answers that it has none, with
     // no provider loss. The highest floor seen doesn't make that absence lawful: every
     // one-time request counts as dated before the floor.
     let w = World::new();
@@ -3800,9 +3803,9 @@ async fn test_blocked_return_conflicting_widening_raise_keeps_the_receive_going(
     for _ in 0..2 {
         w.alice
             .switch()
-            .fail_next(pubky_switch_client::testing::Fault::Error {
+            .fail_next(pubky_dispatch_client::testing::Fault::Error {
                 path: "/ops".into(),
-                code: pubky_switch_core::http::ErrorCode::Conflict,
+                code: pubky_dispatch_core::http::ErrorCode::Conflict,
                 current: serde_json::Value::Null,
             });
     }
@@ -3888,7 +3891,7 @@ async fn test_blocked_return_missed_item_holds_a_due_mark_ask_while_its_read_fai
     for _ in 0..6 {
         w.alice
             .switch()
-            .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+            .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
                 path: "/allow".into(),
                 after: 0,
             });
@@ -3997,7 +4000,7 @@ async fn due_mark(app: &mut Paykit, sender: &[u8; 32], at: u64) {
     let value = serde_json::json!({
         "v": 1,
         "d": {
-            "sender": pubky_switch_core::enc::b64(sender),
+            "sender": pubky_dispatch_core::enc::b64(sender),
             "earliest_ms": at,
             "latest_ms": at,
             "due": true,
@@ -4008,8 +4011,8 @@ async fn due_mark(app: &mut Paykit, sender: &[u8; 32], at: u64) {
     app.app_mut()
         .protocol_commit(
             "paykit",
-            &[pubky_switch_client::app::LocalWrite::Put {
-                key: format!("ud/{}", pubky_switch_core::enc::b64(sender)).into_bytes(),
+            &[pubky_dispatch_client::app::LocalWrite::Put {
+                key: format!("ud/{}", pubky_dispatch_core::enc::b64(sender)).into_bytes(),
                 value: serde_json::to_vec(&value).unwrap(),
             }],
         )
@@ -4152,7 +4155,7 @@ async fn test_blocked_return_allowance_accepted_while_a_raise_is_owed_pays_nothi
                 "allowed_payment_endpoint_identifiers": null
             }))
             .unwrap(),
-            pubky_switch_client::app::UserConfirmed::new(),
+            pubky_dispatch_client::app::UserConfirmed::new(),
         ),
     )
     .await
@@ -4498,7 +4501,7 @@ async fn test_blocked_return_one_read_leaving_two_raises_unwritten_counts_one_tr
     for _ in 0..2 {
         w.alice
             .switch()
-            .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+            .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
                 path: "/allow".into(),
                 after: 0,
             });
@@ -4536,7 +4539,7 @@ async fn test_blocked_return_waiting_raise_tried_once_the_clock_goes_back() {
         waiting_raise_in(&w, false, Arc::clone(&storage)).await;
     let app_id = wallet.app_id();
     drop(wallet);
-    let behind = Arc::new(pubky_switch_client::clock::TestClock::new(
+    let behind = Arc::new(pubky_dispatch_client::clock::TestClock::new(
         w.clock.now_ms() - 2 * 60 * MINUTE_MS,
     ));
     let mut wallet = w.load_on_clock(&w.alice, storage, app_id, behind).await;
@@ -4552,7 +4555,7 @@ async fn test_blocked_return_raise_retry_that_does_not_read_is_taken_as_none() {
     let w = World::new();
     let (mut wallet, _shop, mut phone, _contacts) = waiting_raise(&w, false).await;
     let damage = |value: &'static [u8]| {
-        vec![pubky_switch_client::app::LocalWrite::Put {
+        vec![pubky_dispatch_client::app::LocalWrite::Put {
             key: b"rr".to_vec(),
             value: value.to_vec(),
         }]
@@ -4664,9 +4667,9 @@ async fn test_blocked_return_conflict_leaves_the_retry_record_as_it_is() {
     for _ in 0..4 {
         w.alice
             .switch()
-            .fail_next(pubky_switch_client::testing::Fault::Error {
+            .fail_next(pubky_dispatch_client::testing::Fault::Error {
                 path: "/ops".into(),
-                code: pubky_switch_core::http::ErrorCode::Conflict,
+                code: pubky_dispatch_core::http::ErrorCode::Conflict,
                 current: serde_json::Value::Null,
             });
     }
@@ -4712,7 +4715,9 @@ async fn test_blocked_return_wait_ended_by_a_clock_put_back_part_of_the_way() {
         waiting_raise_in(&w, false, Arc::clone(&storage)).await;
     let app_id = wallet.app_id();
     drop(wallet);
-    let device = Arc::new(pubky_switch_client::clock::TestClock::new(w.clock.now_ms()));
+    let device = Arc::new(pubky_dispatch_client::clock::TestClock::new(
+        w.clock.now_ms(),
+    ));
     let mut wallet = w
         .load_on_clock(&w.alice, storage, app_id, Arc::clone(&device) as _)
         .await;
@@ -4750,7 +4755,7 @@ async fn test_blocked_return_new_widening_at_a_waiting_raise_time_tried_at_once(
     )
     .unwrap();
     let to_ms = owed["d"]["to_ms"].as_u64().unwrap();
-    let hold = pubky_switch_core::enc::b64(&[0x61; 16]);
+    let hold = pubky_dispatch_core::enc::b64(&[0x61; 16]);
     let widening = serde_json::json!({
         "v": 1,
         "d": {
@@ -4763,7 +4768,7 @@ async fn test_blocked_return_new_widening_at_a_waiting_raise_time_tried_at_once(
         .app_mut()
         .protocol_commit(
             "paykit",
-            &[pubky_switch_client::app::LocalWrite::Put {
+            &[pubky_dispatch_client::app::LocalWrite::Put {
                 key: format!("bw/{hold}").into_bytes(),
                 value: serde_json::to_vec(&widening).unwrap(),
             }],
@@ -4829,7 +4834,9 @@ async fn test_blocked_return_wait_ended_by_a_clock_set_back_between_receives() {
         waiting_raise_in(&w, false, Arc::clone(&storage)).await;
     let app_id = wallet.app_id();
     drop(wallet);
-    let device = Arc::new(pubky_switch_client::clock::TestClock::new(w.clock.now_ms()));
+    let device = Arc::new(pubky_dispatch_client::clock::TestClock::new(
+        w.clock.now_ms(),
+    ));
     let mut wallet = w
         .load_on_clock(&w.alice, storage, app_id, Arc::clone(&device) as _)
         .await;
@@ -4879,9 +4886,9 @@ async fn test_blocked_return_conflicting_raise_starts_no_wait() {
     for _ in 0..2 {
         w.alice
             .switch()
-            .fail_next(pubky_switch_client::testing::Fault::Error {
+            .fail_next(pubky_dispatch_client::testing::Fault::Error {
                 path: "/ops".into(),
-                code: pubky_switch_core::http::ErrorCode::Conflict,
+                code: pubky_dispatch_core::http::ErrorCode::Conflict,
                 current: serde_json::Value::Null,
             });
     }
@@ -5048,7 +5055,7 @@ async fn test_blocked_return_in_place_restore_holds_only_requests_dated_before_i
     assert!(restored.request(&inside).await.unwrap().manual_only);
     let floor = floor.expect("the restore raised the floor");
     w.clock.advance_ms(
-        (floor + pubky_switch_core::records::CLOCK_TOLERANCE_MS).saturating_sub(w.clock.now_ms())
+        (floor + pubky_dispatch_core::records::CLOCK_TOLERANCE_MS).saturating_sub(w.clock.now_ms())
             + 1_000,
     );
     let after = request_from(&mut shop, w.alice_id(), draft("4", w.clock.now_ms())).await;
@@ -5178,7 +5185,7 @@ async fn test_blocked_return_owed_raise_holds_an_ask_already_queued() {
     let before = asked(&wallet, &w.bob_id()).await.len();
     w.bob
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+        .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
             path: "/inbox".into(),
             after: 0,
         });
@@ -5259,7 +5266,7 @@ async fn test_blocked_return_owed_raise_counts_no_queued_ask_as_sent() {
     let before = asked(&wallet, &w.bob_id()).await.len();
     w.bob
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+        .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
             path: "/inbox".into(),
             after: 0,
         });
@@ -5330,13 +5337,13 @@ async fn test_blocked_return_owed_raise_takes_period_details_and_holds_a_one_tim
     // bob, whose subscription the wallet accepted. While the raise for that unblock is owed,
     // his period details are taken under their own rules, and his one-time request waits.
     let w = World::new();
-    assert_eq!(w.clock.now_ms(), pubky_switch_client::testing::START_MS);
+    assert_eq!(w.clock.now_ms(), pubky_dispatch_client::testing::START_MS);
     let mut shop = w.shop().await;
     let mut wallet = contacts_wallet(&w, store()).await;
     let sent = shop
         .send_request(
             w.alice_id(),
-            crate::periods::monthly(pubky_switch_client::testing::START_MS, None),
+            crate::periods::monthly(pubky_dispatch_client::testing::START_MS, None),
         )
         .await
         .unwrap();
@@ -5408,7 +5415,7 @@ async fn test_blocked_return_owed_raise_takes_period_details_and_holds_a_one_tim
 #[tokio::test]
 async fn test_blocked_return_raise_writes_the_floor_held_over_a_lower_write_refused() {
     // Paykit wire 5.6, Seen floor and permanence: the wallet holds a floor and another app
-    // writes a lower one, which the wallet refuses, keeping the higher. The switch holds the
+    // writes a lower one, which the wallet refuses, keeping the higher. The Dispatch holds the
     // lower write, so the raise the wallet owes for another app's unblock isn't spared by the
     // floor it holds: it writes that higher floor over the lower write.
     let w = World::new();
@@ -5464,7 +5471,7 @@ async fn test_blocked_return_conflicting_background_raise_keeps_the_receive_goin
     let sent = shop
         .send_request(
             w.alice_id(),
-            crate::periods::monthly(pubky_switch_client::testing::START_MS, None),
+            crate::periods::monthly(pubky_dispatch_client::testing::START_MS, None),
         )
         .await
         .unwrap();
@@ -5517,9 +5524,9 @@ async fn test_blocked_return_conflicting_background_raise_keeps_the_receive_goin
     for _ in 0..2 {
         w.alice
             .switch()
-            .fail_next(pubky_switch_client::testing::Fault::Error {
+            .fail_next(pubky_dispatch_client::testing::Fault::Error {
                 path: "/ops".into(),
-                code: pubky_switch_core::http::ErrorCode::Conflict,
+                code: pubky_dispatch_core::http::ErrorCode::Conflict,
                 current: serde_json::Value::Null,
             });
     }
@@ -5535,9 +5542,9 @@ async fn test_blocked_return_conflicting_background_raise_keeps_the_receive_goin
     for _ in 0..2 {
         w.alice
             .switch()
-            .fail_next(pubky_switch_client::testing::Fault::Error {
+            .fail_next(pubky_dispatch_client::testing::Fault::Error {
                 path: "/ops".into(),
-                code: pubky_switch_core::http::ErrorCode::Conflict,
+                code: pubky_dispatch_core::http::ErrorCode::Conflict,
                 current: serde_json::Value::Null,
             });
     }
@@ -5749,7 +5756,7 @@ async fn test_blocked_return_floor_gone_in_continuous_history_holds_a_repeat() {
         matches!(
             resumed,
             Err(paykit_sdk::PaykitError::Client(
-                pubky_switch_client::app::AppError::Alarm(_)
+                pubky_dispatch_client::app::AppError::Alarm(_)
             ))
         ),
         "{resumed:?}"
@@ -5784,7 +5791,7 @@ async fn test_blocked_return_floor_raised_before_the_attempt_read_again_at_the_r
 
 #[tokio::test]
 async fn test_blocked_return_floor_raised_after_the_attempt_read_again_at_the_repeat() {
-    // The phone's attempt on carol's request is committed and dispatched first; the wallet
+    // The phone's attempt on carol's request is committed and handed off first; the wallet
     // then raises the floor past it, and the phone's copy doesn't hold the raise. At the
     // resume, the floor read again immediately before the repeat holds it: no repeat.
     let w = World::new();
@@ -5809,7 +5816,7 @@ async fn test_blocked_return_floor_read_that_fails_at_the_repeat_holds_it() {
     // The resume reads the request record again, twice, then the floor, which fails.
     w.alice
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+        .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
             path: "/records/".into(),
             after: 2,
         });
@@ -5828,7 +5835,7 @@ async fn test_blocked_return_floor_write_kept_by_the_client_names_its_batch() {
     dropped_for_the_block(&w, &mut wallet, &mut shop).await;
     w.alice
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::LoseAnswer {
+        .fail_next(pubky_dispatch_client::testing::Fault::LoseAnswer {
             path: "/ops".into(),
         });
     let error = wallet.unblock(&w.bob_id()).await.unwrap_err();
@@ -5857,7 +5864,7 @@ async fn test_blocked_return_floor_write_kept_at_unblock_is_asked_once_after_suc
     dropped_for_the_block(&w, &mut wallet, &mut shop).await;
     w.alice
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::LoseAnswer {
+        .fail_next(pubky_dispatch_client::testing::Fault::LoseAnswer {
             path: "/ops".into(),
         });
     assert!(wallet
@@ -5903,26 +5910,29 @@ async fn keep_queued_ask(
     app: &mut Paykit,
     sender: &[u8; 32],
     from_ms: u64,
-    queued: &pubky_switch_client::app::QueuedMessage,
+    queued: &pubky_dispatch_client::app::QueuedMessage,
 ) {
     let ask = serde_json::json!({
         "v": 1,
         "d": {
-            "sender": pubky_switch_core::enc::b64(sender),
+            "sender": pubky_dispatch_core::enc::b64(sender),
             "from_ms": from_ms,
             "until_ms": null,
             "queued": {
                 "msg_id": queued.msg_id,
-                "hash": pubky_switch_core::enc::b64(&queued.hash),
+                "hash": pubky_dispatch_core::enc::b64(&queued.hash),
             },
         }
     });
     app.app_mut()
         .protocol_commit(
             "paykit",
-            &[pubky_switch_client::app::LocalWrite::Put {
-                key: format!("ask/{}/{from_ms:020}", pubky_switch_core::enc::b64(sender))
-                    .into_bytes(),
+            &[pubky_dispatch_client::app::LocalWrite::Put {
+                key: format!(
+                    "ask/{}/{from_ms:020}",
+                    pubky_dispatch_core::enc::b64(sender)
+                )
+                .into_bytes(),
                 value: serde_json::to_vec(&ask).unwrap(),
             }],
         )
@@ -5934,7 +5944,7 @@ async fn keep_ask(app: &mut Paykit, sender: &[u8; 32], from_ms: u64) {
     let ask = serde_json::json!({
         "v": 1,
         "d": {
-            "sender": pubky_switch_core::enc::b64(sender),
+            "sender": pubky_dispatch_core::enc::b64(sender),
             "from_ms": from_ms,
             "until_ms": null,
             "queued": null,
@@ -5943,9 +5953,12 @@ async fn keep_ask(app: &mut Paykit, sender: &[u8; 32], from_ms: u64) {
     app.app_mut()
         .protocol_commit(
             "paykit",
-            &[pubky_switch_client::app::LocalWrite::Put {
-                key: format!("ask/{}/{from_ms:020}", pubky_switch_core::enc::b64(sender))
-                    .into_bytes(),
+            &[pubky_dispatch_client::app::LocalWrite::Put {
+                key: format!(
+                    "ask/{}/{from_ms:020}",
+                    pubky_dispatch_core::enc::b64(sender)
+                )
+                .into_bytes(),
                 value: serde_json::to_vec(&ask).unwrap(),
             }],
         )
@@ -5962,7 +5975,7 @@ async fn test_blocked_return_ask_whose_answer_is_lost_asked_once_after_a_restart
     keep_ask(&mut wallet, &w.bob_id(), 5).await;
     w.bob
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::LoseAnswer {
+        .fail_next(pubky_dispatch_client::testing::Fault::LoseAnswer {
             path: "/inbox".into(),
         });
     let _ = wallet.receive(None).await;
@@ -5998,14 +6011,14 @@ async fn test_blocked_return_conflicting_unblock_raise_retries_before_any_ask() 
     dropped_for_the_block(&w, &mut wallet, &mut shop).await;
     w.alice
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::Error {
+        .fail_next(pubky_dispatch_client::testing::Fault::Error {
             path: "/ops".into(),
-            code: pubky_switch_core::http::ErrorCode::Conflict,
+            code: pubky_dispatch_core::http::ErrorCode::Conflict,
             current: serde_json::Value::Null,
         });
     assert_eq!(
         wallet.unblock(&w.bob_id()).await.unwrap_err().code(),
-        Some(pubky_switch_core::http::ErrorCode::Conflict)
+        Some(pubky_dispatch_core::http::ErrorCode::Conflict)
     );
     assert!(wallet
         .app_mut()
@@ -6055,7 +6068,7 @@ async fn test_blocked_return_floor_write_refused_for_good_returns_the_refusal() 
     let mut wallet = contacts_wallet(&w, store()).await;
     let mut shop = w.shop().await;
     dropped_for_the_block(&w, &mut wallet, &mut shop).await;
-    let code = pubky_switch_core::http::ErrorCode::PermissionMissing;
+    let code = pubky_dispatch_core::http::ErrorCode::PermissionMissing;
     crate::common::refuse_writes(&w.alice, 1);
     let error = wallet.unblock(&w.bob_id()).await.unwrap_err();
     assert!(error.refusal().is_none(), "{error}");
@@ -6107,16 +6120,16 @@ async fn test_blocked_return_entry_held_while_the_notices_owed_are_full() {
             let value = serde_json::json!({
                 "v": 1,
                 "d": {
-                    "sender": pubky_switch_core::enc::b64(&other),
+                    "sender": pubky_dispatch_core::enc::b64(&other),
                     "earliest_ms": i,
                     "latest_ms": i,
                     "raised_ms": i,
                     "msg_id": msg_id,
-                    "hash": pubky_switch_core::enc::b64(&[3; 32]),
+                    "hash": pubky_dispatch_core::enc::b64(&[3; 32]),
                 }
             });
-            pubky_switch_client::app::LocalWrite::Put {
-                key: format!("bl/{}/{msg_id}", pubky_switch_core::enc::b64(&other)).into_bytes(),
+            pubky_dispatch_client::app::LocalWrite::Put {
+                key: format!("bl/{}/{msg_id}", pubky_dispatch_core::enc::b64(&other)).into_bytes(),
                 value: serde_json::to_vec(&value).unwrap(),
             }
         })
@@ -6166,7 +6179,7 @@ async fn test_blocked_return_kept_floor_raise_holds_the_restore_verdict() {
     for _ in 0..4 {
         w.alice
             .switch()
-            .fail_next(pubky_switch_client::testing::Fault::Unanswered {
+            .fail_next(pubky_dispatch_client::testing::Fault::Unanswered {
                 path: "/ops".into(),
                 after: 0,
             });
@@ -6175,7 +6188,7 @@ async fn test_blocked_return_kept_floor_raise_holds_the_restore_verdict() {
     let before = verdict(&restored).await;
     restored.reconcile().await.unwrap();
     restored
-        .end_reconcile(pubky_switch_client::app::UserConfirmed::new())
+        .end_reconcile(pubky_dispatch_client::app::UserConfirmed::new())
         .await
         .expect_err("reconcile mode waits for the kept raise");
     assert_eq!(verdict(&restored).await, before);
@@ -6211,7 +6224,7 @@ async fn test_blocked_return_kept_floor_batch_holds_an_open_restore_verdict() {
     for _ in 0..2 {
         w.alice
             .switch()
-            .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+            .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
                 path: "/ops".into(),
                 after: 0,
             });
@@ -6245,11 +6258,11 @@ async fn test_blocked_return_kept_floor_batch_holds_an_open_restore_verdict() {
         .protocol_commit(
             "paykit",
             &[
-                pubky_switch_client::app::LocalWrite::Put {
+                pubky_dispatch_client::app::LocalWrite::Put {
                     key: b"rh".to_vec(),
                     value: serde_json::to_vec(&hold).unwrap(),
                 },
-                pubky_switch_client::app::LocalWrite::Put {
+                pubky_dispatch_client::app::LocalWrite::Put {
                     key: b"fb".to_vec(),
                     value: kept.to_vec(),
                 },
@@ -6261,7 +6274,7 @@ async fn test_blocked_return_kept_floor_batch_holds_an_open_restore_verdict() {
     for _ in 0..4 {
         w.alice
             .switch()
-            .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+            .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
                 path: "/ops".into(),
                 after: 0,
             });
@@ -6273,7 +6286,7 @@ async fn test_blocked_return_kept_floor_batch_holds_an_open_restore_verdict() {
         "reconcile takes no verdict while the floor batch is kept"
     );
     let refused = restored
-        .end_reconcile(pubky_switch_client::app::UserConfirmed::new())
+        .end_reconcile(pubky_dispatch_client::app::UserConfirmed::new())
         .await
         .expect_err("reconcile mode waits for the kept floor batch");
     assert!(

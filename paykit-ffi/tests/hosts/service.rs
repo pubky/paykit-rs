@@ -1,4 +1,4 @@
-use pubky_switch_harness::{Backend, World};
+use pubky_dispatch_harness::{Backend, World};
 use std::{error::Error, io::Write};
 
 pub(super) fn start() -> Result<World, Box<dyn Error>> {

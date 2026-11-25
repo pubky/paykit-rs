@@ -11,14 +11,14 @@ use crate::{
     StorageError, WalletError,
 };
 use paykit_lib::{bodies::PrivatePaymentList, collections::Collection, derive::natural_key};
-use pubky_switch_client::app::{Collection as SwitchCollection, LocalWrite, RecordTarget};
-use pubky_switch_core::{
+use pubky_dispatch_client::app::{Collection as DispatchCollection, LocalWrite, RecordTarget};
+use pubky_dispatch_core::{
     enc::{b64, pubky_id, zbase32_encode},
     ident::Policy,
     message::{Message, Sender},
     records::{AppCert, AppCertBody},
 };
-use pubky_switch_harness::{Backend, World};
+use pubky_dispatch_harness::{Backend, World};
 use serde_json::{json, Value};
 use std::sync::Arc;
 
@@ -166,7 +166,7 @@ async fn check_held_list(wallet: &NativeWallet, world: &World) -> TestResult {
     )?;
     let collection = Collection::PaymentLists;
     let target = RecordTarget::new(
-        SwitchCollection::new(collection.name(), collection.policy(None)),
+        DispatchCollection::new(collection.name(), collection.policy(None)),
         &natural_key::payment_list(&payee.public(), &app_id),
     );
     retain(
@@ -206,7 +206,7 @@ async fn check_conflicts(wallet: &NativeWallet, recipient: &[u8; 32]) -> TestRes
     assert!(wallet.publication_conflicts().await?.is_empty());
     let publisher = fixed(wallet.app_id().await?, "publisher")?;
     let target = RecordTarget::new(
-        SwitchCollection::new(
+        DispatchCollection::new(
             "private_list_publications",
             Policy::new("paykit_request", &["paykit_request"]).permanent(Some(3)),
         ),
@@ -348,8 +348,8 @@ fn test_lists_payer_sharing_and_retained_records_on_service() {
 async fn restored_list_delivery(world: &World) -> TestResult {
     use crate::{RuntimeTimer, WalletScopes};
     use paykit_sdk::{AppScopes, Paykit};
-    use pubky_switch_client::store::MemoryStore;
-    use pubky_switch_harness::parties::Asking;
+    use pubky_dispatch_client::store::MemoryStore;
+    use pubky_dispatch_harness::parties::Asking;
 
     let root = tempfile::tempdir()?;
     let account = Arc::new(Account::open(root.path(), world.clock().clone()));
@@ -415,7 +415,7 @@ async fn restored_list_delivery(world: &World) -> TestResult {
     for _ in 0..8 {
         let report = Box::pin(payer.receive(None)).await?.report;
         for event in report.events {
-            if let pubky_switch_client::app::AppEvent::MessageReceived {
+            if let pubky_dispatch_client::app::AppEvent::MessageReceived {
                 kind,
                 msg_id,
                 sender,

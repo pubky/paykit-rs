@@ -8,8 +8,10 @@ use paykit_sdk::{
     AllowanceRole, AllowanceStatus, AppScopes, Paykit, PaykitError, Refusal, RequestedScopes,
     UserConfirmed,
 };
-use pubky_switch_client::app::{AppEvent, LocalWrite, OpBatch, OutgoingMessage, RecordApplication};
-use pubky_switch_client::clock::Clock;
+use pubky_dispatch_client::app::{
+    AppEvent, LocalWrite, OpBatch, OutgoingMessage, RecordApplication,
+};
+use pubky_dispatch_client::clock::Clock;
 use serde_json::{json, Value};
 
 use crate::certificate::{is_not_now, list, renew, store_bundle};
@@ -90,10 +92,10 @@ async fn value(app: &Paykit, record: &[u8; 32]) -> Value {
 fn pending_target(
     peer: &[u8; 32],
     id: &paykit_lib::AllowanceId,
-) -> pubky_switch_client::app::RecordTarget {
+) -> pubky_dispatch_client::app::RecordTarget {
     let family = paykit_lib::Collection::AllowanceProposals;
-    pubky_switch_client::app::RecordTarget::new(
-        pubky_switch_client::app::Collection::new(family.name(), family.fixed_policy()),
+    pubky_dispatch_client::app::RecordTarget::new(
+        pubky_dispatch_client::app::Collection::new(family.name(), family.fixed_policy()),
         &paykit_lib::derive::natural_key::allowance(peer, id),
     )
 }
@@ -120,7 +122,7 @@ async fn install_accepted_record(
     current: PendingAllowanceRecord,
     response: StoredMessage,
 ) {
-    use pubky_switch_core::ops::{Condition, RecordVersion};
+    use pubky_dispatch_core::ops::{Condition, RecordVersion};
     let peer = *current.counterparty();
     let id = current.allowance_id().clone();
     let permanent = allowances_target(&peer, &id);
@@ -234,7 +236,7 @@ async fn own_acceptance_recorded(app: &mut Paykit, record: &[u8; 32]) -> StoredM
 }
 
 /// The test identity whose identity key is `pubky`.
-fn signer_of<'a>(w: &'a World, pubky: &[u8; 32]) -> &'a pubky_switch_client::testing::TestSigner {
+fn signer_of<'a>(w: &'a World, pubky: &[u8; 32]) -> &'a pubky_dispatch_client::testing::TestSigner {
     [&w.alice, &w.bob, &w.carol]
         .into_iter()
         .find(|signer| signer.identity().public() == *pubky)
@@ -334,7 +336,7 @@ async fn test_allowances_proposal_binds_verified_remote_generation() {
     w.alice
         .sign_next(|body| {
             body.service_keys
-                .push(pubky_switch_core::records::ServiceKeyEntry {
+                .push(pubky_dispatch_core::records::ServiceKeyEntry {
                     generation: old.generation(),
                     key: old.body().inbox.service_key,
                 });
@@ -365,9 +367,9 @@ enum AcceptanceGeneration {
 pub(crate) async fn advance_allowance_generation(
     w: &World,
     payer: &mut Paykit,
-) -> std::sync::Arc<pubky_switch_client::testing::ScriptedSwitch> {
+) -> std::sync::Arc<pubky_dispatch_client::testing::ScriptedSwitch> {
     use crate::common::ALICE_ORIGIN;
-    use pubky_switch_core::records::{Inbox, ServiceKeyEntry};
+    use pubky_dispatch_core::records::{Inbox, ServiceKeyEntry};
 
     let previous = payer.app().own_identity().clone();
     let service = w.alice.switch().change_key_into([74; 32]);
@@ -392,8 +394,8 @@ pub(crate) async fn advance_allowance_generation(
 
 async fn acceptance_after_generation_change(change: AcceptanceGeneration, proposer: AllowanceRole) {
     use paykit_lib::allowances::Ledger;
-    use pubky_switch_client::app::{Collection, RecordTarget};
-    use pubky_switch_core::ops::{OpKind, RecordVersion};
+    use pubky_dispatch_client::app::{Collection, RecordTarget};
+    use pubky_dispatch_core::ops::{OpKind, RecordVersion};
 
     let w = World::new();
     let mut payer = Box::pin(paying_wallet(&w)).await;
@@ -486,7 +488,7 @@ async fn acceptance_after_generation_change(change: AcceptanceGeneration, propos
                 );
                 // The old provider is unreachable while its routing copy is cached.
                 // Retry the same signed reply after the ordinary cache lifetime.
-                w.clock.advance_ms(pubky_switch_client::app::DOC_CACHE_MS);
+                w.clock.advance_ms(pubky_dispatch_client::app::DOC_CACHE_MS);
                 seller.flush().await.unwrap();
                 let delivery = seller.message_delivery(&acceptance).await.unwrap();
                 assert!(
@@ -567,7 +569,7 @@ async fn acceptance_after_generation_change(change: AcceptanceGeneration, propos
             };
             assert_eq!(deletion.expected_version, expected);
             assert!(op.body().conditions.iter().any(|condition| matches!(condition,
-                pubky_switch_core::ops::Condition::RecordCurrent { key, revision, deleted: false }
+                pubky_dispatch_core::ops::Condition::RecordCurrent { key, revision, deleted: false }
                     if *key == pending && revision.generation == payer.app().own_identity().generation()
             )));
         } else {
@@ -743,7 +745,7 @@ async fn test_allowances_proposal_viewed_on_both_sides() {
 async fn acceptance_refused(
     w: &World,
     app: &mut Paykit,
-    signer: &pubky_switch_client::testing::TestSigner,
+    signer: &pubky_dispatch_client::testing::TestSigner,
     record: &[u8; 32],
     other: &mut Paykit,
 ) {
@@ -751,7 +753,7 @@ async fn acceptance_refused(
     let local = app.app().protocol_scan("paykit", b"").await.unwrap();
     signer
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+        .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
             path: format!("records/{}", b64_of(record)),
             after: 0,
         });
@@ -764,7 +766,7 @@ async fn acceptance_refused(
             ))
         ) || matches!(
             error,
-            PaykitError::Client(pubky_switch_client::app::AppError::Transport(_))
+            PaykitError::Client(pubky_dispatch_client::app::AppError::Transport(_))
         ),
         "{error:?}"
     );
@@ -834,7 +836,7 @@ async fn receive_without_allowance_view(
     let path = format!("records/{}", b64_of(record));
     let before = w.router.log().len();
     signer_of(w, &app.identity()).switch().fail_next(
-        pubky_switch_client::testing::Fault::Unreachable {
+        pubky_dispatch_client::testing::Fault::Unreachable {
             path: path.clone(),
             after: 0,
         },
@@ -884,7 +886,7 @@ async fn test_allowances_received_acceptance_kept_unplaced_then_given_up_with_a_
         Box::pin(receive_without_allowance_view(&w, &mut shop, &theirs)).await;
     }
     w.clock
-        .advance_ms(paykit_sdk::KEPT_MESSAGE_MS + pubky_switch_core::records::DAY_MS);
+        .advance_ms(paykit_sdk::KEPT_MESSAGE_MS + pubky_dispatch_core::records::DAY_MS);
     shop.receive(None).await.unwrap();
     assert_eq!(w.record_writes(&w.bob, &theirs), writes);
     assert!(shop.app().shared_record(&theirs).await.unwrap().is_none());
@@ -1448,8 +1450,8 @@ async fn grant(w: &World, exec: &mut Paykit, record: &[u8; 32]) {
         origin: Default::default(),
     });
     value.grant = Some(signed);
-    let target = pubky_switch_client::app::RecordTarget::new(
-        pubky_switch_client::app::Collection::new(
+    let target = pubky_dispatch_client::app::RecordTarget::new(
+        pubky_dispatch_client::app::Collection::new(
             "allowances",
             paykit_lib::Collection::Allowances.fixed_policy(),
         ),
@@ -1472,11 +1474,11 @@ async fn grant(w: &World, exec: &mut Paykit, record: &[u8; 32]) {
 async fn consent(app: &mut Paykit, record: &[u8; 32]) {
     let held = app.app().shared_record(record).await.unwrap().unwrap();
     let value = AllowanceRecord::read(held.content.value().unwrap(), &app.identity()).unwrap();
-    let key = format!("ac/{}", pubky_switch_core::enc::b64(record));
+    let key = format!("ac/{}", pubky_dispatch_core::enc::b64(record));
     let entry = json!({
         "v": 1,
         "d": {
-            "counterparty": pubky_switch_core::enc::b64(&value.counterparty),
+            "counterparty": pubky_dispatch_core::enc::b64(&value.counterparty),
             "allowance_id": value.allowance_id.as_str(),
             "consent": { "held": { "confirm_again": false } },
         },
@@ -1495,7 +1497,7 @@ async fn consent(app: &mut Paykit, record: &[u8; 32]) {
 
 /// The consent list's entry of `record` at `app`, as stored.
 pub(super) async fn consent_entry(app: &Paykit, record: &[u8; 32]) -> Option<Value> {
-    let key = format!("ac/{}", pubky_switch_core::enc::b64(record));
+    let key = format!("ac/{}", pubky_dispatch_core::enc::b64(record));
     app.app()
         .protocol_get("paykit", key.as_bytes())
         .await
@@ -1607,9 +1609,9 @@ async fn restored_consent(clean: bool) {
     }
     Box::pin(read_restored_records(&mut restored)).await;
     let expected = if clean {
-        pubky_switch_client::app::HeldCursor::Clean
+        pubky_dispatch_client::app::HeldCursor::Clean
     } else {
-        pubky_switch_client::app::HeldCursor::Unknown
+        pubky_dispatch_client::app::HeldCursor::Unknown
     };
     assert_eq!(restored.app().restore_held_cursor(), Some(expected));
     assert_eq!(
@@ -1758,7 +1760,7 @@ async fn test_allowances_restore_asks_nothing_for_an_ended_one() {
 /// app `to`.
 pub(super) fn notice(
     w: &World,
-    signer: &pubky_switch_client::testing::TestSigner,
+    signer: &pubky_dispatch_client::testing::TestSigner,
     from: &str,
     to: [u8; 16],
     record: &[u8; 32],
@@ -1772,7 +1774,7 @@ pub(super) fn notice(
         "paykit.executor_notice",
         Vec::new(),
         json!({
-            "allowance_record": pubky_switch_core::enc::b64(record),
+            "allowance_record": pubky_dispatch_core::enc::b64(record),
             "reason": reason
         })
         .as_object()
@@ -1809,14 +1811,14 @@ async fn test_allowances_executor_notice_from_another_identity_dropped() {
     assert!(exec.allowance(&mine).await.unwrap().consented);
 }
 
-/// The next `n` batches at alice's switch are refused for good, `403 permission_missing`.
+/// The next `n` batches at alice's Dispatch are refused for good, `403 permission_missing`.
 fn refuse_writes(w: &World, n: usize) {
     for _ in 0..n {
         w.alice
             .switch()
-            .fail_next(pubky_switch_client::testing::Fault::Error {
+            .fail_next(pubky_dispatch_client::testing::Fault::Error {
                 path: "/ops".into(),
-                code: pubky_switch_core::http::ErrorCode::PermissionMissing,
+                code: pubky_dispatch_core::http::ErrorCode::PermissionMissing,
                 current: Value::Null,
             });
     }
@@ -1859,7 +1861,7 @@ async fn sealed_allowance(
     shop: &mut Paykit,
     wallet: &mut Paykit,
     phone: &mut Paykit,
-) -> ([u8; 32], [u8; 32], pubky_switch_core::records::AppCert) {
+) -> ([u8; 32], [u8; 32], pubky_dispatch_core::records::AppCert) {
     let (theirs, mine) = Box::pin(proposed(w, shop, wallet)).await;
     phone.receive(None).await.unwrap();
     w.alice.next_doc(|body| body.data_epoch += 1).unwrap();
@@ -1877,8 +1879,8 @@ async fn sealed_allowance(
     assert!(
         matches!(
             held.content,
-            pubky_switch_client::app::RecordContent::Unreadable(
-                pubky_switch_client::app::Unopened::KeyNotHeld { .. }
+            pubky_dispatch_client::app::RecordContent::Unreadable(
+                pubky_dispatch_client::app::Unopened::KeyNotHeld { .. }
             )
         ),
         "{:?}",
@@ -1930,7 +1932,7 @@ async fn test_allowances_end_while_its_record_awaits_its_key_stops_it_past_30_da
         1
     );
     w.clock
-        .advance_ms(paykit_sdk::KEPT_MESSAGE_MS + pubky_switch_core::records::DAY_MS);
+        .advance_ms(paykit_sdk::KEPT_MESSAGE_MS + pubky_dispatch_core::records::DAY_MS);
     for _ in 0..2 {
         wallet.receive(None).await.unwrap();
     }
@@ -2041,11 +2043,11 @@ async fn stops(wallet: &Paykit) -> usize {
 }
 
 /// Alice's record of bob's Allowance with ID number `i`.
-fn allowance_record(w: &World, i: usize) -> pubky_switch_client::app::RecordTarget {
+fn allowance_record(w: &World, i: usize) -> pubky_dispatch_client::app::RecordTarget {
     let id =
         paykit_lib::AllowanceId::new(&format!("d0efffb7-191b-4709-b6c7-e343af55{i:04x}")).unwrap();
-    pubky_switch_client::app::RecordTarget::new(
-        pubky_switch_client::app::Collection::new(
+    pubky_dispatch_client::app::RecordTarget::new(
+        pubky_dispatch_client::app::Collection::new(
             "allowances",
             paykit_lib::Collection::Allowances.fixed_policy(),
         ),
@@ -2062,7 +2064,7 @@ async fn keeps_end(w: &World, wallet: &Paykit, i: usize) -> bool {
 
 /// How many ends `wallet` keeps as the stops of the Allowance whose record is `record`.
 async fn ends_kept_at(wallet: &Paykit, record: &[u8; 32]) -> usize {
-    let stops = format!("ae/{}/", pubky_switch_core::enc::b64(record));
+    let stops = format!("ae/{}/", pubky_dispatch_core::enc::b64(record));
     wallet
         .app()
         .protocol_scan("paykit", stops.as_bytes())
@@ -2157,8 +2159,8 @@ async fn test_allowances_stop_over_a_readable_record_counted_in_the_bound() {
     assert!(Box::pin(keeps_end(&w, &wallet, bound - 1)).await);
 }
 
-/// A `missed` item at alice's switch: entries accepted in the last second were deleted before
-/// her apps read them (Switch spec 8.2).
+/// A `missed` item at alice's dispatch: entries accepted in the last second were deleted before
+/// her apps read them (Dispatch spec 8.2).
 fn missed(w: &World) {
     let now = w.clock.now_ms();
     w.alice.switch().push_missed(1, now - 1_000, now);
@@ -2240,7 +2242,7 @@ async fn test_allowances_stored_proposal_waiting_for_the_current_epochs_key_give
     );
     w.alice.next_doc(|body| body.data_epoch += 1).unwrap();
     wallet.receive(None).await.unwrap();
-    let day = pubky_switch_core::records::DAY_MS;
+    let day = pubky_dispatch_core::records::DAY_MS;
     w.clock.advance_ms(paykit_sdk::KEPT_MESSAGE_MS - day);
     wallet.app_mut().rotate().await.unwrap();
     wallet.app_mut().flush_cursor().await.unwrap();
@@ -2432,7 +2434,7 @@ async fn sealed_pending_rejection(
 }
 
 async fn assert_sealed_pending(phone: &Paykit, record: &[u8; 32]) {
-    use pubky_switch_client::app::{RecordContent, Unopened};
+    use pubky_dispatch_client::app::{RecordContent, Unopened};
     let held = phone.app().shared_record(record).await.unwrap().unwrap();
     assert!(
         matches!(
@@ -2513,7 +2515,7 @@ async fn test_allowances_answer_over_a_record_that_doesnt_read_never_written_ove
     assert!(!got.key_epochs_awaited.is_empty(), "{got:?}");
     assert!(phone.notices().await.unwrap().is_empty());
     w.clock
-        .advance_ms(paykit_sdk::KEPT_MESSAGE_MS + pubky_switch_core::records::DAY_MS);
+        .advance_ms(paykit_sdk::KEPT_MESSAGE_MS + pubky_dispatch_core::records::DAY_MS);
     for _ in 0..3 {
         phone.receive(None).await.unwrap();
     }
@@ -2635,9 +2637,9 @@ async fn test_allowances_restore_after_an_undelivered_proposal_proposes_once() {
     let mut wallet = Box::pin(paying_wallet(&w)).await;
     w.bob
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::Error {
+        .fail_next(pubky_dispatch_client::testing::Fault::Error {
             path: "/inbox".into(),
-            code: pubky_switch_core::http::ErrorCode::Unavailable,
+            code: pubky_dispatch_core::http::ErrorCode::Unavailable,
             current: Value::Null,
         });
     let sent = wallet
@@ -2786,7 +2788,7 @@ async fn test_allowances_second_proposal_conflicts_and_is_recorded() {
     propose_as(&w, &[wallet.app_id()], id.as_str(), "0.20");
     let got = wallet.receive(None).await.unwrap();
     assert!(received(&got, "paykit.allowance_proposal"), "{got:?}");
-    // The step wrote nothing at the switch; the later write placed the conflict.
+    // The step wrote nothing at the Dispatch; the later write placed the conflict.
     assert_eq!(w.record_writes(&w.alice, &physical), writes + 1);
     assert!(wallet.app().shared_record(&mine).await.unwrap().is_none());
     assert!(wallet
@@ -3086,7 +3088,7 @@ async fn test_allowances_end_naming_another_acceptance_kept_30_days_and_consent_
         AllowanceStatus::Ended
     );
     w.clock
-        .advance_ms(paykit_sdk::KEPT_MESSAGE_MS + pubky_switch_core::records::DAY_MS);
+        .advance_ms(paykit_sdk::KEPT_MESSAGE_MS + pubky_dispatch_core::records::DAY_MS);
     phone.receive(None).await.unwrap();
     wallet.receive(None).await.unwrap();
     assert!(phone
@@ -3130,7 +3132,7 @@ async fn test_allowances_end_from_a_blocked_sender_keeps_no_stop() {
                 .unwrap(),
             paykit_sdk::PaykitConfig::default(),
             std::sync::Arc::clone(&lists)
-                as std::sync::Arc<dyn pubky_switch_client::store::StateStore>,
+                as std::sync::Arc<dyn pubky_dispatch_client::store::StateStore>,
         )
         .await;
     wallet.app_mut().invite(&w.bob_id()).await.unwrap();
@@ -3156,7 +3158,7 @@ async fn test_allowances_kept_answer_over_a_record_that_doesnt_read_given_up_wit
     assert!(Box::pin(keeps(&phone, b"pr/", &rejection)).await);
     assert!(phone.notices().await.unwrap().is_empty());
     w.clock
-        .advance_ms(paykit_sdk::KEPT_MESSAGE_MS + pubky_switch_core::records::DAY_MS);
+        .advance_ms(paykit_sdk::KEPT_MESSAGE_MS + pubky_dispatch_core::records::DAY_MS);
     for _ in 0..3 {
         phone.receive(None).await.unwrap();
     }
@@ -3182,13 +3184,13 @@ fn missed_and_listing_fails(w: &World, wallet: &Paykit) {
 /// Fail Paykit's own listing at the end of the next receive of `party`'s app after a
 /// `missed` item: the client lists up to its page budget before Paykit takes over.
 /// A listing that fails inside the client's read fails the read.
-fn fail_paykit_listing(party: &pubky_switch_client::testing::TestSigner, collections: usize) {
+fn fail_paykit_listing(party: &pubky_dispatch_client::testing::TestSigner, collections: usize) {
     // A longer native listing already holds Paykit through this read. A fault then
     // would interrupt the next native read instead of Paykit's subsequent listing.
-    if collections <= pubky_switch_client::app::LISTING_PAGES_PER_READ as usize {
+    if collections <= pubky_dispatch_client::app::LISTING_PAGES_PER_READ as usize {
         party
             .switch()
-            .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+            .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
                 path: "records?collection".into(),
                 after: collections,
             });
@@ -3207,7 +3209,7 @@ async fn test_allowances_stop_past_30_days_kept_while_unlisted() {
     wallet.receive(None).await.unwrap();
     assert!(Box::pin(keeps_end(&w, &wallet, 0)).await);
     w.clock
-        .advance_ms(paykit_sdk::KEPT_MESSAGE_MS + pubky_switch_core::records::DAY_MS);
+        .advance_ms(paykit_sdk::KEPT_MESSAGE_MS + pubky_dispatch_core::records::DAY_MS);
     missed_and_listing_fails(&w, &wallet);
     let got = wallet.receive(None).await.unwrap();
     assert!(got.records_unlisted.is_some(), "{got:?}");
@@ -3245,7 +3247,7 @@ async fn test_allowances_kept_answer_past_30_days_kept_while_unlisted() {
         1
     );
     w.clock
-        .advance_ms(paykit_sdk::KEPT_MESSAGE_MS + pubky_switch_core::records::DAY_MS);
+        .advance_ms(paykit_sdk::KEPT_MESSAGE_MS + pubky_dispatch_core::records::DAY_MS);
     shop.app_mut().invite(&w.alice_id()).await.unwrap();
     let now = w.clock.now_ms();
     w.bob.switch().push_missed(1, now - 1_000, now);
@@ -3350,7 +3352,7 @@ async fn test_allowances_stop_under_another_record_key_is_corrupt() {
         .remove(0);
     let msg_id = String::from_utf8(key.clone()).unwrap();
     let msg_id = msg_id.rsplit_once('/').unwrap().1;
-    let other = format!("ae/{}/{msg_id}", pubky_switch_core::enc::b64(&[3; 32]));
+    let other = format!("ae/{}/{msg_id}", pubky_dispatch_core::enc::b64(&[3; 32]));
     wallet
         .app_mut()
         .protocol_commit(
@@ -3430,7 +3432,7 @@ async fn test_allowances_conflict_kept_as_the_stop_though_its_record_write_fails
             .len(),
         1
     );
-    // The step wrote nothing at the switch, so no effect of it was refused.
+    // The step wrote nothing at the Dispatch, so no effect of it was refused.
     assert!(
         !got.report
             .events
@@ -3588,7 +3590,7 @@ async fn test_allowances_first_rejection_kept_past_30_days_while_its_delete_is_r
     assert!(Box::pin(keeps(&wallet, b"pr/", &rejection)).await);
     let writes = w.record_writes(&w.alice, &physical);
     w.clock
-        .advance_ms(paykit_sdk::KEPT_MESSAGE_MS + pubky_switch_core::records::DAY_MS);
+        .advance_ms(paykit_sdk::KEPT_MESSAGE_MS + pubky_dispatch_core::records::DAY_MS);
     wallet.app_mut().rotate().await.unwrap();
     wallet.app_mut().flush_cursor().await.unwrap();
     refuse_writes(&w, 1);
@@ -3622,14 +3624,14 @@ async fn test_allowances_consent_under_another_records_key_is_corrupt() {
     // never consented to (Paykit spec 8.3).
     let w = World::new();
     let (_shop, _wallet, mut exec, _phone, _, mine) = Box::pin(executed(&w)).await;
-    let key = format!("ac/{}", pubky_switch_core::enc::b64(&mine));
+    let key = format!("ac/{}", pubky_dispatch_core::enc::b64(&mine));
     let value = exec
         .app()
         .protocol_get("paykit", key.as_bytes())
         .await
         .unwrap()
         .unwrap();
-    let other = format!("ac/{}", pubky_switch_core::enc::b64(&[3; 32]));
+    let other = format!("ac/{}", pubky_dispatch_core::enc::b64(&[3; 32]));
     exec.app_mut()
         .protocol_commit(
             "paykit",
@@ -3824,7 +3826,7 @@ async fn permanent_delete_refused(w: &World, id: &paykit_lib::AllowanceId) {
         .await
         .unwrap_err();
     assert!(
-        matches!(error, pubky_switch_client::app::AppError::Refused(pubky_switch_client::app::Refusal::Usage(ref reason)) if reason.contains("permanent policy")),
+        matches!(error, pubky_dispatch_client::app::AppError::Refused(pubky_dispatch_client::app::Refusal::Usage(ref reason)) if reason.contains("permanent policy")),
         "{error:?}"
     );
     assert_eq!(w.record_writes(&w.alice, &key), before);
@@ -3857,7 +3859,7 @@ async fn held_deleted(app: &Paykit, record: &[u8; 32]) -> bool {
         .shared_record(record)
         .await
         .unwrap()
-        .is_some_and(|held| held.content == pubky_switch_client::app::RecordContent::Deleted)
+        .is_some_and(|held| held.content == pubky_dispatch_client::app::RecordContent::Deleted)
 }
 
 #[tokio::test]
@@ -3989,7 +3991,7 @@ async fn test_allowances_end_held_past_the_bounded_wait_still_taken() {
         let s = wallet.receive(None).await.unwrap();
         assert!(!received(&s, "paykit.allowance_end"), "{s:?}");
     }
-    w.clock.advance_ms(pubky_switch_core::records::DAY_MS + 1);
+    w.clock.advance_ms(pubky_dispatch_core::records::DAY_MS + 1);
     for _ in 0..3 {
         let s = wallet.receive(None).await.unwrap();
         parked += s
@@ -4040,7 +4042,7 @@ async fn test_allowances_attempted_permanent_delete_preserves_the_accepted_histo
 /// as a faulty own app could.
 pub(super) async fn write_record(
     app: &mut Paykit,
-    target: &pubky_switch_client::app::RecordTarget,
+    target: &pubky_dispatch_client::app::RecordTarget,
     value: Option<&[u8]>,
 ) {
     app.app_mut().read_record(target).await.unwrap();
@@ -4059,9 +4061,9 @@ pub(super) async fn write_record(
 pub(super) fn allowances_target(
     counterparty: &[u8; 32],
     id: &paykit_lib::AllowanceId,
-) -> pubky_switch_client::app::RecordTarget {
-    pubky_switch_client::app::RecordTarget::new(
-        pubky_switch_client::app::Collection::new(
+) -> pubky_dispatch_client::app::RecordTarget {
+    pubky_dispatch_client::app::RecordTarget::new(
+        pubky_dispatch_client::app::Collection::new(
             "allowances",
             paykit_lib::Collection::Allowances.fixed_policy(),
         ),
@@ -4388,9 +4390,9 @@ async fn keeper(w: &World) -> Paykit {
 fn fail_list_read(w: &World) {
     w.alice
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::Error {
+        .fail_next(pubky_dispatch_client::testing::Fault::Error {
             path: "/allow".into(),
-            code: pubky_switch_core::http::ErrorCode::Unavailable,
+            code: pubky_dispatch_core::http::ErrorCode::Unavailable,
             current: Value::Null,
         });
 }
@@ -4800,7 +4802,7 @@ async fn test_allowances_restore_keeps_the_recorded_crossing_end() {
 
 #[tokio::test]
 async fn test_allowances_crossing_end_after_an_unanswered_write_reports_its_unknown_delivery() {
-    use pubky_switch_client::testing::Fault;
+    use pubky_dispatch_client::testing::Fault;
 
     let w = World::new();
     let mut shop = Box::pin(shop(&w)).await;
@@ -4962,11 +4964,11 @@ async fn backed_up_with_its_answer_unqueued(
         Box::pin(accept_elsewhere(w, wallet, &mine)).await;
         shop.receive(None).await.unwrap();
     }
-    // The switch applies the batch and its answer is lost, so the batch stays kept: the
+    // The Dispatch applies the batch and its answer is lost, so the batch stays kept: the
     // client sends it again only at a later call.
     w.alice
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::LoseAnswer {
+        .fail_next(pubky_dispatch_client::testing::Fault::LoseAnswer {
             path: "/ops".into(),
         });
     let answered = Box::pin(answer(wallet, kind, &mine)).await;
@@ -5009,13 +5011,13 @@ async fn block_during_restore(wallet: &mut Paykit, peer: &[u8; 32]) {
         assert!(
             matches!(
                 error,
-                paykit_sdk::PaykitError::Client(pubky_switch_client::app::AppError::Refused(
-                    pubky_switch_client::app::Refusal::NotNow(_)
+                paykit_sdk::PaykitError::Client(pubky_dispatch_client::app::AppError::Refused(
+                    pubky_dispatch_client::app::Refusal::NotNow(_)
                 ))
             ),
             "{error:?}"
         );
-        let mark = format!("bk/{}", pubky_switch_core::enc::b64(peer));
+        let mark = format!("bk/{}", pubky_dispatch_core::enc::b64(peer));
         assert!(wallet
             .app()
             .protocol_get("paykit", mark.as_bytes())
@@ -5043,14 +5045,14 @@ async fn restored_unreceived(w: &World, backup: &paykit_sdk::PaykitBackup) -> Pa
 async fn queued_rejection(w: &World, wallet: &mut Paykit, canonical: &[u8; 32]) -> String {
     w.bob
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+        .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
             path: "/inbox".into(),
             after: 0,
         });
     let original = wallet.reject_allowance(canonical).await.unwrap();
     assert!(matches!(
         wallet.app().delivery(&original).await.unwrap(),
-        Some(pubky_switch_client::app::Delivery::Queued { .. })
+        Some(pubky_dispatch_client::app::Delivery::Queued { .. })
     ));
     original
 }
@@ -5231,8 +5233,8 @@ async fn test_allowances_restore_own_rejection_in_a_record_sealed_under_a_key_no
     assert!(
         matches!(
             sealed.content,
-            pubky_switch_client::app::RecordContent::Unreadable(
-                pubky_switch_client::app::Unopened::KeyNotHeld { .. }
+            pubky_dispatch_client::app::RecordContent::Unreadable(
+                pubky_dispatch_client::app::Unopened::KeyNotHeld { .. }
             )
         ),
         "{:?}",
@@ -5331,7 +5333,7 @@ async fn restored_rejection_over_conflict(w: &World, shop: &mut Paykit, shared: 
     restored.app_mut().flush_message(&original).await.unwrap();
     assert!(!matches!(
         restored.app().delivery(&original).await.unwrap(),
-        Some(pubky_switch_client::app::Delivery::Accepted { .. })
+        Some(pubky_dispatch_client::app::Delivery::Accepted { .. })
     ));
     assert_eq!(Box::pin(taken(shop, "paykit.allowance_rejection")).await, 0);
 }
@@ -5603,7 +5605,7 @@ async fn withdraw_after_rejection(trigger: RejectedWithdrawal) {
                     .alice
                     .sign_next(|body| {
                         body.service_keys
-                            .push(pubky_switch_core::records::ServiceKeyEntry {
+                            .push(pubky_dispatch_core::records::ServiceKeyEntry {
                                 generation: first_generation,
                                 key: first_key,
                             });
@@ -5942,12 +5944,12 @@ async fn test_allowances_restore_sends_no_proposal_after_the_counterpartys_answe
     let mut wallet = Box::pin(paying_wallet(&w)).await;
     w.alice
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::LoseAnswer {
+        .fail_next(pubky_dispatch_client::testing::Fault::LoseAnswer {
             path: "/ops".into(),
         });
     w.alice
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+        .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
             path: "/ops".into(),
             after: 0,
         });
@@ -6003,7 +6005,7 @@ async fn test_allowances_end_dropped_for_the_bound_taken_again_from_a_resend() {
     // and it counts in bob's mark of dropped replies, due at once: an ended Allowance's record
     // may come at any time after its end was dropped. The mark asks him to re-send by itself,
     // once; the same end is taken as a new message and kept as the stop again (Paykit spec
-    // 8.1, "Replies before their record"; 8.3, "Ends reach the executor"; Switch spec 11).
+    // 8.1, "Replies before their record"; 8.3, "Ends reach the executor"; Dispatch spec 11).
     let w = World::new();
     let mut shop = Box::pin(shop(&w)).await;
     let mut wallet = Box::pin(wallet(&w)).await;
@@ -6011,7 +6013,7 @@ async fn test_allowances_end_dropped_for_the_bound_taken_again_from_a_resend() {
     // the Allowance through Paykit, which retains the signed end's producer origin.
     w.alice
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+        .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
             path: "/inbox".into(),
             after: 0,
         });
@@ -6098,8 +6100,11 @@ async fn receives_resent_rejection(app: &mut Paykit, canonical: &[u8; 32], origi
     assert!(app.app().shared_record(canonical).await.unwrap().is_none());
 }
 
-async fn assert_pending_absent(app: &mut Paykit, target: &pubky_switch_client::app::RecordTarget) {
-    use pubky_switch_client::app::{KeptReason, RecordRead};
+async fn assert_pending_absent(
+    app: &mut Paykit,
+    target: &pubky_dispatch_client::app::RecordTarget,
+) {
+    use pubky_dispatch_client::app::{KeptReason, RecordRead};
     let physical = app.app().record_key(target).unwrap();
     let observed = app.app_mut().read_record_fresh(target).await.unwrap();
     assert!(
@@ -6120,7 +6125,7 @@ async fn assert_pending_absent(app: &mut Paykit, target: &pubky_switch_client::a
                     && !r.not_taken
                     && !r.divergent
                     && !r.different_write_at_held_version
-                    && r.content == pubky_switch_client::app::RecordContent::Deleted,
+                    && r.content == pubky_dispatch_client::app::RecordContent::Deleted,
             _ => false,
         },
         "current proposal after restore: {observed:?}"
@@ -6135,7 +6140,7 @@ async fn rejection_before_its_pending(
     responder: &mut Paykit,
     role: AllowanceRole,
 ) -> (StoredMessage, paykit_lib::AllowanceId, String) {
-    use pubky_switch_client::testing::Fault;
+    use pubky_dispatch_client::testing::Fault;
 
     let backup = proposer.backup().await.unwrap();
     let (own, peer) = if proposer.identity() == w.alice_id() {
@@ -6161,7 +6166,7 @@ async fn rejection_before_its_pending(
     let rejected = responder.reject_allowance(&theirs).await.unwrap();
     assert!(matches!(
         responder.app().delivery(&rejected).await.unwrap(),
-        Some(pubky_switch_client::app::Delivery::Queued { .. })
+        Some(pubky_dispatch_client::app::Delivery::Queued { .. })
     ));
 
     peer.switch().fail_next(Fault::Unreachable {
@@ -6171,7 +6176,7 @@ async fn rejection_before_its_pending(
     let end = proposer.end_allowance(&sent.record).await.unwrap();
     assert!(matches!(
         proposer.app().delivery(&end).await.unwrap(),
-        Some(pubky_switch_client::app::Delivery::Queued { .. })
+        Some(pubky_dispatch_client::app::Delivery::Queued { .. })
     ));
     proposer.app_mut().receive(None).await.unwrap();
     proposer.app_mut().flush_cursor().await.unwrap();
@@ -6412,9 +6417,9 @@ async fn test_allowances_owed_crossing_end_kept_through_a_store_failure_and_sent
     // sends the end, once.
     let w = World::new();
     let mut shop = Box::pin(shop(&w)).await;
-    let fault = std::sync::Arc::new(pubky_switch_client::store::FaultStore::new(
+    let fault = std::sync::Arc::new(pubky_dispatch_client::store::FaultStore::new(
         crate::common::store(),
-        pubky_switch_client::store::Fault::None,
+        pubky_dispatch_client::store::Fault::None,
     ));
     let mut wallet = w
         .join_with(
@@ -6428,7 +6433,7 @@ async fn test_allowances_owed_crossing_end_kept_through_a_store_failure_and_sent
                 .unwrap(),
             paykit_sdk::PaykitConfig::default(),
             std::sync::Arc::clone(&fault)
-                as std::sync::Arc<dyn pubky_switch_client::store::StateStore>,
+                as std::sync::Arc<dyn pubky_dispatch_client::store::StateStore>,
         )
         .await;
     wallet.app_mut().invite(&w.bob_id()).await.unwrap();
@@ -6619,8 +6624,8 @@ async fn test_allowances_older_rejection_survives_renewal_without_closing_a_recr
 
 #[tokio::test]
 async fn test_allowances_restore_own_rejection_waits_until_the_current_permanent_key_can_be_read() {
-    use pubky_switch_client::app::Delivery;
-    use pubky_switch_client::testing::Fault;
+    use pubky_dispatch_client::app::Delivery;
+    use pubky_dispatch_client::testing::Fault;
 
     let w = World::new();
     let mut shop = Box::pin(shop(&w)).await;
@@ -6676,7 +6681,7 @@ async fn test_allowances_restore_own_rejection_waits_until_the_current_permanent
     // While the current permanent key can't be read, a try inside a Paykit delivery operation
     // fails and the rejection stays queued, nothing taken.
     w.alice.switch().fail_next(Fault::Unreachable {
-        path: format!("records/{}", pubky_switch_core::enc::b64(&a)),
+        path: format!("records/{}", pubky_dispatch_core::enc::b64(&a)),
         after: 0,
     });
     restored.flush_message_in_delivery(&original).await.unwrap();
@@ -6729,7 +6734,7 @@ async fn accepted_then_unreadable(
     Paykit,
     [u8; 32],
     [u8; 32],
-    pubky_switch_client::app::RecordTarget,
+    pubky_dispatch_client::app::RecordTarget,
     Vec<u8>,
 ) {
     let mut shop = Box::pin(shop(w)).await;
@@ -6758,7 +6763,7 @@ async fn accepted_then_unreadable(
 
 #[tokio::test]
 async fn test_allowances_unreadable_record_parks_the_original_proposal_on_first_read() {
-    use pubky_switch_client::app::ParkReason;
+    use pubky_dispatch_client::app::ParkReason;
 
     let w = World::new();
     let (mut shop, mut wallet, mut writer, theirs, mine, target, good) =
@@ -6803,7 +6808,7 @@ async fn test_allowances_unreadable_record_parks_the_original_proposal_on_first_
     let saved: Value = serde_json::from_slice(&holds[0].1).unwrap();
     assert_eq!(
         saved["d"]["message"]["plaintext"],
-        pubky_switch_core::enc::b64(&proposal.plaintext().encode())
+        pubky_dispatch_core::enc::b64(&proposal.plaintext().encode())
     );
     assert_eq!(saved["d"]["message"]["seq"], kept.seq);
     assert_eq!(saved["d"]["message"]["generation"], kept.generation);
@@ -6956,7 +6961,7 @@ async fn test_allowances_expired_response_is_resolved_against_its_original_propo
         assert!(
             parked
                 .iter()
-                .any(|e| e.reason == pubky_switch_client::app::ParkReason::ProtocolDeferred),
+                .any(|e| e.reason == pubky_dispatch_client::app::ParkReason::ProtocolDeferred),
             "{kind:?}, repeat {repeat_first}, {received:?}, {parked:?}"
         );
         w.clock.advance_ms(paykit_sdk::KEPT_MESSAGE_MS);
@@ -7176,7 +7181,7 @@ async fn test_allowances_unmatched_pending_proposal_keeps_the_original_replies()
 /// `refs`.
 async fn end_with_refs(
     w: &World,
-    signer: &pubky_switch_client::testing::TestSigner,
+    signer: &pubky_dispatch_client::testing::TestSigner,
     app: &str,
     wallet: &Paykit,
     allowance_id: &paykit_lib::AllowanceId,
@@ -7320,7 +7325,7 @@ async fn test_allowances_second_end_over_an_unreadable_record_dropped_for_the_bo
     // record's stop, outside the bounds; his real end after it counts. His 64 ends of
     // Allowances alice holds no record of then push the real end out: its pair is forgotten
     // and bob is asked at once. His re-sent copy is taken and kept again, and once the record
-    // reads it ends the Allowance (Paykit spec 8.3, "Ends reach the executor"; Switch spec
+    // reads it ends the Allowance (Paykit spec 8.3, "Ends reach the executor"; Dispatch spec
     // 11).
     let w = World::new();
     let (mut shop, mut wallet, mut phone, theirs, mine, target, good) =
@@ -7425,7 +7430,7 @@ async fn test_allowances_owed_end_naming_another_end_is_corrupt() {
 #[allow(clippy::too_many_arguments)]
 fn inject_with_id(
     w: &World,
-    signer: &pubky_switch_client::testing::TestSigner,
+    signer: &pubky_dispatch_client::testing::TestSigner,
     app: &str,
     targets: &[[u8; 16]],
     kind: &str,
@@ -7435,9 +7440,9 @@ fn inject_with_id(
 ) {
     let keys = signer.identity().app_keys(app);
     let cert = signer.switch().app(&keys.app_id_bytes()).cert.unwrap();
-    let mut message = pubky_switch_core::message::Message::new(
+    let mut message = pubky_dispatch_core::message::Message::new(
         kind,
-        pubky_switch_core::message::Sender::of_app(signer.identity().public(), &keys),
+        pubky_dispatch_core::message::Sender::of_app(signer.identity().public(), &keys),
         w.alice.identity().public(),
         w.clock.now_ms(),
         refs,
@@ -7470,7 +7475,7 @@ async fn carol_admitted(w: &World, wallet: &mut Paykit) -> Paykit {
 #[tokio::test]
 async fn test_allowances_two_senders_ends_with_one_msg_id_kept_apart() {
     // Carol's end under the ID of bob's Allowance, with the `msg_id` bob's end will carry,
-    // comes first. A message is its sender's and its `msg_id` (Switch spec 8.2): her stop is
+    // comes first. A message is its sender's and its `msg_id` (Dispatch spec 8.2): her stop is
     // under her own record key, and bob's end, with the same `msg_id`, ends his Allowance.
     let w = World::new();
     let mut shop = Box::pin(shop(&w)).await;
@@ -7537,7 +7542,7 @@ async fn test_allowances_two_senders_ends_with_one_msg_id_kept_apart() {
 async fn test_allowances_two_senders_answers_with_one_msg_id_kept_apart() {
     // Bob's and carol's acceptances of proposals the wallet holds no record of, under one
     // Allowance ID and one `msg_id`, are two messages: each is kept before its record, under
-    // its sender (Switch spec 8.2; Paykit spec 8.1).
+    // its sender (Dispatch spec 8.2; Paykit spec 8.1).
     let w = World::new();
     let shop = Box::pin(shop(&w)).await;
     let mut wallet = Box::pin(wallet(&w)).await;
@@ -7726,7 +7731,7 @@ async fn test_allowances_restored_end_acceptance_time_ahead_is_clamped() {
     )
     .unwrap();
     let restored = Box::pin(restored_unreceived(&w, &backup)).await;
-    let bound = w.clock.now_ms() + pubky_switch_core::records::CLOCK_TOLERANCE_MS;
+    let bound = w.clock.now_ms() + pubky_dispatch_core::records::CLOCK_TOLERANCE_MS;
     let (_, value) = restored
         .app()
         .protocol_scan("paykit", b"ae/")
@@ -7837,15 +7842,15 @@ async fn test_allowances_answers_of_one_millisecond_placed_in_acceptance_order()
     assert!(wallet.app().shared_record(&mine).await.unwrap().is_none());
 }
 
-/// A fourth identity, dave, with its own switch, and an app of his, `name`, with `scopes`.
+/// A fourth identity, dave, with its own Dispatch, and an app of his, `name`, with `scopes`.
 pub(super) async fn dave_app(
     w: &World,
     name: &str,
     scopes: RequestedScopes,
-) -> (pubky_switch_client::testing::TestSigner, Paykit) {
-    let dave = pubky_switch_client::testing::TestSigner::at(
-        pubky_switch_client::testing::TestIdentity::new(
-            &pubky_switch_client::testing::Seeds::default(),
+) -> (pubky_dispatch_client::testing::TestSigner, Paykit) {
+    let dave = pubky_dispatch_client::testing::TestSigner::at(
+        pubky_dispatch_client::testing::TestIdentity::new(
+            &pubky_dispatch_client::testing::Seeds::default(),
             "dave",
         ),
         "https://dave-switch.example",
@@ -7863,9 +7868,9 @@ pub(super) async fn dave_app(
 #[allow(clippy::too_many_arguments)]
 fn send(
     w: &World,
-    signer: &pubky_switch_client::testing::TestSigner,
+    signer: &pubky_dispatch_client::testing::TestSigner,
     app: &str,
-    to: &pubky_switch_client::testing::TestSigner,
+    to: &pubky_dispatch_client::testing::TestSigner,
     target: [u8; 16],
     kind: &str,
     refs: Vec<[u8; 32]>,
@@ -8051,7 +8056,7 @@ async fn test_allowances_reply_pool_drops_the_first_accepted_of_one_millisecond_
 /// of, in the current millisecond. Returns its `msg_id`.
 fn end_from(
     w: &World,
-    from: &pubky_switch_client::testing::TestSigner,
+    from: &pubky_dispatch_client::testing::TestSigner,
     app: &str,
     wallet: &Paykit,
     i: usize,
@@ -8155,7 +8160,7 @@ async fn alice_on(
     w: &World,
     name: &str,
     scopes: RequestedScopes,
-    store: std::sync::Arc<dyn pubky_switch_client::store::StateStore>,
+    store: std::sync::Arc<dyn pubky_dispatch_client::store::StateStore>,
 ) -> Paykit {
     let mut app = w
         .join_with(
@@ -8202,7 +8207,7 @@ async fn read_current_proposal(wallet: &mut Paykit, peer: &[u8; 32], id: &paykit
     let target = pending_target(peer, id);
     let observed = wallet.app_mut().read_record_fresh(&target).await.unwrap();
     assert!(
-        matches!(&observed, pubky_switch_client::app::RecordRead::Fresh(record)
+        matches!(&observed, pubky_dispatch_client::app::RecordRead::Fresh(record)
         if record.authenticated && !record.doubtful && !record.divergent && !record.flagged && !record.not_taken
         && record.content.value().is_some()),
         "{observed:?}"
@@ -8217,7 +8222,7 @@ async fn proposed_over_divergent(
     Paykit,
     [u8; 32],
     [u8; 32],
-    std::sync::Arc<dyn pubky_switch_client::store::StateStore>,
+    std::sync::Arc<dyn pubky_dispatch_client::store::StateStore>,
 ) {
     let base = crate::common::store();
     let mut shop = Box::pin(shop(w)).await;
@@ -8345,7 +8350,7 @@ fn unrecorded_proposal(
     });
     let signed = wallet
         .app()
-        .sign_message(pubky_switch_client::app::OutgoingMessage::new(
+        .sign_message(pubky_dispatch_client::app::OutgoingMessage::new(
             w.bob_id(),
             "paykit.allowance_proposal",
             body.as_object().cloned().unwrap(),
@@ -8369,7 +8374,7 @@ async fn records_proposal(
     proposal: &paykit_lib::records::StoredMessage,
     id: &paykit_lib::AllowanceId,
 ) -> [u8; 32] {
-    use pubky_switch_core::ops::{Condition, RecordVersion};
+    use pubky_dispatch_core::ops::{Condition, RecordVersion};
     let own = wallet.identity();
     let record = PendingAllowanceRecord::new(&own, proposal.clone()).unwrap();
     let peer = *record.counterparty();
@@ -8544,7 +8549,7 @@ async fn rejection_behind_a_waiting_acceptance(rejection_after_record: bool) {
 
 /// A record key as the keys of the app's own state spell it.
 fn b64_of(record: &[u8; 32]) -> String {
-    pubky_switch_core::enc::b64(record)
+    pubky_dispatch_core::enc::b64(record)
 }
 
 #[tokio::test]
@@ -8701,11 +8706,11 @@ async fn test_allowances_refused_answers_of_one_millisecond_placed_in_acceptance
 }
 
 /// Fail the next `n` batches the wallet sends with `code`.
-fn fail_writes_with(w: &World, n: usize, code: pubky_switch_core::http::ErrorCode) {
+fn fail_writes_with(w: &World, n: usize, code: pubky_dispatch_core::http::ErrorCode) {
     for _ in 0..n {
         w.alice
             .switch()
-            .fail_next(pubky_switch_client::testing::Fault::Error {
+            .fail_next(pubky_dispatch_client::testing::Fault::Error {
                 path: "/ops".into(),
                 code,
                 current: Value::Null,
@@ -8811,7 +8816,7 @@ async fn test_allowances_refused_answer_keeps_a_later_answer_of_the_same_read_ou
     );
     let physical = pending_key(&wallet, &w.bob_id(), &id);
     let writes = w.record_writes(&w.alice, &physical);
-    fail_writes_with(&w, 1, pubky_switch_core::http::ErrorCode::TooLarge);
+    fail_writes_with(&w, 1, pubky_dispatch_core::http::ErrorCode::TooLarge);
     let received = Box::pin(received_originals(&mut wallet, &[&first, SORTS_FIRST])).await;
     assert_eq!(received, [first.as_str(), SORTS_FIRST]);
     assert!(Box::pin(keeps(&wallet, b"pr/", &first)).await);
@@ -8889,7 +8894,7 @@ async fn test_allowances_two_rejections_of_one_read_close_the_original_once() {
 /// read again by the wallet reloaded from what was committed. Returns whether the fault was
 /// hit, and whether the reloaded wallet found the first rejection kept to write and not yet in the
 /// record: the receive step's commit kept it, and the placement after the read hadn't run.
-async fn rejection_kept_through_a_stop(fault: pubky_switch_client::store::Fault) -> (bool, bool) {
+async fn rejection_kept_through_a_stop(fault: pubky_dispatch_client::store::Fault) -> (bool, bool) {
     let w = World::new();
     let base = crate::common::store();
     let mut shop = Box::pin(shop(&w)).await;
@@ -8913,14 +8918,14 @@ async fn rejection_kept_through_a_stop(fault: pubky_switch_client::store::Fault)
     );
     let app_id = wallet.app_id();
     drop(wallet);
-    let faulty = std::sync::Arc::new(pubky_switch_client::store::FaultStore::new(
+    let faulty = std::sync::Arc::new(pubky_dispatch_client::store::FaultStore::new(
         std::sync::Arc::clone(&base),
         fault,
     ));
     let mut crashing = Box::pin(w.load_on_clock(
         &w.alice,
         std::sync::Arc::clone(&faulty)
-            as std::sync::Arc<dyn pubky_switch_client::store::StateStore>,
+            as std::sync::Arc<dyn pubky_dispatch_client::store::StateStore>,
         app_id,
         std::sync::Arc::clone(&w.clock),
     ))
@@ -8971,7 +8976,7 @@ async fn test_allowances_answer_kept_through_a_stop_after_every_commit_placed_on
     let mut seen_between = false;
     loop {
         let (hit, between) = Box::pin(rejection_kept_through_a_stop(
-            pubky_switch_client::store::Fault::StopAfter(n),
+            pubky_dispatch_client::store::Fault::StopAfter(n),
         ))
         .await;
         seen_between |= between;
@@ -9039,7 +9044,7 @@ async fn test_allowances_answer_over_a_held_record_never_dropped_for_the_bounds(
 /// The earlier signed acceptance is parked on its original feed read. When the ordinary
 /// retry page is full, a later rejection can enter local storage first in the same millisecond.
 async fn ordered_stored_replies(full_retry_page: bool) {
-    use pubky_switch_client::app::{FeedPosition, ParkReason};
+    use pubky_dispatch_client::app::{FeedPosition, ParkReason};
     let w = World::new();
     let limited = std::sync::Arc::new(crate::common::FailingRecordReads::default());
     let mut wallet = Box::pin(w.join_with(
@@ -9265,7 +9270,7 @@ async fn test_allowances_later_rejection_stops_existing_consent_before_the_confl
         &id,
         SORTS_FIRST,
     );
-    fail_writes_with(&w, 1, pubky_switch_core::http::ErrorCode::TooLarge);
+    fail_writes_with(&w, 1, pubky_dispatch_core::http::ErrorCode::TooLarge);
     exec.receive(None).await.unwrap();
     assert_eq!(
         exec.allowance(&permanent).await.unwrap().status,
@@ -9332,7 +9337,7 @@ async fn test_allowances_answer_after_a_given_up_earlier_answer_never_takes_the_
     let stop = wallet.app().protocol_scan("paykit", b"pc/").await.unwrap();
     assert!(wallet.app().shared_record(&mine).await.unwrap().is_none());
     w.clock
-        .advance_ms(paykit_sdk::KEPT_MESSAGE_MS + pubky_switch_core::records::DAY_MS);
+        .advance_ms(paykit_sdk::KEPT_MESSAGE_MS + pubky_dispatch_core::records::DAY_MS);
     wallet.app_mut().rotate().await.unwrap();
     wallet.app_mut().flush_cursor().await.unwrap();
     wallet.receive(None).await.unwrap();
@@ -9372,7 +9377,7 @@ async fn test_allowances_answer_after_a_given_up_earlier_answer_never_takes_the_
 async fn consent_state_keeper(
     w: &World,
 ) -> (
-    std::sync::Arc<dyn pubky_switch_client::store::StateStore>,
+    std::sync::Arc<dyn pubky_dispatch_client::store::StateStore>,
     Paykit,
 ) {
     let store = crate::common::store();
@@ -9416,7 +9421,7 @@ async fn consent_state_restore_refused(
     assert!(matches!(
         app.backup().await,
         Err(PaykitError::Client(
-            pubky_switch_client::app::AppError::InvalidData(_)
+            pubky_dispatch_client::app::AppError::InvalidData(_)
         ))
     ));
     let valid: Value = serde_json::from_slice(&valid.to_bytes().unwrap()).unwrap();
@@ -9439,10 +9444,10 @@ async fn consent_state_restore_refused(
     assert!(matches!(
         result,
         Err(PaykitError::Client(
-            pubky_switch_client::app::AppError::InvalidData(_)
+            pubky_dispatch_client::app::AppError::InvalidData(_)
         ))
     ));
-    let ns = pubky_switch_client::store::client_namespace(&app.app_id());
+    let ns = pubky_dispatch_client::store::client_namespace(&app.app_id());
     assert!(store.scan(&ns, b"", None, 1).unwrap().is_empty());
 }
 
@@ -9510,7 +9515,7 @@ async fn test_consent_state_supplied_held_values_restore_and_unknown_member_refu
     // an executor API. Both current Held values must survive the body reader.
     let w = World::new();
     let (_shop, _wallet, mut exec, _phone, _, mine) = Box::pin(executed(&w)).await;
-    let key = format!("ac/{}", pubky_switch_core::enc::b64(&mine)).into_bytes();
+    let key = format!("ac/{}", pubky_dispatch_core::enc::b64(&mine)).into_bytes();
     let bytes = exec
         .app()
         .protocol_get("paykit", &key)
@@ -9560,17 +9565,17 @@ async fn test_consent_state_supplied_grant_notice_routes_and_unknown_member_refu
     );
     drop(restored);
     // The client routing call takes the decoded fields of the notice queued above.
-    let message = pubky_switch_core::message::Message {
+    let message = pubky_dispatch_core::message::Message {
         kind: "paykit.executor_notice".into(),
         msg_id: value["d"]["msg_id"].as_str().unwrap().to_owned(),
         created_at_ms: w.clock.now_ms(),
-        from: pubky_switch_core::message::Sender {
+        from: pubky_dispatch_core::message::Sender {
             identity: w.alice_id(),
             app_id: wallet.app_id(),
         },
         to: w.alice_id(),
         refs: vec![],
-        body: json!({"allowance_record": pubky_switch_core::enc::b64(&mine), "reason": "ended"})
+        body: json!({"allowance_record": pubky_dispatch_core::enc::b64(&mine), "reason": "ended"})
             .as_object()
             .unwrap()
             .clone(),
@@ -9593,9 +9598,9 @@ async fn test_consent_state_supplied_grant_notice_routes_and_unknown_member_refu
     assert!(
         matches!(
             error,
-            pubky_switch_client::app::AppError::Refused(pubky_switch_client::app::Refusal::NotNow(
-                _
-            ))
+            pubky_dispatch_client::app::AppError::Refused(
+                pubky_dispatch_client::app::Refusal::NotNow(_)
+            )
         ),
         "{error:?}"
     );
@@ -9811,7 +9816,7 @@ enum PendingChange {
 
 async fn place_competing_proposal(change: PendingChange) {
     use paykit_lib::records::PendingAllowanceRecord;
-    use pubky_switch_client::app::{Collection, RecordTarget};
+    use pubky_dispatch_client::app::{Collection, RecordTarget};
 
     let w = World::new();
     let mut wallet = Box::pin(wallet(&w)).await;
@@ -9966,11 +9971,11 @@ async fn place_competing_proposal(change: PendingChange) {
 #[tokio::test]
 async fn test_pending_proposal_conflict_restore_preserves_the_first_proposal_and_owed_acceptance() {
     use paykit_lib::records::PendingAllowanceRecord;
-    use pubky_switch_client::app::{Collection, RecordTarget};
+    use pubky_dispatch_client::app::{Collection, RecordTarget};
     use std::sync::Arc;
     let w = World::new();
-    let store: Arc<dyn pubky_switch_client::store::StateStore> =
-        Arc::new(pubky_switch_client::store::MemoryStore::new());
+    let store: Arc<dyn pubky_dispatch_client::store::StateStore> =
+        Arc::new(pubky_dispatch_client::store::MemoryStore::new());
     let mut wallet = Box::pin(w.join_with(
         &w.alice,
         "wallet",
@@ -10066,7 +10071,7 @@ async fn test_pending_proposal_conflict_restore_preserves_the_first_proposal_and
     let mut restored = Box::pin(restore_pending_wallet(&w, store, &before)).await;
     let deletion = restored.app_mut().read_record_fresh(&target).await.unwrap();
     assert!(
-        matches!(deletion,pubky_switch_client::app::RecordRead::Fresh(ref held) if held.authenticated && !held.not_taken && !held.doubtful && held.content==pubky_switch_client::app::RecordContent::Deleted)
+        matches!(deletion,pubky_dispatch_client::app::RecordRead::Fresh(ref held) if held.authenticated && !held.not_taken && !held.doubtful && held.content==pubky_dispatch_client::app::RecordContent::Deleted)
     );
     for _ in 0..4 {
         restored.receive(None).await.unwrap();
@@ -10074,7 +10079,7 @@ async fn test_pending_proposal_conflict_restore_preserves_the_first_proposal_and
     let current = restored.app().shared_record(&key).await.unwrap().unwrap();
     assert_eq!(
         current.content,
-        pubky_switch_client::app::RecordContent::Deleted
+        pubky_dispatch_client::app::RecordContent::Deleted
     );
     assert!(restored
         .app()
@@ -10095,7 +10100,7 @@ async fn test_pending_proposal_conflict_restore_preserves_the_first_proposal_and
 #[tokio::test]
 async fn test_pending_proposal_conflict_retries_a_stored_proposal_at_the_existing_pending_key() {
     use paykit_lib::records::PendingAllowanceRecord;
-    use pubky_switch_client::app::{Collection, RecordTarget};
+    use pubky_dispatch_client::app::{Collection, RecordTarget};
     let w = World::new();
     let limited = std::sync::Arc::new(crate::common::FailingRecordReads::default());
     let mut wallet = Box::pin(w.join_with(
@@ -10152,7 +10157,7 @@ async fn test_pending_proposal_conflict_retries_a_stored_proposal_at_the_existin
         .expect("the incoming signed proposal is held at the failed read");
     assert_eq!(
         entry.reason,
-        pubky_switch_client::app::ParkReason::StoreRejected
+        pubky_dispatch_client::app::ParkReason::StoreRejected
     );
     let kept = wallet
         .app_mut()
@@ -10194,7 +10199,7 @@ async fn test_pending_proposal_conflict_retries_a_stored_proposal_at_the_existin
 #[tokio::test]
 async fn test_pending_proposal_conflict_discard_checks_the_selected_record_and_sends_nothing() {
     use paykit_lib::records::PendingAllowanceRecord;
-    use pubky_switch_client::app::{Collection, RecordContent, RecordTarget};
+    use pubky_dispatch_client::app::{Collection, RecordContent, RecordTarget};
 
     let w = World::new();
     let mut shop = Box::pin(shop(&w)).await;
@@ -10352,7 +10357,7 @@ async fn test_pending_proposal_conflict_discard_waits_while_the_restore_feed_is_
 
 async fn discard_after_restore(feed_available: bool) {
     use paykit_lib::records::PendingAllowanceRecord;
-    use pubky_switch_client::app::{Collection, RecordContent, RecordTarget};
+    use pubky_dispatch_client::app::{Collection, RecordContent, RecordTarget};
 
     let w = World::new();
     let mut wallet = Box::pin(wallet(&w)).await;
@@ -10393,9 +10398,9 @@ async fn discard_after_restore(feed_available: bool) {
     if !feed_available {
         w.alice
             .switch()
-            .fail_next(pubky_switch_client::testing::Fault::Error {
+            .fail_next(pubky_dispatch_client::testing::Fault::Error {
                 path: "/feed".into(),
-                code: pubky_switch_core::http::ErrorCode::Unavailable,
+                code: pubky_dispatch_core::http::ErrorCode::Unavailable,
                 current: Value::Null,
             });
         assert!(restored
@@ -10405,7 +10410,7 @@ async fn discard_after_restore(feed_available: bool) {
         assert!(restored.app().restore_held_cursor().is_none());
         let current = phone.app_mut().read_record_fresh(&target).await.unwrap();
         assert!(
-            matches!(current, pubky_switch_client::app::RecordRead::Fresh(ref held)
+            matches!(current, pubky_dispatch_client::app::RecordRead::Fresh(ref held)
             if held.authenticated && held.content.value()==Some(pending.to_json().unwrap().as_slice()))
         );
         return;
@@ -10431,8 +10436,8 @@ async fn discard_after_restore(feed_available: bool) {
 #[tokio::test]
 async fn test_pending_record_keeps_the_first_proposal_and_conflict_until_its_verified_deletion() {
     use paykit_lib::records::PendingAllowanceRecord;
-    use pubky_switch_client::app::{Collection, RecordContent, RecordTarget};
-    use pubky_switch_client::testing::Fault;
+    use pubky_dispatch_client::app::{Collection, RecordContent, RecordTarget};
+    use pubky_dispatch_client::testing::Fault;
 
     let w = World::new();
     let shop = Box::pin(shop(&w)).await;
@@ -10541,8 +10546,8 @@ async fn test_pending_record_keeps_the_first_proposal_and_conflict_until_its_ver
     let uncertain = wallet.app_mut().read_record_fresh(&target).await.unwrap();
     assert!(matches!(
         uncertain,
-        pubky_switch_client::app::RecordRead::Kept {
-            reason: pubky_switch_client::app::KeptReason::Unreachable(_),
+        pubky_dispatch_client::app::RecordRead::Kept {
+            reason: pubky_dispatch_client::app::KeptReason::Unreachable(_),
             ..
         }
     ));
@@ -10600,7 +10605,7 @@ async fn test_pending_record_keeps_the_first_proposal_and_conflict_until_its_ver
 #[tokio::test]
 async fn test_pending_proposals_remain_bound_to_their_own_records_after_a_restart() {
     use paykit_lib::{derive::natural_key, records::PendingAllowanceRecord, AllowanceId};
-    use pubky_switch_client::app::{Collection, RecordTarget};
+    use pubky_dispatch_client::app::{Collection, RecordTarget};
 
     let w = World::new();
     let shop = Box::pin(shop(&w)).await;
@@ -10759,7 +10764,7 @@ async fn test_allowances_receive_only_app_can_read_a_proposal_and_cannot_send_or
     let rejected = author.reject_allowance(&incoming.record).await.unwrap();
     assert!(matches!(
         author.app().delivery(&rejected).await.unwrap(),
-        Some(pubky_switch_client::app::Delivery::Accepted { .. })
+        Some(pubky_dispatch_client::app::Delivery::Accepted { .. })
     ));
     shop.receive(None).await.unwrap();
     assert!(matches!(
@@ -10832,7 +10837,7 @@ async fn queued_allowance_after_renewal(
     };
     w.bob
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+        .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
             path: "/inbox".into(),
             after: 0,
         });
@@ -10850,7 +10855,7 @@ async fn queued_allowance_after_renewal(
     };
     assert!(matches!(
         payer.app().delivery(&msg_id).await.unwrap(),
-        Some(pubky_switch_client::app::Delivery::Queued { .. })
+        Some(pubky_dispatch_client::app::Delivery::Queued { .. })
     ));
     assert!(payer
         .app_mut()
@@ -10868,7 +10873,7 @@ async fn queued_allowance_after_renewal(
         .release_message(
             "paykit",
             &msg_id,
-            pubky_switch_client::app::ReplyGrantOnRelease::IfOwed,
+            pubky_dispatch_client::app::ReplyGrantOnRelease::IfOwed,
         )
         .await
         .unwrap();
@@ -10876,7 +10881,7 @@ async fn queued_allowance_after_renewal(
     assert_eq!(
         matches!(
             retried,
-            Some(pubky_switch_client::app::Delivery::Accepted { .. })
+            Some(pubky_dispatch_client::app::Delivery::Accepted { .. })
         ),
         delivered,
         "{kind:?}",
@@ -10995,7 +11000,7 @@ async fn test_allowances_crossing_end_waits_for_contacts_after_renewal_and_reloa
         .is_some());
     assert!(matches!(
         payer.app().delivery(&ended.message().msg_id).await.unwrap(),
-        Some(pubky_switch_client::app::Delivery::Accepted { .. })
+        Some(pubky_dispatch_client::app::Delivery::Accepted { .. })
     ));
     let received = shop.receive(None).await.unwrap();
     assert!(received.report.events.iter().any(|event| matches!(event,
@@ -11011,7 +11016,7 @@ async fn test_allowances_crossing_end_waits_for_contacts_after_renewal_and_reloa
 
 #[tokio::test]
 async fn test_allowances_crossing_end_rechecks_renewal_and_the_deny_copy_at_flush() {
-    use pubky_switch_client::app::{Delivery, DeliveryOrigin};
+    use pubky_dispatch_client::app::{Delivery, DeliveryOrigin};
     let w = World::new();
     let full = AppScopes::new()
         .allowance()
@@ -11355,7 +11360,7 @@ async fn accept_signed_proposal(
 ) -> (
     paykit_lib::AllowanceId,
     StoredMessage,
-    pubky_switch_client::app::SignedMessage,
+    pubky_dispatch_client::app::SignedMessage,
 ) {
     let id = paykit_lib::AllowanceId::generate().unwrap();
     let offer = signed_pending_proposal(wallet, world.bob_id(), &id, "allower");
@@ -11385,7 +11390,7 @@ async fn accept_signed_proposal(
 
 #[tokio::test]
 async fn test_pending_reply_stop_consumes_an_older_stored_answer_at_the_bound() {
-    use pubky_switch_client::app::{Collection, ParkReason, RecordTarget};
+    use pubky_dispatch_client::app::{Collection, ParkReason, RecordTarget};
     let w = World::new();
     let store = std::sync::Arc::new(crate::common::FailingRecordReads::default());
     let mut wallet = Box::pin(w.join_with(
@@ -11408,7 +11413,7 @@ async fn test_pending_reply_stop_consumes_an_older_stored_answer_at_the_bound() 
         .is_some());
     let bound = paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER;
     let deliver =
-        |wallet: &Paykit, shop: &Paykit, reply: &pubky_switch_client::app::SignedMessage| {
+        |wallet: &Paykit, shop: &Paykit, reply: &pubky_dispatch_client::app::SignedMessage| {
             w.alice
                 .switch()
                 .send_plaintext(
@@ -11520,12 +11525,12 @@ enum ReplyJourney {
 
 async fn pending_replies_across_loss(another_loss: bool, journey: ReplyJourney) {
     use paykit_lib::records::PendingAllowanceRecord;
-    use pubky_switch_client::app::{Collection, FeedPosition, RecordTarget};
-    use pubky_switch_client::testing::ScriptedSwitch;
+    use pubky_dispatch_client::app::{Collection, FeedPosition, RecordTarget};
+    use pubky_dispatch_client::testing::ScriptedSwitch;
     use std::sync::Arc;
     let w = World::new();
-    let store: Arc<dyn pubky_switch_client::store::StateStore> =
-        Arc::new(pubky_switch_client::store::MemoryStore::new());
+    let store: Arc<dyn pubky_dispatch_client::store::StateStore> =
+        Arc::new(pubky_dispatch_client::store::MemoryStore::new());
     let mut wallet = Box::pin(w.join_with(
         &w.alice,
         "wallet",
@@ -11749,7 +11754,7 @@ async fn pending_replies_across_loss(another_loss: bool, journey: ReplyJourney) 
             assert_eq!(waiting.len(), 1);
             assert_eq!(
                 waiting[0].reason,
-                pubky_switch_client::app::ParkReason::AwaitingAdmission
+                pubky_dispatch_client::app::ParkReason::AwaitingAdmission
             );
             let parked = restored
                 .app_mut()
@@ -11875,7 +11880,7 @@ enum PendingReplyCase {
 
 async fn restore_pending_wallet(
     world: &World,
-    storage: std::sync::Arc<dyn pubky_switch_client::store::StateStore>,
+    storage: std::sync::Arc<dyn pubky_dispatch_client::store::StateStore>,
     backup: &paykit_sdk::PaykitBackup,
 ) -> Paykit {
     Paykit::restore(
@@ -11891,7 +11896,7 @@ async fn restore_pending_wallet(
 
 async fn held_pending_replies(by: PendingReplyCase) {
     use paykit_lib::records::PendingAllowanceRecord;
-    use pubky_switch_client::app::Delivery;
+    use pubky_dispatch_client::app::Delivery;
 
     let w = World::new();
     let mut shop = Box::pin(shop(&w)).await;
@@ -11903,7 +11908,7 @@ async fn held_pending_replies(by: PendingReplyCase) {
         )
         .await;
     let limited = std::sync::Arc::new(crate::common::FailingRecordReads::default());
-    let storage: std::sync::Arc<dyn pubky_switch_client::store::StateStore> = limited.clone();
+    let storage: std::sync::Arc<dyn pubky_dispatch_client::store::StateStore> = limited.clone();
     let mut wallet = Box::pin(w.join_with(
         &w.alice,
         "wallet",
@@ -11922,8 +11927,8 @@ async fn held_pending_replies(by: PendingReplyCase) {
     let id = paykit_lib::AllowanceId::generate().unwrap();
     let p = signed_pending_proposal(&wallet, w.bob_id(), &id, "allower");
     let family = paykit_lib::Collection::AllowanceProposals;
-    let target = pubky_switch_client::app::RecordTarget::new(
-        pubky_switch_client::app::Collection::new(family.name(), family.fixed_policy()),
+    let target = pubky_dispatch_client::app::RecordTarget::new(
+        pubky_dispatch_client::app::Collection::new(family.name(), family.fixed_policy()),
         &paykit_lib::derive::natural_key::allowance(&w.bob_id(), &id),
     );
     let key = wallet.app().record_key(&target).unwrap();
@@ -11999,7 +12004,7 @@ async fn held_pending_replies(by: PendingReplyCase) {
         Box::pin(write_record(&mut phone, &target, Some(&original))).await;
         let read = wallet.app_mut().read_record_fresh(&target).await.unwrap();
         assert!(
-            matches!(read,pubky_switch_client::app::RecordRead::Fresh(ref r) if r.authenticated && r.version>old && r.content.value()==Some(original.as_slice()))
+            matches!(read,pubky_dispatch_client::app::RecordRead::Fresh(ref r) if r.authenticated && r.version>old && r.content.value()==Some(original.as_slice()))
         );
         inject_with_id(
             &w,
@@ -12056,7 +12061,7 @@ async fn held_pending_replies(by: PendingReplyCase) {
         Box::pin(write_record(&mut phone, &target, None)).await;
         let deleted = wallet.app_mut().read_record_fresh(&target).await.unwrap();
         assert!(
-            matches!(deleted,pubky_switch_client::app::RecordRead::Fresh(ref record) if record.authenticated && record.content==pubky_switch_client::app::RecordContent::Deleted)
+            matches!(deleted,pubky_dispatch_client::app::RecordRead::Fresh(ref record) if record.authenticated && record.content==pubky_dispatch_client::app::RecordContent::Deleted)
         );
         assert_eq!(
             wallet
@@ -12069,7 +12074,7 @@ async fn held_pending_replies(by: PendingReplyCase) {
         );
         Box::pin(write_record(&mut phone, &target, Some(&original))).await;
         let reopened = wallet.app_mut().read_record_fresh(&target).await.unwrap();
-        let pubky_switch_client::app::RecordRead::Fresh(reopened) = reopened else {
+        let pubky_dispatch_client::app::RecordRead::Fresh(reopened) = reopened else {
             panic!("current recreated proposal")
         };
         assert!(reopened.authenticated && reopened.version > selected.version);
@@ -12093,7 +12098,7 @@ async fn held_pending_replies(by: PendingReplyCase) {
         assert!(now.authenticated && now.version > reopened.version);
         assert_eq!(
             now.content,
-            pubky_switch_client::app::RecordContent::Deleted
+            pubky_dispatch_client::app::RecordContent::Deleted
         );
         assert!(!Box::pin(keeps(&wallet, b"pr/", SENT_SECOND)).await);
         assert!(wallet
@@ -12138,7 +12143,7 @@ async fn held_pending_replies(by: PendingReplyCase) {
         Box::pin(write_record(&mut phone, &target, Some(&original))).await;
         // The pending key GET observes the new write, with no intervening read of the delete.
         let new = wallet.app_mut().read_record_fresh(&target).await.unwrap();
-        let pubky_switch_client::app::RecordRead::Fresh(live) = new else {
+        let pubky_dispatch_client::app::RecordRead::Fresh(live) = new else {
             panic!("current recreation")
         };
         assert!(live.version > selected.version);
@@ -12207,7 +12212,7 @@ async fn held_pending_replies(by: PendingReplyCase) {
             assert_eq!(parked.len(), 1);
             assert_eq!(
                 parked[0].reason,
-                pubky_switch_client::app::ParkReason::StoreRejected
+                pubky_dispatch_client::app::ParkReason::StoreRejected
             );
             let q = app
                 .app_mut()
@@ -12226,7 +12231,7 @@ async fn held_pending_replies(by: PendingReplyCase) {
             let closed = app.app().shared_record(&key).await.unwrap().unwrap();
             assert_eq!(
                 closed.content,
-                pubky_switch_client::app::RecordContent::Deleted
+                pubky_dispatch_client::app::RecordContent::Deleted
             );
             assert!(closed.version > selected.version);
             assert!(app
@@ -12254,7 +12259,7 @@ async fn held_pending_replies(by: PendingReplyCase) {
         Box::pin(write_record(&mut phone, &target, Some(&original))).await;
         let read = wallet.app_mut().read_record_fresh(&target).await.unwrap();
         assert!(
-            matches!(read, pubky_switch_client::app::RecordRead::Fresh(ref held)
+            matches!(read, pubky_dispatch_client::app::RecordRead::Fresh(ref held)
             if held.authenticated && held.version > selected.version && held.content.value() == Some(original.as_slice()))
         );
         // Bob closes his own received original before storing the competing proposal.
@@ -12321,7 +12326,7 @@ async fn held_pending_replies(by: PendingReplyCase) {
                 .unwrap()
                 .unwrap()
                 .content,
-            pubky_switch_client::app::RecordContent::Deleted
+            pubky_dispatch_client::app::RecordContent::Deleted
         );
         assert!(wallet
             .app()
@@ -12436,7 +12441,10 @@ async fn held_pending_replies(by: PendingReplyCase) {
             wallet.app_mut().receive(None).await.unwrap();
             let r = wallet.app().shared_record(&key).await.unwrap().unwrap();
             assert!(r.authenticated && !r.not_taken && !r.doubtful);
-            assert_eq!(r.content, pubky_switch_client::app::RecordContent::Deleted);
+            assert_eq!(
+                r.content,
+                pubky_dispatch_client::app::RecordContent::Deleted
+            );
             assert!(wallet.app().record_seen(&key).await.unwrap().is_none());
         }
         let app_id = wallet.app_id();
@@ -12753,8 +12761,8 @@ async fn assert_pending_address(
     public: [u8; 32],
     deleted: bool,
 ) {
-    use pubky_switch_client::app::{Collection, RecordContent, RecordTarget};
-    use pubky_switch_core::{
+    use pubky_dispatch_client::app::{Collection, RecordContent, RecordTarget};
+    use pubky_dispatch_core::{
         ident::Policy,
         ops::{Condition, OpKind, RecordVersion, SignedOp},
     };
@@ -12879,7 +12887,7 @@ async fn test_pending_proposal_received_again_after_its_signed_acceptance_stays_
         .shared_record(&pending)
         .await
         .unwrap()
-        .is_none_or(|held| held.content == pubky_switch_client::app::RecordContent::Deleted));
+        .is_none_or(|held| held.content == pubky_dispatch_client::app::RecordContent::Deleted));
     assert!(w.rail.all_executions().is_empty());
 }
 
@@ -12903,9 +12911,9 @@ fn change_payer_service_key(
     generation: u64,
     old: [u8; 32],
     retain_key: bool,
-) -> std::sync::Arc<pubky_switch_client::testing::ScriptedSwitch> {
+) -> std::sync::Arc<pubky_dispatch_client::testing::ScriptedSwitch> {
     use crate::common::ALICE_ORIGIN;
-    use pubky_switch_core::records::{Inbox, ServiceKeyEntry};
+    use pubky_dispatch_core::records::{Inbox, ServiceKeyEntry};
     let service = w.alice.switch().change_key_into([74; 32]);
     w.router.add_switch(ALICE_ORIGIN, &service);
     let doc = w
@@ -12928,8 +12936,8 @@ fn change_payer_service_key(
 /// Stop after the confirmed deletion and before Paykit releases the original signed message.
 /// An orderly change keeps the service history; an identity without the old key cannot date it.
 async fn applied_answer_before_key_change(withdraw: bool, retain_key: bool) {
-    use pubky_switch_client::app::{Delivery, RecordContent};
-    use pubky_switch_client::store::{Fault, FaultStore};
+    use pubky_dispatch_client::app::{Delivery, RecordContent};
+    use pubky_dispatch_client::store::{Fault, FaultStore};
     let w = World::new();
     let fault = std::sync::Arc::new(FaultStore::new(crate::common::store(), Fault::None));
     let scopes = AppScopes::new().pay().allowance().manage_contacts();
@@ -12987,7 +12995,7 @@ async fn applied_answer_before_key_change(withdraw: bool, retain_key: bool) {
         payer.app().delivery(&message).await.unwrap(),
         Some(Delivery::Queued { .. })
     ));
-    let marker = format!("aq/{}", pubky_switch_core::enc::b64(&hash));
+    let marker = format!("aq/{}", pubky_dispatch_core::enc::b64(&hash));
     assert!(payer
         .app()
         .protocol_get("paykit", marker.as_bytes())
@@ -13086,10 +13094,10 @@ async fn test_loss_withdrawal_waits_for_the_service_key_of_its_selected_proposal
 }
 
 async fn carried_loss_withdrawal(keep_key: bool) {
-    use pubky_switch_client::app::RecordContent;
-    use pubky_switch_client::testing::{Fault, SWITCH_ORIGIN};
-    use pubky_switch_core::ops::{Condition, SignedOp};
-    use pubky_switch_core::records::{Inbox, ServiceKeyEntry};
+    use pubky_dispatch_client::app::RecordContent;
+    use pubky_dispatch_client::testing::{Fault, SWITCH_ORIGIN};
+    use pubky_dispatch_core::ops::{Condition, SignedOp};
+    use pubky_dispatch_core::records::{Inbox, ServiceKeyEntry};
 
     let w = World::new();
     let store = crate::common::store();
@@ -13142,7 +13150,7 @@ async fn carried_loss_withdrawal(keep_key: bool) {
         seller.message_delivery(&q).await.unwrap(),
         Some(paykit_sdk::MessageDelivery::Accepted { .. })
     ) {
-        w.clock.advance_ms(pubky_switch_client::app::DOC_CACHE_MS);
+        w.clock.advance_ms(pubky_dispatch_client::app::DOC_CACHE_MS);
         Box::pin(seller.flush()).await.unwrap();
     }
     assert!(matches!(
@@ -13280,8 +13288,8 @@ async fn test_kept_rejection_refuses_the_pre_loss_condition_on_an_uploaded_propo
 }
 
 async fn kept_rejection_across_generations(lost: bool) {
-    use pubky_switch_client::app::{Delivery, KeptBatchStatus, RecordContent, RecordRead};
-    use pubky_switch_client::store::MemoryStore;
+    use pubky_dispatch_client::app::{Delivery, KeptBatchStatus, RecordContent, RecordRead};
+    use pubky_dispatch_client::store::MemoryStore;
     use std::sync::Arc;
 
     let w = World::new();
@@ -13321,7 +13329,7 @@ async fn kept_rejection_across_generations(lost: bool) {
 
     w.alice
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+        .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
             path: "/ops".into(),
             after: 0,
         });
@@ -13347,8 +13355,8 @@ async fn kept_rejection_across_generations(lost: bool) {
         );
     } else {
         use crate::common::ALICE_ORIGIN;
-        use pubky_switch_core::records::Inbox;
-        // Switch 12.5 retains the current signed write across a service key change.
+        use pubky_dispatch_core::records::Inbox;
+        // Dispatch 12.5 retains the current signed write across a service key change.
         let service = w.alice.switch().change_key_into([74; 32]);
         w.router.add_switch(ALICE_ORIGIN, &service);
         let doc = w
@@ -13380,7 +13388,7 @@ async fn kept_rejection_across_generations(lost: bool) {
     if lost {
         assert!(
             matches!(outcome, Some(KeptBatchStatus::Dropped {
-            reason: pubky_switch_client::app::KeptBatchDrop::Refused { ref code }, ..
+            reason: pubky_dispatch_client::app::KeptBatchDrop::Refused { ref code }, ..
         }) if code == "conflict"),
             "{outcome:?}"
         );
@@ -13430,7 +13438,7 @@ async fn kept_rejection_across_generations(lost: bool) {
 
 #[tokio::test]
 async fn test_queued_withdrawal_after_provider_loss_preserves_the_peers_proposal() {
-    use pubky_switch_client::app::Delivery;
+    use pubky_dispatch_client::app::Delivery;
 
     let w = World::new();
     let mut payer = Box::pin(paying_wallet(&w)).await;
@@ -13457,7 +13465,7 @@ async fn test_queued_withdrawal_after_provider_loss_preserves_the_peers_proposal
     assert!(deleted.authenticated);
     assert_eq!(
         deleted.content,
-        pubky_switch_client::app::RecordContent::Deleted
+        pubky_dispatch_client::app::RecordContent::Deleted
     );
     // The peer already holds a later incarnation before the sender changes provider.
     let remote = shop
@@ -13532,8 +13540,8 @@ enum LaterProposal {
 }
 
 async fn queued_withdrawal_after_reload(later: LaterProposal) {
-    use pubky_switch_client::app::Delivery;
-    use pubky_switch_client::store::MemoryStore;
+    use pubky_dispatch_client::app::Delivery;
+    use pubky_dispatch_client::store::MemoryStore;
     use std::sync::Arc;
 
     let w = World::new();
@@ -13584,7 +13592,7 @@ async fn queued_withdrawal_after_reload(later: LaterProposal) {
         .unwrap();
     assert_eq!(
         old_delete.content,
-        pubky_switch_client::app::RecordContent::Deleted
+        pubky_dispatch_client::app::RecordContent::Deleted
     );
     let app_id = wallet.app_id();
     drop(wallet);
@@ -13647,8 +13655,11 @@ async fn queued_withdrawal_after_reload(later: LaterProposal) {
     wallet.app_mut().release_queued(&w.bob_id()).await.unwrap();
     w.alice
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::Unreachable {
-            path: format!("records/{}", pubky_switch_core::enc::b64(&proposal.record)),
+        .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
+            path: format!(
+                "records/{}",
+                pubky_dispatch_core::enc::b64(&proposal.record)
+            ),
             after: 0,
         });
     wallet.app_mut().flush_message(&withdrawal).await.unwrap();
@@ -13704,10 +13715,10 @@ enum WithdrawalCase {
 }
 
 async fn withdraw_before_receiving(case: WithdrawalCase) {
-    use pubky_switch_client::app::{Collection, Delivery, RecordContent, RecordTarget};
+    use pubky_dispatch_client::app::{Collection, Delivery, RecordContent, RecordTarget};
 
     let w = World::new();
-    let store = std::sync::Arc::new(pubky_switch_client::store::MemoryStore::new());
+    let store = std::sync::Arc::new(pubky_dispatch_client::store::MemoryStore::new());
     let mut wallet = w
         .join_with(
             &w.alice,
@@ -13789,7 +13800,7 @@ async fn withdraw_before_receiving(case: WithdrawalCase) {
         wallet.app_mut().receive(None).await.unwrap();
         w.alice
             .switch()
-            .fail_next(pubky_switch_client::testing::Fault::Unanswered {
+            .fail_next(pubky_dispatch_client::testing::Fault::Unanswered {
                 path: "/ops".into(),
                 after: 1,
             });
@@ -13918,7 +13929,7 @@ async fn test_pending_limit_uses_the_other_wallets_completed_creates_and_withdra
 
 #[tokio::test]
 async fn test_pending_capacity_requires_the_new_generation_after_provider_loss() {
-    use pubky_switch_client::app::Collection;
+    use pubky_dispatch_client::app::Collection;
 
     let w = World::new();
     let mut wallet = Box::pin(paying_wallet(&w)).await;
@@ -13999,7 +14010,7 @@ async fn test_pending_capacity_requires_the_new_generation_after_provider_loss()
 
 #[tokio::test]
 async fn test_pending_capacity_waits_for_a_fresh_listing_after_a_delayed_page() {
-    use pubky_switch_client::{app::Collection, testing::Fault};
+    use pubky_dispatch_client::{app::Collection, testing::Fault};
 
     let w = World::new();
     let mut shop = Box::pin(shop(&w)).await;
@@ -14035,10 +14046,10 @@ async fn test_pending_capacity_waits_for_a_fresh_listing_after_a_delayed_page() 
         .await
         .unwrap()
         .is_some());
-    let collection_id = pubky_switch_core::ident::collection_id(kind.name(), &wallet.identity());
+    let collection_id = pubky_dispatch_core::ident::collection_id(kind.name(), &wallet.identity());
     let page_path = format!(
         "records?collection={}",
-        pubky_switch_core::enc::b64(&collection_id)
+        pubky_dispatch_core::enc::b64(&collection_id)
     );
     w.alice.switch().fail_next(Fault::Head {
         path: page_path.clone(),
@@ -14095,7 +14106,7 @@ async fn test_pending_capacity_waits_for_a_fresh_listing_after_a_delayed_page() 
 
 #[tokio::test]
 async fn test_pending_capacity_waits_for_the_key_of_an_earlier_proposal() {
-    use pubky_switch_client::app::{RecordContent, Unopened};
+    use pubky_dispatch_client::app::{RecordContent, Unopened};
 
     let w = World::new();
     let (mut shop, mut wallet, mut phone) = Box::pin(two_wallets_with(
@@ -14170,7 +14181,7 @@ async fn test_pending_capacity_waits_for_the_key_of_an_earlier_proposal() {
 
 #[tokio::test]
 async fn test_pending_capacity_resumes_from_a_listing_after_a_withdrawal_leaves_the_feed() {
-    use pubky_switch_client::testing::{Fault, Retention};
+    use pubky_dispatch_client::testing::{Fault, Retention};
 
     let w = World::new();
     let mut shop = Box::pin(shop(&w)).await;
@@ -14258,7 +14269,7 @@ async fn test_pending_capacity_resumes_from_a_listing_after_a_withdrawal_leaves_
 
 /// Read the one payer choice produced by the public proposal or acceptance.
 async fn original_approval(wallet: &Paykit, canonical: &[u8; 32]) -> Value {
-    let key = format!("ao/{}", pubky_switch_core::enc::b64(canonical));
+    let key = format!("ao/{}", pubky_dispatch_core::enc::b64(canonical));
     let bytes = wallet
         .app()
         .protocol_get("paykit", key.as_bytes())
@@ -14271,7 +14282,7 @@ async fn original_approval(wallet: &Paykit, canonical: &[u8; 32]) -> Value {
 #[tokio::test]
 async fn test_original_payer_reopens_the_selected_proposal_and_sends_the_same_prepared_acceptance()
 {
-    use pubky_switch_client::app::KeptOp;
+    use pubky_dispatch_client::app::KeptOp;
     use std::sync::Arc;
     let w = World::new();
     let store = Arc::new(crate::common::FailNextKeep::default());
@@ -14339,8 +14350,8 @@ async fn test_original_payer_reopens_the_selected_proposal_and_sends_the_same_pr
     .into_iter()
     .zip(writes)
     {
-        let target = pubky_switch_client::app::RecordTarget::new(
-            pubky_switch_client::app::Collection::new(family.name(), family.fixed_policy()),
+        let target = pubky_dispatch_client::app::RecordTarget::new(
+            pubky_dispatch_client::app::Collection::new(family.name(), family.fixed_policy()),
             &paykit_lib::derive::natural_key::allowance(&w.bob_id(), proposal.allowance_id()),
         );
         let RecordApplication {
@@ -14465,7 +14476,7 @@ async fn replace_exempt_end(answer_first: bool) {
         answer_first
     );
     assert!(Box::pin(keeps(&wallet, b"ae/", other.last().unwrap())).await);
-    let prefix = format!("ae/{}/", pubky_switch_core::enc::b64(&record));
+    let prefix = format!("ae/{}/", pubky_dispatch_core::enc::b64(&record));
     // Ordinary placement can now promote an end that arrived before Q.
     assert_eq!(wallet.receive(None).await.unwrap().resends, 1);
     let ends = wallet
@@ -14572,7 +14583,7 @@ async fn counterparty_ends_its_acceptance(timing: EndTiming) {
     .await
     .unwrap();
     w.clock
-        .advance_ms(paykit_sdk::KEPT_MESSAGE_MS + pubky_switch_core::records::DAY_MS);
+        .advance_ms(paykit_sdk::KEPT_MESSAGE_MS + pubky_dispatch_core::records::DAY_MS);
     for _ in 0..2 {
         payer.receive(None).await.unwrap();
     }
@@ -14686,9 +14697,9 @@ enum ResumeOriginal {
 }
 
 async fn recover_incoming_acceptance(resume: ResumeOriginal) {
-    use pubky_switch_client::app::KeptOp;
-    use pubky_switch_client::store::{Fault, FaultStore};
-    use pubky_switch_core::{
+    use pubky_dispatch_client::app::KeptOp;
+    use pubky_dispatch_client::store::{Fault, FaultStore};
+    use pubky_dispatch_core::{
         ops::{OpKind, SignedOp},
         records::AppCert,
     };
@@ -14716,7 +14727,7 @@ async fn recover_incoming_acceptance(resume: ResumeOriginal) {
     // store limit. The next receive can apply the batch but cannot save its proof.
     disk.refuse_puts_as_too_large(Some(b"opq/"));
     let _ = payer.receive(None).await;
-    let at = format!("ao/{}", pubky_switch_core::enc::b64(&offer.record));
+    let at = format!("ao/{}", pubky_dispatch_core::enc::b64(&offer.record));
     let prepared = payer
         .app()
         .protocol_get("paykit", at.as_bytes())
@@ -14757,8 +14768,8 @@ async fn recover_incoming_acceptance(resume: ResumeOriginal) {
     let failure = payer.receive(None).await.unwrap_err();
     assert!(matches!(
         failure,
-        PaykitError::Client(pubky_switch_client::app::AppError::Store(
-            pubky_switch_client::error::StoreError::TooLarge { .. }
+        PaykitError::Client(pubky_dispatch_client::app::AppError::Store(
+            pubky_dispatch_client::error::StoreError::TooLarge { .. }
         ))
     ));
     assert_eq!(
@@ -14933,7 +14944,9 @@ async fn test_pending_payer_without_ledger_write_scope_keeps_the_proposal_unansw
 async fn test_pending_reply_creates_the_accepted_pair_and_only_the_allowers_zero_ledger() {
     use paykit_lib::allowances::Ledger;
     use paykit_lib::collections::Collection;
-    use pubky_switch_client::app::{Collection as SwitchCollection, RecordContent, RecordTarget};
+    use pubky_dispatch_client::app::{
+        Collection as DispatchCollection, RecordContent, RecordTarget,
+    };
     let w = World::new();
     let mut bob = Box::pin(shop(&w)).await;
     let mut alice = Box::pin(alice_app(
@@ -14948,7 +14961,7 @@ async fn test_pending_reply_creates_the_accepted_pair_and_only_the_allowers_zero
         .unwrap();
     let target = |collection: Collection, peer: [u8; 32]| {
         RecordTarget::new(
-            SwitchCollection::new(collection.name(), collection.fixed_policy()),
+            DispatchCollection::new(collection.name(), collection.fixed_policy()),
             &paykit_lib::derive::natural_key::allowance(&peer, &sent.allowance_id),
         )
     };
@@ -15032,14 +15045,14 @@ async fn test_pending_reply_creates_the_accepted_pair_and_only_the_allowers_zero
 
 #[tokio::test]
 async fn test_pending_reply_retry_uses_the_same_original_after_an_unanswered_acceptance() {
-    use pubky_switch_client::app::Delivery;
+    use pubky_dispatch_client::app::Delivery;
     let w = World::new();
     let mut shop = Box::pin(shop(&w)).await;
     let mut wallet = Box::pin(paying_wallet(&w)).await;
     let (_, mine) = Box::pin(proposed(&w, &mut shop, &mut wallet)).await;
     w.alice
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::LoseAnswer {
+        .fail_next(pubky_dispatch_client::testing::Fault::LoseAnswer {
             path: "/ops".into(),
         });
     let first = wallet
@@ -15080,12 +15093,12 @@ async fn test_pending_reply_retry_uses_the_same_original_after_an_unanswered_acc
 #[tokio::test]
 async fn test_pending_unanswered_acceptance_after_restore_observes_the_original_complete_result() {
     use paykit_lib::collections::Collection;
-    use pubky_switch_client::app::{
-        Collection as SwitchCollection, KeptReason, RecordRead, RecordTarget,
+    use pubky_dispatch_client::app::{
+        Collection as DispatchCollection, KeptReason, RecordRead, RecordTarget,
     };
-    use pubky_switch_core::chain::bind_answer;
-    use pubky_switch_core::ops::{OpKind, SignedOp};
-    use pubky_switch_core::records::AppCert;
+    use pubky_dispatch_core::chain::bind_answer;
+    use pubky_dispatch_core::ops::{OpKind, SignedOp};
+    use pubky_dispatch_core::records::AppCert;
 
     let w = World::new();
     let mut bob = Box::pin(shop(&w)).await;
@@ -15094,7 +15107,7 @@ async fn test_pending_unanswered_acceptance_after_restore_observes_the_original_
     let view = alice.allowance(&pending).await.unwrap();
     let target = |c: Collection| {
         RecordTarget::new(
-            SwitchCollection::new(c.name(), c.fixed_policy()),
+            DispatchCollection::new(c.name(), c.fixed_policy()),
             &paykit_lib::derive::natural_key::allowance(&w.bob_id(), &view.allowance_id),
         )
     };
@@ -15108,7 +15121,7 @@ async fn test_pending_unanswered_acceptance_after_restore_observes_the_original_
         .unwrap();
     w.alice
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::LoseAnswer {
+        .fail_next(pubky_dispatch_client::testing::Fault::LoseAnswer {
             path: "/ops".into(),
         });
     let original = alice
@@ -15131,7 +15144,7 @@ async fn test_pending_unanswered_acceptance_after_restore_observes_the_original_
     assert!(restored.app().kept_batch(batch).await.unwrap().is_none());
     assert!(matches!(
         restored.app_mut().flush_message(&original).await.unwrap(),
-        Some(pubky_switch_client::app::Delivery::Accepted { .. })
+        Some(pubky_dispatch_client::app::Delivery::Accepted { .. })
     ));
     let collections = [
         Collection::Allowances,
@@ -15158,14 +15171,14 @@ async fn test_pending_unanswered_acceptance_after_restore_observes_the_original_
     }
     let held = Box::pin(original_approval(&restored, &pending)).await;
     assert_eq!(
-        serde_json::from_value::<pubky_switch_client::app::KeptOp>(
+        serde_json::from_value::<pubky_dispatch_client::app::KeptOp>(
             held["opening"]["selected"].clone()
         )
         .unwrap(),
         selected
     );
     assert_eq!(held["confirmed_for_execution"], true);
-    let local: [pubky_switch_client::app::KeptOp; 3] =
+    let local: [pubky_dispatch_client::app::KeptOp; 3] =
         serde_json::from_value(held["opening"]["applied"].clone()).unwrap();
     let own = restored.identity();
     let app_id = restored.app_id();
@@ -15323,7 +15336,7 @@ async fn test_pending_reply_allower_proposer_creates_one_ledger_for_the_original
 
 #[tokio::test]
 async fn test_pending_rejection_delivers_from_its_applied_delete() {
-    use pubky_switch_client::app::RecordContent;
+    use pubky_dispatch_client::app::RecordContent;
     let w = World::new();
     let mut bob = Box::pin(shop(&w)).await;
     let mut alice = Box::pin(alice_app(
@@ -15349,7 +15362,7 @@ async fn test_pending_rejection_delivers_from_its_applied_delete() {
     let msg_id = alice.reject_allowance(&canonical).await.unwrap();
     assert!(matches!(
         alice.app().delivery(&msg_id).await.unwrap(),
-        Some(pubky_switch_client::app::Delivery::Accepted { .. })
+        Some(pubky_dispatch_client::app::Delivery::Accepted { .. })
     ));
     assert_eq!(
         alice
@@ -15393,7 +15406,7 @@ async fn test_pending_rejection_delivers_from_its_applied_delete() {
 #[tokio::test]
 async fn test_pending_rejection_waits_when_the_second_record_cannot_be_read() {
     use paykit_lib::collections::Collection;
-    use pubky_switch_client::app::{Collection as SwitchCollection, Delivery, RecordTarget};
+    use pubky_dispatch_client::app::{Collection as DispatchCollection, Delivery, RecordTarget};
     let w = World::new();
     let mut bob = Box::pin(shop(&w)).await;
     let mut alice = Box::pin(wallet(&w)).await;
@@ -15401,15 +15414,15 @@ async fn test_pending_rejection_waits_when_the_second_record_cannot_be_read() {
     let view = alice.allowance(&pending).await.unwrap();
     let permanent = Collection::Allowances;
     let target = RecordTarget::new(
-        SwitchCollection::new(permanent.name(), permanent.fixed_policy()),
+        DispatchCollection::new(permanent.name(), permanent.fixed_policy()),
         &paykit_lib::derive::natural_key::allowance(&w.bob_id(), &view.allowance_id),
     );
     let key = alice.app().record_key(&target).unwrap();
     // The preparation reads the permanent key once. Its next GET belongs to delivery.
     w.alice
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::Unreachable {
-            path: format!("records/{}", pubky_switch_core::enc::b64(&key)),
+        .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
+            path: format!("records/{}", pubky_dispatch_core::enc::b64(&key)),
             after: 1,
         });
     let reply = alice.reject_allowance(&pending).await.unwrap();
@@ -15434,7 +15447,7 @@ async fn test_pending_rejection_waits_when_the_second_record_cannot_be_read() {
 
 #[tokio::test]
 async fn test_pending_competing_proposal_retries_its_original_parked_entry_after_reload() {
-    use pubky_switch_client::app::ParkReason;
+    use pubky_dispatch_client::app::ParkReason;
     use std::sync::Arc;
 
     let w = World::new();
@@ -15506,7 +15519,7 @@ async fn test_pending_competing_proposal_retries_its_original_parked_entry_after
     assert_eq!(note["generation"], parked.generation);
     assert_eq!(
         note["plaintext"],
-        pubky_switch_core::enc::b64(&parked.plaintext.encode())
+        pubky_dispatch_core::enc::b64(&parked.plaintext.encode())
     );
     assert!(matches!(
         refusal(&reopened.reject_allowance(&canonical).await.unwrap_err()),
@@ -15528,7 +15541,7 @@ async fn test_pending_competing_proposal_retries_its_original_parked_entry_after
 /// The backup predates a deletion read by every then-enrolled app. A new
 /// installation sees the service's current absence but did not witness the delete.
 async fn restored_competitor_without_original(full: bool) {
-    use pubky_switch_client::app::{KeptReason, RecordRead};
+    use pubky_dispatch_client::app::{KeptReason, RecordRead};
 
     let w = World::new();
     let mut shop = Box::pin(shop(&w)).await;
@@ -15551,7 +15564,7 @@ async fn restored_competitor_without_original(full: bool) {
     assert_eq!(owed.len(), 1);
     assert!(owed[0]
         .0
-        .ends_with(pubky_switch_core::enc::b64(&physical).as_bytes()));
+        .ends_with(pubky_dispatch_core::enc::b64(&physical).as_bytes()));
     let bytes: Value = serde_json::from_slice(&owed[0].1).unwrap();
     assert!(bytes["d"]["source"]["version"].as_u64().is_some());
     let backup = wallet.backup().await.unwrap();
@@ -15685,7 +15698,7 @@ async fn unsubmitted_answer(
 }
 
 async fn prepared_answer(wallet: &Paykit) -> (String, [u8; 32]) {
-    use pubky_switch_core::{enc::unb64, message::MessagePlaintext};
+    use pubky_dispatch_core::{enc::unb64, message::MessagePlaintext};
     let prepared = wallet.app().protocol_scan("paykit", b"ap/").await.unwrap();
     let [(_, bytes)] = prepared.as_slice() else {
         panic!("one prepared answer")
@@ -15701,7 +15714,7 @@ async fn prepared_answer(wallet: &Paykit) -> (String, [u8; 32]) {
 }
 
 async fn resume_prepared_answer(withdraw: bool, restore_older: bool) {
-    use pubky_switch_client::app::{Delivery, RecordContent};
+    use pubky_dispatch_client::app::{Delivery, RecordContent};
     use std::sync::Arc;
 
     let w = World::new();
@@ -15844,7 +15857,7 @@ async fn test_prepared_allowance_withdrawal_survives_an_older_in_place_import() 
 /// The same explicit decision can continue on renewal, but it cannot delete a later
 /// incarnation created after an enrolled sibling closed the selected original.
 async fn prepared_answer_after_change(withdraw: bool, renew_certificate: bool) {
-    use pubky_switch_client::app::Delivery;
+    use pubky_dispatch_client::app::Delivery;
     use std::sync::Arc;
 
     let w = World::new();
@@ -15894,13 +15907,13 @@ async fn prepared_answer_after_change(withdraw: bool, renew_certificate: bool) {
         Box::pin(delete_pending_record(&w, pending.allowance_id())).await;
         let deleted = payer.app_mut().read_record_fresh(&target).await.unwrap();
         assert!(
-            matches!(deleted,pubky_switch_client::app::RecordRead::Fresh(ref r) if r.content==pubky_switch_client::app::RecordContent::Deleted && r.authenticated && !r.divergent)
+            matches!(deleted,pubky_dispatch_client::app::RecordRead::Fresh(ref r) if r.content==pubky_dispatch_client::app::RecordContent::Deleted && r.authenticated && !r.divergent)
         );
         assert!(payer
             .app()
             .protocol_get(
                 "paykit",
-                format!("pce/{}", pubky_switch_core::enc::b64(&key)).as_bytes()
+                format!("pce/{}", pubky_dispatch_core::enc::b64(&key)).as_bytes()
             )
             .await
             .unwrap()
@@ -15980,7 +15993,7 @@ async fn prepared_answer_after_change(withdraw: bool, renew_certificate: bool) {
         // An outstanding earlier outcome cannot release a message merely because a
         // sibling deleted the old proposal. Its original replay window still applies.
         w.clock
-            .advance_ms(pubky_switch_client::app::SENT_RETENTION_MS + 1);
+            .advance_ms(pubky_dispatch_client::app::SENT_RETENTION_MS + 1);
         payer.receive(None).await.unwrap();
         assert!(payer
             .app()
@@ -16024,9 +16037,9 @@ async fn test_allowances_end_and_executor_notice_wait_under_a_renewal_paykit_ref
     // The executor notice's first try fails, and it is held from then on.
     w.alice
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::Error {
+        .fail_next(pubky_dispatch_client::testing::Fault::Error {
             path: "/inbox".into(),
-            code: pubky_switch_core::http::ErrorCode::Unavailable,
+            code: pubky_dispatch_core::http::ErrorCode::Unavailable,
             current: Value::Null,
         });
     wallet.end_allowance(&mine).await.unwrap();

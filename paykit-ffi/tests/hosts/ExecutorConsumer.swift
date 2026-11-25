@@ -1,9 +1,9 @@
 import Foundation
 import Paykit
 
-/// This account has never dispatched a payment (Paykit spec 8.3).
+/// This account has never handed off a payment (Paykit spec 8.3).
 private final class EmptyExecutorAccount: ReceiptReader, @unchecked Sendable {
-    override func allowanceHistory(payer: Data) async throws -> [MethodDispatch]? { [] }
+    override func allowanceHistory(payer: Data) async throws -> [MethodHandoff]? { [] }
 }
 
 private func checkExecutorCheckout(

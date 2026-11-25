@@ -1,14 +1,14 @@
 //! The world the flow tests run in: two identities, alice (the payer) and bob (the payee),
-//! each with its own signer and its own scripted switch at an origin of its own
+//! each with its own signer and its own scripted Dispatch at an origin of its own
 //! ([`TestSigner::at`]), routed by the client's [`Router`], Paykit apps joined from
 //! approvals, and a fake rail.
 //!
-//! Each switch answers the other identity's apps as a sender sees it: admission by the
+//! Each Dispatch answers the other identity's apps as a sender sees it: admission by the
 //! lists and invite codes, the directory, peer copies of `identity.json` and the inbox. The
 //! identities admit each other as real apps do: a payer invites the payee it buys from (a
 //! conversation it starts, as at a checkout), and the first message an app sends a
 //! counterparty writes its reply grant, so the counterparty's replies are admitted
-//! (Paykit spec 1, Switch spec 7).
+//! (Paykit spec 1, Dispatch spec 7).
 
 use std::sync::Arc;
 
@@ -19,18 +19,18 @@ use paykit_lib::{
 use paykit_lib::{Label, PaymentReference};
 use paykit_sdk::rail::FakeRail;
 use paykit_sdk::{AppScopes, Paykit, PaykitConfig, RequestDraft, RequestRef, RequestedScopes};
-use pubky_switch_client::clock::{Clock, TestClock};
-use pubky_switch_client::store::{MemoryStore, StateStore};
-use pubky_switch_client::testing::{
+use pubky_dispatch_client::clock::{Clock, TestClock};
+use pubky_dispatch_client::store::{MemoryStore, StateStore};
+use pubky_dispatch_client::testing::{
     AppSpec, ProtocolSpec, Router, Seeds, TestHomeserver, TestIdentity, TestSigner, START_MS,
 };
-use pubky_switch_client::transport::Transport;
-use pubky_switch_core::ops::OpKind;
+use pubky_dispatch_client::transport::Transport;
+use pubky_dispatch_core::ops::OpKind;
 use serde_json::Value;
 
 /// Deliver the first collection page of each bounded read from before a newer directory.
 pub fn delay_listing_pages(signer: &TestSigner, earlier: u64) {
-    use pubky_switch_client::app::{Protocol, LISTING_PAGES_PER_READ};
+    use pubky_dispatch_client::app::{Protocol, LISTING_PAGES_PER_READ};
     assert!(signer.switch().tip_seq() > earlier);
     let reads = paykit_sdk::PaykitProtocol::new()
         .collections()
@@ -39,7 +39,7 @@ pub fn delay_listing_pages(signer: &TestSigner, earlier: u64) {
     for _ in 0..reads {
         signer
             .switch()
-            .fail_next(pubky_switch_client::testing::Fault::Head {
+            .fail_next(pubky_dispatch_client::testing::Fault::Head {
                 path: "records?collection".into(),
                 at: Some(earlier),
                 forked: false,
@@ -64,17 +64,17 @@ pub async fn finish_listing(wallet: &mut Paykit) {
     panic!("the test wallet's listing did not finish");
 }
 
-/// Enroll a wallet with its own identity, Switch and signer, using the given app store.
+/// Enroll a wallet with its own identity, Dispatch and signer, using the given app store.
 pub async fn enrolled_wallet(
-    world: &pubky_switch_harness::World,
+    world: &pubky_dispatch_harness::World,
     name: &str,
     scopes: RequestedScopes,
     config: PaykitConfig,
     rail: &Arc<FakeRail>,
     storage: Arc<dyn StateStore>,
 ) -> Result<Paykit, Box<dyn std::error::Error>> {
-    use pubky_switch_harness::parties::Asking;
-    use pubky_switch_signer::{Protocols, Signer};
+    use pubky_dispatch_harness::parties::Asking;
+    use pubky_dispatch_signer::{Protocols, Signer};
 
     let identity = world.identity(name)?;
     let origin = format!("https://{name}.public.test");
@@ -129,11 +129,11 @@ pub async fn receive_message(wallet: &mut Paykit, msg_id: &str) {
 
 pub const HOUR_MS: u64 = 3_600_000;
 
-/// Where alice's switch is.
+/// Where alice's Dispatch is.
 pub const ALICE_ORIGIN: &str = "https://alice-switch.example";
-/// Where bob's switch is.
+/// Where bob's Dispatch is.
 pub const BOB_ORIGIN: &str = "https://bob-switch.example";
-/// Where carol's switch is.
+/// Where carol's Dispatch is.
 pub const CAROL_ORIGIN: &str = "https://carol-switch.example";
 
 /// Every scope Paykit gives keys to, for the signers' approvals.
@@ -156,7 +156,7 @@ pub fn spec() -> ProtocolSpec {
     }
 }
 
-/// Alice, bob, carol, their switches, the Homeserver, the clock and the rail. Carol is a
+/// Alice, bob, carol, their Dispatches, the Homeserver, the clock and the rail. Carol is a
 /// third party to alice's and bob's activity, with no app of her own until a test joins one.
 pub struct World {
     pub clock: Arc<TestClock>,
@@ -177,7 +177,7 @@ pub struct TestTimer {
 }
 
 impl paykit_sdk::Timer for TestTimer {
-    fn sleep(&self, ms: u64) -> pubky_switch_client::transport::BoxFuture<'static, ()> {
+    fn sleep(&self, ms: u64) -> pubky_dispatch_client::transport::BoxFuture<'static, ()> {
         self.clock.advance_ms(ms);
         Box::pin(async {})
     }
@@ -245,10 +245,10 @@ impl World {
     pub async fn bob_directory_version(
         &self,
         wallet: &mut Paykit,
-    ) -> pubky_switch_core::records::IdentityDoc {
+    ) -> pubky_dispatch_core::records::IdentityDoc {
         use paykit_lib::bodies::PrivatePaymentListRequest;
-        use pubky_switch_core::message::{Message, Sender};
-        use pubky_switch_core::records::IdentityDoc;
+        use pubky_dispatch_core::message::{Message, Sender};
+        use pubky_dispatch_core::records::IdentityDoc;
         let mut body = self.bob.body();
         body.version += 1;
         let higher = IdentityDoc::sign(self.bob.identity().key(), body).unwrap();
@@ -289,7 +289,7 @@ impl World {
         signer: &TestSigner,
         name: &str,
         scopes: &RequestedScopes,
-    ) -> pubky_switch_client::app::JoinRequest {
+    ) -> pubky_dispatch_client::app::JoinRequest {
         let keys = signer.identity().app_keys(name);
         let app = AppSpec::new(&scopes.scopes.iter().map(String::as_str).collect::<Vec<_>>())
             .with_permissions(&scopes.permissions);
@@ -301,7 +301,7 @@ impl World {
         &self,
         signer: &TestSigner,
         store: Arc<dyn StateStore>,
-    ) -> pubky_switch_client::app::AppEnv {
+    ) -> pubky_dispatch_client::app::AppEnv {
         signer.env_with(store, Arc::clone(&self.router) as Arc<dyn Transport>)
     }
 
@@ -347,8 +347,8 @@ impl World {
     }
 
     /// A device clock of its own, at `ms`, for an app loaded with [`World::load_on_clock`]:
-    /// the way to model a device clock that is wrong. The world's clock is the switches'
-    /// service time, so moving it back makes every switch answer earlier than it did before,
+    /// the way to model a device clock that is wrong. The world's clock is the Dispatches'
+    /// service time, so moving it back makes every Dispatch answer earlier than it did before,
     /// which the client takes as the service's clock going backwards; a wrong device clock
     /// moves this one instead.
     pub fn device_clock(&self, ms: u64) -> Arc<TestClock> {
@@ -356,7 +356,7 @@ impl World {
     }
 
     /// Load app `app_id` of `signer` from `store`, its device clock `clock` instead of the
-    /// world's, which the switches keep.
+    /// world's, which the Dispatches keep.
     pub async fn load_on_clock(
         &self,
         signer: &TestSigner,
@@ -450,7 +450,7 @@ impl World {
 }
 
 /// A config whose attempts carry a day as `orphan_after`, for the scenarios that repeat a
-/// dispatch hours after it: the default for the fake rail, its hour plus the pre-dispatch
+/// handoff hours after it: the default for the fake rail, its hour plus the pre-handoff
 /// budget, would have them orphaned by then.
 pub fn day_window() -> PaykitConfig {
     PaykitConfig::default().with_orphan_after_s(86_400)
@@ -481,13 +481,13 @@ pub struct FailingRecordReads {
 impl FailingRecordReads {
     pub fn limit_next_record(&self, key: &[u8; 32]) {
         *self.limited_key.lock().unwrap() =
-            Some(format!("rec/{}", pubky_switch_core::enc::b64(key)));
+            Some(format!("rec/{}", pubky_dispatch_core::enc::b64(key)));
     }
 
     /// Hold or release repeated reads of the same local record.
     pub fn cap_record(&self, key: Option<&[u8; 32]>) {
         *self.capped_record.lock().unwrap() =
-            key.map(|key| format!("rec/{}", pubky_switch_core::enc::b64(key)));
+            key.map(|key| format!("rec/{}", pubky_dispatch_core::enc::b64(key)));
     }
 
     pub fn limit_next_cursor_time(&self) {
@@ -530,7 +530,7 @@ impl StateStore for FailingRecordReads {
         &self,
         ns: &str,
         key: &[u8],
-    ) -> Result<Option<Vec<u8>>, pubky_switch_client::error::StoreError> {
+    ) -> Result<Option<Vec<u8>>, pubky_dispatch_client::error::StoreError> {
         let mut limited = self.limited_key.lock().unwrap();
         let once = limited.as_deref().map(str::as_bytes) == Some(key);
         let capped = self
@@ -546,7 +546,7 @@ impl StateStore for FailingRecordReads {
                     *limited = None;
                 }
                 let size = u64::try_from(stored.len()).unwrap();
-                return Err(pubky_switch_client::error::StoreError::TooLarge {
+                return Err(pubky_dispatch_client::error::StoreError::TooLarge {
                     size,
                     cap: size.saturating_sub(1),
                 });
@@ -562,14 +562,14 @@ impl StateStore for FailingRecordReads {
         }
         if key.starts_with(b"rec/") {
             if self.armed.load(std::sync::atomic::Ordering::SeqCst) {
-                return Err(pubky_switch_client::error::StoreError::Unavailable);
+                return Err(pubky_dispatch_client::error::StoreError::Unavailable);
             }
             let left = self.countdown.load(std::sync::atomic::Ordering::SeqCst);
             if left > 0 {
                 self.countdown
                     .store(left - 1, std::sync::atomic::Ordering::SeqCst);
                 if left == 1 {
-                    return Err(pubky_switch_client::error::StoreError::Unavailable);
+                    return Err(pubky_dispatch_client::error::StoreError::Unavailable);
                 }
             }
         }
@@ -582,23 +582,23 @@ impl StateStore for FailingRecordReads {
         prefix: &[u8],
         after: Option<&[u8]>,
         limit: u32,
-    ) -> Result<Vec<pubky_switch_client::store::KeyValue>, pubky_switch_client::error::StoreError>
+    ) -> Result<Vec<pubky_dispatch_client::store::KeyValue>, pubky_dispatch_client::error::StoreError>
     {
         if prefix.starts_with(b"rec/") && self.scans_armed.load(std::sync::atomic::Ordering::SeqCst)
         {
-            return Err(pubky_switch_client::error::StoreError::Unavailable);
+            return Err(pubky_dispatch_client::error::StoreError::Unavailable);
         }
         self.inner.scan(ns, prefix, after, limit)
     }
 
     fn commit(
         &self,
-        batch: pubky_switch_client::store::WriteBatch,
-    ) -> Result<(), pubky_switch_client::error::StoreError> {
+        batch: pubky_dispatch_client::store::WriteBatch,
+    ) -> Result<(), pubky_dispatch_client::error::StoreError> {
         self.commit_with(batch, |batch| {
             self.inner
                 .commit(batch)
-                .map(|()| pubky_switch_client::store::CommitOutcome::Applied)
+                .map(|()| pubky_dispatch_client::store::CommitOutcome::Applied)
         })
         .map(|_| ())
     }
@@ -606,18 +606,20 @@ impl StateStore for FailingRecordReads {
     fn acquire(
         &self,
         ns: &str,
-        owner: pubky_switch_client::store::StoreOwner,
-    ) -> Result<pubky_switch_client::store::AcquireOutcome, pubky_switch_client::error::StoreError>
-    {
+        owner: pubky_dispatch_client::store::StoreOwner,
+    ) -> Result<
+        pubky_dispatch_client::store::AcquireOutcome,
+        pubky_dispatch_client::error::StoreError,
+    > {
         self.inner.acquire(ns, owner)
     }
 
     fn commit_if(
         &self,
         ns: &str,
-        owner: pubky_switch_client::store::StoreOwner,
-        batch: pubky_switch_client::store::WriteBatch,
-    ) -> Result<pubky_switch_client::store::CommitOutcome, pubky_switch_client::error::StoreError>
+        owner: pubky_dispatch_client::store::StoreOwner,
+        batch: pubky_dispatch_client::store::WriteBatch,
+    ) -> Result<pubky_dispatch_client::store::CommitOutcome, pubky_dispatch_client::error::StoreError>
     {
         self.commit_with(batch, |batch| self.inner.commit_if(ns, owner, batch))
     }
@@ -625,21 +627,21 @@ impl StateStore for FailingRecordReads {
 impl FailingRecordReads {
     fn commit_with(
         &self,
-        batch: pubky_switch_client::store::WriteBatch,
+        batch: pubky_dispatch_client::store::WriteBatch,
         apply: impl FnOnce(
-            pubky_switch_client::store::WriteBatch,
+            pubky_dispatch_client::store::WriteBatch,
         ) -> Result<
-            pubky_switch_client::store::CommitOutcome,
-            pubky_switch_client::error::StoreError,
+            pubky_dispatch_client::store::CommitOutcome,
+            pubky_dispatch_client::error::StoreError,
         >,
-    ) -> Result<pubky_switch_client::store::CommitOutcome, pubky_switch_client::error::StoreError>
+    ) -> Result<pubky_dispatch_client::store::CommitOutcome, pubky_dispatch_client::error::StoreError>
     {
         apply(batch)
     }
 }
 
-/// A store that shows the app's copy of the lists (Switch wire 7.4.6) as a test sets it:
-/// senders flagged, which the scripted switch never flags (its `FAKES.md`), a copy not
+/// A store that shows the app's copy of the lists (Dispatch wire 7.4.6) as a test sets it:
+/// senders flagged, which the scripted Dispatch never flags (its `FAKES.md`), a copy not
 /// known to be complete, as after a restore, and reads of the deny list that fail. It
 /// answers the client's own list keys (`lc/flag/<pubky>`, `lc/lists_at`, `lc/deny/<pubky>`)
 /// in place of the copy it holds, and a flagged sender in the copy of the flagged senders
@@ -661,7 +663,7 @@ pub struct ListsStore {
 impl ListsStore {
     /// Show `pubky` among the flagged senders of the last `GET /allow`.
     pub fn flag(&self, pubky: &[u8; 32]) {
-        let key = format!("lc/flag/{}", pubky_switch_core::enc::pubky_id(pubky));
+        let key = format!("lc/flag/{}", pubky_dispatch_core::enc::pubky_id(pubky));
         self.flagged.lock().unwrap().push(key.into_bytes());
         self.flagged_senders.lock().unwrap().push(*pubky);
     }
@@ -675,7 +677,7 @@ impl ListsStore {
 
     /// Show `pubky` no longer flagged.
     pub fn unflag(&self, pubky: &[u8; 32]) {
-        let key = format!("lc/flag/{}", pubky_switch_core::enc::pubky_id(pubky));
+        let key = format!("lc/flag/{}", pubky_dispatch_core::enc::pubky_id(pubky));
         self.flagged
             .lock()
             .unwrap()
@@ -706,7 +708,7 @@ impl StateStore for ListsStore {
         &self,
         ns: &str,
         key: &[u8],
-    ) -> Result<Option<Vec<u8>>, pubky_switch_client::error::StoreError> {
+    ) -> Result<Option<Vec<u8>>, pubky_dispatch_client::error::StoreError> {
         if self.unknown.load(std::sync::atomic::Ordering::SeqCst) && key == b"lc/lists_at" {
             self.missing_list_reads
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -717,13 +719,13 @@ impl StateStore for ListsStore {
                 .pending_unblocks_unreadable
                 .load(std::sync::atomic::Ordering::SeqCst)
         {
-            return Err(pubky_switch_client::error::StoreError::Unavailable);
+            return Err(pubky_dispatch_client::error::StoreError::Unavailable);
         }
         if self.deny_fails.load(std::sync::atomic::Ordering::SeqCst) && key.starts_with(b"lc/deny/")
         {
             self.failed_deny_reads
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            return Err(pubky_switch_client::error::StoreError::Unavailable);
+            return Err(pubky_dispatch_client::error::StoreError::Unavailable);
         }
         if self.flagged.lock().unwrap().iter().any(|k| k == key) {
             return Ok(Some(Vec::new()));
@@ -758,19 +760,19 @@ impl StateStore for ListsStore {
         prefix: &[u8],
         after: Option<&[u8]>,
         limit: u32,
-    ) -> Result<Vec<pubky_switch_client::store::KeyValue>, pubky_switch_client::error::StoreError>
+    ) -> Result<Vec<pubky_dispatch_client::store::KeyValue>, pubky_dispatch_client::error::StoreError>
     {
         self.inner.scan(ns, prefix, after, limit)
     }
 
     fn commit(
         &self,
-        batch: pubky_switch_client::store::WriteBatch,
-    ) -> Result<(), pubky_switch_client::error::StoreError> {
+        batch: pubky_dispatch_client::store::WriteBatch,
+    ) -> Result<(), pubky_dispatch_client::error::StoreError> {
         self.commit_with(batch, |batch| {
             self.inner
                 .commit(batch)
-                .map(|()| pubky_switch_client::store::CommitOutcome::Applied)
+                .map(|()| pubky_dispatch_client::store::CommitOutcome::Applied)
         })
         .map(|_| ())
     }
@@ -778,18 +780,20 @@ impl StateStore for ListsStore {
     fn acquire(
         &self,
         ns: &str,
-        owner: pubky_switch_client::store::StoreOwner,
-    ) -> Result<pubky_switch_client::store::AcquireOutcome, pubky_switch_client::error::StoreError>
-    {
+        owner: pubky_dispatch_client::store::StoreOwner,
+    ) -> Result<
+        pubky_dispatch_client::store::AcquireOutcome,
+        pubky_dispatch_client::error::StoreError,
+    > {
         self.inner.acquire(ns, owner)
     }
 
     fn commit_if(
         &self,
         ns: &str,
-        owner: pubky_switch_client::store::StoreOwner,
-        batch: pubky_switch_client::store::WriteBatch,
-    ) -> Result<pubky_switch_client::store::CommitOutcome, pubky_switch_client::error::StoreError>
+        owner: pubky_dispatch_client::store::StoreOwner,
+        batch: pubky_dispatch_client::store::WriteBatch,
+    ) -> Result<pubky_dispatch_client::store::CommitOutcome, pubky_dispatch_client::error::StoreError>
     {
         self.commit_with(batch, |batch| self.inner.commit_if(ns, owner, batch))
     }
@@ -797,14 +801,14 @@ impl StateStore for ListsStore {
 impl ListsStore {
     fn commit_with(
         &self,
-        batch: pubky_switch_client::store::WriteBatch,
+        batch: pubky_dispatch_client::store::WriteBatch,
         apply: impl FnOnce(
-            pubky_switch_client::store::WriteBatch,
+            pubky_dispatch_client::store::WriteBatch,
         ) -> Result<
-            pubky_switch_client::store::CommitOutcome,
-            pubky_switch_client::error::StoreError,
+            pubky_dispatch_client::store::CommitOutcome,
+            pubky_dispatch_client::error::StoreError,
         >,
-    ) -> Result<pubky_switch_client::store::CommitOutcome, pubky_switch_client::error::StoreError>
+    ) -> Result<pubky_dispatch_client::store::CommitOutcome, pubky_dispatch_client::error::StoreError>
     {
         apply(batch)
     }
@@ -845,7 +849,7 @@ pub async fn request_from(shop: &mut Paykit, alice: [u8; 32], draft: RequestDraf
 
 impl World {
     /// A message of `kind` with `body` and `refs` from `signer`'s app `app`, entered into the
-    /// switch of `to` for its apps `targets`, as if its inbox had accepted it. Returns the
+    /// Dispatch of `to` for its apps `targets`, as if its inbox had accepted it. Returns the
     /// `msg_id`.
     // A test fixture naming the sender, the recipient and the message in full.
     #[allow(clippy::too_many_arguments)]
@@ -861,9 +865,9 @@ impl World {
     ) -> String {
         let keys = signer.identity().app_keys(app);
         let cert = signer.switch().app(&keys.app_id_bytes()).cert.unwrap();
-        let message = pubky_switch_core::message::Message::new(
+        let message = pubky_dispatch_core::message::Message::new(
             kind,
-            pubky_switch_core::message::Sender::of_app(signer.identity().public(), &keys),
+            pubky_dispatch_core::message::Sender::of_app(signer.identity().public(), &keys),
             to.identity().public(),
             self.clock.now_ms(),
             refs,
@@ -887,11 +891,11 @@ impl World {
         kind: &str,
         refs: Vec<[u8; 32]>,
         body: serde_json::Map<String, Value>,
-    ) -> pubky_switch_core::message::MessagePlaintext {
+    ) -> pubky_dispatch_core::message::MessagePlaintext {
         let keys = signer.identity().app_keys(app);
-        let message = pubky_switch_core::message::Message::new(
+        let message = pubky_dispatch_core::message::Message::new(
             kind,
-            pubky_switch_core::message::Sender::of_app(signer.identity().public(), &keys),
+            pubky_dispatch_core::message::Sender::of_app(signer.identity().public(), &keys),
             to.identity().public(),
             self.clock.now_ms(),
             refs,
@@ -901,7 +905,7 @@ impl World {
         message.sign(&keys).unwrap()
     }
 
-    /// Enter `plaintext`, signed by `signer`'s app `app`, into the switch of `to` for its apps
+    /// Enter `plaintext`, signed by `signer`'s app `app`, into the Dispatch of `to` for its apps
     /// `targets`, as if its inbox had accepted it now.
     pub fn deliver(
         &self,
@@ -909,7 +913,7 @@ impl World {
         app: &str,
         to: &TestSigner,
         targets: &[[u8; 16]],
-        plaintext: &pubky_switch_core::message::MessagePlaintext,
+        plaintext: &pubky_dispatch_core::message::MessagePlaintext,
     ) {
         let keys = signer.identity().app_keys(app);
         let cert = signer.switch().app(&keys.app_id_bytes()).cert.unwrap();
@@ -920,7 +924,7 @@ impl World {
 
     /// Bob's `shop` sends alice's apps `targets` a Private Payment List of `version`, with a
     /// single-use on-chain endpoint and a reusable Lightning offer, for 30 days. Bob shares
-    /// his list with alice, a conversation he starts: his switch admits her proofs.
+    /// his list with alice, a conversation he starts: his Dispatch admits her proofs.
     pub async fn list_to_alice(
         &self,
         shop: &mut Paykit,
@@ -977,7 +981,7 @@ impl World {
         )
     }
 
-    /// How many record writes `signer`'s switch applied to the record `key`.
+    /// How many record writes `signer`'s Dispatch applied to the record `key`.
     pub fn record_writes(&self, signer: &TestSigner, key: &[u8; 32]) -> usize {
         signer
             .switch()
@@ -1015,18 +1019,18 @@ impl ScriptedIdentityReads {
     }
 }
 
-impl pubky_switch_client::app::HomeserverReader for ScriptedIdentityReads {
+impl pubky_dispatch_client::app::HomeserverReader for ScriptedIdentityReads {
     fn get(
         &self,
         identity: [u8; 32],
         path: String,
-    ) -> pubky_switch_client::transport::BoxFuture<
+    ) -> pubky_dispatch_client::transport::BoxFuture<
         '_,
-        Result<Option<Vec<u8>>, pubky_switch_client::error::TransportError>,
+        Result<Option<Vec<u8>>, pubky_dispatch_client::error::TransportError>,
     > {
         let step = {
             let mut steps = self.steps.lock().unwrap();
-            let due = path == pubky_switch_core::records::IDENTITY_PATH
+            let due = path == pubky_dispatch_core::records::IDENTITY_PATH
                 && steps.front().is_some_and(|(who, _, _)| *who == identity);
             if due {
                 steps.pop_front()
@@ -1038,7 +1042,7 @@ impl pubky_switch_client::app::HomeserverReader for ScriptedIdentityReads {
             self.clock.advance_ms(delay_ms);
             if fails {
                 return Box::pin(async {
-                    Err(pubky_switch_client::error::TransportError::Connect(
+                    Err(pubky_dispatch_client::error::TransportError::Connect(
                         "slow, then failed".into(),
                     ))
                 });
@@ -1055,7 +1059,7 @@ impl World {
         signer: &TestSigner,
         store: Arc<dyn StateStore>,
         app_id: [u8; 16],
-        homeserver: Arc<dyn pubky_switch_client::app::HomeserverReader>,
+        homeserver: Arc<dyn pubky_dispatch_client::app::HomeserverReader>,
     ) -> Paykit {
         let mut env = self.env(signer, store);
         env.homeserver = homeserver;
@@ -1106,12 +1110,12 @@ impl ReadHook {
 impl Transport for ReadHook {
     fn send(
         &self,
-        request: pubky_switch_client::transport::Request,
-    ) -> pubky_switch_client::transport::BoxFuture<
+        request: pubky_dispatch_client::transport::Request,
+    ) -> pubky_dispatch_client::transport::BoxFuture<
         '_,
         Result<
-            pubky_switch_client::transport::Response,
-            pubky_switch_client::error::TransportError,
+            pubky_dispatch_client::transport::Response,
+            pubky_dispatch_client::error::TransportError,
         >,
     > {
         let hook = {
@@ -1137,9 +1141,9 @@ impl Transport for ReadHook {
     }
 }
 
-/// A transport whose public reads of one switch's `identity.json` hang while held: a slow
-/// switch. Every other request goes through the world's router.
-pub struct SlowSwitch {
+/// A transport whose public reads of one Dispatch's `identity.json` hang while held: a slow
+/// dispatch. Every other request goes through the world's router.
+pub struct SlowDispatch {
     pub inner: Arc<Router>,
     pub origin: String,
     held: std::sync::atomic::AtomicBool,
@@ -1148,7 +1152,7 @@ pub struct SlowSwitch {
     answer_delay: std::sync::Mutex<Option<(Arc<TestClock>, u64)>>,
 }
 
-impl SlowSwitch {
+impl SlowDispatch {
     pub fn new(inner: Arc<Router>, origin: &str) -> Self {
         Self {
             inner,
@@ -1159,7 +1163,7 @@ impl SlowSwitch {
         }
     }
 
-    /// Whether a public identity read is waiting on this switch.
+    /// Whether a public identity read is waiting on this dispatch.
     pub fn has_waiter(&self) -> bool {
         !self.wakers.lock().unwrap().is_empty()
     }
@@ -1169,7 +1173,7 @@ impl SlowSwitch {
         *self.answer_delay.lock().unwrap() = Some((clock, ms));
     }
 
-    /// The switch answers from now on, the reads held included.
+    /// The Dispatch answers from now on, the reads held included.
     pub fn release(&self) {
         self.held.store(false, std::sync::atomic::Ordering::SeqCst);
         for waker in self.wakers.lock().unwrap().drain(..) {
@@ -1178,15 +1182,15 @@ impl SlowSwitch {
     }
 }
 
-impl Transport for SlowSwitch {
+impl Transport for SlowDispatch {
     fn send(
         &self,
-        request: pubky_switch_client::transport::Request,
-    ) -> pubky_switch_client::transport::BoxFuture<
+        request: pubky_dispatch_client::transport::Request,
+    ) -> pubky_dispatch_client::transport::BoxFuture<
         '_,
         Result<
-            pubky_switch_client::transport::Response,
-            pubky_switch_client::error::TransportError,
+            pubky_dispatch_client::transport::Response,
+            pubky_dispatch_client::error::TransportError,
         >,
     > {
         let slow = request.origin == self.origin
@@ -1236,12 +1240,12 @@ impl SlowOps {
 impl Transport for SlowOps {
     fn send(
         &self,
-        request: pubky_switch_client::transport::Request,
-    ) -> pubky_switch_client::transport::BoxFuture<
+        request: pubky_dispatch_client::transport::Request,
+    ) -> pubky_dispatch_client::transport::BoxFuture<
         '_,
         Result<
-            pubky_switch_client::transport::Response,
-            pubky_switch_client::error::TransportError,
+            pubky_dispatch_client::transport::Response,
+            pubky_dispatch_client::error::TransportError,
         >,
     > {
         let ops = request.method == "POST" && request.path_and_query.ends_with("/ops");
@@ -1298,7 +1302,7 @@ pub async fn asked(app: &Paykit, to: &[u8; 32]) -> Vec<(Option<u64>, Option<u64>
     sent.iter()
         .filter(|m| m.kind == "paykit.resend_request")
         .map(|m| {
-            let message = pubky_switch_core::message::Message::parse(
+            let message = pubky_dispatch_core::message::Message::parse(
                 m.plaintext.json(),
                 paykit_lib::kinds::OPAQUE_MEMBERS,
             )
@@ -1321,7 +1325,7 @@ pub async fn seed_marks(app: &mut Paykit, prefix: &str, n: usize, latest: u64) -
         let value = serde_json::json!({
             "v": 1,
             "d": {
-                "sender": pubky_switch_core::enc::b64(&sender),
+                "sender": pubky_dispatch_core::enc::b64(&sender),
                 "earliest_ms": at,
                 "latest_ms": at,
                 "due": false,
@@ -1329,8 +1333,8 @@ pub async fn seed_marks(app: &mut Paykit, prefix: &str, n: usize, latest: u64) -
                 "queued": null,
             }
         });
-        writes.push(pubky_switch_client::app::LocalWrite::Put {
-            key: format!("{prefix}{}", pubky_switch_core::enc::b64(&sender)).into_bytes(),
+        writes.push(pubky_dispatch_client::app::LocalWrite::Put {
+            key: format!("{prefix}{}", pubky_dispatch_core::enc::b64(&sender)).into_bytes(),
             value: serde_json::to_vec(&value).unwrap(),
         });
         senders.push(sender);
@@ -1351,20 +1355,20 @@ pub async fn mark_senders(app: &Paykit, prefix: &str) -> Vec<[u8; 32]> {
         .into_iter()
         .map(|(key, _)| {
             let rest = std::str::from_utf8(&key[prefix.len()..]).unwrap();
-            pubky_switch_core::enc::unb64_array::<32>(rest).unwrap()
+            pubky_dispatch_core::enc::unb64_array::<32>(rest).unwrap()
         })
         .collect()
 }
 
-/// The next `n` batches at `signer`'s switch are refused for good, `403 permission_missing`,
-/// as an effect the switch refuses whatever is sent again.
+/// The next `n` batches at `signer`'s Dispatch are refused for good, `403 permission_missing`,
+/// as an effect the Dispatch refuses whatever is sent again.
 pub fn refuse_writes(signer: &TestSigner, n: usize) {
     for _ in 0..n {
         signer
             .switch()
-            .fail_next(pubky_switch_client::testing::Fault::Error {
+            .fail_next(pubky_dispatch_client::testing::Fault::Error {
                 path: "/ops".into(),
-                code: pubky_switch_core::http::ErrorCode::PermissionMissing,
+                code: pubky_dispatch_core::http::ErrorCode::PermissionMissing,
                 current: serde_json::Value::Null,
             });
     }
@@ -1374,8 +1378,8 @@ pub fn refuse_writes(signer: &TestSigner, n: usize) {
 pub fn is_corrupt(error: &paykit_sdk::PaykitError) -> bool {
     matches!(
         error,
-        paykit_sdk::PaykitError::Client(pubky_switch_client::app::AppError::Store(
-            pubky_switch_client::error::StoreError::Corrupt
+        paykit_sdk::PaykitError::Client(pubky_dispatch_client::app::AppError::Store(
+            pubky_dispatch_client::error::StoreError::Corrupt
         ))
     )
 }
@@ -1432,17 +1436,17 @@ pub fn single_use_payload(version: paykit_lib::ListVersion) -> String {
 /// (`opq/<batch_id>`), once, applying nothing.
 #[derive(Default)]
 pub struct FailNextKeep {
-    inner: pubky_switch_client::store::MemoryStore,
+    inner: pubky_dispatch_client::store::MemoryStore,
     before: std::sync::atomic::AtomicBool,
     after: std::sync::atomic::AtomicBool,
 }
 
-impl pubky_switch_client::store::StateStore for FailNextKeep {
+impl pubky_dispatch_client::store::StateStore for FailNextKeep {
     fn get(
         &self,
         ns: &str,
         key: &[u8],
-    ) -> Result<Option<Vec<u8>>, pubky_switch_client::error::StoreError> {
+    ) -> Result<Option<Vec<u8>>, pubky_dispatch_client::error::StoreError> {
         self.inner.get(ns, key)
     }
 
@@ -1452,19 +1456,19 @@ impl pubky_switch_client::store::StateStore for FailNextKeep {
         prefix: &[u8],
         after: Option<&[u8]>,
         limit: u32,
-    ) -> Result<Vec<pubky_switch_client::store::KeyValue>, pubky_switch_client::error::StoreError>
+    ) -> Result<Vec<pubky_dispatch_client::store::KeyValue>, pubky_dispatch_client::error::StoreError>
     {
         self.inner.scan(ns, prefix, after, limit)
     }
 
     fn commit(
         &self,
-        batch: pubky_switch_client::store::WriteBatch,
-    ) -> Result<(), pubky_switch_client::error::StoreError> {
+        batch: pubky_dispatch_client::store::WriteBatch,
+    ) -> Result<(), pubky_dispatch_client::error::StoreError> {
         self.commit_with(batch, |batch| {
             self.inner
                 .commit(batch)
-                .map(|()| pubky_switch_client::store::CommitOutcome::Applied)
+                .map(|()| pubky_dispatch_client::store::CommitOutcome::Applied)
         })
         .map(|_| ())
     }
@@ -1472,18 +1476,20 @@ impl pubky_switch_client::store::StateStore for FailNextKeep {
     fn acquire(
         &self,
         ns: &str,
-        owner: pubky_switch_client::store::StoreOwner,
-    ) -> Result<pubky_switch_client::store::AcquireOutcome, pubky_switch_client::error::StoreError>
-    {
+        owner: pubky_dispatch_client::store::StoreOwner,
+    ) -> Result<
+        pubky_dispatch_client::store::AcquireOutcome,
+        pubky_dispatch_client::error::StoreError,
+    > {
         self.inner.acquire(ns, owner)
     }
 
     fn commit_if(
         &self,
         ns: &str,
-        owner: pubky_switch_client::store::StoreOwner,
-        batch: pubky_switch_client::store::WriteBatch,
-    ) -> Result<pubky_switch_client::store::CommitOutcome, pubky_switch_client::error::StoreError>
+        owner: pubky_dispatch_client::store::StoreOwner,
+        batch: pubky_dispatch_client::store::WriteBatch,
+    ) -> Result<pubky_dispatch_client::store::CommitOutcome, pubky_dispatch_client::error::StoreError>
     {
         self.commit_with(batch, |batch| self.inner.commit_if(ns, owner, batch))
     }
@@ -1497,27 +1503,27 @@ impl FailNextKeep {
     }
     fn commit_with(
         &self,
-        batch: pubky_switch_client::store::WriteBatch,
+        batch: pubky_dispatch_client::store::WriteBatch,
         apply: impl FnOnce(
-            pubky_switch_client::store::WriteBatch,
+            pubky_dispatch_client::store::WriteBatch,
         ) -> Result<
-            pubky_switch_client::store::CommitOutcome,
-            pubky_switch_client::error::StoreError,
+            pubky_dispatch_client::store::CommitOutcome,
+            pubky_dispatch_client::error::StoreError,
         >,
-    ) -> Result<pubky_switch_client::store::CommitOutcome, pubky_switch_client::error::StoreError>
+    ) -> Result<pubky_dispatch_client::store::CommitOutcome, pubky_dispatch_client::error::StoreError>
     {
-        use pubky_switch_client::store::Write;
+        use pubky_dispatch_client::store::Write;
         use std::sync::atomic::Ordering;
         let keeps = batch
             .writes()
             .iter()
             .any(|write| matches!(write, Write::Put { key, .. } if key.starts_with(b"opq/")));
         if keeps && self.before.swap(false, Ordering::SeqCst) {
-            return Err(pubky_switch_client::error::StoreError::Unavailable);
+            return Err(pubky_dispatch_client::error::StoreError::Unavailable);
         }
         let outcome = apply(batch)?;
         if keeps && self.after.swap(false, Ordering::SeqCst) {
-            return Err(pubky_switch_client::error::StoreError::Unknown);
+            return Err(pubky_dispatch_client::error::StoreError::Unknown);
         }
         Ok(outcome)
     }

@@ -3,15 +3,15 @@
 //! Paykit wire 3.2).
 //!
 //! After a restore, public mutations wait for the identity-confirmed first read, and
-//! scheduled upkeep runs only after a completed read (Switch spec 12.4).
+//! scheduled upkeep runs only after a completed read (Dispatch spec 12.4).
 //!
 //! **Publishing.** Each public endpoint is one entry of the record's `public_endpoints`, by
 //! its Payment Endpoint Identifier; [`Paykit::set_public_endpoint`],
 //! [`Paykit::remove_public_endpoint`] and [`Paykit::set_public_endpoints`] change them, and
 //! [`Paykit::own_public_endpoints`] lists the ones the app's record holds. Once a change can be signed,
-//! the Switch client keeps the new record, delivers it to the own switch with
+//! the Dispatch client keeps the new record, delivers it to the own Dispatch with
 //! `app.put` and then writes to the own Homeserver, in that order and in the same bytes
-//! (Switch spec 4.2, [`pubky_switch_client::app::App::set_protocol_member_with_expiry`]). A delivery
+//! (Dispatch spec 4.2, [`pubky_dispatch_client::app::App::set_protocol_member_with_expiry`]). A delivery
 //! or a Homeserver write that fails stays owed by the client and goes again at the next
 //! read; until then readers of the Homeserver see the record published before. The client's
 //! signed record shows the last signed endpoints. The client can also retain an unsigned
@@ -19,7 +19,7 @@
 //! nothing is issued, reserved or released for them, since a public endpoint is reusable.
 //!
 //! Only an app holding `paykit_request` itself, configured to publish its record
-//! ([`pubky_switch_client::app::AppConfig::publishes_record`]), publishes public endpoints:
+//! ([`pubky_dispatch_client::app::AppConfig::publishes_record`]), publishes public endpoints:
 //! a payment to one carries no label, so its proof reaches only the payee's apps holding
 //! `paykit_request` (Paykit spec 4, 8.4). An app that loses `paykit_request`, or stops
 //! publishing, holds no public endpoints: every record it signs from then on carries none,
@@ -41,7 +41,7 @@
 //! nothing at one without (Paykit wire 3.2). At the join and at every receive the record is
 //! brought to that list when it differs, and
 //! [`Paykit::update_own_record`] does so at once. A list the record can't carry, one that
-//! would make its `app.put` larger than the Switch's cap on a signed operation (Switch wire
+//! would make its `app.put` larger than the Dispatch's cap on a signed operation (Dispatch wire
 //! 6.1), is refused the same way wherever it is read: at the join before anything is
 //! written, and at a receive, an update or a publication before anything is signed.
 //!
@@ -57,14 +57,14 @@ use serde::{Deserialize, Serialize};
 
 use paykit_lib::app_record::{PaykitMember, PROTOCOL_NAME};
 use paykit_lib::{PaymentEndpointIdentifier, PaymentEndpointPayload};
-use pubky_switch_client::app::{
+use pubky_dispatch_client::app::{
     AppError, ProtocolRecord, Publication, RecordExpiry, Refusal as ClientRefusal,
 };
-use pubky_switch_client::error::StoreError;
-use pubky_switch_core::ops::{sign_batch, OpKind};
-use pubky_switch_core::records::{AppCert, AppRecord, AppRecordBody};
-use pubky_switch_core::sig::SignedDoc;
-use pubky_switch_core::signing::Signs;
+use pubky_dispatch_client::error::StoreError;
+use pubky_dispatch_core::ops::{sign_batch, OpKind};
+use pubky_dispatch_core::records::{AppCert, AppRecord, AppRecordBody};
+use pubky_dispatch_core::sig::SignedDoc;
+use pubky_dispatch_core::signing::Signs;
 
 use crate::error::{PaykitError, Refusal, Result};
 use crate::paykit::Paykit;
@@ -77,7 +77,7 @@ pub const MAX_OWN_PUBLIC_ENDPOINTS: usize = crate::app_records::MAX_PUBLIC_ENDPO
 
 impl Paykit {
     /// The public endpoints the app's record holds now, by Payment Endpoint Identifier: the
-    /// latest record the app signed, which the switch may not have accepted yet.
+    /// latest record the app signed, which the Dispatch may not have accepted yet.
     ///
     /// # Errors
     ///
@@ -112,7 +112,7 @@ impl Paykit {
 
     /// Stop publishing the app's public endpoint `endpoint`; one the record doesn't hold is
     /// removed already. A record is still signed when something else of it is owed: the
-    /// capabilities the payment method pays changed, or a restored record the switch never
+    /// capabilities the payment method pays changed, or a restored record the Dispatch never
     /// accepted is signed anew ([`Paykit::set_public_endpoints`]).
     ///
     /// # Errors
@@ -238,8 +238,8 @@ impl Paykit {
     /// Bring the app's record up to date now (module docs), as each receive and the join do:
     /// for a host whose payment method changed what it pays, so the record lists it at once.
     /// When the record held is already up to date, what is owed of it goes instead: its
-    /// delivery to the own switch, as after one that failed once the record was kept, and its
-    /// Homeserver write ([`pubky_switch_client::app::App::publish_record`]).
+    /// delivery to the own Dispatch, as after one that failed once the record was kept, and its
+    /// Homeserver write ([`pubky_dispatch_client::app::App::publish_record`]).
     ///
     /// Returns where the record stands on the Homeserver after the call, as
     /// [`Paykit::set_public_endpoints`] does: [`Publication::Owed`] when the Homeserver write
@@ -289,7 +289,7 @@ impl Paykit {
     /// # Errors
     ///
     /// The client's refusal, store failure, alarm or delivery error; the refusal of a
-    /// capabilities list the resolved record cannot carry (Switch wire 6.1).
+    /// capabilities list the resolved record cannot carry (Dispatch wire 6.1).
     pub(crate) async fn tend_own_record(&mut self) -> Result<Tended> {
         // Nothing is signed while the record this handle holds may not be the one stored:
         // the next load reads it again (`own_record_known`).
@@ -352,8 +352,8 @@ impl Paykit {
     /// The steps after the upkeep act under the app's standing as the read left it: its
     /// certificate, the newest own `identity.json` and a recovery notice. The client can change
     /// that standing within the upkeep and still fail it: a delivery whose answer names a later
-    /// generation reads the newer `identity.json` (Switch wire 7.1), and a conflict with a later
-    /// record of this app takes its renewal before fetching the scope keys (Switch spec 3.5).
+    /// generation reads the newer `identity.json` (Dispatch wire 7.1), and a conflict with a later
+    /// record of this app takes its renewal before fetching the scope keys (Dispatch spec 3.5).
     /// A failure after such a change ends the receive, as any failure did before, whatever it
     /// is ([`upkeep_outcome`]).
     ///
@@ -385,7 +385,7 @@ impl Paykit {
     /// Decide what this app's record changes held aside become, once the restore's first
     /// read is complete (Paykit spec 4, "Changes saved and not yet signed"): a later run of
     /// the app or a restore holds a change the client saved and didn't sign aside for its
-    /// protocol (Switch spec 4.2). A held change of Paykit's member is never signed, a
+    /// protocol (Dispatch spec 4.2). A held change of Paykit's member is never signed, a
     /// withdrawal included: it is cleared, and the host is told which public endpoints it
     /// would have withdrawn and offered or changed, from what the user's call asked
     /// ([`EndpointChange`]; [`crate::NoticeKind::PublicEndpointChangeNotPublished`]). The
@@ -461,7 +461,7 @@ impl Paykit {
             .filter(|duty| {
                 matches!(
                     duty.event,
-                    pubky_switch_client::app::AppEvent::RecordEditsHeld { .. }
+                    pubky_dispatch_client::app::AppEvent::RecordEditsHeld { .. }
                 ) && duty.owners.iter().any(|owner| owner == PROTOCOL_NAME)
             })
             .filter_map(|duty| duty.event.id())
@@ -674,7 +674,7 @@ pub(crate) fn capabilities_for(rail: &dyn Rail, pays: bool) -> Vec<PaymentEndpoi
 }
 
 /// Check the first capabilities against the approved generation and the initial
-/// record's null deadline before joining. Later changes are checked by the Switch
+/// record's null deadline before joining. Later changes are checked by the Dispatch
 /// client against the resolved record, including the other protocols' actual members.
 ///
 /// # Errors
@@ -685,8 +685,8 @@ pub(crate) fn check_join_capabilities(
     ids: &[PaymentEndpointIdentifier],
     generation: u64,
 ) -> Result<()> {
-    let refused = |error: pubky_switch_core::Error| {
-        PaykitError::from(AppError::from(pubky_switch_client::app::Refusal::Usage(
+    let refused = |error: pubky_dispatch_core::Error| {
+        PaykitError::from(AppError::from(pubky_dispatch_client::app::Refusal::Usage(
             format!("the app record: {error}"),
         )))
     };
@@ -727,11 +727,11 @@ impl Signs for Measure {
 
 /// The reason [`Paykit::tend_own_record`] gives a record expiry policy this version doesn't
 /// know.
-const UNKNOWN_EXPIRY_POLICY: &str = "unknown Switch app-record expiry policy";
+const UNKNOWN_EXPIRY_POLICY: &str = "unknown Dispatch app-record expiry policy";
 
 /// What the steps of a receive after the app record's upkeep act under: the app's
 /// certificate, the newest own `identity.json` (its generation, version and listed apps among
-/// it) and the recovery notice held, if any (Switch spec 3.6, 12.4).
+/// it) and the recovery notice held, if any (Dispatch spec 3.6, 12.4).
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct OwnStanding {
     cert: [u8; 32],
@@ -767,14 +767,14 @@ pub(crate) enum Tended {
     Unchanged(Publication),
 }
 
-/// Why the record is owed when the switch holds it and its Homeserver write failed
+/// Why the record is owed when the Dispatch holds it and its Homeserver write failed
 /// ([`Paykit::tend_own_record_at_receive`]). Shown to hosts as it is.
 /// Why the app record's public copy on the Homeserver is owed, where the record stands as
-/// `publication` after the upkeep (Switch spec 4.2); `None` where no copy is owed. Shown to
+/// `publication` after the upkeep (Dispatch spec 4.2); `None` where no copy is owed. Shown to
 /// hosts as it is.
 fn publication_owed(publication: &Publication) -> Option<&'static str> {
     match publication {
-        // The switch holds the record and its Homeserver write failed: the client writes it
+        // The Dispatch holds the record and its Homeserver write failed: the client writes it
         // again at a later read.
         Publication::Owed { .. } => Some(
             "the app record's copy on the Homeserver couldn't be written; it is written again \
@@ -782,16 +782,16 @@ fn publication_owed(publication: &Publication) -> Option<&'static str> {
         ),
         // The copy is missing and the app shares its keys with other devices, or a restore's
         // first read hasn't happened yet: nothing is written until a read shows the app
-        // current (Switch spec 4.2).
+        // current (Dispatch spec 4.2).
         Publication::AwaitingRead => Some(
             "the app record's copy on the Homeserver waits for a read: a missing copy is \
-             written back once the switch shows the app current, and after a restore nothing \
+             written back once the dispatch shows the app current, and after a restore nothing \
              is written before the first receive",
         ),
-        // The switch has accepted no record of the app yet, as after a provider loss or a
+        // The Dispatch has accepted no record of the app yet, as after a provider loss or a
         // restore from a backup that carries none: nothing is published until it does.
         Publication::NothingAccepted => Some(
-            "the switch has accepted no app record yet; its copy on the Homeserver is \
+            "the dispatch has accepted no app record yet; its copy on the Homeserver is \
              written once it does",
         ),
         // A newer record choice of the app's own is unresolved, and the accepted copy is
@@ -802,9 +802,9 @@ fn publication_owed(publication: &Publication) -> Option<&'static str> {
         ),
         // The app doesn't publish its record: no copy is ever owed.
         Publication::NotPublishing
-        // The Homeserver holds the newest record the switch accepted.
+        // The Homeserver holds the newest record the Dispatch accepted.
         | Publication::Published
-        // The Homeserver holds a later record of the app than the switch accepted, which
+        // The Homeserver holds a later record of the app than the Dispatch accepted, which
         // nothing writes over.
         | Publication::Superseded
         // Nothing is owed as far as the client knows; only its check of the copy failed,
@@ -828,16 +828,16 @@ pub(crate) const OWED_UNTIL_LOADED: &str =
 ///
 /// An allow-list, so the receive goes on past an upkeep failure only when every later step
 /// would take the same failure as one to try again later:
-/// - the Switch client's `Usage` refusal of the update itself, a candidate or an `app.put` it
+/// - the Dispatch client's `Usage` refusal of the update itself, a candidate or an `app.put` it
 ///   can't sign, a list of what the payment method pays that the record can't carry among
-///   them (Switch wire 6.1), and the edit the client keeps pending for it: refused before
-///   anything reached the switch, it says nothing of the switch's answer to the later steps;
+///   them (Dispatch wire 6.1), and the edit the client keeps pending for it: refused before
+///   anything reached the Dispatch, it says nothing of the Dispatch's answer to the later steps;
 /// - an expiry policy this version doesn't know;
-/// - an own switch that doesn't answer now, by the very rule the later steps use to tell a
-///   write to try again from one refused ([`crate::pay::switch_unavailable`]).
+/// - an own Dispatch that doesn't answer now, by the very rule the later steps use to tell a
+///   write to try again from one refused ([`crate::pay::dispatch_unavailable`]).
 ///
 /// Everything else ends the receive: a wallet-wide stop, any other refusal or answer of the
-/// switch, the store, an alarm, a held record or member that doesn't read.
+/// Dispatch, the store, an alarm, a held record or member that doesn't read.
 ///
 /// Security: the reason is fixed text, shown to hosts as it is. It never carries the error's
 /// own text, which can hold a service's answer; an update of the record made on its own
@@ -858,8 +858,8 @@ pub(crate) fn own_record_left_owed(error: &PaykitError) -> Option<&'static str> 
             "the app record's update was refused as one the record can't carry; it is tried \
              again at the next receive",
         ),
-        _ if crate::pay::switch_unavailable(client) => Some(
-            "the own switch didn't answer for the app record's update; it is tried again at \
+        _ if crate::pay::dispatch_unavailable(client) => Some(
+            "the own dispatch didn't answer for the app record's update; it is tried again at \
              the next receive",
         ),
         _ => None,
@@ -867,7 +867,7 @@ pub(crate) fn own_record_left_owed(error: &PaykitError) -> Option<&'static str> 
 }
 #[cfg(test)]
 mod renewal_tests {
-    use pubky_switch_client::app::Protocol;
+    use pubky_dispatch_client::app::Protocol;
     use serde_json::json;
 
     use super::*;
@@ -927,17 +927,17 @@ mod renewal_tests {
 
 #[cfg(test)]
 mod upkeep_tests {
-    use pubky_switch_client::error::{ClientError, TransportError};
-    use pubky_switch_core::http::{not_hosted_current, ErrorCode};
+    use pubky_dispatch_client::error::{ClientError, TransportError};
+    use pubky_dispatch_core::http::{not_hosted_current, ErrorCode};
 
     use super::*;
-    use crate::pay::switch_unavailable;
+    use crate::pay::dispatch_unavailable;
 
     fn owed(error: AppError) -> bool {
         own_record_left_owed(&PaykitError::Client(error)).is_some()
     }
 
-    /// The switch's answer `code`, with `current`.
+    /// The Dispatch's answer `code`, with `current`.
     fn answered(code: ErrorCode, current: serde_json::Value) -> AppError {
         AppError::Switch(ClientError::Switch {
             status: code.status(),
@@ -964,13 +964,13 @@ mod upkeep_tests {
         }
     }
 
-    /// The gate's invariant over every answer of the switch: the receive goes on past an
+    /// The gate's invariant over every answer of the dispatch: the receive goes on past an
     /// upkeep failure only when a later step would try the same failure again later
-    /// ([`switch_unavailable`]), kept or not, and under a pending edit too.
+    /// ([`dispatch_unavailable`]), kept or not, and under a pending edit too.
     #[test]
     fn test_own_record_left_owed_only_where_later_steps_try_again() {
         for code in ErrorCode::ALL {
-            // No wildcard: a code the switch adds fails to build here until it is classified.
+            // No wildcard: a code the Dispatch adds fails to build here until it is classified.
             let try_again = match code {
                 ErrorCode::Unavailable | ErrorCode::Staged => true,
                 ErrorCode::BadRequest
@@ -995,7 +995,7 @@ mod upkeep_tests {
             };
             for current in [serde_json::Value::Null, not_hosted_current()] {
                 let answer = answered(code, current);
-                assert_eq!(switch_unavailable(&answer), try_again, "{code:?}");
+                assert_eq!(dispatch_unavailable(&answer), try_again, "{code:?}");
                 assert_eq!(owed(answer.clone()), try_again, "{code:?}");
                 assert_eq!(owed(kept(answer.clone())), try_again, "{code:?} kept");
                 assert_eq!(
@@ -1008,7 +1008,7 @@ mod upkeep_tests {
         }
     }
 
-    /// The invariant over the client's other failures of a call to the switch.
+    /// The invariant over the client's other failures of a call to the dispatch.
     #[test]
     fn test_own_record_left_owed_follows_the_later_steps_for_every_client_failure() {
         for (error, try_again) in [
@@ -1031,18 +1031,18 @@ mod upkeep_tests {
             (ClientError::InvalidResponse("member".into()), false),
             (ClientError::Usage("call".into()), false),
             (
-                ClientError::Chain(pubky_switch_core::chain::ChainError::Malformed(
+                ClientError::Chain(pubky_dispatch_core::chain::ChainError::Malformed(
                     "stub".into(),
                 )),
                 false,
             ),
             (
-                ClientError::Core(pubky_switch_core::Error::Invalid("document".into())),
+                ClientError::Core(pubky_dispatch_core::Error::Invalid("document".into())),
                 false,
             ),
         ] {
             let error = AppError::Switch(error);
-            assert_eq!(switch_unavailable(&error), try_again, "{error:?}");
+            assert_eq!(dispatch_unavailable(&error), try_again, "{error:?}");
             assert_eq!(owed(error.clone()), try_again, "{error:?}");
             assert_eq!(owed(kept(error.clone())), try_again, "{error:?} kept");
         }
@@ -1052,7 +1052,7 @@ mod upkeep_tests {
             (AppError::Store(StoreError::Unknown), false),
             (AppError::InvalidData("kept batch".into()), false),
         ] {
-            assert_eq!(switch_unavailable(&error), try_again, "{error:?}");
+            assert_eq!(dispatch_unavailable(&error), try_again, "{error:?}");
             assert_eq!(owed(error.clone()), try_again, "{error:?}");
         }
     }

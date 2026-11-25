@@ -2,7 +2,7 @@
 //!
 //! - **Answering** a `resend_request`, kept by the receive step with the cursor move and
 //!   answered by [`crate::Paykit::receive`]: the sender re-sends, from the messages it keeps (the
-//!   client keeps each for 30 days from its first acceptance, Switch spec 11), those the
+//!   client keeps each for 30 days from its first acceptance, Dispatch spec 11), those the
 //!   request selects, of kinds the requesting app's certificate receives, and a payer's
 //!   replies only to an app that takes them under their label (Paykit spec 3.4). It re-sends
 //!   one message to one requester identity at most once an hour, and at most a daily number
@@ -16,11 +16,11 @@
 use paykit_lib::bodies::ResendRequest;
 use paykit_lib::kinds::{holds_role, targets_app, Kind, Side, OPAQUE_MEMBERS};
 use paykit_lib::scopes::verify_certificate;
-use pubky_switch_client::app::{Delivery, SENT_RETENTION_MS};
-use pubky_switch_core::enc::unb64_array;
-use pubky_switch_core::message::Message;
-use pubky_switch_core::records::DAY_MS;
-use pubky_switch_core::sig::SignedDoc;
+use pubky_dispatch_client::app::{Delivery, SENT_RETENTION_MS};
+use pubky_dispatch_core::enc::unb64_array;
+use pubky_dispatch_core::message::Message;
+use pubky_dispatch_core::records::DAY_MS;
+use pubky_dispatch_core::sig::SignedDoc;
 
 use crate::activity::{KeptSide, SideTag};
 use crate::error::{PaykitError, Refusal, Result};
@@ -176,7 +176,7 @@ impl Paykit {
         &self,
         counterparty: [u8; 32],
         selection: ResendSelection,
-    ) -> Result<pubky_switch_client::app::SignedMessage> {
+    ) -> Result<pubky_dispatch_client::app::SignedMessage> {
         if let Some(reason) = self.resend_scope_refusal() {
             return Err(reason.into());
         }

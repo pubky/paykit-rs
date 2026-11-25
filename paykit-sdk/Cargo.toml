@@ -1,6 +1,6 @@
 [package]
 name = "paykit-sdk"
-description = "Paykit v0.2 app SDK: payment flows and their state for wallets and seller apps, on the Pubky Switch client"
+description = "Paykit v0.2 app SDK: payment flows and their state for wallets and seller apps, on the Pubky Dispatch client"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -19,8 +19,8 @@ test-support = ["dep:tokio"]
 
 [dependencies]
 paykit-lib.workspace = true
-pubky-switch-client.workspace = true
-pubky-switch-core.workspace = true
+pubky-dispatch-client.workspace = true
+pubky-dispatch-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -28,10 +28,10 @@ tokio = { version = "1", features = ["rt"], optional = true }
 
 [dev-dependencies]
 paykit-sdk = { path = ".", features = ["test-support"] }
-pubky-switch-client = { workspace = true, features = ["test-support"] }
-pubky-switch-core = { workspace = true, features = ["test-vectors"] }
+pubky-dispatch-client = { workspace = true, features = ["test-support"] }
+pubky-dispatch-core = { workspace = true, features = ["test-vectors"] }
 syn = { version = "2", features = ["full"] }
 tokio = { version = "1", features = ["macros", "rt", "time"] }
 paykit-lib = { workspace = true, features = ["signer"] }
-pubky-switch-signer.workspace = true
-pubky-switch-harness.workspace = true
+pubky-dispatch-signer.workspace = true
+pubky-dispatch-harness.workspace = true

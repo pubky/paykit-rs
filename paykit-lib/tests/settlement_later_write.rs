@@ -1,6 +1,6 @@
 use paykit_lib::records::{OccurrenceKind, SeenMarks, SeenMerge, SettlementBucket, SettlementMark};
-use pubky_switch_core::enc::b64;
-use pubky_switch_core::ident::NamingKey;
+use pubky_dispatch_core::enc::b64;
+use pubky_dispatch_core::ident::NamingKey;
 
 const BUCKET: u16 = 17;
 

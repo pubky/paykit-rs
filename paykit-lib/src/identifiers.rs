@@ -4,8 +4,8 @@
 //! Each is validated when it is built and keeps its inner value private, so every value that
 //! names a record, a claim or a destination went through its rule.
 
-use pubky_switch_core::enc::{b64, unb64_array};
-use pubky_switch_core::json::check_uuid_v4;
+use pubky_dispatch_core::enc::{b64, unb64_array};
+use pubky_dispatch_core::json::check_uuid_v4;
 
 use crate::error::{invalid, Error, Result};
 
@@ -127,7 +127,7 @@ impl PaymentEndpointPayload {
 }
 
 /// An attempt ID (Paykit wire 1.3): 16 random bytes, `b64(16)` on the wire. It is the
-/// claim's attempt ID (Switch wire 6.2), and the payment method's idempotency key.
+/// claim's attempt ID (Dispatch wire 6.2), and the payment method's idempotency key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct AttemptId([u8; 16]);
 
@@ -141,9 +141,9 @@ impl AttemptId {
     ///
     /// # Errors
     ///
-    /// [`Error::Switch`] if the random generator fails.
+    /// [`Error::Dispatch`] if the random generator fails.
     pub fn generate() -> Result<Self> {
-        Ok(Self(pubky_switch_core::enc::random_bytes::<16>()?))
+        Ok(Self(pubky_dispatch_core::enc::random_bytes::<16>()?))
     }
 
     /// Read an attempt ID from its text, `b64(16)` (Paykit wire 1.3).
@@ -168,7 +168,7 @@ impl AttemptId {
     }
 }
 
-/// An Allowance ID (Paykit wire 1.3): a lower-case UUID v4, the form of the Switch's
+/// An Allowance ID (Paykit wire 1.3): a lower-case UUID v4, the form of the Dispatch's
 /// `msg_id`.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct AllowanceId(String);
@@ -199,9 +199,9 @@ impl AllowanceId {
     ///
     /// # Errors
     ///
-    /// [`Error::Switch`] if the random generator fails.
+    /// [`Error::Dispatch`] if the random generator fails.
     pub fn generate() -> Result<Self> {
-        Ok(Self(pubky_switch_core::message::new_msg_id()?))
+        Ok(Self(pubky_dispatch_core::message::new_msg_id()?))
     }
 
     /// The text.

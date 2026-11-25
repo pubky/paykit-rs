@@ -1,4 +1,4 @@
-//! A crash at every commit point (Paykit spec 7.2, Switch spec 8.2): the app stops before or
+//! A crash at every commit point (Paykit spec 7.2, Dispatch spec 8.2): the app stops before or
 //! after each commit, is reloaded from what was committed, and resumes.
 //!
 //! - **Paying:** the rail sees each idempotency key once, the request is paid once, and its
@@ -16,11 +16,11 @@ use paykit_sdk::rail::Behaviour;
 use paykit_sdk::{
     AppScopes, PayOptions, PayOutcome, PayeeStatus, Paykit, PaykitConfig, Rail, RequestStatus,
 };
-use pubky_switch_client::clock::Clock;
-use pubky_switch_client::store::{Fault, FaultStore, StateStore};
-use pubky_switch_client::testing::TestSigner;
-use pubky_switch_core::claims::{Basis, ClaimStatus, EntryKind, Outcome};
-use pubky_switch_core::ops::OpKind;
+use pubky_dispatch_client::clock::Clock;
+use pubky_dispatch_client::store::{Fault, FaultStore, StateStore};
+use pubky_dispatch_client::testing::TestSigner;
+use pubky_dispatch_core::claims::{Basis, ClaimStatus, EntryKind, Outcome};
+use pubky_dispatch_core::ops::OpKind;
 
 use crate::common::{draft, request_from, store, World};
 
@@ -263,7 +263,7 @@ async fn crash_receiving_a_receipt(fault: Fault) -> bool {
         .unwrap()
         .unwrap();
     assert_eq!(claim.view.status, ClaimStatus::Settled, "{fault:?}");
-    // One `done` by evidence reached the switch, whatever the crash.
+    // One `done` by evidence reached the Dispatch, whatever the crash.
     let evidence = w
         .alice
         .switch()

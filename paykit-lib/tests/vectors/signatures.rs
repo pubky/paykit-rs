@@ -6,12 +6,12 @@ use paykit_lib::recovery::{
     RecoveryCommitments, RecoveryDecision, RecoveryItem, RecoveryState, RecoverySubject,
     RecoveryWitness, RECOVERY_UPLOAD_LABEL,
 };
-use pubky_switch_core::ops::RecordVersion;
-use pubky_switch_core::records::{IdentityBody, IdentityDoc, Inbox, ListedApp};
-use pubky_switch_core::sig::SignedDoc;
-use pubky_switch_core::sig::{signed_bytes, verify};
+use pubky_dispatch_core::ops::RecordVersion;
+use pubky_dispatch_core::records::{IdentityBody, IdentityDoc, Inbox, ListedApp};
+use pubky_dispatch_core::sig::SignedDoc;
+use pubky_dispatch_core::sig::{signed_bytes, verify};
 
-use pubky_switch_core::enc::b64;
+use pubky_dispatch_core::enc::b64;
 use serde_json::json;
 
 use crate::common::{
@@ -230,10 +230,10 @@ fn recovery_report_case(keys: &Keys) -> serde_json::Value {
         key: b"scan",
         value: &[0, 255, 1],
     };
-    let head = pubky_switch_core::chain::SignedHead::sign(
+    let head = pubky_dispatch_core::chain::SignedHead::sign(
         &keys.app("wallet").keys,
         &phone.identity,
-        &pubky_switch_core::chain::ChainTip {
+        &pubky_dispatch_core::chain::ChainTip {
             generation: 1,
             seq: 258,
             chain_hash: [9; 32],
@@ -306,7 +306,7 @@ fn recovery_report_case(keys: &Keys) -> serde_json::Value {
 /// Decode the published examples as an independent consumer of the wire table. The
 /// generator above uses the library's typed disclosure API.
 fn disclosed_preimages(value: &serde_json::Value, identity: &[u8; 32]) -> Option<[Vec<u8>; 3]> {
-    use pubky_switch_core::enc::{hash, lp};
+    use pubky_dispatch_core::enc::{hash, lp};
     use std::collections::BTreeSet;
 
     fn set(mut rows: Vec<Vec<u8>>) -> Option<Vec<u8>> {
@@ -322,7 +322,7 @@ fn disclosed_preimages(value: &serde_json::Value, identity: &[u8; 32]) -> Option
             let encoded = match st(row, "type") {
                 "head" => {
                     let head =
-                        pubky_switch_core::chain::SignedHead::from_value(&row["head"]).ok()?;
+                        pubky_dispatch_core::chain::SignedHead::from_value(&row["head"]).ok()?;
                     lp(&[
                         b"head",
                         &head.chain_version.to_be_bytes(),
@@ -409,7 +409,7 @@ fn check_recovery_report(keys: &Keys, case: &serde_json::Value) {
     let preimages = disclosed_preimages(&case["disclosure"], &opening.identity()).unwrap();
     let digests = preimages
         .each_ref()
-        .map(|p| pubky_switch_core::enc::hash(p));
+        .map(|p| pubky_dispatch_core::enc::hash(p));
     assert_eq!(
         digests,
         [
@@ -425,7 +425,7 @@ fn check_recovery_report(keys: &Keys, case: &serde_json::Value) {
     let empty_bytes = disclosed_preimages(&empty, &opening.identity()).unwrap();
     for (name, preimage) in ["inventory", "dispositions"].iter().zip(&empty_bytes[1..]) {
         assert_eq!(
-            b64(&pubky_switch_core::enc::hash(preimage)),
+            b64(&pubky_dispatch_core::enc::hash(preimage)),
             st(&case["empty"], name)
         );
     }
@@ -445,15 +445,15 @@ fn check_recovery_report(keys: &Keys, case: &serde_json::Value) {
                 let changed =
                     disclosed_preimages(&rejection["disclosure"], &opening.identity()).unwrap();
                 assert_eq!(
-                    pubky_switch_core::enc::hash(&changed[0]),
+                    pubky_dispatch_core::enc::hash(&changed[0]),
                     commitments.cutoff
                 );
                 assert_ne!(
-                    pubky_switch_core::enc::hash(&changed[1]),
+                    pubky_dispatch_core::enc::hash(&changed[1]),
                     commitments.inventory
                 );
                 assert_ne!(
-                    pubky_switch_core::enc::hash(&changed[2]),
+                    pubky_dispatch_core::enc::hash(&changed[2]),
                     commitments.dispositions
                 );
             }

@@ -3,9 +3,9 @@
 use std::sync::Arc;
 
 use paykit_sdk::{PayOptions, Refusal, RequestStatus};
-use pubky_switch_client::app::UserConfirmed;
-use pubky_switch_client::clock::Clock;
-use pubky_switch_core::records::RemovedApp;
+use pubky_dispatch_client::app::UserConfirmed;
+use pubky_dispatch_client::clock::Clock;
+use pubky_dispatch_core::records::RemovedApp;
 
 use crate::common::{draft, endpoint, list_version, request_from, World, HOUR_MS};
 
@@ -85,7 +85,7 @@ async fn test_destinations_identity_source_expires_at_ten_minutes() {
             .read_at_ms
             .unwrap();
         w.homeserver
-            .remove(w.bob_id(), pubky_switch_core::records::IDENTITY_PATH);
+            .remove(w.bob_id(), pubky_dispatch_core::records::IDENTITY_PATH);
         w.router.remove(crate::common::BOB_ORIGIN);
         w.clock.set_ms(first + age);
         let confirmed =
@@ -144,7 +144,7 @@ async fn test_destinations_identity_source_at_zero_is_required_before_payment() 
     assert!(wallet.payments().await.unwrap().is_empty());
 
     // The Homeserver actually serves this same version at zero. A private destination
-    // may use that observation even while the payee's switch is unreachable.
+    // may use that observation even while the payee's Dispatch is unreachable.
     w.homeserver.publish(&higher).unwrap();
     let read = wallet
         .app_mut()
@@ -166,15 +166,15 @@ async fn test_destinations_identity_source_at_zero_is_required_before_payment() 
 }
 
 #[tokio::test]
-async fn test_destinations_request_endpoint_paid_without_the_switch_confirmation() {
+async fn test_destinations_request_endpoint_paid_without_the_dispatch_confirmation() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
     let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
     wallet.receive(None).await.unwrap();
-    // The payee's switch can't be reached, but its Homeserver gives a fresh identity.json
-    // listing the shop: the request's own endpoint is paid without the switch's
-    // confirmation, which only public endpoints need (Switch spec 4.3, Paykit spec 7.2).
+    // The payee's Dispatch can't be reached, but its Homeserver gives a fresh identity.json
+    // listing the shop: the request's own endpoint is paid without the Dispatch's
+    // confirmation, which only public endpoints need (Dispatch spec 4.3, Paykit spec 7.2).
     w.router.remove(crate::common::BOB_ORIGIN);
     w.clock.advance_ms(11 * 60_000);
     let outcome = wallet
@@ -197,7 +197,7 @@ async fn test_destinations_own_identity_missing_for_over_60s_refused() {
     let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
     wallet.receive(None).await.unwrap();
     // The wallet's own identity.json was confirmed, then goes missing from its Homeserver
-    // for more than 60 s: no read confirms the copy held any more (Paykit spec 4, Switch
+    // for more than 60 s: no read confirms the copy held any more (Paykit spec 4, Dispatch
     // spec 12.6), so the payment is refused before any write and the rail is never called.
     assert!(wallet
         .app_mut()
@@ -207,7 +207,7 @@ async fn test_destinations_own_identity_missing_for_over_60s_refused() {
         .confirmed_at()
         .is_some());
     w.homeserver
-        .remove(w.alice_id(), pubky_switch_core::records::IDENTITY_PATH);
+        .remove(w.alice_id(), pubky_dispatch_core::records::IDENTITY_PATH);
     w.clock.advance_ms(61_000);
     let refused = wallet
         .pay_request(&request, PayOptions::default())
@@ -234,7 +234,7 @@ async fn test_destinations_own_identity_confirmed_under_60s_ago_paid() {
     // Missing now, but confirmed 30 s ago: within the 60 s the payment goes on.
     wallet.app_mut().refresh_identity().await.unwrap();
     w.homeserver
-        .remove(w.alice_id(), pubky_switch_core::records::IDENTITY_PATH);
+        .remove(w.alice_id(), pubky_dispatch_core::records::IDENTITY_PATH);
     w.clock.advance_ms(30_000);
     let outcome = wallet
         .pay_request(&request, PayOptions::default())
@@ -292,7 +292,7 @@ async fn test_destinations_list_endpoint_the_request_restricts_refused() {
     assert!(
         !got.report.events.iter().any(|e| matches!(
             e,
-            pubky_switch_client::app::AppEvent::MessageReceived { kind, .. }
+            pubky_dispatch_client::app::AppEvent::MessageReceived { kind, .. }
                 if kind == "paykit.private_payment_list_request"
         )),
         "{:?}",
@@ -357,7 +357,7 @@ async fn test_destinations_check_after_the_attempt_writes_failed_and_says_so() {
             std::sync::Arc::clone(&base),
             app_id,
             std::sync::Arc::clone(&reads)
-                as std::sync::Arc<dyn pubky_switch_client::app::HomeserverReader>,
+                as std::sync::Arc<dyn pubky_dispatch_client::app::HomeserverReader>,
         )
         .await;
     wallet.receive(None).await.unwrap();
@@ -392,7 +392,7 @@ async fn test_destinations_check_after_the_attempt_writes_failed_and_says_so() {
         .unwrap();
     assert_eq!(
         claim.view.attempts[0].outcome,
-        pubky_switch_core::claims::Outcome::Failed
+        pubky_dispatch_core::claims::Outcome::Failed
     );
 }
 
@@ -720,7 +720,7 @@ async fn test_destinations_unsupported_live_list_beside_an_expired_one_asks_for_
     assert!(
         got.report.events.iter().any(|e| matches!(
             e,
-            pubky_switch_client::app::AppEvent::MessageReceived { kind, .. }
+            pubky_dispatch_client::app::AppEvent::MessageReceived { kind, .. }
                 if kind == "paykit.private_payment_list_request"
         )),
         "{:?}",
@@ -729,7 +729,7 @@ async fn test_destinations_unsupported_live_list_beside_an_expired_one_asks_for_
 }
 
 /// Bob's app `app` sends alice's `wallet` its list at `version`, offering the one reusable
-/// endpoint `id`, entered at her switch directly.
+/// endpoint `id`, entered at her Dispatch directly.
 pub(crate) fn list_from(
     w: &World,
     app: &str,
@@ -1316,7 +1316,7 @@ pub(crate) async fn list_requests_sent(
     sent.iter()
         .filter(|sent| sent.kind == "paykit.private_payment_list_request")
         .map(|sent| {
-            let message = pubky_switch_core::message::Message::parse(
+            let message = pubky_dispatch_core::message::Message::parse(
                 sent.plaintext.json(),
                 paykit_lib::kinds::OPAQUE_MEMBERS,
             )
@@ -1337,7 +1337,7 @@ pub(crate) async fn asked_for_a_list(shop: &mut paykit_sdk::Paykit) -> bool {
     got.report.events.iter().any(|e| {
         matches!(
             e,
-            pubky_switch_client::app::AppEvent::MessageReceived { kind, .. }
+            pubky_dispatch_client::app::AppEvent::MessageReceived { kind, .. }
                 if kind == "paykit.private_payment_list_request"
         )
     })
@@ -1472,7 +1472,7 @@ async fn test_destinations_confirmed_transfer_of_another_destination_refused_aga
     assert_eq!(on_chain.transfer.amount, Some(crate::common::btc("2")));
     assert_eq!(
         on_chain.payload_hash,
-        pubky_switch_core::enc::hash(b"bc1qaddress?amount=2")
+        pubky_dispatch_core::enc::hash(b"bc1qaddress?amount=2")
     );
     assert!(
         !format!("{refused:?}").contains("bc1qaddress"),
@@ -1748,7 +1748,7 @@ async fn test_destinations_list_expiring_while_the_payee_is_read_asked_for_again
             std::sync::Arc::clone(&base),
             app_id,
             std::sync::Arc::clone(&reads)
-                as std::sync::Arc<dyn pubky_switch_client::app::HomeserverReader>,
+                as std::sync::Arc<dyn pubky_dispatch_client::app::HomeserverReader>,
         )
         .await;
     wallet.receive(None).await.unwrap();
@@ -1997,7 +1997,9 @@ async fn test_destinations_list_expired_by_the_service_time_alone_asks_for_the_c
     drop(wallet);
     let expires = sent + 30 * HOUR_MS * 24;
     w.clock.set_ms(expires);
-    let behind = Arc::new(pubky_switch_client::clock::TestClock::new(expires - 10_000));
+    let behind = Arc::new(pubky_dispatch_client::clock::TestClock::new(
+        expires - 10_000,
+    ));
     let mut wallet = w
         .load_on_clock(&w.alice, wallet_store, app_id, behind)
         .await;

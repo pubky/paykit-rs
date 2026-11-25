@@ -1,4 +1,4 @@
-//! An own-record edit the client saves before it reads the service time to sign it (Switch
+//! An own-record edit the client saves before it reads the service time to sign it (Dispatch
 //! spec 4.2): when that read fails, the edit stays saved and unsigned for a later read of the
 //! same run. A later run or a restore holds it aside, and Paykit never signs it: it tells the
 //! host which endpoints it named (Paykit spec 4, "Changes saved and not yet signed").
@@ -7,11 +7,11 @@ use std::sync::{Arc, Mutex};
 
 use paykit_lib::app_record::PaykitMember;
 use paykit_sdk::{AppScopes, Notice, NoticeKind, Paykit, PaykitConfig, Rail};
-use pubky_switch_client::app::AppEvent;
-use pubky_switch_client::store::StateStore;
-use pubky_switch_client::testing::Fault;
-use pubky_switch_client::transport::{BoxFuture, Request, Response, Transport};
-use pubky_switch_client::TransportError;
+use pubky_dispatch_client::app::AppEvent;
+use pubky_dispatch_client::store::StateStore;
+use pubky_dispatch_client::testing::Fault;
+use pubky_dispatch_client::transport::{BoxFuture, Request, Response, Transport};
+use pubky_dispatch_client::TransportError;
 use serde_json::Value;
 
 use super::{payload, publishing};
@@ -56,7 +56,7 @@ fn mentions(value: &Value, needle: &str) -> bool {
     match value {
         Value::String(text) => {
             text.contains(needle)
-                || pubky_switch_core::enc::unb64(text).is_ok_and(|bytes| {
+                || pubky_dispatch_core::enc::unb64(text).is_ok_and(|bytes| {
                     String::from_utf8_lossy(&bytes).contains(needle)
                         || serde_json::from_slice::<Value>(&bytes)
                             .is_ok_and(|inner| mentions(&inner, needle))
@@ -68,8 +68,8 @@ fn mentions(value: &Value, needle: &str) -> bool {
     }
 }
 
-/// The next time read of `signer`'s switch fails, once a fresh sample is too old.
-fn time_read_fails(w: &World, signer: &pubky_switch_client::testing::TestSigner) {
+/// The next time read of `signer`'s Dispatch fails, once a fresh sample is too old.
+fn time_read_fails(w: &World, signer: &pubky_dispatch_client::testing::TestSigner) {
     w.clock.advance_ms(11 * 60 * 1000);
     signer.switch().fail_next(Fault::Unreachable {
         path: "/feed".into(),
@@ -125,7 +125,7 @@ async fn load_recorded(
 #[tokio::test]
 async fn test_own_record_saved_offer_never_signed_once_publishing_stops() {
     // An offer saved while the service time can't be read stays unsigned. The app is loaded
-    // again without publishing its record: the saved offer never reaches the switch, and the
+    // again without publishing its record: the saved offer never reaches the Dispatch, and the
     // app holds no public endpoints (Paykit spec 4).
     let w = World::new();
     let kept = store();
@@ -587,7 +587,7 @@ async fn test_own_record_held_change_without_its_record_is_told_without_endpoint
     shop.app_mut()
         .protocol_commit(
             "paykit",
-            &[pubky_switch_client::app::LocalWrite::Delete {
+            &[pubky_dispatch_client::app::LocalWrite::Delete {
                 key: b"ec".to_vec(),
             }],
         )

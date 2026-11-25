@@ -1,6 +1,6 @@
 //! `identifiers.json`: request hashes, obligation IDs with their blinded inputs, and the
 //! terms hash (Paykit wire 1.5); and the record keys of Paykit's natural keys and the
-//! policies of its collections (Switch wire 1.5).
+//! policies of its collections (Dispatch wire 1.5).
 
 use paykit_lib::collections::Collection;
 use paykit_lib::derive::{
@@ -12,9 +12,9 @@ use paykit_lib::derive::{
 use paykit_lib::identifiers::{AllowanceId, AttemptId, PaymentEndpointIdentifier};
 use paykit_lib::records::SettlementBucket;
 use paykit_lib::scopes::Label;
-use pubky_switch_core::enc::{b64, hash, lp, pubky_id, u64be};
-use pubky_switch_core::ident::{record_key_from_blinded, Policy};
-use pubky_switch_core::labels;
+use pubky_dispatch_core::enc::{b64, hash, lp, pubky_id, u64be};
+use pubky_dispatch_core::ident::{record_key_from_blinded, Policy};
+use pubky_dispatch_core::labels;
 use serde_json::{json, Value};
 
 use crate::common::{
@@ -46,7 +46,7 @@ pub(crate) fn check() {
     assert_eq!(obligations.len(), 3);
     for case in obligations {
         let name = st(case, "name");
-        // Claims sit in the payer's switch: blinded with the payer's naming key.
+        // Claims sit in the payer's dispatch: blinded with the payer's naming key.
         let nk = keys.identity(&pubky(st(case, "identity"))).naming_key();
         let (material, obligation) = match case.get("attempt_id") {
             Some(attempt) => {
@@ -295,7 +295,7 @@ occurrence_blinded_natural_key), the blind of the natural key of the occurrence 
 credited to, bob's payee record of that payment.";
 
 /// `record_keys` (Paykit wire 1.5): Paykit's natural keys, each blinded into its record key
-/// with the naming key of the identity whose switch holds it.
+/// with the naming key of the identity whose Dispatch holds it.
 fn record_keys(keys: &Keys) -> Value {
     let (alice, bob) = (pubky(ALICE), pubky(BOB));
     let one_time = request_hash(&message_json("payment_request"));

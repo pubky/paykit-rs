@@ -14,12 +14,12 @@
 use std::collections::BTreeMap;
 
 use paykit_lib::kinds::Kind;
-use pubky_switch_client::app::{
+use pubky_dispatch_client::app::{
     AppError, AppEvent, DeliveryOrigin, DeliveryView, KeptBatchStatus, QueuedMessage,
     SENT_RETENTION_MS,
 };
-use pubky_switch_core::enc::serde_b64;
-use pubky_switch_core::records::CLOCK_TOLERANCE_MS;
+use pubky_dispatch_core::enc::serde_b64;
+use pubky_dispatch_core::records::CLOCK_TOLERANCE_MS;
 use serde::{Deserialize, Serialize};
 
 use crate::activity::{ActivityTarget, KeptSide, SideTag};
@@ -56,7 +56,7 @@ pub(crate) enum ExemptionReason {
 }
 
 impl SendExemption {
-    pub(crate) fn dispatched(msg_id: &str) -> Self {
+    pub(crate) fn handed_off(msg_id: &str) -> Self {
         Self {
             msg_id: msg_id.to_owned(),
             reason: ExemptionReason::DispatchedPayment,
@@ -135,7 +135,7 @@ pub(crate) fn deny_decision(delivery: &DeliveryView<'_>) -> Result<DenyDecision>
 ///   host ([`Paykit::give_up_expired_stops`], Paykit spec 8.1). Both judge the window on
 ///   the service time verified, the device clock only while none is known;
 /// - a re-send ends at the client's replay deadline, its first acceptance plus 30 days
-///   (Switch spec 11);
+///   (Dispatch spec 11);
 /// - a request, period details, a list request, a subscription acceptance not confirmed
 ///   while blocked and a `resend_request` are never sent past the same window either: the
 ///   receive step ends the copy as it does a stop's, and tells the host when an activity
@@ -223,7 +223,7 @@ pub(crate) fn may_deliver(delivery: &DeliveryView<'_>, kind: Kind) -> Result<boo
 /// observed nothing, so such a message waits, kept, for the next one. A re-send needs no
 /// observed time: the client's replay deadline ends it, and it goes, inside an operation or
 /// not, only on a deny decision that permits it, which a deny change told makes unknown
-/// until the lists are read again (Switch spec 11; Paykit spec 8.1, 9).
+/// until the lists are read again (Dispatch spec 11; Paykit spec 8.1, 9).
 #[derive(Debug, Default)]
 pub(crate) struct DeliveryClock {
     state: std::sync::Mutex<ClockState>,
@@ -361,10 +361,10 @@ impl Drop for DeliveryOperation {
 /// 8.1, "Messages already queued"), a subscription acceptance the user confirmed while its
 /// payee was blocked included. What still goes when first sent while sends are held keeps
 /// the client's own deadline instead, as the hold doesn't govern it: a payment's proof, a
-/// receipt, a payee's cancellation and the acceptance of a dispatched payment, each as its
+/// receipt, a payee's cancellation and the acceptance of a handed off payment, each as its
 /// original delivery only, the user's `allowance_end`, a list's withdrawal and an own app's
 /// `executor_notice`. A copy of one reconstructed from signed plaintext is governed. A re-send keeps
-/// the client's replay deadline from its first acceptance (Switch spec 11).
+/// the client's replay deadline from its first acceptance (Dispatch spec 11).
 ///
 /// Not every window has this rule: the client judges one it queues again from signed
 /// plaintext (`App::queue_stored`), which ends a held answer released from its record
@@ -491,7 +491,7 @@ pub(crate) enum HeldKind {
 #[serde(deny_unknown_fields)]
 pub(crate) struct HeldRecord {
     pub(crate) side: SideTag,
-    #[serde(with = "pubky_switch_core::enc::serde_b64_vec")]
+    #[serde(with = "pubky_dispatch_core::enc::serde_b64_vec")]
     pub(crate) natural_key: Vec<u8>,
     #[serde(deserialize_with = "Option::deserialize")]
     pub(crate) label: Option<String>,
@@ -531,7 +531,7 @@ mod serde_b64_opt {
         serializer: S,
     ) -> std::result::Result<S::Ok, S::Error> {
         match value {
-            Some(bytes) => serializer.serialize_some(&pubky_switch_core::enc::b64(bytes)),
+            Some(bytes) => serializer.serialize_some(&pubky_dispatch_core::enc::b64(bytes)),
             None => serializer.serialize_none(),
         }
     }
@@ -541,7 +541,7 @@ mod serde_b64_opt {
     ) -> std::result::Result<Option<[u8; 32]>, D::Error> {
         Option::<String>::deserialize(deserializer)?
             .map(|text| {
-                pubky_switch_core::enc::unb64_array::<32>(&text).map_err(serde::de::Error::custom)
+                pubky_dispatch_core::enc::unb64_array::<32>(&text).map_err(serde::de::Error::custom)
             })
             .transpose()
     }
@@ -568,12 +568,12 @@ impl QueuedStop {
     /// The entry of `signed`, a held message of `held` just signed, about the request
     /// `request_hash` and recorded in `record`, if any.
     pub(crate) fn signed(
-        signed: &pubky_switch_client::app::SignedMessage,
+        signed: &pubky_dispatch_client::app::SignedMessage,
         held: HeldKind,
         request_hash: Option<[u8; 32]>,
         record: Option<&ActivityTarget>,
     ) -> Result<Self> {
-        let message = pubky_switch_core::message::Message::parse(
+        let message = pubky_dispatch_core::message::Message::parse(
             signed.plaintext().json(),
             paykit_lib::kinds::OPAQUE_MEMBERS,
         )?;
@@ -595,7 +595,7 @@ impl QueuedStop {
     /// overlapping recovery request go (Paykit spec 7.2, 8.1).
     pub(crate) fn put_resend_request(
         tx: &mut Tx,
-        signed: &pubky_switch_client::app::SignedMessage,
+        signed: &pubky_dispatch_client::app::SignedMessage,
     ) -> Result<()> {
         let stop = Self::signed(signed, HeldKind::ResendRequest, None, None)?;
         tx.put(&key::queued_stop(&stop.msg_id), &stop)?;
@@ -688,7 +688,7 @@ impl Paykit {
     #[cfg(feature = "test-support")]
     pub async fn queued_in_delivery(
         &self,
-    ) -> std::result::Result<Vec<QueuedMessage>, pubky_switch_client::app::AppError> {
+    ) -> std::result::Result<Vec<QueuedMessage>, pubky_dispatch_client::app::AppError> {
         let _delivery = self.delivery_operation();
         self.observe_service_time();
         self.app.queued_messages(crate::protocol::BACKUP_NAME).await
@@ -706,8 +706,8 @@ impl Paykit {
         &mut self,
         msg_id: &str,
     ) -> std::result::Result<
-        Option<pubky_switch_client::app::Delivery>,
-        pubky_switch_client::app::AppError,
+        Option<pubky_dispatch_client::app::Delivery>,
+        pubky_dispatch_client::app::AppError,
     > {
         self.send_message(msg_id).await
     }
@@ -722,8 +722,8 @@ impl Paykit {
     pub async fn flush_outbox_in_delivery(
         &mut self,
     ) -> std::result::Result<
-        pubky_switch_client::app::OutboxReport,
-        pubky_switch_client::app::AppError,
+        pubky_dispatch_client::app::OutboxReport,
+        pubky_dispatch_client::app::AppError,
     > {
         self.send_outbox().await
     }
@@ -871,7 +871,7 @@ impl Paykit {
     /// since that notice requires a record that holds the message ("Undelivered
     /// messages"). A possible delivery is always told. Each is ended through the client's
     /// withdrawal, which reports it undelivered when no try of it can have reached the
-    /// payee's switch, and unknown otherwise; that report is taken at once, the host told
+    /// payee's Dispatch, and unknown otherwise; that report is taken at once, the host told
     /// in the commit that takes it ([`crate::NoticeKind::MessageGivenUp`] or
     /// [`crate::NoticeKind::PossiblyDelivered`]). An entry whose copy the outbox no longer
     /// holds, delivered, refused or ended otherwise, goes, and so does an acceptance's
@@ -1018,7 +1018,7 @@ impl Paykit {
 
     /// Take, in `tx`, the client's report that the outbox copy of a stop ended past its 30
     /// days ([`Paykit::give_up_expired_stops`]): the host is told it was given up when no
-    /// try of it can have reached the payee's switch, unless its record left nothing to tell
+    /// try of it can have reached the payee's Dispatch, unless its record left nothing to tell
     /// of, and always that it may have been delivered otherwise. Whether `event` is such a
     /// report: one about a stop the receive step didn't give up stays for the host.
     pub(crate) async fn take_expired_stop(&self, tx: &mut Tx, event: &AppEvent) -> Result<bool> {
@@ -1092,7 +1092,7 @@ mod tests {
             [2; 32],
         );
         for value in [
-            SendExemption::dispatched("123e4567-e89b-42d3-a456-426614174000"),
+            SendExemption::handed_off("123e4567-e89b-42d3-a456-426614174000"),
             confirmed,
         ] {
             let json = serde_json::to_value(&value).unwrap();

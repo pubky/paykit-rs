@@ -1,5 +1,5 @@
 //! The final payment check (Paykit spec 4, 7.2): the last thing before the payment method's
-//! call, on a first dispatch, a resume and a recovery. A late switch answer that removes the
+//! call, on a first handoff, a resume and a recovery. A late Dispatch answer that removes the
 //! destination's app, or a payee copy that aged past its limit meanwhile, pays nothing.
 //! An unchanged confirmation received while journaling `Paying` can complete the first call.
 
@@ -7,14 +7,14 @@ use std::sync::{Arc, Mutex};
 
 use paykit_sdk::rail::Behaviour;
 use paykit_sdk::{PayOptions, PayOutcome, Paykit, PaykitConfig, RailDeclaration, RequestRef};
-use pubky_switch_client::app::HomeserverReader;
-use pubky_switch_client::clock::Clock;
-use pubky_switch_client::error::{StoreError, TransportError};
-use pubky_switch_client::store::{KeyValue, MemoryStore, StateStore, Write};
-use pubky_switch_client::transport::{BoxFuture, Transport};
-use pubky_switch_core::records::{IdentityBody, RemovedApp, IDENTITY_PATH};
+use pubky_dispatch_client::app::HomeserverReader;
+use pubky_dispatch_client::clock::Clock;
+use pubky_dispatch_client::error::{StoreError, TransportError};
+use pubky_dispatch_client::store::{KeyValue, MemoryStore, StateStore, Write};
+use pubky_dispatch_client::transport::{BoxFuture, Transport};
+use pubky_dispatch_core::records::{IdentityBody, RemovedApp, IDENTITY_PATH};
 
-use crate::common::{draft, request_from, SlowSwitch, World, BOB_ORIGIN};
+use crate::common::{draft, request_from, SlowDispatch, World, BOB_ORIGIN};
 
 type Hook = Box<dyn FnOnce() + Send>;
 
@@ -119,12 +119,12 @@ impl StateStore for HookedStore {
 
     fn commit(
         &self,
-        batch: pubky_switch_client::store::WriteBatch,
-    ) -> Result<(), pubky_switch_client::error::StoreError> {
+        batch: pubky_dispatch_client::store::WriteBatch,
+    ) -> Result<(), pubky_dispatch_client::error::StoreError> {
         self.commit_with(batch, |batch| {
             self.inner
                 .commit(batch)
-                .map(|()| pubky_switch_client::store::CommitOutcome::Applied)
+                .map(|()| pubky_dispatch_client::store::CommitOutcome::Applied)
         })
         .map(|_| ())
     }
@@ -132,18 +132,20 @@ impl StateStore for HookedStore {
     fn acquire(
         &self,
         ns: &str,
-        owner: pubky_switch_client::store::StoreOwner,
-    ) -> Result<pubky_switch_client::store::AcquireOutcome, pubky_switch_client::error::StoreError>
-    {
+        owner: pubky_dispatch_client::store::StoreOwner,
+    ) -> Result<
+        pubky_dispatch_client::store::AcquireOutcome,
+        pubky_dispatch_client::error::StoreError,
+    > {
         self.inner.acquire(ns, owner)
     }
 
     fn commit_if(
         &self,
         ns: &str,
-        owner: pubky_switch_client::store::StoreOwner,
-        batch: pubky_switch_client::store::WriteBatch,
-    ) -> Result<pubky_switch_client::store::CommitOutcome, pubky_switch_client::error::StoreError>
+        owner: pubky_dispatch_client::store::StoreOwner,
+        batch: pubky_dispatch_client::store::WriteBatch,
+    ) -> Result<pubky_dispatch_client::store::CommitOutcome, pubky_dispatch_client::error::StoreError>
     {
         self.commit_with(batch, |batch| self.inner.commit_if(ns, owner, batch))
     }
@@ -151,14 +153,14 @@ impl StateStore for HookedStore {
 impl HookedStore {
     fn commit_with(
         &self,
-        batch: pubky_switch_client::store::WriteBatch,
+        batch: pubky_dispatch_client::store::WriteBatch,
         apply: impl FnOnce(
-            pubky_switch_client::store::WriteBatch,
+            pubky_dispatch_client::store::WriteBatch,
         ) -> Result<
-            pubky_switch_client::store::CommitOutcome,
-            pubky_switch_client::error::StoreError,
+            pubky_dispatch_client::store::CommitOutcome,
+            pubky_dispatch_client::error::StoreError,
         >,
-    ) -> Result<pubky_switch_client::store::CommitOutcome, pubky_switch_client::error::StoreError>
+    ) -> Result<pubky_dispatch_client::store::CommitOutcome, pubky_dispatch_client::error::StoreError>
     {
         const SIGNED: &[u8] = b"\"acceptance_msg_id\":\"";
         const PAYING: &[u8] = b"\"stage\":\"paying\"";
@@ -233,7 +235,7 @@ impl HookedStore {
                 .any(|write| matches!(write, Write::Put { key, .. } if key == seller))
         });
         let applied = apply(batch)?;
-        if applied != pubky_switch_client::store::CommitOutcome::Applied {
+        if applied != pubky_dispatch_client::store::CommitOutcome::Applied {
             return Ok(applied);
         }
         if confirmed {
@@ -271,15 +273,15 @@ impl HookedStore {
                     .store(true, std::sync::atomic::Ordering::SeqCst);
             }
         }
-        Ok(pubky_switch_client::store::CommitOutcome::Applied)
+        Ok(pubky_dispatch_client::store::CommitOutcome::Applied)
     }
 }
 
 /// A Homeserver whose reads of `identity.json` follow a script: each step names an
 /// identity, how long its next read takes on the clock, and a hook run during it.
 struct HookedReads {
-    inner: Arc<pubky_switch_client::testing::TestHomeserver>,
-    clock: Arc<pubky_switch_client::clock::TestClock>,
+    inner: Arc<pubky_dispatch_client::testing::TestHomeserver>,
+    clock: Arc<pubky_dispatch_client::clock::TestClock>,
     steps: Mutex<std::collections::VecDeque<Step>>,
 }
 
@@ -327,13 +329,13 @@ impl HomeserverReader for HookedReads {
 }
 
 /// The wallet on `store`, its Homeserver reads through `reads` and its requests to bob's
-/// switch through `slow`.
+/// Dispatch through `slow`.
 async fn wallet(
     w: &World,
     store: Arc<dyn StateStore>,
     app_id: [u8; 16],
     reads: &Arc<HookedReads>,
-    slow: &Arc<SlowSwitch>,
+    slow: &Arc<SlowDispatch>,
 ) -> Paykit {
     let mut env = w.env(&w.alice, store);
     env.homeserver = Arc::clone(reads) as Arc<dyn HomeserverReader>;
@@ -349,23 +351,23 @@ async fn wallet(
     .unwrap()
 }
 
-/// A slow switch that answers nothing until released, for bob's public reads only.
-fn held_switch(w: &World) -> Arc<SlowSwitch> {
-    Arc::new(SlowSwitch::new(Arc::clone(&w.router), BOB_ORIGIN))
+/// A slow Dispatch that answers nothing until released, for bob's public reads only.
+fn held_dispatch(w: &World) -> Arc<SlowDispatch> {
+    Arc::new(SlowDispatch::new(Arc::clone(&w.router), BOB_ORIGIN))
 }
 
-/// Only bob's switch sees the new identity document; the Homeserver still serves its predecessor.
-fn change_shop_on_the_switch_only(w: &World, change: impl FnOnce(&mut IdentityBody)) {
+/// Only bob's Dispatch sees the new identity document; the Homeserver still serves its predecessor.
+fn change_shop_on_the_dispatch_only(w: &World, change: impl FnOnce(&mut IdentityBody)) {
     let older = w.homeserver.file(w.bob_id(), IDENTITY_PATH).unwrap();
     let doc = w.bob.sign_next(change).unwrap();
     w.bob.switch().deliver_identity(&doc).unwrap();
     w.homeserver.put(w.bob_id(), IDENTITY_PATH, older);
 }
 
-fn revoke_shop_on_the_switch_only(w: &World) {
+fn revoke_shop_on_the_dispatch_only(w: &World) {
     let shop = w.bob.identity().app_keys("shop").app_id_bytes();
     let now = w.clock.now_ms();
-    change_shop_on_the_switch_only(w, |body| {
+    change_shop_on_the_dispatch_only(w, |body| {
         body.apps.retain(|a| a.app_id != shop);
         body.removed.push(RemovedApp {
             app_id: shop,
@@ -374,7 +376,7 @@ fn revoke_shop_on_the_switch_only(w: &World) {
     });
 }
 
-/// An idempotent rail without a history: a resume repeats the dispatch, through the checks.
+/// An idempotent rail without a history: a resume repeats the handoff, through the checks.
 fn repeatable(w: &World) {
     w.rail.set_declaration(
         RailDeclaration::new(
@@ -398,7 +400,7 @@ async fn with_a_request(w: &World) -> (Arc<HookedStore>, [u8; 16], RequestRef) {
     (store, app_id, request)
 }
 
-/// A payment of the request left in flight, its dispatch made once.
+/// A payment of the request left in flight, its handoff made once.
 async fn in_flight(w: &World) -> (Arc<HookedStore>, [u8; 16], paykit_lib::AttemptId) {
     repeatable(w);
     let (store, app_id, request) = with_a_request(w).await;
@@ -427,7 +429,7 @@ async fn in_flight(w: &World) -> (Arc<HookedStore>, [u8; 16], paykit_lib::Attemp
 /// payment method: the commit that journals it applied, then failed, as a process that
 /// died at once. A fresh world for each commit tried, until one is found.
 async fn stopped_before_the_rail() -> (World, Arc<HookedStore>, [u8; 16], paykit_lib::AttemptId) {
-    use pubky_switch_client::store::{Fault, FaultStore};
+    use pubky_dispatch_client::store::{Fault, FaultStore};
     for n in 1..64 {
         let w = World::new();
         repeatable(&w);
@@ -478,11 +480,11 @@ async fn stopped_before_the_rail() -> (World, Arc<HookedStore>, [u8; 16], paykit
 }
 
 // ---------------------------------------------------------------------------------------
-// The payer's own Homeserver confirmation at dispatch.
+// The payer's own Homeserver confirmation at handoff.
 
 #[tokio::test]
 async fn test_final_check_own_observation_rollback_during_read_requires_a_new_read() {
-    use pubky_switch_client::clock::TestClock;
+    use pubky_dispatch_client::clock::TestClock;
     let w = World::new();
     let (store, app_id, request) = with_a_request(&w).await;
     let now = w.clock.now_ms() + 10_000;
@@ -534,8 +536,8 @@ async fn test_final_check_own_observation_rollback_during_read_requires_a_new_re
 
 #[tokio::test]
 async fn test_final_check_raw_host_takes_a_newer_own_version_across_a_clock_adjustment() {
-    use pubky_switch_client::app::IdentityRefresh;
-    use pubky_switch_client::clock::TestClock;
+    use pubky_dispatch_client::app::IdentityRefresh;
+    use pubky_dispatch_client::clock::TestClock;
     let w = World::new();
     let (saved, app_id, _) = with_a_request(&w).await;
     let now = w.clock.now_ms() + 100;
@@ -591,7 +593,7 @@ impl Clock for BackwardsOnce {
 }
 
 #[tokio::test]
-async fn test_final_check_own_observation_rollback_after_read_stays_invalid_at_dispatch() {
+async fn test_final_check_own_observation_rollback_after_read_stays_invalid_at_handoff() {
     let w = World::new();
     let (store, app_id, request) = with_a_request(&w).await;
     let clock = Arc::new(BackwardsOnce {
@@ -701,7 +703,7 @@ async fn test_final_check_own_observation_at_the_last_clock_sample_before_the_ra
     );
 }
 
-// A late switch answer that removes the destination's app
+// A late Dispatch answer that removes the destination's app
 
 #[tokio::test]
 async fn test_final_check_current_public_read_remains_usable_without_a_second_get() {
@@ -718,7 +720,7 @@ async fn test_final_check_current_public_read_remains_usable_without_a_second_ge
         Some(w.clock.now_ms() + 86_400_000),
     );
     let owner = w.bob_id();
-    let path = pubky_switch_core::records::app_record_path(&shop.app_id());
+    let path = pubky_dispatch_core::records::app_record_path(&shop.app_id());
     let changed = Arc::clone(&w);
     saved.on_attempted(Box::new(move || changed.homeserver.remove(owner, &path)));
     let paid = payer
@@ -750,7 +752,7 @@ async fn test_final_check_late_public_lookup_rechecks_the_selected_endpoint() {
         let endpoint = |payload| crate::public::one_endpoint("btc-lightning-bolt12", payload);
         let expires = Some(w.clock.now_ms() + 86_400_000);
         crate::public::publish(&w, endpoint("lno1first"), expires);
-        // Only the switch knows this newer document. It still admits the same app and certificate.
+        // Only the Dispatch knows this newer document. It still admits the same app and certificate.
         let older = w.homeserver.file(w.bob_id(), IDENTITY_PATH).unwrap();
         let higher = w
             .bob
@@ -759,7 +761,7 @@ async fn test_final_check_late_public_lookup_rechecks_the_selected_endpoint() {
         w.bob.switch().deliver_identity(&higher).unwrap();
         w.homeserver.put(w.bob_id(), IDENTITY_PATH, older);
         w.clock.advance_ms(1);
-        let slow = held_switch(&w);
+        let slow = held_dispatch(&w);
         let release = Arc::clone(&slow);
         let changed = Arc::clone(&w);
         let hook: Hook = Box::new(move || {
@@ -776,7 +778,7 @@ async fn test_final_check_late_public_lookup_rechecks_the_selected_endpoint() {
         let mut payer = self::wallet(&w, store, app_id, &HookedReads::new(&w), &slow).await;
         let mut payment = crate::public::public_to_bob(&w);
         payment.options.unconfirmed_identity_confirmed =
-            Some(pubky_switch_client::app::UserConfirmed::new());
+            Some(pubky_dispatch_client::app::UserConfirmed::new());
         let result = if on_acceptance {
             payer.pay_request(&request, payment.options).await.outcome
         } else {
@@ -804,14 +806,14 @@ async fn test_final_check_late_public_lookup_rechecks_the_selected_endpoint() {
 }
 
 #[tokio::test]
-async fn test_final_check_first_dispatch_late_answer_removing_the_app_not_paid() {
+async fn test_final_check_first_handoff_late_answer_removing_the_app_not_paid() {
     let w = World::new();
     let (store, app_id, request) = with_a_request(&w).await;
-    revoke_shop_on_the_switch_only(&w);
-    // The wallet's copy of bob's identity.json is old: paying looks it up, and his switch
+    revoke_shop_on_the_dispatch_only(&w);
+    // The wallet's copy of bob's identity.json is old: paying looks it up, and his Dispatch
     // answers only after the last journal write before the final payment check.
     w.clock.advance_ms(11 * 60_000);
-    let slow = held_switch(&w);
+    let slow = held_dispatch(&w);
     let reads = HookedReads::new(&w);
     let release = Arc::clone(&slow);
     store.on_acceptance_journaled(Box::new(move || release.release()));
@@ -838,11 +840,11 @@ async fn test_final_check_first_dispatch_late_answer_removing_the_app_not_paid()
 async fn test_final_check_resume_late_answer_removing_the_app_not_paid() {
     let w = World::new();
     let (store, app_id, attempt_id) = in_flight(&w).await;
-    revoke_shop_on_the_switch_only(&w);
+    revoke_shop_on_the_dispatch_only(&w);
     w.clock.advance_ms(11 * 60_000);
-    // Bob's switch answers while the own identity.json is read, after the destination's
+    // Bob's Dispatch answers while the own identity.json is read, after the destination's
     // check: the answer is taken just before the repeat.
-    let slow = held_switch(&w);
+    let slow = held_dispatch(&w);
     let reads = HookedReads::new(&w);
     let release = Arc::clone(&slow);
     reads.then(w.alice_id(), 0, Some(Box::new(move || release.release())));
@@ -866,9 +868,9 @@ async fn test_final_check_resume_late_answer_removing_the_app_not_paid() {
 #[tokio::test]
 async fn test_final_check_recovery_late_answer_removing_the_app_not_paid() {
     let (w, store, app_id, attempt_id) = stopped_before_the_rail().await;
-    revoke_shop_on_the_switch_only(&w);
+    revoke_shop_on_the_dispatch_only(&w);
     w.clock.advance_ms(11 * 60_000);
-    let slow = held_switch(&w);
+    let slow = held_dispatch(&w);
     let reads = HookedReads::new(&w);
     let release = Arc::clone(&slow);
     reads.then(w.alice_id(), 0, Some(Box::new(move || release.release())));
@@ -905,7 +907,7 @@ async fn observe_payee(w: &World, wallet: &mut Paykit) -> u64 {
 }
 
 #[tokio::test]
-async fn test_final_check_first_dispatch_payee_copy_aged_during_the_own_read_not_paid() {
+async fn test_final_check_first_handoff_payee_copy_aged_during_the_own_read_not_paid() {
     let w = World::new();
     let (store, app_id, request) = with_a_request(&w).await;
     let reads = HookedReads::new(&w);
@@ -913,7 +915,7 @@ async fn test_final_check_first_dispatch_payee_copy_aged_during_the_own_read_not
     reads.then(w.alice_id(), 1_000, None);
     let clock = Arc::clone(&w.clock);
     store.on_attempted(Box::new(move || clock.advance_ms(5 * 60_000 - 1_000)));
-    let slow = held_switch(&w);
+    let slow = held_dispatch(&w);
     slow.release();
     let mut wallet = wallet(
         &w,
@@ -953,7 +955,7 @@ async fn test_final_check_resume_payee_copy_aged_during_the_own_read_not_paid() 
     let (store, app_id, attempt_id) = in_flight(&w).await;
     let reads = HookedReads::new(&w);
     reads.then(w.alice_id(), 1_000, None);
-    let slow = held_switch(&w);
+    let slow = held_dispatch(&w);
     slow.release();
     let mut wallet = wallet(
         &w,
@@ -980,7 +982,7 @@ async fn test_final_check_recovery_payee_copy_aged_during_the_own_read_not_paid(
     let (w, store, app_id, attempt_id) = stopped_before_the_rail().await;
     let reads = HookedReads::new(&w);
     reads.then(w.alice_id(), 1_000, None);
-    let slow = held_switch(&w);
+    let slow = held_dispatch(&w);
     slow.release();
     let mut wallet = wallet(
         &w,
@@ -1038,10 +1040,10 @@ async fn test_final_check_repeat_retention_ending_during_the_lookup_not_paid() {
     };
     drop(first);
     // Resumed 30 s before the retention ends: every check passes, and the kept lookup of
-    // bob's switch answers in the final check, 31 s later, past the retention's end. The
+    // bob's Dispatch answers in the final check, 31 s later, past the retention's end. The
     // method may have forgotten the key: no repeat (Paykit spec 7.2).
     w.clock.set_ms(journaled + RETENTION_MS - 30_000);
-    let slow = held_switch(&w);
+    let slow = held_dispatch(&w);
     slow.delay_answer(Arc::clone(&w.clock), 31_000);
     let reads = HookedReads::new(&w);
     let release = Arc::clone(&slow);
@@ -1066,7 +1068,7 @@ async fn test_final_check_repeat_retention_ending_during_the_lookup_not_paid() {
 // ---------------------------------------------------------------------------------------
 // Conflicting identity documents arriving with the late answer
 
-/// Bob's signer equivocates: his switch holds one document at the next version, his
+/// Bob's signer equivocates: his Dispatch holds one document at the next version, his
 /// Homeserver another body at that same version.
 fn equivocate(w: &World) {
     let switch_copy = w
@@ -1077,17 +1079,17 @@ fn equivocate(w: &World) {
     let mut other = switch_copy.body().clone();
     other.record_max_age = Some(60 * 86_400);
     let homeserver_copy =
-        pubky_switch_core::records::IdentityDoc::sign(w.bob.identity().key(), other).unwrap();
+        pubky_dispatch_core::records::IdentityDoc::sign(w.bob.identity().key(), other).unwrap();
     w.homeserver.publish(&homeserver_copy).unwrap();
 }
 
 #[tokio::test]
-async fn test_final_check_first_dispatch_late_equivocation_refused() {
+async fn test_final_check_first_handoff_late_equivocation_refused() {
     let w = World::new();
     let (store, app_id, request) = with_a_request(&w).await;
     equivocate(&w);
     w.clock.advance_ms(11 * 60_000);
-    let slow = held_switch(&w);
+    let slow = held_dispatch(&w);
     let reads = HookedReads::new(&w);
     let release = Arc::clone(&slow);
     store.on_acceptance_journaled(Box::new(move || release.release()));
@@ -1099,9 +1101,9 @@ async fn test_final_check_first_dispatch_late_equivocation_refused() {
         &slow,
     )
     .await;
-    // The switch's copy arrives before the final payment check, another body at the version
+    // The Dispatch's copy arrives before the final payment check, another body at the version
     // the Homeserver's has: equivocation. Nothing is paid, `failed` is written, and the
-    // payment is refused (Switch wire 3.3).
+    // payment is refused (Dispatch wire 3.3).
     let refused = wallet
         .pay_request(&request, PayOptions::default())
         .await
@@ -1127,7 +1129,7 @@ async fn test_final_check_resume_late_equivocation_not_paid() {
     let (store, app_id, attempt_id) = in_flight(&w).await;
     equivocate(&w);
     w.clock.advance_ms(11 * 60_000);
-    let slow = held_switch(&w);
+    let slow = held_dispatch(&w);
     let reads = HookedReads::new(&w);
     let release = Arc::clone(&slow);
     reads.then(w.alice_id(), 0, Some(Box::new(move || release.release())));
@@ -1139,7 +1141,7 @@ async fn test_final_check_resume_late_equivocation_not_paid() {
         &slow,
     )
     .await;
-    // A repeat may follow a dispatch that paid: it stays "may be paid".
+    // A repeat may follow a handoff that paid: it stays "may be paid".
     let resumed = wallet.resume_payments().await.unwrap();
     assert!(
         matches!(resumed.as_slice(), [PayOutcome::Uncertain { .. }]),
@@ -1154,7 +1156,7 @@ async fn test_final_check_recovery_late_equivocation_not_paid() {
     let (w, store, app_id, attempt_id) = stopped_before_the_rail().await;
     equivocate(&w);
     w.clock.advance_ms(11 * 60_000);
-    let slow = held_switch(&w);
+    let slow = held_dispatch(&w);
     let reads = HookedReads::new(&w);
     let release = Arc::clone(&slow);
     reads.then(w.alice_id(), 0, Some(Box::new(move || release.release())));
@@ -1179,7 +1181,7 @@ async fn test_final_check_recovery_late_equivocation_not_paid() {
 async fn test_final_check_repeat_on_an_own_identity_read_that_errs_refused() {
     let w = World::new();
     let (store, app_id, attempt_id) = in_flight(&w).await;
-    let slow = held_switch(&w);
+    let slow = held_dispatch(&w);
     slow.release();
     let reads = HookedReads::new(&w);
     let mut wallet = wallet(
@@ -1218,9 +1220,9 @@ async fn test_final_check_repeat_on_an_own_identity_read_that_errs_refused() {
 }
 
 // ---------------------------------------------------------------------------------------
-// A first dispatch stopped before the payment method's call, on a rail that can't tell
+// A first handoff stopped before the payment method's call, on a rail that can't tell
 
-/// A rail neither idempotent nor with a history: a dispatch it may have made can't be
+/// A rail neither idempotent nor with a history: a handoff it may have made can't be
 /// resolved, so only a journal that shows none started lets a resume write `failed`.
 fn blind(w: &World) {
     w.rail.set_declaration(RailDeclaration::new(
@@ -1299,15 +1301,15 @@ async fn test_final_check_commit_after_the_acceptance_failing_leaves_the_payment
 }
 
 #[tokio::test]
-async fn test_final_check_held_first_dispatch_leaves_the_payment_unsubmitted() {
+async fn test_final_check_held_first_handoff_leaves_the_payment_unsubmitted() {
     let w = World::new();
     blind(&w);
     let (store, app_id, request) = with_a_request(&w).await;
-    revoke_shop_on_the_switch_only(&w);
-    // Bob's switch answers after the acceptance is journaled: the final payment check holds
+    revoke_shop_on_the_dispatch_only(&w);
+    // Bob's Dispatch answers after the acceptance is journaled: the final payment check holds
     // the payment back.
     w.clock.advance_ms(11 * 60_000);
-    let slow = held_switch(&w);
+    let slow = held_dispatch(&w);
     let reads = HookedReads::new(&w);
     let release = Arc::clone(&slow);
     store.on_acceptance_journaled(Box::new(move || release.release()));
@@ -1359,7 +1361,7 @@ async fn test_final_check_held_first_dispatch_leaves_the_payment_unsubmitted() {
 
 /// Alice's wallet on a hooked store, with bob's request, a rail neither idempotent nor with
 /// a history, and bob's identity.json past its 10 minutes, so paying looks it up; his
-/// switch answers only during the commit that journals `Paying`, after the final payment
+/// Dispatch answers only during the commit that journals `Paying`, after the final payment
 /// check took the Homeserver's copy.
 async fn answered_during_paying(
     w: &World,
@@ -1369,7 +1371,7 @@ async fn answered_during_paying(
     let (store, app_id, request) = with_a_request(w).await;
     change(w);
     w.clock.advance_ms(11 * 60_000);
-    let slow = held_switch(w);
+    let slow = held_dispatch(w);
     let reads = HookedReads::new(w);
     let release = Arc::clone(&slow);
     store.on_paying(Box::new(move || release.release()));
@@ -1385,8 +1387,8 @@ async fn answered_during_paying(
 }
 
 #[tokio::test]
-async fn test_fence_seller_switch_failing_during_paying_pays_the_unchanged_document() {
-    // The seller's switch can't be read when the lookup that the final payment check left
+async fn test_fence_seller_dispatch_failing_during_paying_pays_the_unchanged_document() {
+    // The seller's Dispatch can't be read when the lookup that the final payment check left
     // running ends, during the commit that journals `Paying`: the Homeserver still serves
     // the document the payment was checked against, so nothing changed, and the payment of
     // the signed request goes ahead as it would have one check earlier (Paykit spec 7.2).
@@ -1448,11 +1450,11 @@ async fn test_fence_unchanged_seller_cannot_authorize_a_changed_transfer() {
     let w = World::new();
     let (store, _, request, mut wallet) = answered_during_paying(&w, |_| {}).await;
     let rail = Arc::clone(&w.rail);
-    // As the wallet records the seller's switch confirmation, the method changes
+    // As the wallet records the seller's Dispatch confirmation, the method changes
     // what it would actually transfer for the selected endpoint.
     let key = format!(
         "ident/{}/sw",
-        pubky_switch_core::enc::pubky_id(&request.payee)
+        pubky_dispatch_core::enc::pubky_id(&request.payee)
     );
     *store.lookup_hook.lock().unwrap() = Some((
         key.into_bytes(),
@@ -1481,7 +1483,7 @@ async fn test_fence_unchanged_seller_cannot_authorize_a_changed_transfer() {
 async fn test_fence_new_seller_document_during_paying_holds_even_when_the_shop_remains() {
     let w = World::new();
     let (_, _, request, mut wallet) = answered_during_paying(&w, |w| {
-        change_shop_on_the_switch_only(w, |body| body.record_max_age = Some(86_400));
+        change_shop_on_the_dispatch_only(w, |body| body.record_max_age = Some(86_400));
     })
     .await;
     let outcome = wallet
@@ -1498,11 +1500,11 @@ async fn test_fence_new_seller_document_during_paying_holds_even_when_the_shop_r
 }
 
 #[tokio::test]
-async fn test_fence_older_switch_answer_with_a_newer_homeserver_copy_holds_the_payment() {
+async fn test_fence_older_dispatch_answer_with_a_newer_homeserver_copy_holds_the_payment() {
     let w = World::new();
     let (_, _, request, mut wallet) = answered_during_paying(&w, |w| {
         // The seller publishes a new signed document that still lists the shop. The
-        // switch answers the ongoing lookup with its previous signed version.
+        // Dispatch answers the ongoing lookup with its previous signed version.
         w.bob
             .sign_next(|body| body.record_max_age = Some(86_400))
             .unwrap();
@@ -1529,7 +1531,7 @@ async fn test_fence_older_switch_answer_with_a_newer_homeserver_copy_holds_the_p
 }
 
 #[tokio::test]
-async fn test_fence_unchanged_seller_then_unanswered_dispatch_stays_uncertain_on_reopen() {
+async fn test_fence_unchanged_seller_then_unanswered_handoff_stays_uncertain_on_reopen() {
     let w = World::new();
     let (store, app_id, request, mut wallet) = answered_during_paying(&w, |_| {}).await;
     w.rail.next(Behaviour::LoseAnswer);
@@ -1561,7 +1563,7 @@ async fn test_fence_unchanged_seller_then_unanswered_dispatch_stays_uncertain_on
 async fn test_fence_removal_answered_during_paying_not_paid() {
     let w = World::new();
     let (store, app_id, request, mut wallet) =
-        answered_during_paying(&w, revoke_shop_on_the_switch_only).await;
+        answered_during_paying(&w, revoke_shop_on_the_dispatch_only).await;
     let outcome = wallet
         .pay_request(&request, PayOptions::default())
         .await
@@ -1622,7 +1624,7 @@ async fn test_fence_equivocation_answered_during_paying_refused() {
 async fn test_fence_stop_lost_to_a_crash_stays_paying_and_uncertain() {
     let w = World::new();
     let (store, app_id, request, mut wallet) =
-        answered_during_paying(&w, revoke_shop_on_the_switch_only).await;
+        answered_during_paying(&w, revoke_shop_on_the_dispatch_only).await;
     // The process dies after the fence stops the payment, before the write-back.
     store.stop_after_paying();
     assert!(wallet
@@ -1643,7 +1645,7 @@ async fn test_fence_stop_lost_to_a_crash_stays_paying_and_uncertain() {
         .await;
     let payment = wallet.payments().await.unwrap().remove(0);
     assert_eq!(payment.stage, paykit_sdk::Stage::Paying);
-    // Read as possibly dispatched, the safe direction: on a rail that can't tell, it stays
+    // Read as possibly handed off, the safe direction: on a rail that can't tell, it stays
     // "may be paid", and nothing is paid.
     let resumed = wallet.resume_payments().await.unwrap();
     assert!(
@@ -1688,26 +1690,26 @@ async fn test_acceptance_queued_once_the_call_is_made() {
 
 /// Alice's wallet holding bob's one-time request, its payment's fence unable to read the
 /// request record: once `Paying` is journaled, the next record read, the fence's, can't
-/// reach the switch. With `failed_write_fails`, the next write, the one that would record
+/// reach the dispatch. With `failed_write_fails`, the next write, the one that would record
 /// the attempt failed, can't either. Returns the wallet, the request, the refusal and
 /// whether `Paying` was journaled before it.
 async fn fence_unread(
     w: &World,
     failed_write_fails: bool,
 ) -> (paykit_sdk::Paykit, RequestRef, paykit_sdk::PaykitError) {
-    use pubky_switch_client::testing::Fault;
+    use pubky_dispatch_client::testing::Fault;
     let (store, app_id, request) = with_a_request(w).await;
     let paying = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let seen = Arc::clone(&paying);
-    let switch = w.alice.switch().clone();
+    let dispatch = w.alice.switch().clone();
     store.on_paying(Box::new(move || {
         seen.store(true, std::sync::atomic::Ordering::SeqCst);
-        switch.fail_next(Fault::Unreachable {
+        dispatch.fail_next(Fault::Unreachable {
             path: "/records/".into(),
             after: 0,
         });
         if failed_write_fails {
-            switch.fail_next(Fault::Unreachable {
+            dispatch.fail_next(Fault::Unreachable {
                 path: "/ops".into(),
                 after: 0,
             });
@@ -1738,7 +1740,7 @@ async fn fence_unread(
 async fn test_fence_read_failure_writes_the_attempt_failed_and_a_new_payment_pays_once() {
     // The fence's read failing, after `Paying` and just before the payment method's call, is
     // the caller's error, not a pending payment: nothing was submitted, so the attempt is
-    // written failed with the switch's error as its cause, and a new payment goes at once
+    // written failed with the Dispatch's error as its cause, and a new payment goes at once
     // (Paykit spec 7.2 step 1).
     let w = World::new();
     let (mut wallet, request, refused) = fence_unread(&w, false).await;
@@ -1746,7 +1748,7 @@ async fn test_fence_read_failure_writes_the_attempt_failed_and_a_new_payment_pay
         matches!(
             refused.refusal(),
             Some(paykit_sdk::Refusal::AttemptFailed(why))
-                if matches!(**why, paykit_sdk::Refusal::SwitchUnavailable(_))
+                if matches!(**why, paykit_sdk::Refusal::DispatchUnavailable(_))
         ),
         "{refused:?}"
     );
@@ -1762,8 +1764,8 @@ async fn test_fence_read_failure_writes_the_attempt_failed_and_a_new_payment_pay
 
 #[tokio::test]
 async fn test_fence_read_failure_with_the_failed_write_failing_waits_for_a_resume() {
-    // As above, but the write that would record the attempt failed can't reach the switch
-    // either: the attempt stays known unsubmitted and the switch's error is returned. A new
+    // As above, but the write that would record the attempt failed can't reach the Dispatch
+    // either: the attempt stays known unsubmitted and the Dispatch's error is returned. A new
     // payment is refused as in progress until a resume writes the attempt failed; then it
     // pays once.
     let w = World::new();
@@ -1771,7 +1773,7 @@ async fn test_fence_read_failure_with_the_failed_write_failing_waits_for_a_resum
     assert!(
         matches!(
             refused.refusal(),
-            Some(paykit_sdk::Refusal::SwitchUnavailable(_))
+            Some(paykit_sdk::Refusal::DispatchUnavailable(_))
         ),
         "{refused:?}"
     );
@@ -1858,16 +1860,16 @@ async fn test_fence_holds_a_marked_one_time_request_before_the_first_method_call
 }
 
 // ---------------------------------------------------------------------------------------
-// The pre-dispatch budget and the floor of `orphan_after`
+// The pre-handoff budget and the floor of `orphan_after`
 
 #[tokio::test]
-async fn test_fence_attempt_past_its_pre_dispatch_budget_not_paid() {
+async fn test_fence_attempt_past_its_pre_handoff_budget_not_paid() {
     let w = World::new();
     let (store, app_id, request) = with_a_request(&w).await;
     // The journal write of `Paying` takes the attempt past its budget.
     let clock = Arc::clone(&w.clock);
     store.on_paying(Box::new(move || {
-        clock.advance_ms(paykit_sdk::PRE_DISPATCH_BUDGET_MS);
+        clock.advance_ms(paykit_sdk::PRE_HANDOFF_BUDGET_MS);
     }));
     let mut wallet = w
         .load_on_clock(
@@ -1904,7 +1906,7 @@ async fn test_orphan_after_below_the_floor_refused() {
     let floor = paykit_sdk::orphan_floor_s(&paykit_sdk::Rail::declaration(&*w.rail));
     assert_eq!(
         floor,
-        (paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS + paykit_sdk::PRE_DISPATCH_BUDGET_MS) / 1000
+        (paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS + paykit_sdk::PRE_HANDOFF_BUDGET_MS) / 1000
     );
     let scopes = paykit_sdk::AppScopes::new().pay().build().unwrap();
     let config = PaykitConfig::default().with_orphan_after_s(floor - 1);
@@ -1942,7 +1944,7 @@ async fn test_repeat_too_close_to_the_orphan_age_not_made() {
         crate::common::day_window().orphan_after_s_for(&paykit_sdk::Rail::declaration(&*w.rail))
             * 1000
             - paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS
-            - pubky_switch_core::records::CLOCK_TOLERANCE_MS,
+            - pubky_dispatch_core::records::CLOCK_TOLERANCE_MS,
     );
     let mut wallet = w
         .load_on_clock(
@@ -1964,14 +1966,14 @@ async fn test_repeat_too_close_to_the_orphan_age_not_made() {
 #[tokio::test]
 async fn test_default_config_takes_a_one_day_rail() {
     // A rail that may take a day: the default config's `orphan_after` is that day plus the
-    // pre-dispatch budget, so join, load and paying all take it.
+    // pre-handoff budget, so join, load and paying all take it.
     let w = World::new();
     let mut declaration = paykit_sdk::Rail::declaration(&*w.rail);
     declaration.longest_completion_ms = 86_400_000;
     w.rail.set_declaration(declaration);
     assert_eq!(
         PaykitConfig::default().orphan_after_s_for(&declaration),
-        86_400 + paykit_sdk::PRE_DISPATCH_BUDGET_MS / 1000
+        86_400 + paykit_sdk::PRE_HANDOFF_BUDGET_MS / 1000
     );
     let (store, app_id, request) = with_a_request(&w).await;
     let mut wallet = w
@@ -1992,7 +1994,7 @@ async fn test_default_config_takes_a_one_day_rail() {
 
 #[tokio::test]
 async fn test_fence_answer_committed_past_the_budget_not_paid() {
-    // The attempt's answer is committed locally only once the pre-dispatch budget and the
+    // The attempt's answer is committed locally only once the pre-handoff budget and the
     // attempt's orphan age have passed, so another own app could have resolved it
     // meanwhile: the age counts from before the attempt was sent, and nothing is paid.
     let w = World::new();
@@ -2146,7 +2148,7 @@ async fn paid_while_acceptances_fail(
         matches!(
             &outcome,
             Err(paykit_sdk::PaykitError::Client(
-                pubky_switch_client::app::AppError::Store(_)
+                pubky_dispatch_client::app::AppError::Store(_)
             ))
         ),
         "{outcome:?}"
@@ -2224,7 +2226,7 @@ async fn test_acceptance_owed_sent_with_a_users_done_on_a_pending_payment() {
             &obligation,
             attempt_id,
             paykit_sdk::Resolution::Done,
-            pubky_switch_client::app::UserConfirmed::new(),
+            pubky_dispatch_client::app::UserConfirmed::new(),
         )
         .await
         .unwrap();
@@ -2282,7 +2284,7 @@ async fn test_acceptance_owed_sent_when_another_app_resolves_the_payment_done() 
     declaration.idempotent = true;
     declaration.idempotency_retention_ms = Some(7 * 24 * crate::common::HOUR_MS);
     w.rail.set_declaration(declaration);
-    // Past the attempt's orphan window, another own app may resolve it (Switch wire 6.8).
+    // Past the attempt's orphan window, another own app may resolve it (Dispatch wire 6.8).
     w.clock.advance_ms(4201 * 1000);
     let mut phone = w.wallet("phone").await;
     phone
@@ -2290,7 +2292,7 @@ async fn test_acceptance_owed_sent_when_another_app_resolves_the_payment_done() 
             &obligation,
             attempt_id,
             paykit_sdk::Resolution::Done,
-            pubky_switch_client::app::UserConfirmed::new(),
+            pubky_dispatch_client::app::UserConfirmed::new(),
         )
         .await
         .unwrap();
@@ -2345,7 +2347,7 @@ async fn test_acceptance_never_sent_for_an_unsubmitted_payment_another_app_resol
             &obligation,
             attempt_id,
             paykit_sdk::Resolution::Done,
-            pubky_switch_client::app::UserConfirmed::new(),
+            pubky_dispatch_client::app::UserConfirmed::new(),
         )
         .await
         .unwrap();
@@ -2371,7 +2373,7 @@ async fn test_acceptance_never_sent_for_an_unsubmitted_payment_the_user_resolves
             &obligation,
             attempt_id,
             paykit_sdk::Resolution::Done,
-            pubky_switch_client::app::UserConfirmed::new(),
+            pubky_dispatch_client::app::UserConfirmed::new(),
         )
         .await
         .unwrap();
@@ -2422,7 +2424,7 @@ async fn test_acceptance_sent_earlier_is_placed_when_another_app_resolves_the_pa
             &obligation,
             attempt_id,
             paykit_sdk::Resolution::Done,
-            pubky_switch_client::app::UserConfirmed::new(),
+            pubky_dispatch_client::app::UserConfirmed::new(),
         )
         .await
         .unwrap();
@@ -2430,9 +2432,9 @@ async fn test_acceptance_sent_earlier_is_placed_when_another_app_resolves_the_pa
     // The wallet's write placing the acceptance meets a conflict: the entry waits.
     w.alice
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::Error {
+        .fail_next(pubky_dispatch_client::testing::Fault::Error {
             path: "/ops".into(),
-            code: pubky_switch_core::http::ErrorCode::Conflict,
+            code: pubky_dispatch_core::http::ErrorCode::Conflict,
             current: serde_json::Value::Null,
         });
     wallet.resume_payments().await.unwrap();
@@ -2496,9 +2498,9 @@ async fn test_acceptance_queued_then_unplaced_finishes_after_a_restart() {
     for _ in 0..3 {
         w.alice
             .switch()
-            .fail_next(pubky_switch_client::testing::Fault::Error {
+            .fail_next(pubky_dispatch_client::testing::Fault::Error {
                 path: "/ops".into(),
-                code: pubky_switch_core::http::ErrorCode::Conflict,
+                code: pubky_dispatch_core::http::ErrorCode::Conflict,
                 current: serde_json::Value::Null,
             });
     }
@@ -2537,10 +2539,10 @@ async fn reload(w: &World, store: &Arc<HookedStore>, app_id: [u8; 16]) -> Paykit
 /// payment, and its acceptance was queued exactly once and placed. Returns whether the fault
 /// was hit.
 async fn crash_owed_acceptance_path(
-    fault: pubky_switch_client::store::Fault,
+    fault: pubky_dispatch_client::store::Fault,
     users_done: bool,
 ) -> bool {
-    use pubky_switch_client::store::FaultStore;
+    use pubky_dispatch_client::store::FaultStore;
     let w = World::new();
     let (store, app_id, request) = with_a_request(&w).await;
     let mut wallet = reload(&w, &store, app_id).await;
@@ -2570,7 +2572,7 @@ async fn crash_owed_acceptance_path(
                 &obligation,
                 attempt_id,
                 done(),
-                pubky_switch_client::app::UserConfirmed::new(),
+                pubky_dispatch_client::app::UserConfirmed::new(),
             )
             .await
     } else {
@@ -2586,7 +2588,7 @@ async fn crash_owed_acceptance_path(
                 &obligation,
                 attempt_id,
                 done(),
-                pubky_switch_client::app::UserConfirmed::new(),
+                pubky_dispatch_client::app::UserConfirmed::new(),
             )
             .await;
         wallet.resume_payments().await.unwrap();
@@ -2607,7 +2609,7 @@ async fn crash_owed_acceptance_path(
 
 /// Every commit point of `users_done`'s path, stopping after and before each.
 async fn crash_at_every_commit(users_done: bool) {
-    use pubky_switch_client::store::Fault;
+    use pubky_dispatch_client::store::Fault;
     for stop in [Fault::StopAfter as fn(u64) -> Fault, Fault::StopBefore] {
         let mut n = 1;
         while crash_owed_acceptance_path(stop(n), users_done).await {
@@ -2632,7 +2634,7 @@ async fn test_crash_in_a_users_done_on_a_pending_payment_queues_its_acceptance_o
 async fn test_acceptance_of_a_made_payment_restored_bare_is_placed_at_the_first_resume() {
     // Paid by the method, its acceptance not queued as the store failed, then backed up; a
     // bare restore resumes first. The records are listed before the acceptance is placed:
-    // it goes into the record the switch holds, and only then does the entry finish.
+    // it goes into the record the Dispatch holds, and only then does the entry finish.
     let w = World::new();
     let (store, app_id, request) = with_a_request(&w).await;
     let mut wallet = reload(&w, &store, app_id).await;
@@ -2667,7 +2669,7 @@ enum DenyBoundary {
     Unavailable,
 }
 
-/// A user payment whose deny copy expires immediately before dispatch.
+/// A user payment whose deny copy expires immediately before handoff.
 async fn manual_deny_boundary(
     change: Option<fn(&mut paykit_sdk::BlockedPayment)>,
     boundary: DenyBoundary,
@@ -2737,7 +2739,7 @@ async fn manual_deny_boundary_result(
     phone.block(&w.bob_id()).await.unwrap();
     w.clock.advance_ms(paykit_sdk::LISTS_REFRESH_MS - 1);
     let clock = Arc::clone(&w.clock);
-    let switch = w.alice.switch().clone();
+    let dispatch = w.alice.switch().clone();
     let local = Arc::clone(&store);
     store.on_paying(Box::new(move || {
         if matches!(boundary, DenyBoundary::LocalRead) {
@@ -2746,9 +2748,9 @@ async fn manual_deny_boundary_result(
             clock.advance_ms(1);
         }
         if matches!(boundary, DenyBoundary::Unavailable) {
-            switch.fail_next(pubky_switch_client::testing::Fault::Error {
+            dispatch.fail_next(pubky_dispatch_client::testing::Fault::Error {
                 path: "/allow".into(),
-                code: pubky_switch_core::http::ErrorCode::Unavailable,
+                code: pubky_dispatch_core::http::ErrorCode::Unavailable,
                 current: serde_json::Value::Null,
             });
         }
@@ -2758,14 +2760,14 @@ async fn manual_deny_boundary_result(
 }
 
 #[tokio::test]
-async fn test_final_check_manual_dispatch_refreshes_the_deny_copy_at_ten_minutes() {
+async fn test_final_check_manual_handoff_refreshes_the_deny_copy_at_ten_minutes() {
     let (w, outcome) = manual_deny_boundary(None, DenyBoundary::Commit).await;
     assert!(matches!(outcome, PayOutcome::Pending { .. }), "{outcome:?}");
     assert!(w.rail.all_executions().is_empty());
 }
 
 #[tokio::test]
-async fn test_final_check_manual_dispatch_binds_every_confirmed_payment_field() {
+async fn test_final_check_manual_handoff_binds_every_confirmed_payment_field() {
     let changes: [fn(&mut paykit_sdk::BlockedPayment); 5] = [
         |_| {},
         |p| p.amount = crate::common::btc("0.000000001"),
@@ -2800,7 +2802,7 @@ async fn test_final_check_manual_confirmation_cannot_replace_a_due_deny_read() {
         matches!(
             refused.refusal(),
             Some(paykit_sdk::Refusal::AttemptFailed(why))
-                if matches!(**why, paykit_sdk::Refusal::SwitchUnavailable(_))
+                if matches!(**why, paykit_sdk::Refusal::DispatchUnavailable(_))
         ),
         "{refused:?}"
     );
@@ -2893,18 +2895,18 @@ async fn made_then_in_flight() -> (World, Paykit, paykit_sdk::AttemptId) {
 }
 
 #[tokio::test]
-async fn test_resume_ends_at_the_switchs_answer_that_the_wallet_must_stop() {
+async fn test_resume_ends_at_the_dispatchs_answer_that_the_wallet_must_stop() {
     // The made payment's outcome write is answered that the app is no longer current, that
     // its certificate expired, or that the account awaits a recovery: a stop of the wallet
     // as a whole. The resume
     // returns it and asks the method about no later entry, so the second stays `Paying`.
-    use pubky_switch_core::http::ErrorCode as E;
+    use pubky_dispatch_core::http::ErrorCode as E;
     for code in [E::NotCurrent, E::CertExpired, E::RecoveryRequired] {
         let (w, mut wallet, attempt_id) = made_then_in_flight().await;
         w.rail.settle(&attempt_id, true);
         w.alice
             .switch()
-            .fail_next(pubky_switch_client::testing::Fault::Error {
+            .fail_next(pubky_dispatch_client::testing::Fault::Error {
                 path: "/ops".into(),
                 code,
                 current: serde_json::Value::Null,
@@ -2931,8 +2933,8 @@ async fn test_resume_ends_at_the_switchs_answer_that_the_wallet_must_stop() {
 
 #[tokio::test]
 async fn test_resume_ends_when_its_first_claim_read_installs_a_recovery_notice() {
-    // The first entry's payment stopped before its dispatch, so the resume reads its claim
-    // first. The switch answers that read that the account awaits a recovery, with the
+    // The first entry's payment stopped before its handoff, so the resume reads its claim
+    // first. The Dispatch answers that read that the account awaits a recovery, with the
     // notice, which the client keeps. The wallet is stopped from then on: the resume returns
     // the stop, and the later payment, which the method shows paid, is neither looked up nor
     // written.
@@ -2972,9 +2974,9 @@ async fn test_resume_ends_when_its_first_claim_read_installs_a_recovery_notice()
         let generation = wallet.app().own_identity().generation();
         w.alice
             .switch()
-            .fail_next(pubky_switch_client::testing::Fault::Error {
+            .fail_next(pubky_dispatch_client::testing::Fault::Error {
                 path: "/claims".into(),
-                code: pubky_switch_core::http::ErrorCode::RecoveryRequired,
+                code: pubky_dispatch_core::http::ErrorCode::RecoveryRequired,
                 current: serde_json::json!({
                     "generation": generation,
                     "reason": "behind",
@@ -3001,8 +3003,8 @@ async fn test_resume_ends_when_its_first_claim_read_installs_a_recovery_notice()
 #[tokio::test]
 async fn test_resume_ends_at_a_store_failure_a_step_below_it_meets() {
     // The store fails every commit that queues an acceptance. The first payment's acceptance
-    // can't be queued when it is dispatched, and that store failure is the call's answer: the
-    // payment may be running, and the journal keeps it in flight. The second is dispatched
+    // can't be queued when it is handed off, and that store failure is the call's answer: the
+    // payment may be running, and the journal keeps it in flight. The second is handed off
     // with the store sound. Both are then shown paid. Resuming the first meets the store
     // failure again while releasing its acceptance: it ends the resume, so the second payment
     // is neither looked up nor written.
@@ -3026,7 +3028,7 @@ async fn test_resume_ends_at_a_store_failure_a_step_below_it_meets() {
             matches!(
                 &refused,
                 Err(paykit_sdk::PaykitError::Client(
-                    pubky_switch_client::app::AppError::Store(_)
+                    pubky_dispatch_client::app::AppError::Store(_)
                 ))
             ),
             "{refused:?}"
@@ -3055,7 +3057,7 @@ async fn test_resume_ends_at_a_store_failure_a_step_below_it_meets() {
             matches!(
                 &resumed,
                 Err(paykit_sdk::PaykitError::Client(
-                    pubky_switch_client::app::AppError::Store(_)
+                    pubky_dispatch_client::app::AppError::Store(_)
                 ))
             ),
             "{resumed:?}"
@@ -3076,18 +3078,18 @@ async fn test_resume_ends_at_a_store_failure_a_step_below_it_meets() {
 
 #[tokio::test]
 async fn test_pay_whose_outcome_write_is_answered_not_current_returns_the_stop() {
-    // The method makes the payment, and the switch answers its outcome write that the app is
+    // The method makes the payment, and the Dispatch answers its outcome write that the app is
     // no longer current: a stop of the wallet as a whole, which the call returns. The host
     // gets an error for a payment that was made, so `payments` lists it paid by the method
     // with its outcome unwritten (`RailPaid`), not failed. The method was called once.
     let w = World::new();
     let (store, app_id, request) = with_a_request(&w).await;
     let mut wallet = reload(&w, &store, app_id).await;
-    let switch = Arc::clone(w.alice.switch());
+    let dispatch = Arc::clone(w.alice.switch());
     store.on_paying(Box::new(move || {
-        switch.fail_next(pubky_switch_client::testing::Fault::Error {
+        dispatch.fail_next(pubky_dispatch_client::testing::Fault::Error {
             path: "/ops".into(),
-            code: pubky_switch_core::http::ErrorCode::NotCurrent,
+            code: pubky_dispatch_core::http::ErrorCode::NotCurrent,
             current: serde_json::Value::Null,
         })
     }));
@@ -3100,7 +3102,7 @@ async fn test_pay_whose_outcome_write_is_answered_not_current_returns_the_stop()
             .as_ref()
             .err()
             .and_then(paykit_sdk::PaykitError::code),
-        Some(pubky_switch_core::http::ErrorCode::NotCurrent),
+        Some(pubky_dispatch_core::http::ErrorCode::NotCurrent),
         "{outcome:?}"
     );
     let payment = wallet.payments().await.unwrap().remove(0);
@@ -3139,7 +3141,7 @@ async fn two_in_flight() -> (World, Paykit, [paykit_sdk::AttemptId; 2]) {
 #[tokio::test]
 async fn test_resume_ends_at_a_payment_lookup_that_fails() {
     // Two payments in flight, both shown paid by the method. Its history can't be read for
-    // the first: that isn't the Switch client refusing the entry, so the call ends with the
+    // the first: that isn't the Dispatch client refusing the entry, so the call ends with the
     // method's error as it is, and the later payment isn't looked up.
     let (w, mut wallet, [_, later]) = two_in_flight().await;
     for attempt in wallet.payments().await.unwrap() {
@@ -3168,9 +3170,9 @@ async fn test_resume_ends_at_a_payment_lookup_that_fails() {
 
 #[tokio::test]
 async fn test_resume_ends_at_a_service_answer_that_is_no_stop() {
-    // The first payment stopped before its dispatch, so the resume reads its claim first, and
-    // the switch answers that read with an error that is neither a stop nor a refusal of the
-    // Switch client. The call ends with it, as it is; the later payment, which the method
+    // The first payment stopped before its handoff, so the resume reads its claim first, and
+    // the Dispatch answers that read with an error that is neither a stop nor a refusal of the
+    // Dispatch client. The call ends with it, as it is; the later payment, which the method
     // shows paid, isn't looked up.
     for _ in 0..40 {
         let w = World::new();
@@ -3203,10 +3205,10 @@ async fn test_resume_ends_at_a_service_answer_that_is_no_stop() {
             continue;
         }
         w.rail.settle(&attempt_id, true);
-        let code = pubky_switch_core::http::ErrorCode::PermissionMissing;
+        let code = pubky_dispatch_core::http::ErrorCode::PermissionMissing;
         w.alice
             .switch()
-            .fail_next(pubky_switch_client::testing::Fault::Error {
+            .fail_next(pubky_dispatch_client::testing::Fault::Error {
                 path: "/claims".into(),
                 code,
                 current: serde_json::Value::Null,
@@ -3238,7 +3240,7 @@ async fn test_pay_reports_paid_when_a_stop_follows_its_written_outcome() {
     // The store stops after some commit of the payment. Wherever that falls after the outcome
     // batch committed, which finishes the entry, the payment is reported `Paid`: nothing
     // later reports a finished entry, and the proof's delivery is the outbox's.
-    use pubky_switch_client::store::{Fault, FaultStore};
+    use pubky_dispatch_client::store::{Fault, FaultStore};
     for after in 1..64 {
         let w = World::new();
         let (store, app_id, request) = with_a_request(&w).await;

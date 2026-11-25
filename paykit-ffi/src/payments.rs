@@ -123,7 +123,7 @@ pub enum PaymentOutcome {
         /// The attempt.
         attempt_id: String,
     },
-    /// Paid by the method, but the outcome's batch didn't go through (the switch didn't answer,
+    /// Paid by the method, but the outcome's batch didn't go through (the Dispatch didn't answer,
     /// or the write failed otherwise).
     PaidOutcomeUnwritten {
         /// The attempt.
@@ -246,7 +246,7 @@ pub struct PaymentEntry {
     /// doesn't read, so `done` and the proof aren't written, and the attempt stays open (Paykit
     /// spec 7.2 step 3).
     pub record_held: bool,
-    /// The exact transferred amount bound before dispatch, excluding fees. `None` when the method
+    /// The exact transferred amount bound before handoff, excluding fees. `None` when the method
     /// could not quantify the selected transfer or the entry was rebuilt only to report an
     /// outcome.
     pub paid: Option<Amount>,

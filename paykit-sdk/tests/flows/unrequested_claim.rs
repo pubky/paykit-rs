@@ -13,9 +13,9 @@ use paykit_sdk::{
     PayOptions, PayOutcome, Paykit, PaykitConfig, Rail, RailDeclaration, Resolution, Stage,
     UnrequestedPayment,
 };
-use pubky_switch_client::app::UserConfirmed;
-use pubky_switch_client::testing::Fault;
-use pubky_switch_core::claims::{ClaimStatus, Outcome};
+use pubky_dispatch_client::app::UserConfirmed;
+use pubky_dispatch_client::testing::Fault;
+use pubky_dispatch_core::claims::{ClaimStatus, Outcome};
 
 use crate::common::{btc, endpoint, list_version, store, World, HOUR_MS};
 
@@ -59,12 +59,12 @@ fn claim_key(app: &Paykit, attempt: &AttemptId) -> [u8; 32] {
 /// `derive("paykit/v1/obligation", "payment", attempt ID)`, the attempt ID not blinded: no
 /// payment's claim key (Paykit wire 1.5).
 fn unblinded(attempt: &AttemptId) -> [u8; 32] {
-    pubky_switch_core::enc::derive("paykit/v1/obligation", &[b"payment", &attempt.to_bytes()])
+    pubky_dispatch_core::enc::derive("paykit/v1/obligation", &[b"payment", &attempt.to_bytes()])
 }
 
 /// Whether any request the router logged from `from` on names the claim `key`.
 fn read_of(w: &World, from: usize, key: &[u8; 32]) -> bool {
-    let key = pubky_switch_core::enc::b64(key);
+    let key = pubky_dispatch_core::enc::b64(key);
     w.router.log()[from..]
         .iter()
         .any(|line| line.contains(&key))
@@ -91,7 +91,7 @@ async fn only_attempt(app: &mut Paykit, key: &[u8; 32], attempt: &AttemptId, out
     );
 }
 
-/// A rail without a history and idempotent for a day: a resume decides a dispatched payment
+/// A rail without a history and idempotent for a day: a resume decides a handed off payment
 /// by what its claim shows (Paykit spec 7.2, "What a payment method declares").
 fn idempotent_without_history() -> RailDeclaration {
     RailDeclaration::new(
@@ -217,7 +217,7 @@ async fn test_unrequested_claim_restored_payment_to_a_public_endpoint_finishes_o
 /// `sender`'s receipt for alice's `wallet` of `attempt`, naming the proof `proof`.
 fn receipt_from(
     w: &World,
-    sender: &pubky_switch_client::testing::TestSigner,
+    sender: &pubky_dispatch_client::testing::TestSigner,
     wallet: &Paykit,
     attempt: AttemptId,
     proof: [u8; 32],
@@ -414,7 +414,7 @@ async fn test_unrequested_claim_second_wallet_finds_a_public_payments_claim_from
 
 async fn unblinded_claim_after_loss(mode: Mode) {
     // The payment is in flight when the device and alice's service are both lost; the app
-    // restored from a backup holding the dispatched entry follows the loss, and the new
+    // restored from a backup holding the handed off entry follows the loss, and the new
     // service holds no claim for it. A claim holding the attempt, open and the app's own,
     // sits only at the attempt ID's unblinded derivation. The restored app never reads it,
     // writes to it or takes it as the payment's: it finds nothing at its own claim key, takes
@@ -486,12 +486,12 @@ async fn test_unrequested_claim_public_payment_never_takes_the_unblinded_claim()
 
 #[tokio::test]
 async fn test_unrequested_claim_offline_public_payment_never_takes_the_unblinded_claim() {
-    // Paid while alice's switch was unreachable, so no claim was written, then restored from
+    // Paid while alice's Dispatch was unreachable, so no claim was written, then restored from
     // a backup holding the paid journal entry. A claim holding the attempt sits only at the
     // attempt ID's unblinded derivation, open and the app's. The restored app finds nothing
     // at its own claim key and keeps the payment unrecorded, waiting on that claim, without
     // reading the other key, writing to it or paying again (Paykit spec 8.4, "Without the
-    // switch"; Paykit wire 1.5).
+    // Dispatch"; Paykit wire 1.5).
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let _shop = crate::offline_public::shop_with_endpoint(&w).await;
@@ -557,7 +557,7 @@ async fn journal_on_the_unblinded_claim_refused(mode: Mode) {
         .expect("the payment is journaled");
     assert_eq!(
         state[journal].1["d"]["obligation"],
-        serde_json::Value::String(pubky_switch_core::enc::b64(&claim_key(
+        serde_json::Value::String(pubky_dispatch_core::enc::b64(&claim_key(
             &wallet,
             &attempt_id
         )))
@@ -565,7 +565,7 @@ async fn journal_on_the_unblinded_claim_refused(mode: Mode) {
     // An entry on the attempt's unblinded derivation is a corrupt store: refused, not taken
     // or migrated (Paykit wire 1.5).
     state[journal].1["d"]["obligation"] =
-        serde_json::Value::String(pubky_switch_core::enc::b64(&unblinded(&attempt_id)));
+        serde_json::Value::String(pubky_dispatch_core::enc::b64(&unblinded(&attempt_id)));
     let target = store();
     crate::restore::refused_restore(
         &w,

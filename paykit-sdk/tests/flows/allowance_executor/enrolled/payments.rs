@@ -12,7 +12,7 @@ pub(super) async fn unanswered_reservation(
     key: [u8; 32],
 ) -> TestResult {
     use crate::common::{draft, request_from};
-    use pubky_switch_core::{claims::Outcome, ops::Condition};
+    use pubky_dispatch_core::{claims::Outcome, ops::Condition};
 
     let identity = payer.identity();
     let app_id = payer.app_id();
@@ -200,7 +200,7 @@ pub(super) async fn late_period_proof(
         .unwrap();
     assert_eq!(
         claim.view.attempt(&attempt_id.to_bytes()).unwrap().outcome,
-        pubky_switch_core::claims::Outcome::Failed
+        pubky_dispatch_core::claims::Outcome::Failed
     );
     Box::pin(finish_listing(seller)).await;
     let sales = seller.payee_activity().await?;
@@ -228,7 +228,7 @@ pub(super) async fn late_period_proof(
             .attempt(&attempt_id.to_bytes())
             .unwrap()
             .outcome,
-        pubky_switch_core::claims::Outcome::Done
+        pubky_dispatch_core::claims::Outcome::Done
     );
     let receipts = payer
         .receipts(paykit_sdk::ReceiptsOf::Period(request, period))
@@ -261,7 +261,7 @@ pub(super) async fn payment_after_restore(
     amounts: [&str; 3],
 ) -> TestResult {
     use crate::common::{draft, request_from};
-    use pubky_switch_client::clock::Clock;
+    use pubky_dispatch_client::clock::Clock;
 
     let (mut payer, mut seller) = wallets;
     let identity = payer.identity();
@@ -349,7 +349,7 @@ pub(super) async fn payment_after_restore(
             let waiting = Box::pin(payer.receive(None)).await?;
             assert!(waiting.report.events.iter().any(|event| matches!(
                 event,
-                pubky_switch_client::app::AppEvent::ProtocolDeferred {
+                pubky_dispatch_client::app::AppEvent::ProtocolDeferred {
                     reason: "sender lists unknown",
                     ..
                 }
@@ -467,7 +467,7 @@ async fn restore_after_first_payment(
     let floors = payer.app().records_of("block_floor").await?;
     assert_eq!(floors.len(), 1);
     let floor = paykit_lib::records::BlockFloorRecord::read(floors[0].content.value().unwrap())?;
-    let after = floor.floor_ms + pubky_switch_core::records::CLOCK_TOLERANCE_MS + 1;
+    let after = floor.floor_ms + pubky_dispatch_core::records::CLOCK_TOLERANCE_MS + 1;
     world.advance_ms(after.saturating_sub(world.now_ms()));
     Ok(payer)
 }

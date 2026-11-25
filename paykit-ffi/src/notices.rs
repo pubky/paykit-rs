@@ -12,8 +12,8 @@ pub enum WalletNoticeKind {
     /// and writes no claim and no payer record, and the attempt waits, open, for an app holding
     /// `paykit_pay` (Paykit spec 3.1, 7.3).
     HeldWithoutPay,
-    /// A message whose effect the switch refused for good, kept to write into its record later,
-    /// wasn't written within `KEPT_MESSAGE_MS` of its acceptance: the SDK gave it up (Switch spec
+    /// A message whose effect the Dispatch refused for good, kept to write into its record later,
+    /// wasn't written within `KEPT_MESSAGE_MS` of its acceptance: the SDK gave it up (Dispatch spec
     /// 8.2).
     MessageGivenUp,
     /// Ordinary placement expired, but the wallet retained a hold on this Allowance because the

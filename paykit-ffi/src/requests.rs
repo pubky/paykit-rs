@@ -59,8 +59,8 @@ pub enum OneTimeRequestStatus {
     /// (Paykit spec 7.2, `PayOptions::possibly_cancelled_confirmed`,
     /// `Paykit::confirm_possibly_cancelled`).
     Held,
-    /// Received, but its record couldn't be written: the switch refused the write for good, such
-    /// as over a quota (Switch spec 8.2).
+    /// Received, but its record couldn't be written: the Dispatch refused the write for good, such
+    /// as over a quota (Dispatch spec 8.2).
     Unrecorded,
     /// From a payee the identity's deny list holds, as the app last read it: paused, and paid
     /// only once the user confirms (Paykit spec 8.1, `Refusal::Blocked`).
@@ -101,8 +101,8 @@ pub struct PaymentOptions {
     pub list_app: Option<Vec<u8>>,
     /// The user explicitly chose to pay using public endpoints.
     pub public_endpoints_confirmed: bool,
-    /// The user has seen that the payee's switch couldn't confirm the payee's apps, and pays
-    /// anyway (`Refusal::IdentityUnconfirmed`; Switch spec 4.3, Paykit spec 7.2).
+    /// The user has seen that the payee's Dispatch couldn't confirm the payee's apps, and pays
+    /// anyway (`Refusal::IdentityUnconfirmed`; Dispatch spec 4.3, Paykit spec 7.2).
     pub unconfirmed_identity_confirmed: bool,
     /// Exact refusals the user has reviewed and explicitly confirmed for this payment.
     pub confirmed_refusals: Vec<Arc<PaymentRefusal>>,
@@ -182,10 +182,10 @@ pub struct PublicEndpointFailure {
 pub enum PublicFailureKind {
     /// The payee's Homeserver couldn't serve the app's record now.
     Homeserver,
-    /// The reader refuses the record: it doesn't verify as the app's (Switch wire 3.2), its
+    /// The reader refuses the record: it doesn't verify as the app's (Dispatch wire 3.2), its
     /// Paykit member doesn't read (Paykit wire 3.2), the app isn't current in the payee's
     /// `identity.json` with the record's certificate or that certificate doesn't allow
-    /// `paykit_request`, the app's records conflict (Switch spec 4.2), or its newest records are
+    /// `paykit_request`, the app's records conflict (Dispatch spec 4.2), or its newest records are
     /// more than the reader keeps of them.
     Refused,
     /// The record has expired: past its `expires_at`, or its `updated_at` plus the identity's
@@ -230,7 +230,7 @@ impl From<paykit_sdk::PayResult> for PaymentResult {
 
 #[uniffi::export]
 impl NativeWallet {
-    /// Allow an explicitly chosen identity to start a conversation with this payer (Switch spec 7).
+    /// Allow an explicitly chosen identity to start a conversation with this payer (Dispatch spec 7).
     pub async fn allow_connect(&self, payee: Vec<u8>) -> Result<(), WalletError> {
         let identity = fixed(payee, "payee identity")?;
         self.with_wallet(move |app| {

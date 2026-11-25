@@ -4,7 +4,7 @@
 
 use paykit_sdk::rail::Behaviour;
 use paykit_sdk::{PayOptions, PayOutcome, Refusal, RequestStatus};
-use pubky_switch_client::clock::Clock;
+use pubky_dispatch_client::clock::Clock;
 
 use crate::common::{draft, request_from, World};
 
@@ -99,9 +99,9 @@ async fn test_wallets_one_rejects_the_other_cannot_pay() {
 #[tokio::test]
 async fn test_wallets_payment_crossing_the_others_rejection_past_the_deadline_shows_it() {
     // The phone rejects the request; past the request's deadline, the wallet, which still
-    // holds the record as it was and last heard from its switch before the deadline, pays
+    // holds the record as it was and last heard from its Dispatch before the deadline, pays
     // it. Its attempt is refused with `409`, answered past the deadline: the record the
-    // switch holds says the request was rejected, as its status does, and that comes first.
+    // Dispatch holds says the request was rejected, as its status does, and that comes first.
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut phone = w.wallet("phone").await;
@@ -128,7 +128,7 @@ async fn test_wallets_payment_crossing_the_others_rejection_past_the_deadline_sh
 #[tokio::test]
 async fn test_wallets_payment_past_the_deadline_shows_the_others_open_attempt() {
     // The phone's payment is in flight when the request's deadline passes. The wallet, which
-    // has heard from its switch since, pays: the claim it reads shows the phone's open
+    // has heard from its Dispatch since, pays: the claim it reads shows the phone's open
     // attempt, and that is what it answers, not that the deadline passed.
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
@@ -158,15 +158,15 @@ async fn test_wallets_payment_past_the_deadline_shows_the_others_open_attempt() 
     );
 }
 
-/// What the switch's `409` to the wallet's attempt carries, and what follows it.
+/// What the Dispatch's `409` to the wallet's attempt carries, and what follows it.
 enum Crossing {
     /// The claim, in `state`, with another app's attempt.
-    Claim(pubky_switch_core::claims::ClaimStatus),
+    Claim(pubky_dispatch_core::claims::ClaimStatus),
     /// No claim; then the request record can't be read again.
     RecordUnreadable,
     /// No claim; another own app deleted the request record before.
     RecordDeleted,
-    /// No claim; then the switch holds no request record (`404`), though the wallet keeps
+    /// No claim; then the Dispatch holds no request record (`404`), though the wallet keeps
     /// its copy.
     RecordNotFound,
     /// No claim; another own app wrote the request record over with a value the wallet
@@ -176,11 +176,11 @@ enum Crossing {
 
 /// Alice's wallet holds bob's request; its copy of bob's `identity.json` is old, so the
 /// check before the attempt reads it again, and that read takes 25 hours: past the request's
-/// deadline. The switch then answers the attempt's batch with `409`, as `crossing` says, at
+/// deadline. The Dispatch then answers the attempt's batch with `409`, as `crossing` says, at
 /// its own time. Returns the wallet's error.
 async fn attempt_answered_past_the_deadline(crossing: Crossing) -> paykit_sdk::PaykitError {
-    use pubky_switch_client::testing::Fault;
-    use pubky_switch_core::claims::{AttemptView, ClaimView, Outcome};
+    use pubky_dispatch_client::testing::Fault;
+    use pubky_dispatch_core::claims::{AttemptView, ClaimView, Outcome};
     use std::sync::Arc;
     let w = World::new();
     let base = crate::common::store();
@@ -199,7 +199,7 @@ async fn attempt_answered_past_the_deadline(crossing: Crossing) -> paykit_sdk::P
             &w.alice,
             Arc::clone(&base),
             app_id,
-            Arc::clone(&reads) as Arc<dyn pubky_switch_client::app::HomeserverReader>,
+            Arc::clone(&reads) as Arc<dyn pubky_dispatch_client::app::HomeserverReader>,
         )
         .await;
     wallet.receive(None).await.unwrap();
@@ -222,15 +222,15 @@ async fn attempt_answered_past_the_deadline(crossing: Crossing) -> paykit_sdk::P
             let view = ClaimView {
                 claim_key: [0; 32],
                 status,
-                owner: (status == pubky_switch_core::claims::ClaimStatus::Attempting)
+                owner: (status == pubky_dispatch_core::claims::ClaimStatus::Attempting)
                     .then_some(other),
-                attempt_id: (status == pubky_switch_core::claims::ClaimStatus::Attempting)
+                attempt_id: (status == pubky_dispatch_core::claims::ClaimStatus::Attempting)
                     .then_some(attempt_id),
                 step: 2,
                 attempts: vec![AttemptView {
                     attempt_id,
                     owner: other,
-                    outcome: if status == pubky_switch_core::claims::ClaimStatus::Settled {
+                    outcome: if status == pubky_dispatch_core::claims::ClaimStatus::Settled {
                         Outcome::Done
                     } else {
                         Outcome::Open
@@ -240,7 +240,7 @@ async fn attempt_answered_past_the_deadline(crossing: Crossing) -> paykit_sdk::P
                     orphaned: false,
                     possibly_duplicate: false,
                     duplicate: false,
-                    resolved_by: (status == pubky_switch_core::claims::ClaimStatus::Settled)
+                    resolved_by: (status == pubky_dispatch_core::claims::ClaimStatus::Settled)
                         .then_some(other),
                 }],
                 tombstone: false,
@@ -258,7 +258,7 @@ async fn attempt_answered_past_the_deadline(crossing: Crossing) -> paykit_sdk::P
     };
     w.alice.switch().fail_next(Fault::Error {
         path: "/ops".into(),
-        code: pubky_switch_core::http::ErrorCode::Conflict,
+        code: pubky_dispatch_core::http::ErrorCode::Conflict,
         current,
     });
     if let Crossing::RecordUnreadable = crossing {
@@ -270,7 +270,7 @@ async fn attempt_answered_past_the_deadline(crossing: Crossing) -> paykit_sdk::P
     if let Crossing::RecordNotFound = crossing {
         w.alice.switch().fail_next(Fault::Error {
             path: "/records/".into(),
-            code: pubky_switch_core::http::ErrorCode::NotFound,
+            code: pubky_dispatch_core::http::ErrorCode::NotFound,
             current: serde_json::Value::Null,
         });
     }
@@ -286,8 +286,8 @@ async fn attempt_answered_past_the_deadline(crossing: Crossing) -> paykit_sdk::P
 #[tokio::test]
 async fn test_wallets_attempt_conflict_past_the_deadline_shows_the_claim() {
     // The `409` carries the claim: another wallet's open attempt, or the payment made. That
-    // is the answer, though the switch answered past the deadline.
-    use pubky_switch_core::claims::ClaimStatus;
+    // is the answer, though the Dispatch answered past the deadline.
+    use pubky_dispatch_core::claims::ClaimStatus;
     for (status, expected) in [
         (ClaimStatus::Attempting, Refusal::BeingHandledByOtherWallet),
         (ClaimStatus::Settled, Refusal::AlreadyPaid),
@@ -304,7 +304,7 @@ async fn test_wallets_attempt_conflict_past_the_deadline_with_the_record_unread_
     // the answer, never that the deadline passed.
     let error = attempt_answered_past_the_deadline(Crossing::RecordUnreadable).await;
     assert!(
-        matches!(error.refusal(), Some(Refusal::SwitchUnavailable(_))),
+        matches!(error.refusal(), Some(Refusal::DispatchUnavailable(_))),
         "{error:?}"
     );
 }
@@ -312,7 +312,7 @@ async fn test_wallets_attempt_conflict_past_the_deadline_with_the_record_unread_
 #[tokio::test]
 async fn test_wallets_attempt_conflict_past_the_deadline_with_the_record_not_found_is_the_conflict()
 {
-    // The `409` carries no claim, and the switch answers the record's read `404`: the copy
+    // The `409` carries no claim, and the Dispatch answers the record's read `404`: the copy
     // the wallet keeps shows nothing of the request now, so the conflict is the answer, not
     // that the deadline passed.
     let error = attempt_answered_past_the_deadline(Crossing::RecordNotFound).await;
@@ -398,7 +398,7 @@ async fn test_wallets_payment_past_the_deadline_over_a_record_gone_or_unreadable
         let mut wallet = w
             .wallet_on(
                 "wallet",
-                Arc::clone(&store) as Arc<dyn pubky_switch_client::store::StateStore>,
+                Arc::clone(&store) as Arc<dyn pubky_dispatch_client::store::StateStore>,
             )
             .await;
         let mut phone = w.wallet("phone").await;
@@ -479,7 +479,7 @@ async fn test_wallets_confirmed_doubt_changed_since_refused_again() {
         .attempt_id();
     let obligation = phone.payments().await.unwrap()[0].obligation;
     w.clock.advance_ms(PAST_ORPHAN_MS);
-    let confirmed = pubky_switch_client::app::UserConfirmed::new();
+    let confirmed = pubky_dispatch_client::app::UserConfirmed::new();
     wallet
         .resolve_attempt(
             &obligation,
@@ -641,6 +641,6 @@ async fn test_wallets_receipt_waits_for_its_proof_before_reading_an_unseen_claim
     assert_eq!(claim.view.step, 1);
     assert_eq!(
         claim.view.attempt(&attempt_id.to_bytes()).unwrap().outcome,
-        pubky_switch_core::claims::Outcome::Open
+        pubky_dispatch_core::claims::Outcome::Open
     );
 }
