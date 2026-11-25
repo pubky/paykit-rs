@@ -2161,6 +2161,32 @@ async fn test_restore_entry_holding_the_users_resolution_before_it_finished_refu
     );
 }
 
+#[tokio::test]
+async fn test_restore_entry_paid_off_the_claim_and_resolved_otherwise_refused() {
+    // The user's `done` off the claim goes with the user's resolution as done: a backup entry
+    // paid off the claim but resolved failed or unknown is refused, writing nothing. Resolved
+    // done, or with no resolution beside it, it restores.
+    let w = World::new();
+    let (good, app_id) = backup_with_a_payment(&w).await;
+    let paid = with_journal_member(&good, "stage", serde_json::json!("finished"));
+    let paid = with_journal_member(&paid, "restored", serde_json::json!(true));
+    let paid = with_journal_member(&paid, "user_paid", serde_json::json!(true));
+    for resolution in [serde_json::json!("failed"), serde_json::json!("unknown")] {
+        let backup = with_journal_member(&paid, "user_resolved", resolution.clone());
+        refused_writing_nothing(&w, backup, app_id, &format!("paid and {resolution}")).await;
+    }
+    for resolution in [serde_json::json!("done"), serde_json::Value::Null] {
+        let held = with_journal_member(&paid, "user_resolved", resolution.clone());
+        let backup = PaykitBackup::from_bytes(&serde_json::to_vec(&held).unwrap()).unwrap();
+        let wallet = restored(&w, &backup).await;
+        assert_eq!(
+            wallet.payments().await.unwrap()[0].stage,
+            paykit_sdk::Stage::Finished,
+            "{resolution}"
+        );
+    }
+}
+
 /// A backup of alice's wallet with a payment priced by a rate in flight, confirmed at the
 /// amount the request's fixed rate gives its invoice, and the wallet's App ID.
 async fn backup_with_a_priced_payment(w: &World) -> (serde_json::Value, [u8; 16]) {

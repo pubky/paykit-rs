@@ -642,6 +642,45 @@ async fn test_local_state_users_resolution_beside_a_proof_the_recheck_found_read
 }
 
 #[tokio::test]
+async fn test_local_state_entry_paid_off_the_claim_and_resolved_otherwise_is_corrupt() {
+    // The user's `done` off the claim is written with the user's resolution as done, in one
+    // transition: a restored entry paid off the claim but resolved failed or unknown would
+    // answer "already paid" and withhold a repeat on a word the user never gave. Each is a
+    // corrupt store at load; resolved done, or with no resolution beside it, it reads.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    w.rail.next(Behaviour::Hang);
+    let PayOutcome::Pending { attempt_id, .. } = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .outcome
+        .unwrap()
+    else {
+        panic!("the payment is in flight");
+    };
+    let key = journal(&attempt_id);
+    let mut entry = held_json(&wallet, &key).await;
+    entry["d"]["stage"] = json!("finished");
+    entry["d"]["restored"] = json!(true);
+    entry["d"]["user_paid"] = json!(true);
+    for resolution in [json!("failed"), json!("unknown")] {
+        entry["d"]["user_resolved"] = resolution.clone();
+        put(&mut wallet, &key, &entry).await;
+        let read = wallet.payments().await.unwrap_err();
+        assert!(corrupt(&read), "{resolution}: {read:?}");
+    }
+    for resolution in [json!("done"), Value::Null] {
+        entry["d"]["user_resolved"] = resolution.clone();
+        put(&mut wallet, &key, &entry).await;
+        let read = wallet.payments().await.unwrap();
+        assert_eq!(read[0].stage, paykit_sdk::Stage::Finished, "{resolution}");
+    }
+}
+
+#[tokio::test]
 async fn test_local_state_entry_keeping_another_request_is_corrupt() {
     // `a`'s entry keeps `b`'s request: its record would be rebuilt with another request
     // than the one its claim key and record name.

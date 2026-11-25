@@ -6973,17 +6973,15 @@ mod tests {
                             Some(UserResolution::Failed),
                         ] {
                             // The states the journal refuses to hold
-                            // ([`crate::journal::stage_members_hold`]), and a stage only a
-                            // proof reaches without one.
-                            if !crate::journal::stage_members_hold(
-                                stage,
+                            // ([`crate::journal::members_hold`]).
+                            if !crate::journal::members_hold(&crate::journal::EntryMembers {
+                                stage: Some(stage),
                                 proof,
                                 failed_by_method,
                                 failed_before_call,
-                                user_resolved.is_some(),
-                            ) || matches!(stage, Stage::RailPaid | Stage::AcceptanceOwed)
-                                && !proof
-                            {
+                                user_resolved,
+                                ..Default::default()
+                            }) {
                                 continue;
                             }
                             all.push(EntryFacts {
