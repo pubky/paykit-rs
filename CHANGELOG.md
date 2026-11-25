@@ -176,6 +176,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   slot no longer advances the cursor or reports `CaughtUp` after such a change.
   Other failures, such as network errors or a packet that fails the buffer's
   integrity checks, are not retried.
+- In the Rust-only SSE-assisted private intake API (`start_private_intake` and
   `PrivateIntakeSupervisor`), a supervised peer (a Linked Peer or a peer with
   a pending Encrypted Link Handshake) with no stored intake cursor no longer
   replays its whole private-directory event history, one expected-slot
