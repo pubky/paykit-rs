@@ -1,6 +1,6 @@
 //! Two wallets of different identities enroll and connect: the seller's first request waits
 //! for admission, the payer admits the seller, and the waiting request reaches the payer and
-//! is paid and receipted (Paykit spec 1, Switch spec 7).
+//! is paid and receipted (Paykit spec 1, Dispatch spec 7).
 
 use std::sync::Arc;
 
@@ -8,11 +8,11 @@ use paykit_sdk::rail::FakeRail;
 use paykit_sdk::{
     AppScopes, MessageDelivery, PayOptions, PayeeStatus, Paykit, PaykitConfig, RequestStatus,
 };
-use pubky_switch_client::app::AppError;
-use pubky_switch_client::store::MemoryStore;
-use pubky_switch_client::ClientError;
-use pubky_switch_core::http::ErrorCode;
-use pubky_switch_harness::World;
+use pubky_dispatch_client::app::AppError;
+use pubky_dispatch_client::store::MemoryStore;
+use pubky_dispatch_client::ClientError;
+use pubky_dispatch_core::http::ErrorCode;
+use pubky_dispatch_harness::World;
 
 use super::{
     btc, endpoint, invoice, on_both_backends, paid_and_receipted, Expected, Owner, TestResult,
@@ -23,7 +23,7 @@ async fn test_connect_admits_the_seller_and_its_waiting_request_is_paid() -> Tes
     on_both_backends(admits_the_seller_and_its_waiting_request_is_paid).await
 }
 
-/// Whether `wallet`'s allow list holds a reply grant for `peer`: the Switch client's own
+/// Whether `wallet`'s allow list holds a reply grant for `peer`: the Dispatch client's own
 /// read, used here only to observe admission.
 async fn admits(wallet: &mut Paykit, peer: &[u8; 32]) -> TestResult<bool> {
     let allowed = Box::pin(wallet.app_mut().allow_list()).await?;
@@ -76,7 +76,7 @@ async fn admits_the_seller_and_its_waiting_request_is_paid(world: &World) -> Tes
     assert!(Box::pin(wallet.requests()).await?.is_empty());
 
     // The payer's identity takes no connect requests, so the seller's ask, through the
-    // Switch client, is refused; the payer admits the seller itself.
+    // Dispatch client, is refused; the payer admits the seller itself.
     let asked = Box::pin(shop.app_mut().ask_to_connect(&payer_id)).await;
     assert!(
         matches!(

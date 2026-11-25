@@ -13,9 +13,9 @@ use crate::{
 };
 use paykit_lib::{allowances::AllowanceTerms as SignedTerms, PaymentReference};
 use paykit_sdk::{self as sdk, AppScopes, Paykit, RequestDestination, RequestDraft, UserConfirmed};
-use pubky_switch_client::store::MemoryStore;
-use pubky_switch_core::json::check_uuid_v4;
-use pubky_switch_harness::{parties::Asking, Backend, World};
+use pubky_dispatch_client::store::MemoryStore;
+use pubky_dispatch_core::json::check_uuid_v4;
+use pubky_dispatch_harness::{parties::Asking, Backend, World};
 use std::{error::Error, path::Path, sync::Arc};
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
@@ -129,7 +129,7 @@ async fn parties(world: &World, root: &Path) -> TestResult<(Arc<NativeWallet>, P
     Box::pin(receive_shop(&mut shop)).await?;
     shop.app_mut().allow_connect(&buyer).await?;
 
-    // The shop redeems the wallet's invitation with its first request (Switch spec 7).
+    // The shop redeems the wallet's invitation with its first request (Dispatch spec 7).
     let expiry = world
         .now_ms()
         .checked_add(3_600_000)

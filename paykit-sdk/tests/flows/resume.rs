@@ -1,5 +1,5 @@
 //! A resume visits every journal entry (Paykit spec 7.2, 7.3): a payment the method reports
-//! made is journaled with its proof, without the switch, whatever another entry's step met,
+//! made is journaled with its proof, without the Dispatch, whatever another entry's step met,
 //! and nothing is journaled under a wallet-wide stop.
 
 use std::sync::Arc;
@@ -7,9 +7,9 @@ use std::sync::Arc;
 use paykit_lib::AttemptId;
 use paykit_sdk::rail::Behaviour;
 use paykit_sdk::{PayOptions, PayOutcome, Paykit, PaykitConfig, Rail, Stage};
-use pubky_switch_client::clock::Clock;
-use pubky_switch_client::error::TransportError;
-use pubky_switch_client::testing::Fault;
+use pubky_dispatch_client::clock::Clock;
+use pubky_dispatch_client::error::TransportError;
+use pubky_dispatch_client::testing::Fault;
 
 use crate::common::{draft, request_from, store, World};
 
@@ -51,8 +51,8 @@ async fn stage(wallet: &Paykit, attempt: &AttemptId) -> Stage {
         .stage
 }
 
-/// The switch answers nothing for the next `n` requests.
-fn switch_down(w: &World, n: usize) {
+/// The Dispatch answers nothing for the next `n` requests.
+fn dispatch_down(w: &World, n: usize) {
     for _ in 0..n {
         w.alice.switch().fail_next(Fault::Unreachable {
             path: String::new(),
@@ -62,14 +62,14 @@ fn switch_down(w: &World, n: usize) {
 }
 
 #[tokio::test]
-async fn test_resume_switch_unreachable_still_journals_a_later_settled_payment() {
+async fn test_resume_dispatch_unreachable_still_journals_a_later_settled_payment() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let [first, second] = two_in_flight(&w, &mut wallet).await;
-    // The first failed at the method, so its outcome needs the switch; the second paid.
+    // The first failed at the method, so its outcome needs the Dispatch; the second paid.
     w.rail.settle(&first, false);
     w.rail.settle(&second, true);
-    switch_down(&w, 200);
+    dispatch_down(&w, 200);
     // The first is left for the next resume; the caller learns the second was paid and its
     // outcome is owed.
     let resumed = wallet.resume_payments().await.unwrap();
@@ -96,7 +96,7 @@ async fn test_resume_switch_unreachable_still_journals_a_later_settled_payment()
 async fn test_resume_restored_entry_reads_its_claim_before_its_history() {
     // A restored entry may have been resolved by the user in another app since the backup:
     // its own step reads its claim before the method's history (Paykit spec 7.2), so with the
-    // switch down nothing of it is journaled, even with the method showing it paid.
+    // Dispatch down nothing of it is journaled, even with the method showing it paid.
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let [first, second] = two_in_flight(&w, &mut wallet).await;
@@ -112,7 +112,7 @@ async fn test_resume_restored_entry_reads_its_claim_before_its_history() {
     .await
     .unwrap();
     w.rail.settle(&second, true);
-    switch_down(&w, 200);
+    dispatch_down(&w, 200);
     assert!(restored.resume_payments().await.is_err());
     assert_eq!(stage(&restored, &first).await, Stage::Paying);
     assert_eq!(stage(&restored, &second).await, Stage::Paying);
@@ -129,7 +129,7 @@ async fn test_resume_reports_a_refused_outcome_write_as_the_journal_holds_it() {
     // The first outcome's write is refused for now; the second's goes.
     w.alice.switch().fail_next(Fault::Error {
         path: "/ops".into(),
-        code: pubky_switch_core::http::ErrorCode::Unavailable,
+        code: pubky_dispatch_core::http::ErrorCode::Unavailable,
         current: serde_json::Value::Null,
     });
     let resumed = wallet.resume_payments().await.unwrap();
@@ -181,8 +181,8 @@ async fn test_resume_by_an_app_that_left_journals_nothing() {
     let [_, second] = two_in_flight(&w, &mut wallet).await;
     wallet
         .app_mut()
-        .leave(pubky_switch_client::app::LeaveMode::Immediate(
-            pubky_switch_client::app::UserConfirmed::new(),
+        .leave(pubky_dispatch_client::app::LeaveMode::Immediate(
+            pubky_dispatch_client::app::UserConfirmed::new(),
         ))
         .await
         .unwrap();
@@ -197,7 +197,7 @@ async fn test_resume_by_an_app_that_left_journals_nothing() {
 
 #[tokio::test]
 async fn test_resume_on_a_failing_store_journals_nothing() {
-    use pubky_switch_client::store::{Fault as StoreFault, FaultStore, StateStore};
+    use pubky_dispatch_client::store::{Fault as StoreFault, FaultStore, StateStore};
     let w = World::new();
     let base = store();
     let mut wallet = w.wallet_on("wallet", Arc::clone(&base)).await;
@@ -248,19 +248,19 @@ async fn test_resume_on_a_failing_store_journals_nothing() {
 /// The world's switches, where the next operation batch (`/ops`), once armed, fails at the
 /// host's transport with the error armed, nothing sent; later ones go through.
 struct RefusingOps {
-    inner: Arc<pubky_switch_client::testing::Router>,
-    next: std::sync::Mutex<Option<pubky_switch_client::error::TransportError>>,
+    inner: Arc<pubky_dispatch_client::testing::Router>,
+    next: std::sync::Mutex<Option<pubky_dispatch_client::error::TransportError>>,
 }
 
-impl pubky_switch_client::transport::Transport for RefusingOps {
+impl pubky_dispatch_client::transport::Transport for RefusingOps {
     fn send(
         &self,
-        request: pubky_switch_client::transport::Request,
-    ) -> pubky_switch_client::transport::BoxFuture<
+        request: pubky_dispatch_client::transport::Request,
+    ) -> pubky_dispatch_client::transport::BoxFuture<
         '_,
         Result<
-            pubky_switch_client::transport::Response,
-            pubky_switch_client::error::TransportError,
+            pubky_dispatch_client::transport::Response,
+            pubky_dispatch_client::error::TransportError,
         >,
     > {
         let refused = (request.method == "POST" && request.path_and_query.ends_with("/ops"))
@@ -306,7 +306,7 @@ async fn settled_with_transport_error(
             &w.alice,
             base,
             app_id,
-            Arc::clone(&transport) as Arc<dyn pubky_switch_client::transport::Transport>,
+            Arc::clone(&transport) as Arc<dyn pubky_dispatch_client::transport::Transport>,
         )
         .await;
     *transport.next.lock().unwrap() = Some(error);
@@ -323,11 +323,11 @@ async fn test_resume_returns_a_host_transport_failure_behind_a_kept_outcome_writ
         let w = World::new();
         let (mut wallet, [first, second]) =
             settled_with_transport_error(&w, [true, true], error.clone()).await;
-        // The first submit fails at the transport. The switch refuses the same batch on
+        // The first submit fails at the transport. The Dispatch refuses the same batch on
         // retry, leaving the first outcome unwritten (Paykit spec 7.2 step 3).
         w.alice.switch().fail_next(Fault::Error {
             path: "/ops".into(),
-            code: pubky_switch_core::http::ErrorCode::Conflict,
+            code: pubky_dispatch_core::http::ErrorCode::Conflict,
             current: serde_json::Value::Null,
         });
         let resumed = wallet.resume_payments().await;
@@ -336,7 +336,7 @@ async fn test_resume_returns_a_host_transport_failure_behind_a_kept_outcome_writ
         };
         assert_eq!(
             failure.unkept(),
-            &pubky_switch_client::app::AppError::Transport(error.clone()),
+            &pubky_dispatch_client::app::AppError::Transport(error.clone()),
             "{resumed:?}"
         );
         // The first payment keeps its proof and its outcome is still to write.
@@ -452,7 +452,7 @@ async fn in_flight_behind(w: &World) -> (Paykit, [AttemptId; 2], Arc<RefusingOps
             &w.alice,
             base,
             app_id,
-            Arc::clone(&transport) as Arc<dyn pubky_switch_client::transport::Transport>,
+            Arc::clone(&transport) as Arc<dyn pubky_dispatch_client::transport::Transport>,
         )
         .await;
     (wallet, attempts, transport)
@@ -516,7 +516,7 @@ async fn second_resolved_and_kept(
             &obligation,
             second,
             resolution,
-            pubky_switch_client::app::UserConfirmed::new(),
+            pubky_dispatch_client::app::UserConfirmed::new(),
         )
         .await
         .unwrap_err();
@@ -783,12 +783,12 @@ async fn test_resume_reports_a_restored_failure_written_after_the_methods_histor
     assert_eq!(w.rail.executions(&second), 1);
 }
 
-/// How the user's resolution of one of two payments in flight reached the switch.
+/// How the user's resolution of one of two payments in flight reached the dispatch.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Sent {
     /// Its batch never left: kept, nothing applied.
     Unsent,
-    /// Applied at the switch, the answer lost: kept, to be sent again.
+    /// Applied at the Dispatch, the answer lost: kept, to be sent again.
     AnswerLost,
     /// Applied and answered: the entry is over before the resume.
     Applied,
@@ -803,7 +803,7 @@ enum Shows {
 }
 
 /// Two payments in flight, one of them (`target`) resolved by the user as `resolution` with
-/// its batch `sent` so, the method showing `shows` for the two, and the switch failing as
+/// its batch `sent` so, the method showing `shows` for the two, and the Dispatch failing as
 /// `timeouts` and `claim_unavailable` say: resumed twice. `resume_payments` checks in test
 /// builds that each result agrees with the journal it left, every entry that ended in the
 /// call reported exactly once; this adds that no payment is made twice.
@@ -814,7 +814,7 @@ async fn resumed_under(
     timeouts: usize,
     claim_unavailable: bool,
 ) {
-    use pubky_switch_client::app::UserConfirmed;
+    use pubky_dispatch_client::app::UserConfirmed;
     let case = format!(
         "target {target}, {resolution:?}, {shows:?}, {timeouts} timeouts, claims \
          unavailable {claim_unavailable}"
@@ -867,7 +867,7 @@ async fn resumed_under(
     if claim_unavailable {
         w.alice.switch().fail_next(Fault::Error {
             path: "claims".into(),
-            code: pubky_switch_core::http::ErrorCode::Unavailable,
+            code: pubky_dispatch_core::http::ErrorCode::Unavailable,
             current: serde_json::Value::Null,
         });
     }
@@ -886,7 +886,7 @@ async fn resumed_under(
     for attempt in attempts {
         assert!(w.rail.executions(&attempt) <= 1, "{case}");
     }
-    // With the switch answering again, the journal settles: nothing is left told as open
+    // With the Dispatch answering again, the journal settles: nothing is left told as open
     // that the journal holds as over, which the check inside judges once more.
     let settled = wallet.resume_payments().await;
     assert!(settled.is_ok(), "{case}: {settled:?}");

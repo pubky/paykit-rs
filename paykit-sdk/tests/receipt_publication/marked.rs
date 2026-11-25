@@ -69,7 +69,7 @@ async fn read_repaired_marker(world: &World, sale: IssuedSale) -> TestResult {
             .any(|n| n.delete == delete_ref.item_hash && n.writer == Some(other_wallet.app_id())));
     }
     let mut eager = original.clone();
-    eager["lost_to_delete"] = pubky_switch_core::enc::b64(&delete_ref.item_hash).into();
+    eager["lost_to_delete"] = pubky_dispatch_core::enc::b64(&delete_ref.item_hash).into();
     let cert = eager["proof"]["cert"]
         .as_object_mut()
         .ok_or("missing proof certificate")?;

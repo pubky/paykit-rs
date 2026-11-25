@@ -46,7 +46,7 @@ func checkPeriods(fixture: CheckoutFixture, wallet: NativeWallet) async throws {
     refused(try await wallet.payPeriodAutomatically(id: missing, period: period, price: .requestedAmount))
     refused(try await wallet.payPeriodUnderAllowance(id: missing, period: period))
 
-    // Read a restored copy before its first listing (Switch spec 12.4).
+    // Read a restored copy before its first listing (Dispatch spec 12.4).
     let host = fixture.hostForStore(store: EnrollmentStore())
     let restored = try await host.restore(appId: wallet.appId(), bytes: wallet.backup(), sourceDevice: .inPossession)
     do {

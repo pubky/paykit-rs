@@ -14,7 +14,7 @@
 //!   at once to re-send what its inbox accepted from the mark's earliest time to its latest
 //!   (`accepted_from` and `accepted_until`).
 //! - **Entries dropped while they waited for a scope key** (`kw/<sender>`, `stored.rs`): the
-//!   client drops such an entry past its bounds unprocessed (Switch spec 8.2). The mark also
+//!   client drops such an entry past its bounds unprocessed (Dispatch spec 8.2). The mark also
 //!   holds the data epochs the messages waited for, and asks that sender, as for entries
 //!   dropped unverified, only while the app holds every key of those epochs its certificate
 //!   is given: a copy sent before would wait for the same key.
@@ -74,10 +74,10 @@
 //! restore tells nothing; one still queued, refused, or delivered before the backup and gone
 //! from the outbox then tells the window lost.
 
-use pubky_switch_client::app::Delivery;
-use pubky_switch_client::app::Protocol as _;
-use pubky_switch_core::enc::serde_b64;
-use pubky_switch_core::records::DAY_MS;
+use pubky_dispatch_client::app::Delivery;
+use pubky_dispatch_client::app::Protocol as _;
+use pubky_dispatch_core::enc::serde_b64;
+use pubky_dispatch_core::records::DAY_MS;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{PaykitError, Refusal, Result};
@@ -697,7 +697,7 @@ impl Paykit {
     }
 
     /// Forget the processed pair of every message a block's mark counted (module docs), each
-    /// with the mark's update in one commit ([`pubky_switch_client::app::App::forget_processed`]):
+    /// with the mark's update in one commit ([`pubky_dispatch_client::app::App::forget_processed`]):
     /// from then on a re-sent copy is a new entry. One the client won't forget yet (an entry
     /// it stores, or an effect it keeps, holds it) stays for a later receive.
     ///
@@ -705,7 +705,7 @@ impl Paykit {
     ///
     /// A store failure or an alarm.
     pub(crate) async fn forget_blocked_pairs(&mut self) -> Result<()> {
-        use pubky_switch_client::app::{AppError, Refusal as ClientRefusal};
+        use pubky_dispatch_client::app::{AppError, Refusal as ClientRefusal};
         let family = MarkFamily::Blocked;
         for (rest, mut mark) in self.local_scan::<DropMark>(family.prefix()).await? {
             let key = format!("{}{rest}", family.prefix());
@@ -1064,7 +1064,7 @@ impl Paykit {
             if let Some(service) = self.service_time() {
                 let kept_from = service
                     .saturating_sub(crate::KEPT_MESSAGE_MS)
-                    .saturating_add(pubky_switch_core::records::CLOCK_TOLERANCE_MS);
+                    .saturating_add(pubky_dispatch_core::records::CLOCK_TOLERANCE_MS);
                 let mark = held.drop_mark();
                 if mark.asked_at_ms.is_none() && !mark.late_told && mark.earliest_ms < kept_from {
                     let lost = (mark.earliest_ms, kept_from.min(mark.latest_ms));

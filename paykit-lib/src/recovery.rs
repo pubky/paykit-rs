@@ -5,7 +5,7 @@ pub use evidence::{
     RecoveryDecision, RecoveryItem, RecoveryState, RecoverySubject, RecoveryWitness,
 };
 
-use pubky_switch_core::{
+use pubky_dispatch_core::{
     enc::{lp, unb64_array},
     json::{parse_json_as, Doc},
     records::IdentityDoc,

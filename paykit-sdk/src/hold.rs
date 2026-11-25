@@ -6,7 +6,7 @@
 //! as the restore itself sets it: [`crate::protocol::PaykitProtocol`]'s restore step adds the
 //! hold to the writes it installs, in the restore's one commit, so no restore can leave it
 //! out. The hold stays in force until the client's verdict on the restore is known
-//! (`App::restore_held_cursor`; Switch spec 12.4, "The held cursor"): a clean one, the first
+//! (`App::restore_held_cursor`; Dispatch spec 12.4, "The held cursor"): a clean one, the first
 //! feed page read after the restore reporting a cursor at or behind the backup's position,
 //! lifts it with no question to the user and no re-send asked for it, since no entry after
 //! the backup's position was passed; ahead or unknown leaves it as below
@@ -15,7 +15,7 @@
 //! makes the first read itself first ([`Paykit::first_read_before_writing`]). The holds the
 //! backup held itself, of an earlier restore or a `missed` item, cover entries before its
 //! position and are carried whatever the verdict, with the user's confirmations of them
-//! (`hb/`), which never release this restore's own hold. A `missed` item (Switch spec 8.2)
+//! (`hb/`), which never release this restore's own hold. A `missed` item (Dispatch spec 8.2)
 //! shows the service deleted entries before the app read them, a payee's cancellation
 //! possibly among them: the protocol's `missed` step sets the same hold (`mh`) and drops
 //! every confirmation of an earlier one, in the commit that passes the item. An item whose
@@ -23,7 +23,7 @@
 //! that completes bounds it by the service time verified then
 //! ([`Paykit::bound_missed_hold`]). While a request is held:
 //!
-//! - no automatic attempt is made on it, and a dispatch made before is not repeated at a
+//! - no automatic attempt is made on it, and a handoff made before is not repeated at a
 //!   resume;
 //! - a manual one only once the user has seen that the payee may have cancelled it
 //!   ([`crate::PayOptions::possibly_cancelled_confirmed`]), which ends the hold for that
@@ -42,16 +42,16 @@
 
 use paykit_lib::collections::Collection;
 use paykit_lib::records::ActivityRecord;
-use pubky_switch_client::app::Protocol as _;
-use pubky_switch_client::app::{
-    AppError, Collection as SwitchCollection, HeldCursor, PolicyFamily, RecordContent,
+use pubky_dispatch_client::app::Protocol as _;
+use pubky_dispatch_client::app::{
+    AppError, Collection as DispatchCollection, HeldCursor, PolicyFamily, RecordContent,
     Refusal as ClientRefusal, Unopened,
 };
-use pubky_switch_core::enc::serde_b64;
-use pubky_switch_core::http::ErrorCode;
-use pubky_switch_core::records::{AppCert, CLOCK_TOLERANCE_MS};
-use pubky_switch_core::scopes::Permission;
-use pubky_switch_core::sig::SignedDoc;
+use pubky_dispatch_core::enc::serde_b64;
+use pubky_dispatch_core::http::ErrorCode;
+use pubky_dispatch_core::records::{AppCert, CLOCK_TOLERANCE_MS};
+use pubky_dispatch_core::scopes::Permission;
+use pubky_dispatch_core::sig::SignedDoc;
 use serde::{Deserialize, Serialize};
 
 use crate::allowances::{Consent, ConsentEntry};
@@ -89,8 +89,8 @@ impl HoldEpoch {
         &self.0
     }
 
-    pub(crate) fn new() -> pubky_switch_core::Result<Self> {
-        pubky_switch_core::enc::random_bytes().map(Self)
+    pub(crate) fn new() -> pubky_dispatch_core::Result<Self> {
+        pubky_dispatch_core::enc::random_bytes().map(Self)
     }
 
     #[cfg(test)]
@@ -214,7 +214,7 @@ impl OwedWidening {
     }
 }
 
-/// The client's verdict on a restore, as Paykit took it (Switch spec 12.4, "The held
+/// The client's verdict on a restore, as Paykit took it (Dispatch spec 12.4, "The held
 /// cursor"; `App::restore_held_cursor`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -373,7 +373,7 @@ impl MissedHold {
 /// Which side waits for a wider certificate's scope keys ([`Paykit::scope_keys_awaited`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum KeysAwaited {
-    /// The payer's records, claims or `paykit_pay` key: a resume writes nothing to the switch.
+    /// The payer's records, claims or `paykit_pay` key: a resume writes nothing to the dispatch.
     PayerSide,
     /// Only records the payer's side doesn't read: a resume goes on.
     PayeeSideOnly,
@@ -395,7 +395,7 @@ pub(crate) enum RecordSide {
 
 impl RecordSide {
     /// The collections of the side.
-    pub(crate) fn collections(self) -> Vec<SwitchCollection> {
+    pub(crate) fn collections(self) -> Vec<DispatchCollection> {
         let payer = crate::activity::family(Collection::PayerActivity);
         let payee = crate::activity::family(Collection::PayeeActivity);
         let settlements = crate::activity::family(Collection::Settlements);
@@ -423,11 +423,11 @@ impl RecordSide {
 }
 
 /// Whether `scope` reads `collection`, or a member of it: its read scope, or, in a sub-scope
-/// family, one of its sub-scopes (Switch spec 3.3, 10.3).
-fn read_by_scope(collection: &SwitchCollection, scope: &str) -> bool {
+/// family, one of its sub-scopes (Dispatch spec 3.3, 10.3).
+fn read_by_scope(collection: &DispatchCollection, scope: &str) -> bool {
     scope == collection.policy.read_scope
         || (collection.family == PolicyFamily::SubScopes
-            && pubky_switch_core::scopes::split(scope)
+            && pubky_dispatch_core::scopes::split(scope)
                 .is_some_and(|(name, sub)| sub.is_some() && name == collection.policy.read_scope))
 }
 
@@ -443,7 +443,7 @@ fn read_by_scope(collection: &SwitchCollection, scope: &str) -> bool {
 /// between the two may have read less, and the copy then lacks what was written meanwhile
 /// though `held` reads no more than `listed`. Nothing of Paykit's can say which certificates
 /// were held between: the client takes each in a commit of its own, and one read can take
-/// several, at its start and at each `identity.json` that lists a renewal it keeps (Switch
+/// several, at its start and at each `identity.json` that lists a renewal it keeps (Dispatch
 /// spec 3.2). So only a listing ends it, which keeps the certificate it ran under
 /// ([`Paykit::list_records`]); a side `held` reads none of lacks nothing it reads.
 pub(crate) fn side_unlisted(
@@ -468,9 +468,9 @@ pub(crate) enum Unlisted {
     /// No certificate has been listed yet. A wallet action can run the initial listing.
     FirstListing,
     /// A restore set `p/nl`: the client owes a listing too, which its next read makes
-    /// before the feed (Switch spec 12.4 step 2.1).
+    /// before the feed (Dispatch spec 12.4 step 2.1).
     Restore,
-    /// A `missed` item set `p/ml` (Switch spec 8.2): the client lists again at the start of
+    /// A `missed` item set `p/ml` (Dispatch spec 8.2): the client lists again at the start of
     /// its next read, so entries later in the read that passed the item, and calls before
     /// the next one, would decide from the copy as it was. A listing Paykit makes
     /// ([`Paykit::list_records`]) ends this, at the end of that receive.
@@ -478,7 +478,7 @@ pub(crate) enum Unlisted {
     /// The certificate the app holds is another than the one the records were last listed
     /// under (`p/lc`, [`side_unlisted`]). A client owes a listing too for
     /// one that reads collections, or members of one, that the certificate before it didn't
-    /// (Switch spec 8.3), made at the start of a later read once it holds the scope keys,
+    /// (Dispatch spec 8.3), made at the start of a later read once it holds the scope keys,
     /// but tells no caller when it made it: a listing Paykit makes ([`Paykit::list_records`])
     /// ends this.
     Certificate,
@@ -562,7 +562,7 @@ impl Paykit {
     }
 
     /// Whether the app waits for a certificate's scope keys, which the signer stores when it
-    /// is next online (Switch spec 3.5), and on which side: the records aren't listed under
+    /// is next online (Dispatch spec 3.5), and on which side: the records aren't listed under
     /// it ([`side_unlisted`]), and can't be until the keys come. The payer's side waits when
     /// the app lacks the current key of `paykit_pay`, the certificate reads claims the one listed
     /// under didn't, or the payer's side isn't listed under it; otherwise only the payee's
@@ -612,7 +612,7 @@ impl Paykit {
     }
 
     /// Whether the app holds, at the current data epoch, the key of every scope of its
-    /// certificate that reads a collection of Paykit's (Switch spec 3.5): a certificate
+    /// certificate that reads a collection of Paykit's (Dispatch spec 3.5): a certificate
     /// just taken that reads more gets them with the key bundle the next read fetches, and
     /// a listing before then keeps values it can't open, so it waits for them. The client
     /// skips its own listing exactly while this doesn't hold, so it also tells whether a
@@ -697,7 +697,7 @@ impl Paykit {
         self.held_across_with(reads, record_key, record, None).await
     }
 
-    /// A seller stop crossing an accepted first dispatch leaves any restore or missed-item
+    /// A seller stop crossing an accepted first handoff leaves any restore or missed-item
     /// hold in force (Paykit spec 7.2, 8.1).
     pub(crate) async fn held_across_payee_stop(
         &self,
@@ -815,7 +815,7 @@ impl Paykit {
     }
 
     /// Bound the hold of a `missed` item whose end isn't known (`mu`), at a receive whose
-    /// read completed: by the highest service time the app verified (Switch spec 10.1), no
+    /// read completed: by the highest service time the app verified (Dispatch spec 10.1), no
     /// earlier than any acceptance time of the entries the item stands for, since the
     /// client noted the time of the answer that showed the item, or of a later one, before
     /// the commit that passed it. The bound is the later of that time and the bound of an
@@ -849,7 +849,7 @@ impl Paykit {
     /// The user has seen that the payee may have cancelled `request` since the backup the
     /// app was restored from, or a `missed` item, and lets its payment go on: the request's
     /// hold ends, as a payment confirmed with
-    /// [`crate::PayOptions::possibly_cancelled_confirmed`] ends it, so a dispatch made before
+    /// [`crate::PayOptions::possibly_cancelled_confirmed`] ends it, so a handoff made before
     /// the hold is repeated at a later resume (Paykit spec 7.2). It never overrides a
     /// cancellation the record shows or the app keeps. A later `missed` item holds the
     /// request again. `held` must be the exact value the user saw, from
@@ -866,7 +866,7 @@ impl Paykit {
         &mut self,
         request: &crate::requests::RequestRef,
         held: &HeldRequest,
-        _confirmed: pubky_switch_client::app::UserConfirmed,
+        _confirmed: pubky_dispatch_client::app::UserConfirmed,
     ) -> Result<()> {
         // A delivery operation for the whole call (Paykit spec 8.1).
         let _delivery = self.delivery_operation();
@@ -1001,11 +1001,11 @@ impl Paykit {
     }
 
     /// The shared records known, not an empty copy: after a restore the client's copy is
-    /// empty until they are listed again (Switch spec 12.4 step 2.1), and under another
+    /// empty until they are listed again (Dispatch spec 12.4 step 2.1), and under another
     /// certificate than the one they were listed under it may lack what was written since,
-    /// so while either holds they are listed first. A listing the network or the switch couldn't
+    /// so while either holds they are listed first. A listing the network or the Dispatch couldn't
     /// answer now refuses the call as not now: a record's absence then decides nothing,
-    /// never "gone". Any other failure (a store failure, an alarm, the switch's refusal for
+    /// never "gone". Any other failure (a store failure, an alarm, the Dispatch's refusal for
     /// good) is that error: the call is refused all the same.
     pub(crate) async fn records_known(&mut self) -> Result<()> {
         self.refuse_while_scope_keys_missing().await?;
@@ -1118,7 +1118,7 @@ impl Paykit {
     /// mark in its own commit, and only a [`Paykit::reconcile`] that ran the payer pass,
     /// under `paykit_pay`, clears it. The backup doesn't hold the attempts made after it, and only
     /// that pass finds them on the payer's obligations (Paykit spec 7.3), so until then no
-    /// new attempt is made and nothing is dispatched, whatever the host does meanwhile, such
+    /// new attempt is made and nothing is handed off, whatever the host does meanwhile, such
     /// as [`Paykit::end_reconcile`] after a reconcile without `paykit_pay` skipped the pass.
     pub(crate) async fn payer_pass_owed(&self) -> Result<bool> {
         Ok(self
@@ -1537,7 +1537,7 @@ impl Paykit {
 
     /// Whether the restored-record scan has reached its bound for unreadable records.
     fn past_restore_window(&self, since_ms: u64) -> bool {
-        self.window_now() > since_ms.saturating_add(pubky_switch_client::app::SENT_RETENTION_MS)
+        self.window_now() > since_ms.saturating_add(pubky_dispatch_client::app::SENT_RETENTION_MS)
     }
 
     /// Write the restore time into the restored-record scan mark after the client's
@@ -1600,13 +1600,13 @@ impl Paykit {
 
     /// Whether the client refuses to queue `stored` again by now: past 30 days from its
     /// `created_at`, less the clock tolerance, by the later of the device clock and the
-    /// service time verified (Switch spec 11, `App::queue_stored`).
+    /// service time verified (Dispatch spec 11, `App::queue_stored`).
     pub(crate) fn past_replay_window(&self, stored: &paykit_lib::records::StoredMessage) -> bool {
         let until = stored
             .message()
             .created_at_ms
             .saturating_sub(CLOCK_TOLERANCE_MS)
-            .saturating_add(pubky_switch_client::app::SENT_RETENTION_MS);
+            .saturating_add(pubky_dispatch_client::app::SENT_RETENTION_MS);
         self.window_now() > until
     }
 
@@ -1693,7 +1693,7 @@ impl Paykit {
         self.local_commit(tx).await
     }
 
-    /// Apply the Switch's held cursor to this restore (Switch spec 12.4, Paykit spec 7.2).
+    /// Apply the Dispatch's held cursor to this restore (Dispatch spec 12.4, Paykit spec 7.2).
     /// A confirmed clean page releases only this restore's hold and the consents it marked.
     /// An ahead or unknown verdict keeps the hold. If a later page ends a clean verdict,
     /// replace the confirmation epoch and require the re-sends and block window again.
@@ -1738,7 +1738,7 @@ impl Paykit {
                 let hold_now = self.current_hold().await?;
                 for (rest, _) in self.local_scan::<bool>(key::RESTORE_APPROVALS).await? {
                     if !missed {
-                        let record = pubky_switch_core::enc::unb64_array::<32>(&rest)
+                        let record = pubky_dispatch_core::enc::unb64_array::<32>(&rest)
                             .map_err(|_| crate::error::PaykitError::corrupt())?;
                         tx.put(&key::execution_approval(&record, hold_now.as_ref()), &true)?;
                     }
@@ -1886,12 +1886,12 @@ pub(crate) struct HeldAnswer {
     /// A backup carried this answer. Its signed record does not show its delivery outcome.
     pub(crate) restored: bool,
     /// The payee it goes to.
-    #[serde(with = "pubky_switch_core::enc::serde_b64")]
+    #[serde(with = "pubky_dispatch_core::enc::serde_b64")]
     pub(crate) payee: [u8; 32],
     /// Its `msg_id`.
     pub(crate) msg_id: String,
     /// The request it answers.
-    #[serde(with = "pubky_switch_core::enc::serde_b64")]
+    #[serde(with = "pubky_dispatch_core::enc::serde_b64")]
     pub(crate) request_hash: [u8; 32],
 }
 
@@ -1963,7 +1963,7 @@ fn keys_awaited() -> crate::error::PaykitError {
 }
 
 /// Whether a record's value isn't open for now only: sealed under a scope key the app
-/// doesn't hold yet (Switch spec 3.5). The client opens it once the key comes, so a value
+/// doesn't hold yet (Dispatch spec 3.5). The client opens it once the key comes, so a value
 /// that is only waiting is never treated as one that doesn't read: nothing offers to write
 /// over it, which would drop what it holds unseen, such as single-use marks.
 pub(crate) fn awaits_key(content: &RecordContent) -> bool {
@@ -1979,11 +1979,11 @@ pub(crate) fn value_awaits_key() -> crate::error::PaykitError {
     Refusal::NotNow(crate::NotNowReason::ValueAwaitsKey).into()
 }
 
-/// A listing the network or the switch couldn't answer now, as a payment's switch read
-/// counts it ([`crate::pay::switch_unavailable`]), or a `429`: a record's absence then
+/// A listing the network or the Dispatch couldn't answer now, as a payment's Dispatch read
+/// counts it ([`crate::pay::dispatch_unavailable`]), or a `429`: a record's absence then
 /// decides nothing.
 fn unanswered(error: &PaykitError) -> bool {
-    matches!(error, PaykitError::Client(client) if crate::pay::switch_unavailable(client))
+    matches!(error, PaykitError::Client(client) if crate::pay::dispatch_unavailable(client))
         || error.code() == Some(ErrorCode::RateLimited)
 }
 
@@ -2054,7 +2054,7 @@ impl HoldReads {
 
 #[cfg(test)]
 mod tests {
-    use pubky_switch_client::error::{ClientError, StoreError, TransportError};
+    use pubky_dispatch_client::error::{ClientError, StoreError, TransportError};
 
     use super::*;
 
@@ -2302,7 +2302,7 @@ mod tests {
         assert!(serde_json::from_value::<HeldAnswer>(value).is_err());
     }
 
-    fn switch(code: ErrorCode) -> PaykitError {
+    fn dispatch(code: ErrorCode) -> PaykitError {
         PaykitError::Client(AppError::Switch(ClientError::Switch {
             status: code.status(),
             code,
@@ -2315,7 +2315,7 @@ mod tests {
 
     /// Alice's wallet's certificate for `scopes`, issued `after_ms` after the fixtures' time.
     fn cert(scopes: &[&str], after_ms: u64) -> AppCert {
-        use pubky_switch_core::records::{AppCertBody, DEFAULT_CERT_LIFETIME_MS};
+        use pubky_dispatch_core::records::{AppCertBody, DEFAULT_CERT_LIFETIME_MS};
         let party = crate::testkit::Party::new("alice", "wallet", scopes);
         let owned: Vec<String> = scopes.iter().map(|s| (*s).to_owned()).collect();
         let issued_at = crate::testkit::NOW + after_ms;
@@ -2382,7 +2382,7 @@ mod tests {
     }
 
     #[test]
-    fn test_listing_unanswered_as_a_switch_read_counts_it() {
+    fn test_listing_unanswered_as_a_dispatch_read_counts_it() {
         let lost = PaykitError::Client(AppError::Transport(TransportError::Connect("down".into())));
         assert!(unanswered(&lost));
         assert!(unanswered(&PaykitError::Client(
@@ -2391,9 +2391,9 @@ mod tests {
         assert!(unanswered(&PaykitError::Client(AppError::Switch(
             ClientError::BadServiceSignature { status: 502 }
         ))));
-        assert!(unanswered(&switch(ErrorCode::RateLimited)));
-        assert!(unanswered(&switch(ErrorCode::Unavailable)));
-        assert!(!unanswered(&switch(ErrorCode::PermissionMissing)));
+        assert!(unanswered(&dispatch(ErrorCode::RateLimited)));
+        assert!(unanswered(&dispatch(ErrorCode::Unavailable)));
+        assert!(!unanswered(&dispatch(ErrorCode::PermissionMissing)));
     }
 
     #[test]
@@ -2401,7 +2401,7 @@ mod tests {
         assert!(local_failure(&PaykitError::Client(AppError::Store(
             StoreError::Unavailable
         ))));
-        assert!(!local_failure(&switch(ErrorCode::PermissionMissing)));
+        assert!(!local_failure(&dispatch(ErrorCode::PermissionMissing)));
         assert!(!local_failure(&PaykitError::Client(AppError::InvalidData(
             "bad".into()
         ))));

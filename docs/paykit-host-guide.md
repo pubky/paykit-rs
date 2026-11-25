@@ -1,8 +1,8 @@
 # Paykit host guide
 
 A wallet owns one `Paykit` handle for each approved App ID. Supply the same
-durable Switch store, transport, clock and Homeserver access when reopening it.
-Use the [Switch app host guide](https://github.com/pubky/pubky-switch/blob/d4f33242e2771a773e004b7fd2be0ebb09505c86/docs/app-host-guide.md)
+durable Dispatch store, transport, clock and Homeserver access when reopening it.
+Use the [Dispatch app host guide](https://github.com/pubky/pubky-dispatch/blob/d4f33242e2771a773e004b7fd2be0ebb09505c86/docs/app-host-guide.md)
 for store guarantees, approval and client outcomes. Keep app keys and backups in
 host-protected storage and serialize operations on the handle. A memory store
 cannot preserve unanswered writes or payments across a restart.
@@ -38,7 +38,7 @@ the exact Paykit protocol instance supplied to the registration closure.
 
 In Kotlin and Swift, pass `WalletScopes` to `prepareEnrollment`. Choose the
 roles this app needs. A request scope covers every sale, while `requestLabels`
-limits the app to the named labels. The SDK derives required scopes and Switch
+limits the app to the named labels. The SDK derives required scopes and Dispatch
 permissions. Keep the same scope set and authentication request when resuming
 a pending enrollment (Paykit spec 3.1, 3.2).
 
@@ -48,7 +48,7 @@ outgoing requests, `orphanAfterS` for the attempt's orphan age in seconds, and
 `resendBudget` for the maximum number of messages re-sent to each requester per day.
 Register handled message kinds in `extensionKinds` and ask for their prefixes
 at enrollment. Public Payment Endpoints require the unlabelled request scope
-and `publishesRecord` enabled (Paykit spec 3.3, 4, 7.2, 9, Switch spec 4.2).
+and `publishesRecord` enabled (Paykit spec 3.3, 4, 7.2, 9, Dispatch spec 4.2).
 
 The one-time payment path uses these SDK calls. Keep the receive summary so
 the host can handle its duty events. List received requests and show the
@@ -139,16 +139,16 @@ that tries that upkeep still does its other work, and sets
 `ReceiveSummary::app_record_owed`, when the record can't be brought up to date
 for one of these reasons:
 
-- the Switch client refuses the update as one it can't sign, for example
+- the Dispatch client refuses the update as one it can't sign, for example
   because the rail now pays a list of endpoint identifiers the record can't
   carry;
-- the own switch doesn't answer;
+- the own Dispatch doesn't answer;
 - the record's copy on the Homeserver couldn't be written;
 - the record's copy on the Homeserver is missing while the app runs on devices
   that share its keys: another device may have removed it to leave, so it is
   written back, and the reason clears, at the first receive that reads the
   feed to its end and so shows the app current;
-- the switch has accepted no record of the app yet, as after a provider loss
+- the Dispatch has accepted no record of the app yet, as after a provider loss
   or a restore from a backup that carries none: the copy is written once it
   does;
 - a newer change of the record is still settling, and the copy waits for it;
@@ -166,9 +166,9 @@ every receive sets `app_record_owed`: neither a receive's upkeep nor
 with `Paykit::load`. A delivery the client kept goes again at the start of its
 next read, so one that keeps failing there fails that receive.
 
-## Use a Switch App built by the host
+## Use a Dispatch App built by the host
 
-When the host opens the Switch App, use `PaykitConfig::protocol` to build the
+When the host opens the Dispatch App, use `PaykitConfig::protocol` to build the
 protocol with the wallet's configured extension kinds. Register it in the App's
 protocol set. Hand the App and that exact
 protocol instance to `Paykit::attach` immediately after `App::join` or
@@ -211,7 +211,7 @@ consenting to a new Allowance. If the installation's store is damaged so that
 restore reads nothing of the old installation.
 
 Every restore, in place or into a new store, installs the seen marks the backup
-carries in place of the store's own (Switch spec 12.4 "Seen marks"). When some
+carries in place of the store's own (Dispatch spec 12.4 "Seen marks"). When some
 were left out, the restore reports `AppEvent::SeenMarksIncomplete` once for each
 registered protocol (`WalletEventData::SeenMarksIncomplete` in the bindings). It
 is a notice, with nothing to acknowledge: from then on a record without a mark
@@ -243,7 +243,7 @@ gone through, keep that uncertainty clear and follow the reconciliation rules.
 A Kotlin or Swift wallet can return no entry from `messageDelivery` after
 delivery retention expires or after a restore. A retry can be refused after
 an earlier try was accepted and its answer was lost. When delivery is
-`Failed`, check the request or record before sending a replacement (Switch
+`Failed`, check the request or record before sending a replacement (Dispatch
 spec 11, 12.4).
 
 After loading, read the durable journal with `Paykit::payments()`. Match the
@@ -290,9 +290,9 @@ current store.
 | `PayOutcome::RecordHeld` | The method paid, but the record update is held. Resume when the record is readable or repaired. |
 | `PayOutcome::RecordDivergent` | The method paid and the record awaits confirmation. Show the named record, confirm it with the user and resume. |
 | `PayOutcome::Resolved` | The attempt is over: the user or another app resolved it, or it finished with nothing of this call's to report. Nothing new is paid. It doesn't say that no payment was made: read the payment's state from `payments` and the claim. In the Kotlin and Swift bindings it is opaque: they expose no claim read and no typed resolution, so a host can tell only that nothing new is paid, whether the method gave a proof (`paidByMethod`, while the wallet keeps the entry), and for a request its status and receipts; not who resolved the attempt or how. |
-| `Stage::Recorded` | The journal exists before the Switch attempt write. |
-| `Stage::Attempted` | The attempt is written and checked. Payment has yet to be dispatched. |
-| `Stage::Paying` | Dispatch may have happened. Treat the attempt as potentially paid. |
+| `Stage::Recorded` | The journal exists before the Dispatch attempt write. |
+| `Stage::Attempted` | The attempt is written and checked. Payment has yet to be handed off. |
+| `Stage::Paying` | Handoff may have happened. Treat the attempt as potentially paid. |
 | `Stage::RailPaid` | The method reported payment. The SDK still owns outcome recording. |
 | `Stage::RailFailed` | The method reported a definitive failure. The SDK still owns outcome recording. |
 | `Stage::AcceptanceOwed` | The payment outcome is recorded. Resume the outstanding acceptance delivery. |
@@ -387,16 +387,16 @@ One-time requests stay held after a provider loss in any case (Paykit spec 8.1,
 8.3).
 
 If `Paykit::ledger_alarm` returns an alarm, show its reason when opening the
-wallet and after a reconciliation error. The Switch client stops new payment
+wallet and after a reconciliation error. The Dispatch client stops new payment
 attempts, including manual payments. Direct the user to the signer to move to
-another provider or declare provider loss (Switch spec 10.1).
+another provider or declare provider loss (Dispatch spec 10.1).
 
 Call `Paykit::reserved_by_other_apps` with the permanent Allowance handle.
 For each returned attempt, show its ID and transfer amount in the Allowance's
 asset. If the user selects that attempt and confirms the release, pass its ID
 and `UserConfirmed` to `Paykit::release_allowance_attempt`. The wallet
 checks the current grant and failure and its own durable evidence that the
-attempt ended before dispatch. A restored journal cannot establish that.
+attempt ended before handoff. A restored journal cannot establish that.
 If the call returns a kept batch ID, show the release as pending. Receive or
 resume and read the verified usage again before showing a change in capacity.
 A later signed paid outcome still spends the amount (Paykit spec 8.3).
@@ -482,7 +482,7 @@ SDK makes no fee check: your payment method bounds the fee. For a payment by han
 authorized quote through `PayOptions::with_rate_authorized`.
 
 The SDK checks the automatic payment window, the request and period records, and the
-usual payment restrictions again before dispatch. A missed period remains available for
+usual payment restrictions again before handoff. A missed period remains available for
 `pay_period` when its other payment conditions hold.
 
 ## Blocked counterparties
@@ -512,17 +512,17 @@ the backup came from may have delivered it.
 
 The outbox is the host's to drive. `Paykit::flush` (`NativeWallet::flush` in the wallet bindings) makes one bounded delivery try: it reaches a few queued messages within a time budget, and can return `Ok` with messages still queued. `receive` retries some messages, such as the batches it keeps and a queued Private Payment List, but it doesn't drive the outbox. Call `flush` on a schedule of the host's choice, for example after each `receive`, when the app comes to the foreground, when it reconnects, and on a timer.
 
-A request the recipient's switch refused because the sender isn't admitted yet stays queued, and is sent again when a delivery try reaches it after the recipient admits the sender. `Paykit::message_delivery` (`NativeWallet::message_delivery`) tells where a message stands: kept in a batch, queued with its tries, waiting for admission, waiting for a current certificate, accepted by the recipient's inbox, or failed. `None` means the client keeps no delivery status for that message ID; the request's activity may still hold evidence, so look at it before sending anything in the message's place.
+A request the recipient's Dispatch refused because the sender isn't admitted yet stays queued, and is sent again when a delivery try reaches it after the recipient admits the sender. `Paykit::message_delivery` (`NativeWallet::message_delivery`) tells where a message stands: kept in a batch, queued with its tries, waiting for admission, waiting for a current certificate, accepted by the recipient's inbox, or failed. `None` means the client keeps no delivery status for that message ID; the request's activity may still hold evidence, so look at it before sending anything in the message's place.
 
 ### Crediting a payment exactly once
 
 Which payment-method output a proof names is the integrator's to check: Paykit names no payment method and checks no method's outputs. The wallet's `Rail::verify` checks the evidence and returns the time it dates the payment. `Rail::settlement_id` returns the identifier of the settlement the proof pays. For example, a Bitcoin method could check the transaction and output a proof names, and return them as the settlement ID.
 
-`Paykit::confirm_payment` credits a payment by storing its signed receipt and the settlement's mark in one batch. The mark is shared by the payee's own apps: once a settlement's mark is visible, no other credit of it is made, whether for another request, a Billing Period or a payment without a request. A repeat for the same occurrence returns its existing receipt. A provider loss can hide an earlier mark from the app deciding. When the SDK can't tell whether the settlement was already credited, it refuses with `Refusal::MaybeCredited`; when the settlement's bucket is full, or the Switch refuses the bucket for its quota or size, with `Refusal::SettlementBucketFull`. Show the risk, and retry with `Paykit::confirm_payment_with` only on the user's explicit confirmation: `with_maybe_credited_confirmed` for the first, `with_unmarked_credit_confirmed` for the second. The first is still refused when no fresh bucket version was read, or when a bucket seen before is gone with no provider loss to explain it. A credit without a mark can duplicate a credit made elsewhere.
+`Paykit::confirm_payment` credits a payment by storing its signed receipt and the settlement's mark in one batch. The mark is shared by the payee's own apps: once a settlement's mark is visible, no other credit of it is made, whether for another request, a Billing Period or a payment without a request. A repeat for the same occurrence returns its existing receipt. A provider loss can hide an earlier mark from the app deciding. When the SDK can't tell whether the settlement was already credited, it refuses with `Refusal::MaybeCredited`; when the settlement's bucket is full, or the Dispatch refuses the bucket for its quota or size, with `Refusal::SettlementBucketFull`. Show the risk, and retry with `Paykit::confirm_payment_with` only on the user's explicit confirmation: `with_maybe_credited_confirmed` for the first, `with_unmarked_credit_confirmed` for the second. The first is still refused when no fresh bucket version was read, or when a bucket seen before is gone with no provider loss to explain it. A credit without a mark can duplicate a credit made elsewhere.
 
 ### Sharing a Private Payment List from several selling apps
 
-A selling app that publishes a Private Payment List keeps a counter for each recipient and generation of its own identity. Another app holding the unlabelled selling scope (`paykit_request`) can write that counter. When `publish_list_to` or `withdraw_list_from` has to reserve a new list version and the counter holds another app's write, the call is refused with `HeldForUser`, a withdrawal included: with `PublicationConflict` (code `publication_conflict`) when that write verifies, and with `Unresolved` (code `held_unresolved`) while the counter can't be verified, as when the Switch client flagged a write to it. In Rust the conflict's text names the app that wrote the counter; a binding host gets the code only. A flagged write is reported first as `AppEvent::WriteFlagged` (`WalletEventData::WriteFlagged` in the bindings), which names the app that wrote it: look at that event before revoking anything. With another app's verified write on the counter, retries give the same refusal throughout the same generation; an unverified counter may clear on a later read. The refusal holds publication to that one recipient; other recipients are not affected. To stop that recipient paying this app's list now, revoke this selling app in the signer and enroll it again. That ends this app's lists for every recipient, not only this one, once they read the payee's current identity document, at most 10 minutes later. Otherwise the list lapses at its signed expiry or 30 days after the recipient accepted it. Revoke the app that made the foreign write too.
+A selling app that publishes a Private Payment List keeps a counter for each recipient and generation of its own identity. Another app holding the unlabelled selling scope (`paykit_request`) can write that counter. When `publish_list_to` or `withdraw_list_from` has to reserve a new list version and the counter holds another app's write, the call is refused with `HeldForUser`, a withdrawal included: with `PublicationConflict` (code `publication_conflict`) when that write verifies, and with `Unresolved` (code `held_unresolved`) while the counter can't be verified, as when the Dispatch client flagged a write to it. In Rust the conflict's text names the app that wrote the counter; a binding host gets the code only. A flagged write is reported first as `AppEvent::WriteFlagged` (`WalletEventData::WriteFlagged` in the bindings), which names the app that wrote it: look at that event before revoking anything. With another app's verified write on the counter, retries give the same refusal throughout the same generation; an unverified counter may clear on a later read. The refusal holds publication to that one recipient; other recipients are not affected. To stop that recipient paying this app's list now, revoke this selling app in the signer and enroll it again. That ends this app's lists for every recipient, not only this one, once they read the payee's current identity document, at most 10 minutes later. Otherwise the list lapses at its signed expiry or 30 days after the recipient accepted it. Revoke the app that made the foreign write too.
 
 ### Receive events the host acts on
 
@@ -536,15 +536,15 @@ These three are not kept after the call returns. A crash before the host handles
 
 ### Withdrawing public endpoints and paying offline
 
-To stop offering public endpoints, call `set_public_endpoints` with an empty set while publication is on, and check the result. `Published` means the Homeserver holds the record without them. For any other result, check that the withdrawal is visible before going further. Turn `publishes_record` off only if the app should stop publishing its record on the Homeserver altogether; it still gives its app record to the Switch. Until the withdrawal is visible, the old endpoints expire, or the app is revoked, a payer can still pay the endpoints it read before.
+To stop offering public endpoints, call `set_public_endpoints` with an empty set while publication is on, and check the result. `Published` means the Homeserver holds the record without them. For any other result, check that the withdrawal is visible before going further. Turn `publishes_record` off only if the app should stop publishing its record on the Homeserver altogether; it still gives its app record to the Dispatch. Until the withdrawal is visible, the old endpoints expire, or the app is revoked, a payer can still pay the endpoints it read before.
 
-With the own Switch unreachable, `pay_without_request` can still pay a reusable public endpoint the user picked explicitly, with `PaymentMode::Public` and the endpoint named in the payment's options. It needs the app's own identity document confirmed within the last 60 seconds, a copy of the deny list read within the last 10 minutes, and the payee's identity checked. Once the switch is back, call `resume_payments`: it records the payment the method made offline, and never sends that payment again.
+With the own Dispatch unreachable, `pay_without_request` can still pay a reusable public endpoint the user picked explicitly, with `PaymentMode::Public` and the endpoint named in the payment's options. It needs the app's own identity document confirmed within the last 60 seconds, a copy of the deny list read within the last 10 minutes, and the payee's identity checked. Once the Dispatch is back, call `resume_payments`: it records the payment the method made offline, and never sends that payment again.
 
 ### Reply grants and push
 
-The host manages the identity's reply grants through the Switch App (`Paykit::app_mut`). `App::allow_list` lists the peers, each grant's origin, when it was given and when the peer last sent through it, so check the app's own outgoing activity separately; `App::remove_reply` removes a grant and keeps a peer the user keeps for another reason. Pruning is the host's policy: for example, check once a day and remove a grant only after it has been idle in both directions for 180 days, never for a peer the user keeps or an exchange that is unfinished or uncertain.
+The host manages the identity's reply grants through the Dispatch App (`Paykit::app_mut`). `App::allow_list` lists the peers, each grant's origin, when it was given and when the peer last sent through it, so check the app's own outgoing activity separately; `App::remove_reply` removes a grant and keeps a peer the user keeps for another reason. Pruning is the host's policy: for example, check once a day and remove a grant only after it has been idle in both directions for 180 days, never for a peer the user keeps or an exchange that is unfinished or uncertain.
 
-Push is registered through the Switch App: `App::register_push` with the relay URL and device token, also to change relays, and `App::reregister_push` to retry the saved settings after an interruption or a provider change. A push only wakes the app: it can arrive twice or not at all. Read the feed with `receive` for the payment's state; never take it from the push.
+Push is registered through the Dispatch App: `App::register_push` with the relay URL and device token, also to change relays, and `App::reregister_push` to retry the saved settings after an interruption or a provider change. A push only wakes the app: it can arrive twice or not at all. Read the feed with `receive` for the payment's state; never take it from the push.
 
 ## After a restore or a provider loss
 
@@ -552,9 +552,9 @@ Push is registered through the Switch App: `App::register_push` with the relay U
 
 Before restoring, ask who has the device the backup came from (`WalletHost::restore` takes the answer). If it may be lost or stolen, revoke its app and enroll a new one instead.
 
-After `Paykit::restore`, call `receive` before using the Switch App directly; Paykit's own outgoing calls make that first read themselves. `App::restore_held_cursor` gives the first read's verdict once a page settles it: `Clean` releases this restore's hold, though the hold of an earlier restore that wasn't clean, or of a missed feed item, can remain, and a later page found `Ahead` ends the verdict; `Ahead` and `Unknown` keep open requests on hold until the user confirms each, or evidence shows it ended. Run `reconcile` and show its report: each outcome it resolved, the obligations in doubt, and whether payer obligations were skipped because the certificate lacks `paykit_pay`. After the user has seen it, call `end_reconcile` (`endConfirmedReconciliation` in the wallet bindings); an open restore question must be answered first. When payer obligations were skipped, payments still wait for a reconcile by an app holding `paykit_pay`.
+After `Paykit::restore`, call `receive` before using the Dispatch App directly; Paykit's own outgoing calls make that first read themselves. `App::restore_held_cursor` gives the first read's verdict once a page settles it: `Clean` releases this restore's hold, though the hold of an earlier restore that wasn't clean, or of a missed feed item, can remain, and a later page found `Ahead` ends the verdict; `Ahead` and `Unknown` keep open requests on hold until the user confirms each, or evidence shows it ended. Run `reconcile` and show its report: each outcome it resolved, the obligations in doubt, and whether payer obligations were skipped because the certificate lacks `paykit_pay`. After the user has seen it, call `end_reconcile` (`endConfirmedReconciliation` in the wallet bindings); an open restore question must be answered first. When payer obligations were skipped, payments still wait for a reconcile by an app holding `paykit_pay`.
 
-If the switch saw receive-key registrations the backup can't explain, `App::restore_question` lists them. Show them, and pass the exact list to `confirm_restored_registrations` when the user recognizes them, or to `refuse_restored_registrations`, which raises the compromise alarm.
+If the Dispatch saw receive-key registrations the backup can't explain, `App::restore_question` lists them. Show them, and pass the exact list to `confirm_restored_registrations` when the user recognizes them, or to `refuse_restored_registrations`, which raises the compromise alarm.
 
 A payment refused with `Refusal::HeldAfterRestore` is for a request the payee may have cancelled. Show the hold; `confirm_possibly_cancelled` with that exact hold releases it on the user's confirmation.
 
@@ -568,7 +568,7 @@ After the identity's provider is lost, a one-time request that was payable befor
 
 ### Records shown divergent
 
-A shared record the switch shows divergent pauses the payments, credits and ordinary writes that depend on it; a cancellation or a rejection can still be written. `divergent_records` lists them: show each, and pass each observation the user confirms to `confirm_divergent`. While `writes_waiting` is set, keep calling `receive`. For a credit, confirm the observation the credit's own refusal returns. Automatic payment waits until the record is no longer divergent. A divergent block floor holds for good: `confirm_divergent` can't release it.
+A shared record the Dispatch shows divergent pauses the payments, credits and ordinary writes that depend on it; a cancellation or a rejection can still be written. `divergent_records` lists them: show each, and pass each observation the user confirms to `confirm_divergent`. While `writes_waiting` is set, keep calling `receive`. For a credit, confirm the observation the credit's own refusal returns. Automatic payment waits until the record is no longer divergent. A divergent block floor holds for good: `confirm_divergent` can't release it.
 
 ### Replacing the signer
 
@@ -598,7 +598,7 @@ listed again after the restore: the same occurrence comes back with the same `id
 `raised_at_ms`, and the host may skip one it recorded acknowledging with both. A notice
 raised again is a new occurrence with the same `id` and a later `raised_at_ms`, such as a
 `HeldWithoutPay` whose hold started again, or an identity notice told again while its
-hold stands: show it as the table below says. Handle Switch
+hold stands: show it as the table below says. Handle Dispatch
 duty events from `ReceiveSummary::report`. Call `receive` on startup and after a
 feed wake. It returns one bounded report. Use `more` to decide when to read another
 page. `ReceiveSummary::report.more` says the read stopped on one of its per-call
@@ -610,7 +610,7 @@ reported event: reading again does nothing until it is dealt with. The loop ends
 the first summary with `more` unset or `stopped` set; a host that caps its rounds
 reads the rest at its next wake. If
 `records_unlisted` says the listing has more to read, call `receive(None)` again. The wallet can still be listing
-collections after the Switch has finished its feed read. An explicit `reconcile` or
+collections after the Dispatch has finished its feed read. An explicit `reconcile` or
 `end_reconcile` can also run its own listing. Follow the action named in its
 `NotNow` result to resume that scan. After a receive error,
 read and retain committed duties from `wallet.app_mut().unacknowledged_events()`.
@@ -650,9 +650,9 @@ the new cursor to the service. Acknowledging the deletion notice leaves the cred
 | `NoticeKind::CreditNeedsUser` | Show the user which settlement or requested proof needs a credit decision. Acknowledging the warning leaves the credit decision open. |
 | `NoticeKind::DroppedMessagesLost` | Show the counterparty and the acceptance-time range for which the wallet stopped requesting dropped replies. Check the payment method for any payment whose outcome is still unknown. Acknowledge the notice after showing it. With 64 distinct loss windows retained, an input that would add another waits for space. |
 | `NoticeKind::BlockFloorHeld` | Tell the user that the wallet saw the identity's block floor diverge after a provider loss and holds it for good: no one-time request is paid automatically, each can still be paid by hand, and an unblock or a widening that needs the floor raised waits, with the unblocked sender's one-time requests and, after a restore that isn't clean or a missed item, every re-send request, unless the shared post-loss hold stands too (`NoticeKind::AutomaticPaymentsHeld`), when they go without the raise. Billing Periods and payments without a request go on. Shown once, and again after each reopen while the hold stands; acknowledge it after showing it. |
-| `NoticeKind::FloorRaiseWaiting` | Tell the user that the wallet owes a block floor raise it can't write now, because the floor doesn't read or the switch refuses the write for now: until it is written, an unblocked sender's one-time requests wait and it is asked nothing, and while the raise of a restore that isn't clean or of a missed item waits, no one is asked to re-send. Payments by hand, Billing Periods and payments without a request go on. The wallet tries again at the next receive, and from its second unwritten try in a row after a wait of one minute, doubling to ten; the wait ends early when the floor record changes, the floor becomes readable or a new raise is owed. Shown once per load while it stands, and again after a reopen while the raise stays unwritten; the notice goes when the raise is written, or when the divergence hold stands (`NoticeKind::BlockFloorHeld`). Acknowledge it after showing it. |
+| `NoticeKind::FloorRaiseWaiting` | Tell the user that the wallet owes a block floor raise it can't write now, because the floor doesn't read or the Dispatch refuses the write for now: until it is written, an unblocked sender's one-time requests wait and it is asked nothing, and while the raise of a restore that isn't clean or of a missed item waits, no one is asked to re-send. Payments by hand, Billing Periods and payments without a request go on. The wallet tries again at the next receive, and from its second unwritten try in a row after a wait of one minute, doubling to ten; the wait ends early when the floor record changes, the floor becomes readable or a new raise is owed. Shown once per load while it stands, and again after a reopen while the raise stays unwritten; the notice goes when the raise is written, or when the divergence hold stands (`NoticeKind::BlockFloorHeld`). Acknowledge it after showing it. |
 | `NoticeKind::AutomaticPaymentsHeld` | Tell the user that, after a provider loss, no one-time request of the identity is paid automatically any more, on any of its wallets, and no payment of one is repeated at a resume, one the user started included; each can still be paid by hand. Billing Periods and payments without a request go on. Shown once, and again after each reopen; acknowledge it after showing it. |
-| `PaykitError::Client` | Handle the enclosed Switch outcome. Preserve any kept batch and its ID. |
+| `PaykitError::Client` | Handle the enclosed Dispatch outcome. Preserve any kept batch and its ID. |
 | `PaykitError::Lib` | Use the rule error to distinguish invalid input from invalid network or shared data. |
 | `PaykitError::Rail` | Preserve any unresolved attempt unless the method established definitive refusal. |
 | `PaykitError::PublicEndpointChangePending` | Keep the previously signed offer visible with a pending change. Resolve the reported signing refusal and check the resulting publication. |
@@ -713,11 +713,11 @@ The method declares `payment_time_tolerance_ms` with its declaration. The payee 
 | `Refusal::Subscribed` | Show that the recurring request is already accepted. |
 | `Refusal::NotSubscribed` | Wait until the payer accepts the recurring request. |
 | `Refusal::ManualOnly` | Not this automatic payer's to pay. An occurrence marked to be paid by hand only: no wallet's policy and no Allowance's executor pays it; leave it for the user. From `pay_period_automatically`, a Billing Period funded under an Allowance: leave it for that Allowance's executor (`pay_period_under_allowance`). From `pay_period_under_allowance`, a Billing Period funded under no Allowance: leave it for the wallet's own policy or the user. |
-| `Refusal::NotAutomatic` | Show why this payment can't be made automatically: the window or dated subscription, or, under an Allowance, a request outside its terms, a lifetime limit used up with nothing reserved or to release, or an Allowance that expired after the payment was reserved and before its first dispatch. An Allowance set up before a provider loss and never granted here gets its own reason: it can't be granted now, so the user ends it and sets up a new one. After a provider loss, a one-time request is not paid automatically under any Allowance: the shared post-loss hold holds it for good (Paykit spec 8.1). It is final for automatic payment; the user may still pay by hand. |
+| `Refusal::NotAutomatic` | Show why this payment can't be made automatically: the window or dated subscription, or, under an Allowance, a request outside its terms, a lifetime limit used up with nothing reserved or to release, or an Allowance that expired after the payment was reserved and before its first handoff. An Allowance set up before a provider loss and never granted here gets its own reason: it can't be granted now, so the user ends it and sets up a new one. After a provider loss, a one-time request is not paid automatically under any Allowance: the shared post-loss hold holds it for good (Paykit spec 8.1). It is final for automatic payment; the user may still pay by hand. |
 | `Refusal::PeriodNotStarted` | Show when this Billing Period starts. If the payer chooses to pay early, call `pay_period` for that period with `PayOptions::with_early_payment_confirmed`. After a payer-provider loss, an older subscription may already have paid this period early. Keep it pending while that history is incomplete. |
 | `Refusal::AttemptedPeriodsFull` | Wait for an existing period attempt to finish or reconcile its outcome before starting another. |
 | `Refusal::Destination` | Show the failed destination check and refresh when the payee has a usable endpoint. When its text says the device clock is behind, the destination expired by the service's time: tell the user the device clock is behind. |
-| `Refusal::AttemptFailed` | The attempt was recorded failed before dispatch. Show its enclosed refusal. |
+| `Refusal::AttemptFailed` | The attempt was recorded failed before handoff. Show its enclosed refusal. |
 | `Refusal::NoDestination` | Show why no endpoint could be used, including failed public app reads if available. When its text says the device clock is behind, a destination expired by the service's time: tell the user the device clock is behind. |
 | `Refusal::UnsupportedEndpoint` | Ask the user to choose a compatible endpoint or payment method. |
 | `Refusal::WaitingForList` | Show that a newer Private Payment List was requested. A public destination is a separate user choice. When `device_clock_behind` is set, a list expired by the service's time while the device clock is behind it: tell the user the device clock is behind. A list in `held_lists()` waits because its record was deleted, doesn't read, or is absent: the SDK never creates a held list's record over an absent key, since an absence can be a delete the service forgot. After a delete, or over an absent key, it can wait indefinitely; the payee's public endpoints or a request's own destination remain the way to pay. |
@@ -725,7 +725,7 @@ The method declares `payment_time_tolerance_ms` with its declaration. The payee 
 | `Refusal::Transfer` | Show the actual transfer quote and return that exact quote only on confirmation; a quote that changed since is refused again with a new one, unless the transfer now passes the check on its own. |
 | `Refusal::PricedByRate` | Obtain authorization for this exact quote from the user or their bounded policy (Scheduling a Billing Period). |
 | `Refusal::IdentityUnavailable` | Refresh the required identity before retrying. |
-| `Refusal::IdentityUnconfirmed` | Ask for explicit confirmation before using a public destination without Switch confirmation. |
+| `Refusal::IdentityUnconfirmed` | Ask for explicit confirmation before using a public destination without Dispatch confirmation. |
 | `Refusal::PaymentInProgress` | Wait for the existing attempt before rejecting or cancelling. |
 | `Refusal::NotCurrent` | Refresh authority and reconcile the existing attempt under the current provider and certificate. |
 | `Refusal::FloorHeld` | The identity's block floor is held after it was seen divergent: the unblock or widening that needs a raise waits, and retrying changes nothing until the shared post-loss hold stands too, when it goes without the raise. Tell the user that requests can still be paid by hand. |
@@ -735,7 +735,7 @@ The method declares `payment_time_tolerance_ms` with its declaration. The payee 
 | `Refusal::Usage` | Correct the supplied API input, such as a payment under an Allowance asked of an app that isn't its executor. |
 | `Refusal::RecordHeld` | A payer record with payment history lost to deletion permanently holds that obligation. For a temporarily unreadable record, resume when it can be read or repaired. |
 | `Refusal::CertificateRefused` | Seek a suitable certificate from the signer and keep Paykit actions paused meanwhile. |
-| `Refusal::SwitchUnavailable` | Show the own Switch as unavailable and keep payment actions waiting. From a payment, directly or as an `AttemptFailed` cause, it means nothing was paid, not a payment in flight: retry the payment once the switch answers. If the retry is refused with `PaymentInProgress`, call `Paykit::resume_payments` and retry once the earlier attempt is resolved; the resume records it failed when the switch takes that write. |
+| `Refusal::DispatchUnavailable` | Show the own Dispatch as unavailable and keep payment actions waiting. From a payment, directly or as an `AttemptFailed` cause, it means nothing was paid, not a payment in flight: retry the payment once the Dispatch answers. If the retry is refused with `PaymentInProgress`, call `Paykit::resume_payments` and retry once the earlier attempt is resolved; the resume records it failed when the Dispatch takes that write. |
 | `Refusal::Blocked` | Show the blocked recipient and the exact payment to the user before any supported override. |
 | `Refusal::Divergent` | Show the returned records and the exact confirmation asked for. Run receive while the record still has writes waiting. A credit refused this way is released only by confirming, with `confirm_divergent`, the records this refusal returns (`may_hold_credit`): a record confirmed as `divergent_records()` lists it doesn't count for a credit, and one still owed that confirmation may be missing from that list. Then ask for the credit again. |
 
@@ -752,15 +752,15 @@ The Kotlin and Swift wallets report a failed call as one of six cases, each carr
 | `Permanent` | Final: trying again gives the same answer. Never confirmed. |
 | `Recovery` | The wallet as a whole is stopped: an alarm, a recovery notice, its certificate or its authority. Stop Paykit actions and follow the recovery steps. A hold on one record is never `Recovery`. |
 
-Three codes are provisional: `usage`, `not_automatic` and `client_not_now`. The SDK and the Switch client give these refusals a text reason only, and one variant covers reasons of different cases, from a wait to an alarm. Until each carries a typed reason, they take the case that never retries by itself and never pays twice. `client_not_now` comes as `NeedsUser`, `usage` as `NotSent` and `not_automatic` as `Permanent`. Every reason of a refusal kind comes as the same case, so a host may branch on the kind alone. Their codes stay, and the typed reasons will add codes.
+Three codes are provisional: `usage`, `not_automatic` and `client_not_now`. The SDK and the Dispatch client give these refusals a text reason only, and one variant covers reasons of different cases, from a wait to an alarm. Until each carries a typed reason, they take the case that never retries by itself and never pays twice. `client_not_now` comes as `NeedsUser`, `usage` as `NotSent` and `not_automatic` as `Permanent`. Every reason of a refusal kind comes as the same case, so a host may branch on the kind alone. Their codes stay, and the typed reasons will add codes.
 
-`resumePayments` visits every payment the wallet keeps. Before any entry's own work, it asks the method's history about every payment this app left at the paying stage that is neither restored nor offline, which needs no switch, and records one the method made with its proof. A restored or offline entry does any lookup in its own step: a restored one reads its claim first, and an offline one keeps its own order. A failure of one entry short of a wallet-wide stop leaves that entry for the next resume, reported as its outcome: `PaidOutcomeUnwritten` when the method reported it paid, `Pending` otherwise. The next entry goes on. When the failure is a wait, which may pass by itself, such as the network, the switch busy or a conflict, Paykit's own `NotNow`, a method that can't tell now, or the wait for the wallet's own `identity.json`, nothing more is said, and every outcome reached is in the result; `payments()` shows the entries the wallet still keeps, as a finished one may be pruned in the same resume. A failure that is no wait, which the next resume would meet again until the user or the host acts, such as a permission the certificate lacks or the Switch client's own refusal for now (`client_not_now`, whose reason is text only), comes as the call's error once every entry is visited, and nothing is pruned then; handle it by its code, and read `payments()` for the outcomes the call reached. An owed acceptance that can't be placed now stays owed for the next resume; its outcome is written already, so it reports none. A wallet-wide stop ends the call at once, wherever a step meets it, with nothing written or pruned after it: an alarm, a store failure, an app that stopped, left, is gone, is no longer current or whose certificate expired, a recovery notice the app holds or the switch's answer that the account awaits a recovery, or an open restore question. The work before the entries (the first read) and after them (rechecking failed attempts, the Allowance ledger, the outbox, pruning) can fail the call with its own error too; handle it by its code. A call that returns a stop carries no outcome, so a payment it made or finished is not in its answer. `payments()` lists every payment the wallet keeps with its stage and `paidByMethod`, which tells a payment the method made, its outcome written or not, from a failed one. After a store failure, a payment may already have been made by the method, even when a pay call returned the failure: don't pay again. Fix the store, read `payments()`, then call `resumePayments`, which finishes every payment still open and reports its outcome. After the switch's answer that the app is no longer current, a payment may likewise have been made already: `payments()` lists it at `RailPaid`, paid by the method with its outcome unwritten. The app writes nothing more (Paykit spec 7.3), and it must be approved again before it can report that payment or pay.
+`resumePayments` visits every payment the wallet keeps. Before any entry's own work, it asks the method's history about every payment this app left at the paying stage that is neither restored nor offline, which needs no Dispatch, and records one the method made with its proof. A restored or offline entry does any lookup in its own step: a restored one reads its claim first, and an offline one keeps its own order. A failure of one entry short of a wallet-wide stop leaves that entry for the next resume, reported as its outcome: `PaidOutcomeUnwritten` when the method reported it paid, `Pending` otherwise. The next entry goes on. When the failure is a wait, which may pass by itself, such as the network, the Dispatch busy or a conflict, Paykit's own `NotNow`, a method that can't tell now, or the wait for the wallet's own `identity.json`, nothing more is said, and every outcome reached is in the result; `payments()` shows the entries the wallet still keeps, as a finished one may be pruned in the same resume. A failure that is no wait, which the next resume would meet again until the user or the host acts, such as a permission the certificate lacks or the Dispatch client's own refusal for now (`client_not_now`, whose reason is text only), comes as the call's error once every entry is visited, and nothing is pruned then; handle it by its code, and read `payments()` for the outcomes the call reached. An owed acceptance that can't be placed now stays owed for the next resume; its outcome is written already, so it reports none. A wallet-wide stop ends the call at once, wherever a step meets it, with nothing written or pruned after it: an alarm, a store failure, an app that stopped, left, is gone, is no longer current or whose certificate expired, a recovery notice the app holds or the Dispatch's answer that the account awaits a recovery, or an open restore question. The work before the entries (the first read) and after them (rechecking failed attempts, the Allowance ledger, the outbox, pruning) can fail the call with its own error too; handle it by its code. A call that returns a stop carries no outcome, so a payment it made or finished is not in its answer. `payments()` lists every payment the wallet keeps with its stage and `paidByMethod`, which tells a payment the method made, its outcome written or not, from a failed one. After a store failure, a payment may already have been made by the method, even when a pay call returned the failure: don't pay again. Fix the store, read `payments()`, then call `resumePayments`, which finishes every payment still open and reports its outcome. After the Dispatch's answer that the app is no longer current, a payment may likewise have been made already: `payments()` lists it at `RailPaid`, paid by the method with its outcome unwritten. The app writes nothing more (Paykit spec 7.3), and it must be approved again before it can report that payment or pay.
 
 Every reason of `NotNow` is `RetryLater`, of `HeldForUser` `NeedsUser`, and of `RecoveryNeeded` `Recovery`. `attempt_failed` takes its cause's case, whatever it is: read `attemptedFailure()` for the cause. `waiting_for_list` is `NeedsUser` when the device clock is behind.
 
 Two rules override a code's case. A failure with a `keptBatch` comes as `OutcomeUnknown`, unless its case is `Recovery`: the wallet sends that batch again by itself, and the outcome shows once it is answered. The one exception is `settlement_warning_unsaved`, which comes as `NeedsUser` with its `keptBatch`: the user is shown the bucket's warning while the kept batch may still apply. A pay that may have been sent never comes as an error: it comes as a pending or uncertain outcome. The one exception is a wallet-wide stop met after the call, such as the store failing or an alarm. It comes as that stop, and the journal keeps the payment, which the resume after the recovery settles from the method's history.
 
-A failure that comes once the request may have left the device comes as `OutcomeUnknown`, also without a `keptBatch`: a timeout, an answer whose signature doesn't verify, an answer too large to take, one the service gave before reading the request, and one that doesn't read or verify. The failure doesn't say which request it was, and some requests the Switch client sends outside a kept batch are safe to repeat only while the first is outstanding: a message the service no longer holds is appended again, and a late connect request can reopen one that was declined. Only a failure that sent nothing comes as a case that calls again.
+A failure that comes once the request may have left the device comes as `OutcomeUnknown`, also without a `keptBatch`: a timeout, an answer whose signature doesn't verify, an answer too large to take, one the service gave before reading the request, and one that doesn't read or verify. The failure doesn't say which request it was, and some requests the Dispatch client sends outside a kept batch are safe to repeat only while the first is outstanding: a message the service no longer holds is appended again, and a late connect request can reopen one that was declined. Only a failure that sent nothing comes as a case that calls again.
 
 | Code | From | Case | What the host does |
 |---|---|---|---|
@@ -776,7 +776,7 @@ A failure that comes once the request may have left the device comes as `Outcome
 | `maybe_credited` | `Refusal::MaybeCredited` | `NeedsUser` | Show that the occurrence may already be credited; credit only on the user's explicit confirmation. |
 | `settlement_bucket_full` | `Refusal::SettlementBucketFull` | `NeedsUser` | Ask the payee whether to issue a receipt without a mark. |
 | `period_not_started` | `Refusal::PeriodNotStarted` | `NeedsUser` | Show when the period starts; pay early only on the user's choice. |
-| `identity_unconfirmed` | `Refusal::IdentityUnconfirmed` | `NeedsUser` | Ask before paying a payee whose switch couldn't confirm its apps; then set `unconfirmedIdentityConfirmed`. |
+| `identity_unconfirmed` | `Refusal::IdentityUnconfirmed` | `NeedsUser` | Ask before paying a payee whose Dispatch couldn't confirm its apps; then set `unconfirmedIdentityConfirmed`. |
 | `scope_missing` | `Refusal::ScopeMissing` | `NeedsUser` | Ask the user to approve the missing scope in their signer. |
 | `not_subscribed` | `Refusal::NotSubscribed` | `NeedsUser` | The recurring request isn't accepted: the payer accepts it, and the payee waits for that. |
 | `floor_held` | `Refusal::FloorHeld` | `NeedsUser` | The identity's block floor is held after it was seen divergent: the unblock or widening that needs a raise waits, and retrying changes nothing until the shared post-loss hold stands too. Tell the user that each request can still be paid by hand. |
@@ -812,7 +812,7 @@ A failure that comes once the request may have left the device comes as `Outcome
 | `records_not_listed` | `NotNowReason::RecordsNotListed` | `RetryLater` | `receive`, which lists the shared records, then call again. |
 | `scope_keys_awaited` | `NotNowReason::ScopeKeysAwaited` | `RetryLater` | The signer stores the certificate's keys when it is next online; tell the user if it stays. |
 | `value_awaits_key` | `NotNowReason::ValueAwaitsKey` | `RetryLater` | The signer stores the record's keys when it is next online; call again then. |
-| `floor_unreadable` | `NotNowReason::FloorUnreadable` | `RetryLater` | The block floor can't be read now: the payer's records not listed yet, a key awaited, a kept floor write, or the switch not answering. A later `receive` clears it with no one acting. |
+| `floor_unreadable` | `NotNowReason::FloorUnreadable` | `RetryLater` | The block floor can't be read now: the payer's records not listed yet, a key awaited, a kept floor write, or the Dispatch not answering. A later `receive` clears it with no one acting. |
 | `floor_record_unreadable` | `HeldForUserReason::FloorRecordUnreadable` | `NeedsUser` | The block floor record doesn't read, and no later read clears it. This version has no call that repairs it: it reads again only once another of the user's wallets that holds a readable floor writes it. Until then an unblock is refused and the counterparty stays blocked, a block still takes effect, and one-time requests are paid by hand. Show that. |
 | `floor_raise_waiting` | `NotNowReason::FloorRaiseWaiting` | `RetryLater` | A block floor raise left unwritten waits before it is tried again: call again later. |
 | `no_service_time` | `NotNowReason::NoServiceTime` | `RetryLater` | `receive`, which verifies a service time, then call again. |
@@ -829,7 +829,7 @@ A failure that comes once the request may have left the device comes as `Outcome
 | `held_for_user` | a `HeldForUserReason` the bindings don't know | `NeedsUser` | Show `reason()` to the user. |
 | `attempt_check` | `HeldForUserReason::AttemptCheck` | `NeedsUser` | Inside `attempt_failed`: a check before money moved failed and nothing was paid. A new payment is the user's decision once the check can pass, for a certificate expiring soon after the signer renews it. |
 | `reload_required` | `HeldForUserReason::ReloadRequired` | `NeedsUser` | Load the wallet again, then edit its record. |
-| `switch_client_hold` | `HeldForUserReason::SwitchClient` | `NeedsUser` | The Switch client holds the attempt. The bindings carry no subtype: tell the user the wallet holds payments for now, finish a reconciliation or a display read the host started, and check the device clock; then make the call again. |
+| `dispatch_client_hold` | `HeldForUserReason::SwitchClient` | `NeedsUser` | The Dispatch client holds the attempt. The bindings carry no subtype: tell the user the wallet holds payments for now, finish a reconciliation or a display read the host started, and check the device clock; then make the call again. |
 | `held_unresolved` | `HeldForUserReason::Unresolved` | `NeedsUser` | A hold on one request, publication or delivery that no wait clears as far as the wallet can tell: show `reason()`. |
 | `payer_pass_owed` | `RecoveryReason::PayerPassOwed` | `Recovery` | `reconcile` with pay runs the payer pass owed since the restore. |
 | `activity_base_changed` | `HeldForUserReason::ActivityBaseChanged` | `NeedsUser` | After a provider loss another write sits at this record's version: show it for that request; it goes on once the loss steps run or a write the app takes replaces it. |
@@ -850,9 +850,9 @@ A failure that comes once the request may have left the device comes as `Outcome
 | `chain` | `ClientError::Chain` | `Recovery` | The service signed a head that doesn't verify: handled as a rollback alarm. |
 | `own_recovery_required` | `ClientError::OwnRecoveryRequired` | `Recovery` | A recovery notice holds writes to this service. `receive` clears one that isn't permanent; one that stays needs the recovery. |
 | `approval_refused` | `AppRefusal::Approval` | `Permanent` | The approval doesn't pass its checks: ask for a new one. |
-| `client_not_now` | `AppRefusal::NotNow`: reconcile mode, the clocks apart, a read still owed | `NeedsUser` | Provisional. The Switch client gives a text reason only, which the bindings don't pass on: finish the reconciliation, check the device clock, or `receive`; then call again. |
+| `client_not_now` | `AppRefusal::NotNow`: reconcile mode, the clocks apart, a read still owed | `NeedsUser` | Provisional. The Dispatch client gives a text reason only, which the bindings don't pass on: finish the reconciliation, check the device clock, or `receive`; then call again. |
 | `kept_batches_ahead` | `AppRefusal::KeptBatchesAhead` | `OutcomeUnknown` | The call's own batch was kept unsent behind earlier kept batches, which the wallet sends in order over its next reads: follow `more` on `receive`, then reconcile. Don't make the call again. A restore doesn't carry kept batches, so after one, reconcile decides. |
-| `client_usage` | `AppRefusal::Usage`, `ClientError::Usage` | `NotSent` | A value given breaks a Switch rule: fix the call. |
+| `client_usage` | `AppRefusal::Usage`, `ClientError::Usage` | `NotSent` | A value given breaks a Dispatch rule: fix the call. |
 | `carried_too_large` | `AppRefusal::CarriedTooLarge` | `NotSent` | Acknowledge the duty events acted on, then restore again. |
 | `duties_too_large` | `AppRefusal::DutiesTooLarge` | `NotSent` | The backup wouldn't fit beside the duty events it carries: acknowledge the duty events acted on, then back up again. |
 | `deny_list_full` | `AppRefusal::DenyListFull` | `NeedsUser` | After a provider loss the new service's deny list has no room for `over` of the app's deny entries: ask the user which peers to unblock, then follow the recovery again. |
@@ -872,37 +872,37 @@ A failure that comes once the request may have left the device comes as `Outcome
 | `display_read_pending` | `ClientError::DisplayReadPending` | `RetryLater` | Wait for the signed display read in progress. |
 | `bad_service_signature` | `ClientError::BadServiceSignature` or an unreadable signed header, at any status | `OutcomeUnknown` | An answer the pinned service key doesn't verify, from an intermediary such as a proxy, or after the service changed its key: nothing of it was used, its status included. The request went out, so it may have taken effect: reconcile before trying again. `receive` follows the newest `identity.json` and its key; if the answer stays, report it. |
 | `stale_answer` | `ClientError::StaleAnswer` | `RetryLater` | A public read outside its window: call again. |
-| `body_unread` | `ClientError::BodyUnread`: `too_large`, `rate_limited` or `not_found` before the service read the request | `OutcomeUnknown` | Such an answer binds the request without its body, so it counts as no answer (Switch wire 7.1): reconcile before trying again, after `retryAfterMs` when it is set. |
+| `body_unread` | `ClientError::BodyUnread`: `too_large`, `rate_limited` or `not_found` before the service read the request | `OutcomeUnknown` | Such an answer binds the request without its body, so it counts as no answer (Dispatch wire 7.1): reconcile before trying again, after `retryAfterMs` when it is set. |
 | `invalid_response` | `ClientError::InvalidResponse` | `OutcomeUnknown` | The call's answer doesn't read. The request went out, so it may have taken effect: reconcile before trying again. |
 | `body_over_cap` | `ClientError::BodyOverCap` | `NotSent` | The request is over its cap: make a smaller one. |
 | `unpinned` | `ClientError::Unpinned` | `NotSent` | No pinned service key: enroll first. |
-| `switch_bad_request` | Switch answer `bad_request` | `Permanent` | The service refused the request as malformed. |
-| `switch_bad_signature` | Switch answer `bad_signature` | `Permanent` | The service refused the request signature. |
-| `switch_stale_timestamp` | Switch answer `stale_timestamp` | `RetryLater` | Call again: it is signed with a new timestamp. |
-| `switch_not_admitted` | Switch answer `not_admitted` | `NotSent` | The recipient doesn't admit this sender now. Nothing applied; send again once the recipient admits it, for example after it adds the contact. |
-| `switch_permission_missing` | Switch answer `permission_missing` | `NeedsUser` | The certificate lacks the permission: ask the user to approve a wider one in their signer. |
-| `switch_not_current` | Switch answer `not_current` | `Recovery` | The app isn't current any more: recover. |
-| `switch_cert_expired` | Switch answer `cert_expired` | `Recovery` | The certificate expired: get a new one from the signer. |
-| `switch_not_found` | Switch answer `not_found` | `Permanent` | The service holds no such object. |
-| `switch_conflict` | Switch answer `conflict` | `NotSent` | The state changed: read again, decide again, then call again. |
-| `switch_stale_epoch` | Switch answer `stale_epoch` | `RetryLater` | Call again after `receive`. |
-| `switch_stale_generation` | Switch answer `stale_generation` | `RetryLater` | Call again after `receive`. |
-| `switch_stale_key` | Switch answer `stale_key` | `RetryLater` | Call again after `receive`. |
-| `switch_stale_identity` | Switch answer `stale_identity` | `RetryLater` | The `identity.json` delivered isn't the newest the service holds: call again after `receive`, which reads the current one. |
-| `switch_identity_needed` | Switch answer `identity_needed` | `RetryLater` | Call again after `receive`. |
-| `switch_moved` | Switch answer `moved` | `RetryLater` | The account moved: call again after `receive`. |
-| `switch_too_large` | Switch answer `too_large` | `NotSent` | The request is over a size cap of the service. Nothing applied; make a smaller one. |
-| `switch_rate_limited` | Switch answer `rate_limited` | `RetryLater` | Wait `retryAfterMs`, then call again. |
-| `switch_quota_wait` | Switch answer `quota_exceeded` naming `inbox`, `sender_share`, `claims` or `claim_share` | `RetryLater` | The limit frees with time: as the recipient's apps read their feed, or as the service deletes old claims, 30 days after their deadline or 400 days after their last entry. A claim with an open or unknown attempt is never deleted by age, so this app's doubtful attempts may need the user's answer first. Call again later. |
-| `switch_quota_open_attempts` | Switch answer `quota_exceeded` naming `open_attempts` | `NeedsUser` | This app holds the most open attempts it may. The new attempt's batch stays kept at the front of the app's queue and is sent again before each later write, so the outcome writes that would free a slot, from `resumePayments` or the user resolving a doubtful attempt, wait behind it until the switch takes that batch. Don't pay again: show that this app's payments wait, and call `resumePayments` later. |
-| `switch_quota_full` | Switch answer `quota_exceeded` naming `storage`, `record_keys`, `contacts`, `conversations`, `deny` or `invite_codes` | `NeedsUser` | The limit frees after the user removes something, such as contacts or records, through another app or the signer (these bindings have no call for it); invite codes also free as they expire or are used up. `quotaLimit()` names the limit. Then call again. |
-| `switch_quota_connect_requests` | Switch answer `quota_exceeded` naming `connect_requests` | `NotSent` | The recipient has its pending connect requests full. Nothing applied; ask again much later, as the recipient may never answer them. |
-| `switch_quota_final` | Switch answer `quota_exceeded` naming `attempts` | `Permanent` | Final: no more attempts fit this obligation's claim. |
-| `switch_quota_exceeded` | Switch answer `quota_exceeded` naming a limit the bindings don't know, or none | `NeedsUser` | Show it to the user; it is never retried by itself. |
-| `switch_staged` | Switch answer `staged` | `RetryLater` | Call again later. |
-| `switch_unavailable` | `Refusal::SwitchUnavailable`, Switch answer `unavailable` | `RetryLater` | The own Switch is unavailable: nothing was paid. Call again once it answers. |
-| `switch_recovery_required` | Switch answer `recovery_required` | `Recovery` | The account awaits a recovery. `receive` clears a notice that isn't permanent; one that stays needs the recovery to the next generation. |
-| `public_endpoint_change_pending` | `PaykitError::PublicEndpointChangePending`, a refusal of the Switch client | as its cause | The edit is saved, and is published once what stopped its signing clears. It comes as `Recovery` when the client stopped for a recovery. Otherwise it comes as `NeedsUser`: the user or another own app acts first, such as renewing a sibling's record whose policy expired. |
+| `dispatch_bad_request` | Dispatch answer `bad_request` | `Permanent` | The service refused the request as malformed. |
+| `dispatch_bad_signature` | Dispatch answer `bad_signature` | `Permanent` | The service refused the request signature. |
+| `dispatch_stale_timestamp` | Dispatch answer `stale_timestamp` | `RetryLater` | Call again: it is signed with a new timestamp. |
+| `dispatch_not_admitted` | Dispatch answer `not_admitted` | `NotSent` | The recipient doesn't admit this sender now. Nothing applied; send again once the recipient admits it, for example after it adds the contact. |
+| `dispatch_permission_missing` | Dispatch answer `permission_missing` | `NeedsUser` | The certificate lacks the permission: ask the user to approve a wider one in their signer. |
+| `dispatch_not_current` | Dispatch answer `not_current` | `Recovery` | The app isn't current any more: recover. |
+| `dispatch_cert_expired` | Dispatch answer `cert_expired` | `Recovery` | The certificate expired: get a new one from the signer. |
+| `dispatch_not_found` | Dispatch answer `not_found` | `Permanent` | The service holds no such object. |
+| `dispatch_conflict` | Dispatch answer `conflict` | `NotSent` | The state changed: read again, decide again, then call again. |
+| `dispatch_stale_epoch` | Dispatch answer `stale_epoch` | `RetryLater` | Call again after `receive`. |
+| `dispatch_stale_generation` | Dispatch answer `stale_generation` | `RetryLater` | Call again after `receive`. |
+| `dispatch_stale_key` | Dispatch answer `stale_key` | `RetryLater` | Call again after `receive`. |
+| `dispatch_stale_identity` | Dispatch answer `stale_identity` | `RetryLater` | The `identity.json` delivered isn't the newest the service holds: call again after `receive`, which reads the current one. |
+| `dispatch_identity_needed` | Dispatch answer `identity_needed` | `RetryLater` | Call again after `receive`. |
+| `dispatch_moved` | Dispatch answer `moved` | `RetryLater` | The account moved: call again after `receive`. |
+| `dispatch_too_large` | Dispatch answer `too_large` | `NotSent` | The request is over a size cap of the service. Nothing applied; make a smaller one. |
+| `dispatch_rate_limited` | Dispatch answer `rate_limited` | `RetryLater` | Wait `retryAfterMs`, then call again. |
+| `dispatch_quota_wait` | Dispatch answer `quota_exceeded` naming `inbox`, `sender_share`, `claims` or `claim_share` | `RetryLater` | The limit frees with time: as the recipient's apps read their feed, or as the service deletes old claims, 30 days after their deadline or 400 days after their last entry. A claim with an open or unknown attempt is never deleted by age, so this app's doubtful attempts may need the user's answer first. Call again later. |
+| `dispatch_quota_open_attempts` | Dispatch answer `quota_exceeded` naming `open_attempts` | `NeedsUser` | This app holds the most open attempts it may. The new attempt's batch stays kept at the front of the app's queue and is sent again before each later write, so the outcome writes that would free a slot, from `resumePayments` or the user resolving a doubtful attempt, wait behind it until the Dispatch takes that batch. Don't pay again: show that this app's payments wait, and call `resumePayments` later. |
+| `dispatch_quota_full` | Dispatch answer `quota_exceeded` naming `storage`, `record_keys`, `contacts`, `conversations`, `deny` or `invite_codes` | `NeedsUser` | The limit frees after the user removes something, such as contacts or records, through another app or the signer (these bindings have no call for it); invite codes also free as they expire or are used up. `quotaLimit()` names the limit. Then call again. |
+| `dispatch_quota_connect_requests` | Dispatch answer `quota_exceeded` naming `connect_requests` | `NotSent` | The recipient has its pending connect requests full. Nothing applied; ask again much later, as the recipient may never answer them. |
+| `dispatch_quota_final` | Dispatch answer `quota_exceeded` naming `attempts` | `Permanent` | Final: no more attempts fit this obligation's claim. |
+| `dispatch_quota_exceeded` | Dispatch answer `quota_exceeded` naming a limit the bindings don't know, or none | `NeedsUser` | Show it to the user; it is never retried by itself. |
+| `dispatch_staged` | Dispatch answer `staged` | `RetryLater` | Call again later. |
+| `dispatch_unavailable` | `Refusal::DispatchUnavailable`, Dispatch answer `unavailable` | `RetryLater` | The own Dispatch is unavailable: nothing was paid. Call again once it answers. |
+| `dispatch_recovery_required` | Dispatch answer `recovery_required` | `Recovery` | The account awaits a recovery. `receive` clears a notice that isn't permanent; one that stays needs the recovery to the next generation. |
+| `public_endpoint_change_pending` | `PaykitError::PublicEndpointChangePending`, a refusal of the Dispatch client | as its cause | The edit is saved, and is published once what stopped its signing clears. It comes as `Recovery` when the client stopped for a recovery. Otherwise it comes as `NeedsUser`: the user or another own app acts first, such as renewing a sibling's record whose policy expired. |
 | `method_unknown` | `RailError::Unavailable` from a lookup or endpoint selection | `RetryLater` | The method couldn't answer now: call again later. |
 | `method_not_submitted` | `RailError::Refused` | `NotSent` | The method refused the call. |
 | `method_invalid_selection` | `RailError::InvalidSelection` | `Permanent` | Fix the method's endpoint selection. |
@@ -910,7 +910,7 @@ A failure that comes once the request may have left the device comes as `Outcome
 | `invalid_protocol_data` | other `paykit_lib::Error` | `Permanent` | Network or stored data breaks a Paykit rule. |
 | `conflict` | `PaykitError::Conflict` | `NotSent` | Read the current state, decide again, then call again. |
 | `homeserver` | `PaykitError::Homeserver` | `RetryLater` | The Homeserver couldn't be read now: call again later. |
-| `settlement_warning_unsaved` | `PaykitError::SettlementNoticeUnavailable` | `NeedsUser` | The Switch refused a new settlement bucket for lack of a record slot, and the wallet couldn't save or check that bucket's warning. Show the warning for `settlement_bucket()` if the host has yet to show it; it grants no consent to issue another receipt. `settlement_warning_outcome()` says what this call did to the warning: `Failed` when it wrote none, and when its lookup of an earlier warning failed, whether one is saved already is unverified; `OutcomeUnknown` when the store can't tell the outcome of its lookup or its write: it may be saved, by this call or an earlier one. The marked receipt and its delivery are still kept under `kept_batch()`, and that batch may still apply. `service_code()` and `quota_limit()` give the Switch's answer. |
+| `settlement_warning_unsaved` | `PaykitError::SettlementNoticeUnavailable` | `NeedsUser` | The Dispatch refused a new settlement bucket for lack of a record slot, and the wallet couldn't save or check that bucket's warning. Show the warning for `settlement_bucket()` if the host has yet to show it; it grants no consent to issue another receipt. `settlement_warning_outcome()` says what this call did to the warning: `Failed` when it wrote none, and when its lookup of an earlier warning failed, whether one is saved already is unverified; `OutcomeUnknown` when the store can't tell the outcome of its lookup or its write: it may be saved, by this call or an earlier one. The marked receipt and its delivery are still kept under `kept_batch()`, and that batch may still apply. `service_code()` and `quota_limit()` give the Dispatch's answer. |
 | `unclassified` | a Paykit failure the bindings don't know | `OutcomeUnknown` | Reconcile before trying again. |
-| `client_unclassified` | a Switch client failure the bindings don't know | `OutcomeUnknown` | Reconcile before trying again. |
+| `client_unclassified` | a Dispatch client failure the bindings don't know | `OutcomeUnknown` | Reconcile before trying again. |
 | `method_unclassified` | a method failure the bindings don't know | `OutcomeUnknown` | Reconcile before trying again. |

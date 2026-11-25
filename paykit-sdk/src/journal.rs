@@ -9,11 +9,11 @@
 //! - **Paying**: the payment may have been submitted. It is resolved from the payment
 //!   method's history, never carried out again unless the method is idempotent on the
 //!   attempt ID, the claim still shows the attempt open, and every check before a first
-//!   dispatch passes again; otherwise it stays open, "may be paid".
+//!   handoff passes again; otherwise it stays open, "may be paid".
 //! - **After paying** (`RailPaid`, `RailFailed`): the outcome, the activity record and the
 //!   proof go in one batch, which also moves the entry to `Finished` once applied.
 //! - **A restored journal** may predate a payment made after its backup, so its open attempts
-//!   are resolved from a history that survives a restore, or left "may be paid" (Pubky Switch
+//!   are resolved from a history that survives a restore, or left "may be paid" (Pubky Dispatch
 //!   spec, Section 12.4).
 //!
 //! Sensitive: an entry holds the destination's payload, the message carrying it and the
@@ -27,11 +27,11 @@ use paykit_lib::{
     Asset, AttemptId, Decimal, Label, ListVersion, PaymentAmount, PaymentEndpointIdentifier,
     PaymentEndpointPayload, PaymentReference, Rate,
 };
-use pubky_switch_core::chain::TransitionProof;
-use pubky_switch_core::enc::{serde_b64, serde_b64_vec};
-use pubky_switch_core::message::MessagePlaintext;
-use pubky_switch_core::records::{AppCert, AppRecord};
-use pubky_switch_core::sig::SignedDoc;
+use pubky_dispatch_core::chain::TransitionProof;
+use pubky_dispatch_core::enc::{serde_b64, serde_b64_vec};
+use pubky_dispatch_core::message::MessagePlaintext;
+use pubky_dispatch_core::records::{AppCert, AppRecord};
+use pubky_dispatch_core::sig::SignedDoc;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -43,7 +43,7 @@ use crate::requests::RequestRef;
 
 /// An optional byte string as base64url, or null.
 mod serde_b64_opt {
-    use pubky_switch_core::enc::{b64, unb64};
+    use pubky_dispatch_core::enc::{b64, unb64};
     use serde::{Deserialize, Deserializer, Serializer};
 
     pub(crate) fn serialize<S: Serializer>(
@@ -176,7 +176,7 @@ pub(crate) enum TransferBound {
     /// What the user asked for: exactly the amount paid.
     Asked {},
     /// The selected transfer the user confirmed: its amount remains bound for every
-    /// dispatch.
+    /// handoff.
     Confirmed {
         /// The amount confirmed; `None` for one the method couldn't tell.
         amount: Option<KeptAmount>,
@@ -220,7 +220,7 @@ pub(crate) enum KeptRateSource {
     PeriodDetails {
         /// The period details' `msg_id`.
         msg_id: String,
-        /// The signed rate source, kept for dispatch, its proof and a later restore.
+        /// The signed rate source, kept for handoff, its proof and a later restore.
         details: Box<KeptMessage>,
     },
 }
@@ -321,7 +321,7 @@ pub(crate) struct JournalEntry {
     #[serde(deserialize_with = "Option::deserialize")]
     pub(crate) allowance: Option<crate::executor::JournalAllowance>,
     /// The `expires_at` of the Allowance terms the reservation was made under, set with
-    /// `allowance`: no first dispatch goes once it has passed, while a repeat of a dispatch
+    /// `allowance`: no first handoff goes once it has passed, while a repeat of a handoff
     /// that may have gone still reconciles (Paykit spec 8.3).
     #[serde(deserialize_with = "Option::deserialize")]
     pub(crate) allowance_expires_at_ms: Option<u64>,
@@ -356,7 +356,7 @@ pub(crate) struct JournalEntry {
     pub(crate) acceptance_plaintext: Option<Vec<u8>>,
     /// The app's own certificate the acceptance was signed under, kept with it: the
     /// acceptance is checked and placed under it, never under a later renewal, which may no
-    /// longer hold `paykit_pay` (Paykit spec 3.2, Switch wire 3.8). Set and cleared with
+    /// longer hold `paykit_pay` (Paykit spec 3.2, Dispatch wire 3.8). Set and cleared with
     /// `acceptance_plaintext`.
     pub(crate) acceptance_cert: Option<SignedDoc>,
     /// The acceptance went into the outbox, sendable: only once the payment method's call
@@ -367,12 +367,12 @@ pub(crate) struct JournalEntry {
     pub(crate) rail_proof: Option<Map<String, Value>>,
     pub(crate) paid_at_ms: Option<u64>,
     pub(crate) proof_msg_id: Option<String>,
-    /// Recording a public payment made without the payer's switch (Paykit spec 8.4).
+    /// Recording a public payment made without the payer's Dispatch (Paykit spec 8.4).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) offline: Option<OfflineRecording>,
     /// The entry came back from a backup.
     pub(crate) restored: bool,
-    /// Device time when journaled: the earliest a dispatch could start.
+    /// Device time when journaled: the earliest a handoff could start.
     pub(crate) journaled_at_ms: u64,
     /// The verified message carrying the destination, for the destination check before a
     /// repeat (Paykit spec 7.2 step 1). Exactly one of it and `carrier_record` is kept: the
@@ -380,7 +380,7 @@ pub(crate) struct JournalEntry {
     pub(crate) carrier: Option<KeptMessage>,
     /// The signed app record carrying a public endpoint, for the same check.
     pub(crate) carrier_record: Option<SignedDoc>,
-    /// The payment method reported the dispatch failed, and `failed` was written on it: the
+    /// The payment method reported the handoff failed, and `failed` was written on it: the
     /// method's history is asked again within its retention, and a payment that completed
     /// after all is reported with its proof (Paykit spec 7.2, "What a payment method
     /// declares").
@@ -388,12 +388,12 @@ pub(crate) struct JournalEntry {
     /// This device ended the Allowance attempt before entering the payment method.
     /// Restore clears the evidence because the original device may have continued.
     pub(crate) never_dispatched: bool,
-    /// The user resolved this restored dispatch as paid while no claim showed it, so its
+    /// The user resolved this restored handoff as paid while no claim showed it, so its
     /// `done` went on no claim (Paykit spec 7.2, 8.4): no payment of its obligation goes
     /// again while it is journaled, as `done` on a claim would settle it.
     pub(crate) user_paid: bool,
     /// The attempt's transition proof, for the service and generation it was written at
-    /// (Paykit spec 4, "Fresh before paying"). An entry without one is never dispatched again.
+    /// (Paykit spec 4, "Fresh before paying"). An entry without one is never handed off again.
     pub(crate) attempt_proof: Option<SignedDoc>,
     /// The request paid, as the payer's request record stored it: with the acceptance and
     /// the proof, what rebuilds that record should it be gone by the outcome, so `done`
@@ -407,14 +407,14 @@ pub(crate) struct JournalEntry {
     /// [`crate::Paykit::repair_activity_record`] writes it again.
     pub(crate) record_held: bool,
     /// The transfer the attempt may make, as its planning allowed it. `None` only in an
-    /// entry a reconcile rebuilt from its claim (`restored`), which is never dispatched
+    /// entry a reconcile rebuilt from its claim (`restored`), which is never handed off
     /// again.
     pub(crate) transfer_bound: Option<TransferBound>,
     /// The price its user confirmed, for a payment priced by a rate: the rate `paid` was
     /// computed by, and `amount` stays the request's. `None` for a payment no rate prices,
-    /// and in an entry a reconcile rebuilt, which is never dispatched again.
+    /// and in an entry a reconcile rebuilt, which is never handed off again.
     pub(crate) price: Option<KeptPrice>,
-    /// The payment method reported the dispatch failed, `failed` was written on the claim,
+    /// The payment method reported the handoff failed, `failed` was written on the claim,
     /// and the method's history later showed it paid: its proof went, and `failed` stands on
     /// the claim until the payee's receipt settles it by evidence. A receipt that comes once
     /// the claim is gone raises [`crate::NoticeKind::PaidAfterFailed`] (Paykit spec 7.2,
@@ -427,7 +427,7 @@ pub(crate) struct JournalEntry {
     /// came to apply, and on the `RailFailed` entry a refusal leaves.
     pub(crate) failed_before_call: bool,
     /// How the user resolved this attempt ([`crate::Resolution`]), on its claim or, for a
-    /// restored dispatch no claim shows, off it (Paykit spec 7.3). Set in the journal copy the
+    /// restored handoff no claim shows, off it (Paykit spec 7.3). Set in the journal copy the
     /// resolution's batch carries, so the entry holds it however that batch came to apply.
     #[serde(deserialize_with = "Option::deserialize")]
     pub(crate) user_resolved: Option<UserResolution>,
@@ -546,12 +546,12 @@ impl JournalEntry {
         }
     }
 
-    /// The amount passed to the payment method, computed and bound before dispatch.
+    /// The amount passed to the payment method, computed and bound before handoff.
     pub(crate) fn call_amount(&self) -> Result<PaymentAmount> {
         self.payment_amount.amount()
     }
 
-    /// Exact transfer evidence bound before dispatch, excluding fees. A method whose
+    /// Exact transfer evidence bound before handoff, excluding fees. A method whose
     /// transfer was unknown and an outcome-only reconstruction supply no numeric amount.
     pub(crate) fn paid_amount(&self) -> Result<Option<PaymentAmount>> {
         self.transfer_bound
@@ -690,7 +690,7 @@ impl JournalEntry {
             rate_source_hash: selected.map_or(request_hash, StoredMessage::hash),
             app_id: self.destination.app_id,
             endpoint_id: self.destination.endpoint_id()?,
-            payload_hash: pubky_switch_core::enc::hash(payload.as_str().as_bytes()),
+            payload_hash: pubky_dispatch_core::enc::hash(payload.as_str().as_bytes()),
             requested: self.amount.amount()?,
             source: price.source(),
             rate: price.rate()?,
@@ -706,7 +706,7 @@ impl JournalEntry {
         self.request_hash
             .as_deref()
             .map(|h| {
-                pubky_switch_core::enc::unb64_array::<32>(h).map_err(|_| PaykitError::corrupt())
+                pubky_dispatch_core::enc::unb64_array::<32>(h).map_err(|_| PaykitError::corrupt())
             })
             .transpose()
     }
@@ -853,7 +853,7 @@ impl JournalEntry {
             (None, None) => {}
             _ => return bad(),
         }
-        // Only a reconcile's rebuilt entry, never dispatched again, has no transfer bound.
+        // Only a reconcile's rebuilt entry, never handed off again, has no transfer bound.
         if self.transfer_bound.is_none()
             && (!self.restored
                 || !matches!(
@@ -1119,9 +1119,9 @@ impl JournalEntry {
         )
     }
 
-    /// Whether the payment method's call may have been made for this entry ([`dispatched`]).
-    pub(crate) fn may_have_dispatched(&self) -> bool {
-        dispatched(self.stage, self.restored)
+    /// Whether the payment method's call may have been made for this entry ([`handed_off`]).
+    pub(crate) fn may_have_handed_off(&self) -> bool {
+        handed_off(self.stage, self.restored)
     }
 
     /// The request's acceptance is this entry's to send and place: owed, queued or not yet
@@ -1171,7 +1171,7 @@ pub struct PaymentView {
     /// [`crate::Paykit::resume_payments`], or when the user has the record written again
     /// with [`crate::Paykit::repair_activity_record`].
     pub record_held: bool,
-    /// The exact transferred amount bound before dispatch, excluding fees. `None` when
+    /// The exact transferred amount bound before handoff, excluding fees. `None` when
     /// the method could not quantify the selected transfer or the entry was rebuilt only
     /// to report an outcome. The requested amount is never substituted for missing evidence.
     pub paid: Option<PaymentAmount>,
@@ -1180,7 +1180,7 @@ pub struct PaymentView {
     /// The payee's receipt of this attempt the payer's activity record holds, if any
     /// (Paykit wire 4.11), as this app's copy shows it: for display. While the records
     /// aren't listed, after a restore or a certificate that reads more, the copy may lack a
-    /// receipt the switch holds; [`crate::Paykit::receipts`] is refused as not now
+    /// receipt the Dispatch holds; [`crate::Paykit::receipts`] is refused as not now
     /// meanwhile.
     pub receipt: Option<crate::ReceivedReceipt>,
 }
@@ -1208,11 +1208,11 @@ impl JournalEntry {
 
 /// Whether the payment method's call may have been made, as the acceptance's release reads
 /// it (Paykit spec 7.2 step 2): at `Paying`, journaled just before the call, or for a
-/// restored entry not yet past it, whose dispatch the backup can't tell. Before `Paying` the
+/// restored entry not yet past it, whose handoff the backup can't tell. Before `Paying` the
 /// call is known not made; at `RailPaid` the method's history spoke (its paid branch releases
 /// the acceptance), and at `RailFailed` it reported a definitive failure, so a later user's
 /// `done` releases none.
-pub(crate) fn dispatched(stage: Stage, restored: bool) -> bool {
+pub(crate) fn handed_off(stage: Stage, restored: bool) -> bool {
     match stage {
         Stage::Paying => true,
         Stage::Recorded | Stage::Attempted => restored,
@@ -1463,7 +1463,7 @@ mod tests {
     }
 
     #[test]
-    fn test_journal_dispatched_only_at_paying_or_restored_before_an_outcome() {
+    fn test_journal_handed_off_only_at_paying_or_restored_before_an_outcome() {
         let stages = [
             (Stage::Recorded, false, true),
             (Stage::Attempted, false, true),
@@ -1475,8 +1475,8 @@ mod tests {
             (Stage::Abandoned, false, false),
         ];
         for (stage, fresh, restored) in stages {
-            assert_eq!(dispatched(stage, false), fresh, "{stage:?}");
-            assert_eq!(dispatched(stage, true), restored, "{stage:?} restored");
+            assert_eq!(handed_off(stage, false), fresh, "{stage:?}");
+            assert_eq!(handed_off(stage, true), restored, "{stage:?} restored");
         }
     }
 

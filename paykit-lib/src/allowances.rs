@@ -13,8 +13,8 @@
 
 use std::collections::HashMap;
 
-use pubky_switch_core::enc::{b64, pubky_id};
-use pubky_switch_core::time::{rfc3339, MAX_TIME_MS};
+use pubky_dispatch_core::enc::{b64, pubky_id};
+use pubky_dispatch_core::time::{rfc3339, MAX_TIME_MS};
 use serde::Serialize;
 use serde_json::{Map, Value};
 
@@ -54,7 +54,7 @@ pub struct TermsTime {
 }
 
 impl TermsTime {
-    /// A time built locally, in the canonical spelling (Switch wire 1.6).
+    /// A time built locally, in the canonical spelling (Dispatch wire 1.6).
     pub fn new(ms: u64) -> Self {
         Self {
             ms,
@@ -62,7 +62,7 @@ impl TermsTime {
         }
     }
 
-    /// Read a time as spelled (Switch wire 1.6).
+    /// Read a time as spelled (Dispatch wire 1.6).
     fn read(text: &str, member: &str) -> Result<Self> {
         Ok(Self {
             ms: crate::json::time(text, TERMS, member)?,
@@ -189,7 +189,7 @@ const TERMS_MEMBERS: [&str; 7] = [
 
 impl AllowanceTerms {
     /// Read and check terms (Paykit wire 4.15). A time that doesn't parse makes the terms
-    /// invalid; it is never read as no limit. Unknown members are ignored (Switch wire 1.1).
+    /// invalid; it is never read as no limit. Unknown members are ignored (Dispatch wire 1.1).
     ///
     /// # Errors
     ///
@@ -420,7 +420,7 @@ impl AllowanceTerms {
     /// entry lies in exactly one period of every anchored limit.
     ///
     /// Both bounds are written in the condition, so each is a time the grammar writes, at
-    /// most 9999-12-31T23:59:59.999Z (Switch wire 1.6).
+    /// most 9999-12-31T23:59:59.999Z (Dispatch wire 1.6).
     ///
     /// # Errors
     ///
@@ -430,7 +430,7 @@ impl AllowanceTerms {
     pub fn entry_window_end(&self, at: u64) -> Result<u64> {
         let beyond = || {
             Error::Validation(
-                "Paykit wire 5.5: an executor batch's window ends past the last time Switch wire 1.6 writes"
+                "Paykit wire 5.5: an executor batch's window ends past the last time Dispatch wire 1.6 writes"
                     .into(),
             )
         };
@@ -965,7 +965,7 @@ impl Ledger {
         )?;
         ensure(
             self.entries.iter().all(|e| e.at <= MAX_TIME_MS),
-            "Paykit wire 5.5: a ledger entry's at past the last time Switch wire 1.6 writes",
+            "Paykit wire 5.5: a ledger entry's at past the last time Dispatch wire 1.6 writes",
         )?;
         self.check_attempts_once()
     }
@@ -975,7 +975,7 @@ impl Ledger {
     }
 }
 
-/// What an attempt's claim shows (Paykit wire 5.5 "Counting", Switch wire 6.8).
+/// What an attempt's claim shows (Paykit wire 5.5 "Counting", Dispatch wire 6.8).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ClaimState {
     /// The attempt is open.
@@ -996,14 +996,14 @@ pub enum ClaimState {
 pub enum Counting {
     /// Held against the limits until its outcome is known.
     Reserved,
-    /// Counted as spent, including a failed attempt without never-dispatched evidence.
+    /// Counted as spent, including a failed attempt without never-handed-off evidence.
     Spent,
-    /// Freed by durable evidence that dispatch never started and cannot start.
+    /// Freed by durable evidence that handoff never started and cannot start.
     Released,
 }
 
 /// Evidence used to count an attempt (Paykit spec 8.3, Paykit wire 5.5).
-/// Claim state alone never proves a failed payment was not dispatched. Callers must
+/// Claim state alone never proves a failed payment was not handed off. Callers must
 /// validate and bind this evidence to the entry's attempt, obligation, Allowance,
 /// amount, asset and owner before using it to count usage.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -1013,7 +1013,7 @@ pub struct AttemptEvidence {
     /// The payer's validated proof or durable journal shows the attempt was paid.
     pub paid: bool,
     /// The executor's durable journal proves the attempt ended before the payment
-    /// method's call and can never dispatch. A restored journal, user confirmation or
+    /// method's call and can never hand off. A restored journal, user confirmation or
     /// reported failure is insufficient. This evidence must bind to this attempt.
     pub never_dispatched: bool,
 }
@@ -1028,7 +1028,7 @@ impl From<ClaimState> for AttemptEvidence {
 }
 
 /// How an entry counts (Paykit spec 8.3, Paykit wire 5.5). A paid outcome, claim or
-/// proof spends. Every failed attempt spends unless durable never-dispatched evidence
+/// proof spends. Every failed attempt spends unless durable never-handed-off evidence
 /// releases it. Without an outcome, open and unknown reserve, and a missing claim spends.
 pub fn counts(entry: &LedgerEntry, evidence: AttemptEvidence) -> Counting {
     counting(entry.outcome, evidence)
@@ -1092,7 +1092,7 @@ pub struct Usage {
 impl Usage {
     /// The lifetime amount: compacted spent totals and counted entries, including
     /// compacted failed attempts. Failures stay spent unless bound durable
-    /// never-dispatched evidence releases them; `done` or paid evidence always spends.
+    /// never-handed-off evidence releases them; `done` or paid evidence always spends.
     pub fn lifetime(&self) -> &Decimal {
         &self.lifetime
     }
@@ -1849,7 +1849,7 @@ pub fn merge_for_repair(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pubky_switch_core::time::parse_rfc3339;
+    use pubky_dispatch_core::time::parse_rfc3339;
     use serde_json::json;
 
     fn usage(
@@ -2159,7 +2159,7 @@ mod tests {
     }
 
     #[test]
-    fn test_allowance_failed_attempts_spend_without_dispatch_evidence() {
+    fn test_allowance_failed_attempts_spend_without_handoff_evidence() {
         let mut attempt = entry(1, "0.01", "2026-02-01T00:00:00.000Z", None);
         for claim in [
             None,
@@ -2226,7 +2226,7 @@ mod tests {
     }
 
     #[test]
-    fn test_allowance_compacted_failure_needs_the_same_dispatch_evidence() {
+    fn test_allowance_compacted_failure_needs_the_same_handoff_evidence() {
         let terms = AllowanceTerms::from_json(&terms()).unwrap();
         let mut l = ledger(Vec::new());
         let attempt = AttemptId::from_bytes([8; 16]);

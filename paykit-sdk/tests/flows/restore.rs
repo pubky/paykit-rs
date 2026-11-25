@@ -1,4 +1,4 @@
-//! Restore and reconcile (Paykit spec 7.2, 7.3; Switch spec 12.4): a restored app makes no
+//! Restore and reconcile (Paykit spec 7.2, 7.3; Dispatch spec 12.4): a restored app makes no
 //! attempt until it has reconciled, resolves its open attempts from the payment method's
 //! history, and never pays twice.
 
@@ -9,8 +9,8 @@ use paykit_sdk::{
     AppScopes, PayOptions, PayOutcome, Paykit, PaykitBackup, PaykitConfig, Rail, Refusal,
     RequestStatus,
 };
-use pubky_switch_client::app::UserConfirmed;
-use pubky_switch_client::clock::Clock;
+use pubky_dispatch_client::app::UserConfirmed;
+use pubky_dispatch_client::clock::Clock;
 
 use crate::common::{draft, list_version, request_from, store, World};
 
@@ -64,8 +64,8 @@ async fn test_restore_reconciles_a_payment_made_after_the_backup() {
     assert!(
         matches!(
             refused,
-            paykit_sdk::PaykitError::Client(pubky_switch_client::app::AppError::Refused(
-                pubky_switch_client::app::Refusal::NotNow(_)
+            paykit_sdk::PaykitError::Client(pubky_dispatch_client::app::AppError::Refused(
+                pubky_dispatch_client::app::Refusal::NotNow(_)
             ))
         ),
         "{refused:?}"
@@ -142,7 +142,7 @@ async fn test_restore_unresolvable_attempt_stays_doubtful() {
         panic!("pending");
     };
     drop(wallet);
-    // The method's history lost the dispatch: nothing can tell whether it paid.
+    // The method's history lost the handoff: nothing can tell whether it paid.
     w.rail.forget_history(&attempt_id);
 
     let mut app = restored(&w, &backup).await;
@@ -246,7 +246,7 @@ async fn test_restore_paid_attempt_whose_outcome_write_fails_is_written_at_a_res
     // The rebuilt payment's outcome batch can't connect.
     w.alice
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+        .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
             path: "/ops".into(),
             after: 0,
         });
@@ -336,7 +336,7 @@ async fn test_restore_paid_attempt_to_an_unknown_destination_stays_doubtful() {
         .unwrap();
     assert_eq!(
         claim.view.status,
-        pubky_switch_core::claims::ClaimStatus::Attempting
+        pubky_dispatch_core::claims::ClaimStatus::Attempting
     );
 }
 
@@ -360,8 +360,8 @@ async fn backup_with_a_payment(w: &World) -> (serde_json::Value, [u8; 16]) {
 /// Paykit's layer of a backup: its local state, each value as Paykit keeps it.
 pub(crate) fn layer_of(backup: &serde_json::Value) -> Vec<(Vec<u8>, serde_json::Value)> {
     let data = backup["layers"][0]["data"].as_str().unwrap();
-    let bytes = pubky_switch_core::enc::unb64(data).unwrap();
-    pubky_switch_client::app::decode_local_state(&bytes)
+    let bytes = pubky_dispatch_core::enc::unb64(data).unwrap();
+    pubky_dispatch_client::app::decode_local_state(&bytes)
         .unwrap()
         .into_iter()
         .map(|(k, v)| (k, serde_json::from_slice(&v).unwrap()))
@@ -378,8 +378,8 @@ pub(crate) fn with_layer(
         .map(|(k, v)| (k, serde_json::to_vec(&v).unwrap()))
         .collect();
     let mut out = backup.clone();
-    out["layers"][0]["data"] = serde_json::Value::String(pubky_switch_core::enc::b64(
-        &pubky_switch_client::app::encode_local_state(&state),
+    out["layers"][0]["data"] = serde_json::Value::String(pubky_dispatch_core::enc::b64(
+        &pubky_dispatch_client::app::encode_local_state(&state),
     ));
     out
 }
@@ -388,7 +388,7 @@ pub(crate) fn with_layer(
 pub(crate) async fn refused_restore(
     w: &World,
     backup: serde_json::Value,
-    store: Arc<dyn pubky_switch_client::store::StateStore>,
+    store: Arc<dyn pubky_dispatch_client::store::StateStore>,
 ) -> paykit_sdk::PaykitError {
     let backup = PaykitBackup::from_bytes(&serde_json::to_vec(&backup).unwrap()).unwrap();
     let restored = Paykit::restore(
@@ -408,7 +408,7 @@ pub(crate) async fn refused_restore(
 /// Nothing of the app is in `store`: it doesn't load.
 pub(crate) async fn nothing_restored(
     w: &World,
-    store: Arc<dyn pubky_switch_client::store::StateStore>,
+    store: Arc<dyn pubky_dispatch_client::store::StateStore>,
     app_id: [u8; 16],
 ) {
     let loaded = Paykit::load(
@@ -425,7 +425,7 @@ pub(crate) async fn nothing_restored(
 pub(crate) fn is_refused(error: &paykit_sdk::PaykitError) -> bool {
     matches!(
         error,
-        paykit_sdk::PaykitError::Client(pubky_switch_client::app::AppError::InvalidData(_))
+        paykit_sdk::PaykitError::Client(pubky_dispatch_client::app::AppError::InvalidData(_))
     )
 }
 
@@ -438,7 +438,7 @@ fn with_given_up_notice(
     let mut state = layer_of(good);
     let key = format!(
         "nt/{}/123e4567-e89b-42d3-a456-426614174000",
-        pubky_switch_core::enc::b64(&w.bob_id())
+        pubky_dispatch_core::enc::b64(&w.bob_id())
     );
     state.push((key.into_bytes(), serde_json::json!({ "v": 1, "d": notice })));
     with_layer(good, state)
@@ -450,11 +450,11 @@ fn given_up_notice(w: &World) -> serde_json::Value {
         "kind": "message_given_up",
         "attempt_id": null,
         "msg_id": "123e4567-e89b-42d3-a456-426614174000",
-        "counterparty": pubky_switch_core::enc::b64(&w.bob_id()),
+        "counterparty": pubky_dispatch_core::enc::b64(&w.bob_id()),
         "request_hash": null,
         "raised_at_ms": 3,
         "acknowledged": false,
-        "stored": { "stored_id": 4, "hash": pubky_switch_core::enc::b64(&[5; 32]) }
+        "stored": { "stored_id": 4, "hash": pubky_dispatch_core::enc::b64(&[5; 32]) }
     })
 }
 
@@ -576,7 +576,7 @@ async fn test_restore_acknowledged_notice_without_its_payment_refused() {
         "kind": "paid_after_failed",
         "attempt_id": attempt,
         "msg_id": null,
-        "counterparty": pubky_switch_core::enc::b64(&w.bob_id()),
+        "counterparty": pubky_dispatch_core::enc::b64(&w.bob_id()),
         "request_hash": null,
         "raised_at_ms": 3,
         "acknowledged": true
@@ -660,14 +660,14 @@ async fn test_restore_another_protocols_layer_refused() {
 }
 
 /// `backup` with its certificate, and the app record carrying it, replaced by a new one of
-/// the wallet's keys granting `scopes`, as the Switch takes it.
+/// the wallet's keys granting `scopes`, as the Dispatch takes it.
 fn with_certificate(
     w: &World,
     backup: &serde_json::Value,
     scopes: &paykit_sdk::RequestedScopes,
-) -> (serde_json::Value, pubky_switch_core::records::AppCert) {
-    use pubky_switch_client::testing::{issue_cert, AppSpec};
-    use pubky_switch_core::records::{AppRecord, AppRecordBody};
+) -> (serde_json::Value, pubky_dispatch_core::records::AppCert) {
+    use pubky_dispatch_client::testing::{issue_cert, AppSpec};
+    use pubky_dispatch_core::records::{AppRecord, AppRecordBody};
     let keys = w.alice.identity().app_keys("wallet");
     let names: Vec<&str> = scopes.scopes.iter().map(String::as_str).collect();
     let issued_at = w.clock.now_ms() - 1;
@@ -687,19 +687,19 @@ fn with_certificate(
 
 #[tokio::test]
 async fn test_restore_certificate_paykit_refuses_writes_nothing() {
-    use pubky_switch_client::store::{Fault, FaultStore, StateStore};
+    use pubky_dispatch_client::store::{Fault, FaultStore, StateStore};
     let w = World::new();
     let (good, app_id) = backup_with_a_payment(&w).await;
-    // `paykit_pay` with a switch permission its scopes don't derive: the Switch takes the
+    // `paykit_pay` with a Dispatch permission its scopes don't derive: the Dispatch takes the
     // certificate, and Paykit refuses it (Paykit wire 3.1).
     let mut scopes = AppScopes::new().pay().build().unwrap();
-    let extra = pubky_switch_core::scopes::Permission::ALL
+    let extra = pubky_dispatch_core::scopes::Permission::ALL
         .into_iter()
         .find(|p| !scopes.permissions.contains(p))
         .unwrap();
     scopes.permissions.push(extra);
-    // Each once, in the Switch's fixed order (Switch wire 3.1).
-    let all = pubky_switch_core::scopes::Permission::ALL;
+    // Each once, in the Dispatch's fixed order (Dispatch wire 3.1).
+    let all = pubky_dispatch_core::scopes::Permission::ALL;
     scopes
         .permissions
         .sort_by_key(|p| all.iter().position(|q| q == p));
@@ -711,7 +711,7 @@ async fn test_restore_certificate_paykit_refuses_writes_nothing() {
     assert!(
         matches!(
             &error,
-            paykit_sdk::PaykitError::Client(pubky_switch_client::app::AppError::InvalidData(why))
+            paykit_sdk::PaykitError::Client(pubky_dispatch_client::app::AppError::InvalidData(why))
                 if why.contains("the backup's certificate")
         ),
         "{error:?}"
@@ -727,7 +727,7 @@ async fn test_restore_certificate_paykit_refuses_writes_nothing() {
 
 #[tokio::test]
 async fn test_restore_failed_commit_leaves_neither_layer() {
-    use pubky_switch_client::store::{Fault, FaultStore};
+    use pubky_dispatch_client::store::{Fault, FaultStore};
     let w = World::new();
     let (backup, app_id) = backup_with_a_payment(&w).await;
     let backup = PaykitBackup::from_bytes(&serde_json::to_vec(&backup).unwrap()).unwrap();
@@ -740,7 +740,7 @@ async fn test_restore_failed_commit_leaves_neither_layer() {
         let restored = Paykit::restore(
             w.env(
                 &w.alice,
-                faulty as Arc<dyn pubky_switch_client::store::StateStore>,
+                faulty as Arc<dyn pubky_dispatch_client::store::StateStore>,
             ),
             PaykitConfig::default(),
             &backup,
@@ -866,7 +866,7 @@ async fn test_restore_journal_entry_naming_another_obligation_refused() {
         .unwrap();
     // The entry's claim key names another obligation than its request's (Paykit spec 7.1).
     state[journal].1["d"]["obligation"] =
-        serde_json::Value::String(pubky_switch_core::enc::b64(&[7; 32]));
+        serde_json::Value::String(pubky_dispatch_core::enc::b64(&[7; 32]));
     let target = store();
     let backup =
         PaykitBackup::from_bytes(&serde_json::to_vec(&with_layer(&good, state)).unwrap()).unwrap();
@@ -929,8 +929,8 @@ fn list_from(w: &World, app: &str, wallet: [u8; 16], version: paykit_lib::ListVe
 /// single-use marks replaced by `used`: what a restore finds there.
 async fn rewrite_marks(wallet: &mut Paykit, w: &World, app_id: [u8; 16], used: serde_json::Value) {
     use paykit_lib::collections::Collection;
-    let target = pubky_switch_client::app::RecordTarget::new(
-        pubky_switch_client::app::Collection::new(
+    let target = pubky_dispatch_client::app::RecordTarget::new(
+        pubky_dispatch_client::app::Collection::new(
             Collection::PaymentLists.name(),
             Collection::PaymentLists.policy(None),
         ),
@@ -949,7 +949,7 @@ async fn rewrite_marks(wallet: &mut Paykit, w: &World, app_id: [u8; 16], used: s
         .unwrap();
     wallet
         .app_mut()
-        .submit_batch(pubky_switch_client::app::OpBatch::for_protocol("paykit").entry(entry))
+        .submit_batch(pubky_dispatch_client::app::OpBatch::for_protocol("paykit").entry(entry))
         .await
         .unwrap();
 }
@@ -1148,7 +1148,7 @@ async fn test_restore_unrebuildable_failure_stays_doubtful_then_paid_is_not_lost
         .unwrap();
     assert_eq!(
         claim.view.status,
-        pubky_switch_core::claims::ClaimStatus::Attempting
+        pubky_dispatch_core::claims::ClaimStatus::Attempting
     );
     app.end_reconcile(UserConfirmed::new()).await.unwrap();
     assert!(app
@@ -1165,7 +1165,7 @@ pub(crate) fn kept_message(
     w: &World,
     app: &str,
     cert_app: &str,
-    to: &pubky_switch_client::testing::TestSigner,
+    to: &pubky_dispatch_client::testing::TestSigner,
     kind: &str,
     body: serde_json::Value,
 ) -> serde_json::Value {
@@ -1180,9 +1180,9 @@ pub(crate) fn kept_message(
     let keys = w.bob.identity().app_keys(cert_app);
     let cert = w.bob.switch().app(&keys.app_id_bytes()).cert.unwrap();
     serde_json::json!({
-        "sender": pubky_switch_core::enc::b64(&w.bob_id()),
+        "sender": pubky_dispatch_core::enc::b64(&w.bob_id()),
         "cert": serde_json::to_value(cert.signed()).unwrap(),
-        "plaintext": pubky_switch_core::enc::b64(&plaintext.encode()),
+        "plaintext": pubky_dispatch_core::enc::b64(&plaintext.encode()),
         "accepted_at": w.clock.now_ms(),
     })
 }
@@ -1203,7 +1203,7 @@ async fn refused_writing_nothing(
     app_id: [u8; 16],
     what: &str,
 ) {
-    use pubky_switch_client::store::{Fault, FaultStore, StateStore};
+    use pubky_dispatch_client::store::{Fault, FaultStore, StateStore};
     let target = store();
     let fault = Arc::new(FaultStore::new(Arc::clone(&target), Fault::None));
     let error = refused_restore(w, backup, Arc::clone(&fault) as Arc<dyn StateStore>).await;
@@ -1225,11 +1225,11 @@ async fn test_restore_kept_request_that_doesnt_verify_writes_nothing() {
         .unwrap();
     let kept = layer[journal].1["d"]["request"].clone();
     let own_cert = good["cert"].clone();
-    let another = |kind: &str, to: &pubky_switch_client::testing::TestSigner, cert_app: &str| {
+    let another = |kind: &str, to: &pubky_dispatch_client::testing::TestSigner, cert_app: &str| {
         kept_message(&w, "shop1", cert_app, to, kind, another_request_body())
     };
     let mut sender = kept.clone();
-    sender["sender"] = serde_json::Value::String(pubky_switch_core::enc::b64(&w.alice_id()));
+    sender["sender"] = serde_json::Value::String(pubky_dispatch_core::enc::b64(&w.alice_id()));
     let mut certificate = kept.clone();
     certificate["cert"] = own_cert;
     // Each reads, and fails one check a use of the request would make: another request
@@ -1300,14 +1300,14 @@ async fn test_restore_kept_request_that_doesnt_verify_writes_nothing() {
     }
     // An acceptance the wallet signed, with its `msg_id` kept, but of another kind: the
     // wallet's rejection of the request.
-    let request_hash: [u8; 32] = pubky_switch_core::enc::unb64_array(
+    let request_hash: [u8; 32] = pubky_dispatch_core::enc::unb64_array(
         layer[journal].1["d"]["request_hash"].as_str().unwrap(),
     )
     .unwrap();
     let wallet = w.alice.identity().app_keys("wallet");
-    let rejection = pubky_switch_core::message::Message::new(
+    let rejection = pubky_dispatch_core::message::Message::new(
         "paykit.payment_request_rejection",
-        pubky_switch_core::message::Sender::of_app(w.alice_id(), &wallet),
+        pubky_dispatch_core::message::Sender::of_app(w.alice_id(), &wallet),
         w.bob_id(),
         w.clock.now_ms(),
         vec![request_hash],
@@ -1320,7 +1320,7 @@ async fn test_restore_kept_request_that_doesnt_verify_writes_nothing() {
     let mut state = layer.clone();
     let entry = &mut state[journal].1["d"];
     assert!(entry.get("acceptance_plaintext").is_some());
-    entry["acceptance_plaintext"] = serde_json::Value::String(pubky_switch_core::enc::b64(
+    entry["acceptance_plaintext"] = serde_json::Value::String(pubky_dispatch_core::enc::b64(
         &rejection.sign(&wallet).unwrap().encode(),
     ));
     entry["acceptance_msg_id"] = serde_json::Value::String(rejection.msg_id.clone());
@@ -1335,8 +1335,8 @@ pub(crate) fn kept(value: serde_json::Value) -> serde_json::Value {
 /// The `msg_id` of the message a [`kept`] value holds.
 pub(crate) fn kept_msg_id(kept: &serde_json::Value) -> String {
     let plaintext =
-        pubky_switch_core::enc::unb64(kept["d"]["plaintext"].as_str().unwrap()).unwrap();
-    let plaintext = pubky_switch_core::message::MessagePlaintext::decode(&plaintext).unwrap();
+        pubky_dispatch_core::enc::unb64(kept["d"]["plaintext"].as_str().unwrap()).unwrap();
+    let plaintext = pubky_dispatch_core::message::MessagePlaintext::decode(&plaintext).unwrap();
     let json: serde_json::Value = serde_json::from_slice(plaintext.json()).unwrap();
     json["msg_id"].as_str().unwrap().to_owned()
 }
@@ -1406,7 +1406,7 @@ async fn test_restore_layer_state_that_doesnt_verify_or_read_writes_nothing() {
         .map(|(_, v)| v["d"].clone())
         .unwrap();
     let request = entry["request"].clone();
-    let key_of = |prefix: &str| format!("{prefix}{}", pubky_switch_core::enc::b64(&[7u8; 32]));
+    let key_of = |prefix: &str| format!("{prefix}{}", pubky_dispatch_core::enc::b64(&[7u8; 32]));
     // A verified list held under a different record key.
     let list = kept_message(
         &w,
@@ -1431,7 +1431,7 @@ async fn test_restore_layer_state_that_doesnt_verify_or_read_writes_nothing() {
         serde_json::json!({
             "seq": 1,
             "msg_id": msg_id,
-            "requester": pubky_switch_core::enc::b64(&w.alice_id()),
+            "requester": pubky_dispatch_core::enc::b64(&w.alice_id()),
             "cert": cert,
             "body": body,
         })
@@ -1442,22 +1442,22 @@ async fn test_restore_layer_state_that_doesnt_verify_or_read_writes_nothing() {
     // under the key of another of his apps.
     let shop1 = w.bob.identity().app_keys("shop1");
     let shop1_cert = w.bob.switch().app(&shop1.app_id_bytes()).cert.unwrap();
-    let record = pubky_switch_core::records::AppRecord::sign(
+    let record = pubky_dispatch_core::records::AppRecord::sign(
         &shop1,
-        pubky_switch_core::records::AppRecordBody::new(&shop1_cert, vec![], w.clock.now_ms()),
+        pubky_dispatch_core::records::AppRecordBody::new(&shop1_cert, vec![], w.clock.now_ms()),
     )
     .unwrap();
     let seen_key = |app: [u8; 16]| {
         format!(
             "ar/{}/{}",
-            pubky_switch_core::enc::b64(&w.bob_id()),
-            pubky_switch_core::enc::b64(&app)
+            pubky_dispatch_core::enc::b64(&w.bob_id()),
+            pubky_dispatch_core::enc::b64(&app)
         )
     };
     let record_json = serde_json::to_value(record.signed()).unwrap();
     let list_ask = |payee: [u8; 32]| {
         serde_json::json!({
-            "payee": pubky_switch_core::enc::b64(&payee),
+            "payee": pubky_dispatch_core::enc::b64(&payee),
             "app_id": null,
             "held_version": null,
             "asked_at_ms": 1,
@@ -1467,7 +1467,7 @@ async fn test_restore_layer_state_that_doesnt_verify_or_read_writes_nothing() {
     // names, waiting for `epochs`.
     let key_waits = |sender: [u8; 32], epochs: serde_json::Value| {
         serde_json::json!({
-            "sender": pubky_switch_core::enc::b64(&sender),
+            "sender": pubky_dispatch_core::enc::b64(&sender),
             "earliest_ms": 5, "latest_ms": 6, "due": false,
             "asked_at_ms": null, "queued": null, "epochs": epochs,
         })
@@ -1505,7 +1505,7 @@ async fn test_restore_layer_state_that_doesnt_verify_or_read_writes_nothing() {
         ),
         (
             "list record seen lost, not set",
-            format!("lgone/{}", pubky_switch_core::enc::b64(&[3; 32])),
+            format!("lgone/{}", pubky_dispatch_core::enc::b64(&[3; 32])),
             kept(serde_json::json!(false)),
         ),
         (
@@ -1523,7 +1523,7 @@ async fn test_restore_layer_state_that_doesnt_verify_or_read_writes_nothing() {
             "queued ask under another sender's key",
             format!("{}/{:020}", key_of("ask/"), 5),
             kept(serde_json::json!({
-                "sender": pubky_switch_core::enc::b64(&w.bob_id()),
+                "sender": pubky_dispatch_core::enc::b64(&w.bob_id()),
                 "from_ms": 5,
                 "until_ms": null,
                 "queued": null,
@@ -1587,7 +1587,7 @@ async fn test_restore_layer_state_that_doesnt_verify_or_read_writes_nothing() {
             "key-wait mark without its epochs",
             key_of("kw/"),
             kept(serde_json::json!({
-                "sender": pubky_switch_core::enc::b64(&[7u8; 32]),
+                "sender": pubky_dispatch_core::enc::b64(&[7u8; 32]),
                 "earliest_ms": 5, "latest_ms": 6, "due": false,
                 "asked_at_ms": null, "queued": null,
             })),
@@ -1613,7 +1613,7 @@ async fn test_restore_layer_state_that_doesnt_verify_or_read_writes_nothing() {
     ));
     // So do a list ask and a kept side under their own keys.
     state.push((
-        format!("lq/{}", pubky_switch_core::enc::b64(&w.bob_id())).into_bytes(),
+        format!("lq/{}", pubky_dispatch_core::enc::b64(&w.bob_id())).into_bytes(),
         kept(list_ask(w.bob_id())),
     ));
     state.push((
@@ -1661,7 +1661,7 @@ async fn test_restore_cursor_time_ahead_of_the_backup_is_clamped() {
     let app = restored(&w, &backup).await;
     // Clamped to the backup's verified time plus the clock tolerance, and the re-sends start
     // from there, not from the future.
-    let bound = w.clock.now_ms() + pubky_switch_core::records::CLOCK_TOLERANCE_MS;
+    let bound = w.clock.now_ms() + pubky_dispatch_core::records::CLOCK_TOLERANCE_MS;
     let read = |bytes: Vec<u8>| serde_json::from_slice::<serde_json::Value>(&bytes).unwrap();
     let cursor = read(
         app.app()
@@ -1687,11 +1687,11 @@ async fn test_restore_cursor_time_ahead_of_the_backup_is_clamped() {
 /// Bob's shop's record of `request`.
 pub(super) fn payee_record(
     request: &paykit_sdk::RequestRef,
-) -> pubky_switch_client::app::RecordTarget {
+) -> pubky_dispatch_client::app::RecordTarget {
     use paykit_lib::collections::Collection;
     let collection = Collection::PayeeActivity;
-    pubky_switch_client::app::RecordTarget::new(
-        pubky_switch_client::app::Collection::new(collection.name(), collection.policy(None)),
+    pubky_dispatch_client::app::RecordTarget::new(
+        pubky_dispatch_client::app::Collection::new(collection.name(), collection.policy(None)),
         &paykit_lib::derive::natural_key::request_record(&request.payee, &request.request_hash),
     )
 }
@@ -1699,7 +1699,7 @@ pub(super) fn payee_record(
 /// The value of the record at `target`, as `app` reads it.
 async fn value_of(
     app: &mut Paykit,
-    target: &pubky_switch_client::app::RecordTarget,
+    target: &pubky_dispatch_client::app::RecordTarget,
 ) -> serde_json::Value {
     let held = app.app_mut().read_record(target).await.unwrap().unwrap();
     serde_json::from_slice(held.content.value().unwrap()).unwrap()
@@ -1712,7 +1712,7 @@ async fn acceptances_taken(shop: &mut Paykit) -> usize {
         .events
         .iter()
         .filter(|e| {
-            matches!(e, pubky_switch_client::app::AppEvent::MessageReceived { kind, .. }
+            matches!(e, pubky_dispatch_client::app::AppEvent::MessageReceived { kind, .. }
                 if kind == "paykit.payment_request_acceptance")
         })
         .count()
@@ -1730,12 +1730,12 @@ async fn restored_with_a_released_acceptance(
     let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
     wallet.receive(None).await.unwrap();
     if !delivered {
-        // Bob's switch doesn't answer the delivery: the acceptance stays in the outbox.
+        // Bob's Dispatch doesn't answer the delivery: the acceptance stays in the outbox.
         w.bob
             .switch()
-            .fail_next(pubky_switch_client::testing::Fault::Error {
+            .fail_next(pubky_dispatch_client::testing::Fault::Error {
                 path: "/inbox".into(),
-                code: pubky_switch_core::http::ErrorCode::Unavailable,
+                code: pubky_dispatch_core::http::ErrorCode::Unavailable,
                 current: serde_json::Value::Null,
             });
     }
@@ -1902,11 +1902,11 @@ async fn test_restore_cursor_time_left_unclamped_by_a_crash_is_clamped_at_load()
         .protocol_commit(
             "paykit",
             &[
-                pubky_switch_client::app::LocalWrite::Put {
+                pubky_dispatch_client::app::LocalWrite::Put {
                     key: b"ct".to_vec(),
                     value: serde_json::to_vec(&kept(serde_json::json!(ahead))).unwrap(),
                 },
-                pubky_switch_client::app::LocalWrite::Put {
+                pubky_dispatch_client::app::LocalWrite::Put {
                     key: b"rh".to_vec(),
                     value: serde_json::to_vec(&hold).unwrap(),
                 },
@@ -1919,7 +1919,7 @@ async fn test_restore_cursor_time_left_unclamped_by_a_crash_is_clamped_at_load()
         .load_on_clock(&w.alice, Arc::clone(&base), app_id, Arc::clone(&w.clock))
         .await;
     let read = |bytes: Vec<u8>| serde_json::from_slice::<serde_json::Value>(&bytes).unwrap();
-    let bound = w.clock.now_ms() + pubky_switch_core::records::CLOCK_TOLERANCE_MS;
+    let bound = w.clock.now_ms() + pubky_dispatch_core::records::CLOCK_TOLERANCE_MS;
     let cursor = read(
         app.app()
             .protocol_get("paykit", b"ct")
@@ -1958,7 +1958,7 @@ async fn test_restore_records_mark_kept_by_a_stopped_read() {
     w.alice
         .next_doc(|body| {
             body.apps.retain(|a| a.app_id != wallet_id);
-            body.removed.push(pubky_switch_core::records::RemovedApp {
+            body.removed.push(pubky_dispatch_core::records::RemovedApp {
                 app_id: wallet_id,
                 distrust_from: now,
             });
@@ -2010,20 +2010,20 @@ async fn test_restore_asks_start_bounded_where_they_are_queued() {
     app.app_mut()
         .protocol_commit(
             "paykit",
-            &[pubky_switch_client::app::LocalWrite::Put {
+            &[pubky_dispatch_client::app::LocalWrite::Put {
                 key: b"rh".to_vec(),
                 value: serde_json::to_vec(&hold).unwrap(),
             }],
         )
         .await
         .unwrap();
-    // Queued, not yet sent: bob's switch doesn't answer.
+    // Queued, not yet sent: bob's Dispatch doesn't answer.
     for _ in 0..4 {
         w.bob
             .switch()
-            .fail_next(pubky_switch_client::testing::Fault::Error {
+            .fail_next(pubky_dispatch_client::testing::Fault::Error {
                 path: "/inbox".into(),
-                code: pubky_switch_core::http::ErrorCode::Unavailable,
+                code: pubky_dispatch_core::http::ErrorCode::Unavailable,
                 current: serde_json::Value::Null,
             });
     }
@@ -2140,7 +2140,7 @@ async fn test_restore_entry_holding_the_users_resolution_before_it_finished_refu
         paykit_sdk::Stage::Finished
     );
     drop(wallet);
-    // The user's `done` off the claim, on a restored dispatch, by the same rule.
+    // The user's `done` off the claim, on a restored handoff, by the same rule.
     let paid = with_journal_member(&good, "failed_by_method", serde_json::json!(true));
     let paid = with_journal_member(&paid, "restored", serde_json::json!(true));
     let paid = with_journal_member(&paid, "user_paid", serde_json::json!(true));
@@ -2327,7 +2327,7 @@ async fn test_journal_entry_with_no_carrier_holds_its_payment() {
         .app_mut()
         .protocol_commit(
             "paykit",
-            &[pubky_switch_client::app::LocalWrite::Put {
+            &[pubky_dispatch_client::app::LocalWrite::Put {
                 key: held[0].0.clone(),
                 value: serde_json::to_vec(&value).unwrap(),
             }],
@@ -2344,7 +2344,7 @@ async fn test_restore_acceptance_certificate_of_another_own_app_refused() {
     let w = World::new();
     let (good, app_id) = backup_with_a_payment(&w).await;
     let keys = w.alice.identity().app_keys("phone");
-    let other = pubky_switch_client::testing::issue_cert(
+    let other = pubky_dispatch_client::testing::issue_cert(
         w.alice.identity().key(),
         &keys,
         &app_spec(&AppScopes::new().pay().build().unwrap()),
@@ -2365,7 +2365,7 @@ async fn test_restore_acceptance_certificate_of_another_identity_refused() {
     let w = World::new();
     let (good, app_id) = backup_with_a_payment(&w).await;
     let keys = w.bob.identity().app_keys("wallet");
-    let other = pubky_switch_client::testing::issue_cert(
+    let other = pubky_dispatch_client::testing::issue_cert(
         w.bob.identity().key(),
         &keys,
         &app_spec(&AppScopes::new().pay().build().unwrap()),
@@ -2404,9 +2404,9 @@ async fn test_restore_kept_certificate_without_its_acceptance_refused() {
 }
 
 /// The app spec a certificate for `scopes` is issued with.
-fn app_spec(scopes: &paykit_sdk::RequestedScopes) -> pubky_switch_client::testing::AppSpec {
+fn app_spec(scopes: &paykit_sdk::RequestedScopes) -> pubky_dispatch_client::testing::AppSpec {
     let names: Vec<&str> = scopes.scopes.iter().map(String::as_str).collect();
-    pubky_switch_client::testing::AppSpec::new(&names).with_permissions(&scopes.permissions)
+    pubky_dispatch_client::testing::AppSpec::new(&names).with_permissions(&scopes.permissions)
 }
 
 #[tokio::test]
@@ -2416,7 +2416,7 @@ async fn test_restore_acceptance_under_a_certificate_without_pay_refused() {
     let w = World::new();
     let (good, app_id) = backup_with_a_payment(&w).await;
     let keys = w.alice.identity().app_keys("wallet");
-    let c = pubky_switch_client::testing::issue_cert(
+    let c = pubky_dispatch_client::testing::issue_cert(
         w.alice.identity().key(),
         &keys,
         &app_spec(&AppScopes::new().contacts().build().unwrap()),
@@ -2438,11 +2438,11 @@ async fn test_restore_acceptance_of_another_own_app_refused() {
     // Both the plaintext and the kept certificate replaced by another own app's ("phone",
     // `paykit_pay`): a genuine acceptance of the same request, signed by the phone. Only the
     // App ID check refuses it.
-    use pubky_switch_core::message::{Message, MessagePlaintext, Sender};
+    use pubky_dispatch_core::message::{Message, MessagePlaintext, Sender};
     let w = World::new();
     let (good, app_id) = backup_with_a_payment(&w).await;
     let keys = w.alice.identity().app_keys("phone");
-    let phone = pubky_switch_client::testing::issue_cert(
+    let phone = pubky_dispatch_client::testing::issue_cert(
         w.alice.identity().key(),
         &keys,
         &app_spec(&AppScopes::new().pay().build().unwrap()),
@@ -2455,7 +2455,7 @@ async fn test_restore_acceptance_of_another_own_app_refused() {
         .find(|(k, _)| k.starts_with(b"j/"))
         .map(|(_, v)| v)
         .unwrap();
-    let pt = pubky_switch_core::enc::unb64(entry["d"]["acceptance_plaintext"].as_str().unwrap())
+    let pt = pubky_dispatch_core::enc::unb64(entry["d"]["acceptance_plaintext"].as_str().unwrap())
         .unwrap();
     let pt = MessagePlaintext::decode(&pt).unwrap();
     let json: serde_json::Value = serde_json::from_slice(pt.json()).unwrap();
@@ -2464,7 +2464,7 @@ async fn test_restore_acceptance_of_another_own_app_refused() {
         .unwrap()
         .iter()
         .map(|r| {
-            let b = pubky_switch_core::enc::unb64(r.as_str().unwrap()).unwrap();
+            let b = pubky_dispatch_core::enc::unb64(r.as_str().unwrap()).unwrap();
             <[u8; 32]>::try_from(b.as_slice()).unwrap()
         })
         .collect();
@@ -2483,7 +2483,7 @@ async fn test_restore_acceptance_of_another_own_app_refused() {
     };
     let signed = msg.sign(&keys).unwrap();
     entry["d"]["acceptance_plaintext"] =
-        serde_json::Value::String(pubky_switch_core::enc::b64(&signed.encode()));
+        serde_json::Value::String(pubky_dispatch_core::enc::b64(&signed.encode()));
     entry["d"]["acceptance_cert"] = serde_json::to_value(phone.signed()).unwrap();
     refused_writing_nothing(
         &w,
@@ -2526,7 +2526,7 @@ async fn test_restore_unrequested_entry_naming_another_payments_record_refused()
     refused_writing_nothing(&w, with_layer(&good, state), wallet.app_id(), "record").await;
 }
 
-/// Bob's shop sends alice a request whose batch the switch applies and whose answer is lost:
+/// Bob's shop sends alice a request whose batch the Dispatch applies and whose answer is lost:
 /// the client keeps the batch unanswered, so its message is in no outbox, and the shop is
 /// backed up then and restored onto a new store, which keeps no such batch. Returns the
 /// restored shop.
@@ -2537,7 +2537,7 @@ async fn shop_restored_with_its_request_unqueued(w: &World, wallet: &mut Paykit)
     unexpiring.proposal_expires_at_ms = None;
     w.bob
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::LoseAnswer {
+        .fail_next(pubky_dispatch_client::testing::Fault::LoseAnswer {
             path: "/ops".into(),
         });
     let _ = shop.send_request(w.alice_id(), unexpiring).await;
@@ -2666,13 +2666,14 @@ async fn test_restore_request_past_its_replay_window_stays_uncertain() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = shop_restored_with_its_request_unqueued(&w, &mut wallet).await;
-    w.clock.advance_ms(31 * pubky_switch_core::records::DAY_MS);
+    w.clock
+        .advance_ms(31 * pubky_dispatch_core::records::DAY_MS);
     let before = w.alice.switch().entries_from(&w.bob_id());
     let summary = shop.receive(None).await.unwrap();
     assert!(
         !summary.report.events.iter().any(|e| matches!(
             e,
-            pubky_switch_client::app::AppEvent::MessageUndelivered { .. }
+            pubky_dispatch_client::app::AppEvent::MessageUndelivered { .. }
         )),
         "{:?}",
         summary.report.events
@@ -2694,7 +2695,7 @@ async fn test_restore_request_past_its_replay_window_stays_uncertain() {
 /// Restore `backup` onto a new store as an app of `signer`'s identity, without a receive.
 async fn restored_unreceived(
     w: &World,
-    signer: &pubky_switch_client::testing::TestSigner,
+    signer: &pubky_dispatch_client::testing::TestSigner,
     backup: &PaykitBackup,
 ) -> Paykit {
     Paykit::restore(
@@ -2710,7 +2711,7 @@ async fn restored_unreceived(
 
 #[tokio::test]
 async fn test_restore_live_store_delivers_the_original_kept_receipt_once() {
-    use pubky_switch_client::app::{Delivery, DeliveryOrigin, KeptBatchStatus};
+    use pubky_dispatch_client::app::{Delivery, DeliveryOrigin, KeptBatchStatus};
 
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
@@ -2739,7 +2740,7 @@ async fn test_restore_live_store_delivers_the_original_kept_receipt_once() {
     let record = shop.payee_activity().await.unwrap()[0].record;
     w.bob
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::LoseAnswer {
+        .fail_next(pubky_dispatch_client::testing::Fault::LoseAnswer {
             path: "/ops".into(),
         });
     let batch_id = shop
@@ -2800,7 +2801,7 @@ async fn test_restore_fresh_store_keeps_an_issued_receipt_without_assuming_deliv
     let record = shop.payee_activity().await.unwrap()[0].record;
     w.bob
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::LoseAnswer {
+        .fail_next(pubky_dispatch_client::testing::Fault::LoseAnswer {
             path: "/ops".into(),
         });
     let kept = shop
@@ -2826,7 +2827,7 @@ async fn test_restore_fresh_store_keeps_an_issued_receipt_without_assuming_deliv
         .ends_with(&original.msg_id));
     assert!(matches!(
         shop.app().kept_batch(kept).await.unwrap(),
-        Some(pubky_switch_client::app::KeptBatchStatus::Kept { .. })
+        Some(pubky_dispatch_client::app::KeptBatchStatus::Kept { .. })
     ));
     wallet.receive(None).await.unwrap();
     assert!(wallet.request(&request).await.unwrap().receipt.is_none());
@@ -2886,7 +2887,7 @@ async fn test_restore_fresh_store_keeps_an_issued_receipt_without_assuming_deliv
 
 #[tokio::test]
 async fn test_an_unanswered_receipt_keeps_its_batch_id_when_saving_the_application_fails() {
-    use pubky_switch_client::store::{Fault, FaultStore};
+    use pubky_dispatch_client::store::{Fault, FaultStore};
 
     let w = World::new();
     let mut buyer = w.wallet("wallet").await;
@@ -2913,7 +2914,7 @@ async fn test_an_unanswered_receipt_keeps_its_batch_id_when_saving_the_applicati
     store.refuse_puts_as_too_large_over(Some(b"p/paykit/ri/"), 16);
     w.bob
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::LoseAnswer {
+        .fail_next(pubky_dispatch_client::testing::Fault::LoseAnswer {
             path: "/ops".into(),
         });
     let err = shop
@@ -2966,7 +2967,7 @@ async fn test_restore_shared_receipt_alone_does_not_create_a_delivery() {
     let backup = shop.backup().await.unwrap();
     w.bob
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::LoseAnswer {
+        .fail_next(pubky_dispatch_client::testing::Fault::LoseAnswer {
             path: "/ops".into(),
         });
     let _ = shop
@@ -3011,7 +3012,7 @@ async fn wallet_backed_up_with_its_rejection_unqueued(
     wallet.receive(None).await.unwrap();
     w.alice
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::LoseAnswer {
+        .fail_next(pubky_dispatch_client::testing::Fault::LoseAnswer {
             path: "/ops".into(),
         });
     let _ = wallet.reject_request(&request, None).await;
@@ -3096,9 +3097,9 @@ async fn test_restore_reading_the_deny_list_does_not_release_a_rejection() {
     let mut wallet = restored_unreceived(&w, &w.alice, &backup).await;
     w.alice
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::Error {
+        .fail_next(pubky_dispatch_client::testing::Fault::Error {
             path: "/allow".into(),
-            code: pubky_switch_core::http::ErrorCode::Unavailable,
+            code: pubky_dispatch_core::http::ErrorCode::Unavailable,
             current: serde_json::Value::Null,
         });
     let before = w.bob.switch().entries_from(&w.alice_id());
@@ -3175,8 +3176,8 @@ async fn test_restore_opening_the_record_reports_an_uncertain_rejection() {
     assert!(
         matches!(
             held.content,
-            pubky_switch_client::app::RecordContent::Unreadable(
-                pubky_switch_client::app::Unopened::KeyNotHeld { .. }
+            pubky_dispatch_client::app::RecordContent::Unreadable(
+                pubky_dispatch_client::app::Unopened::KeyNotHeld { .. }
             )
         ),
         "{:?}",
@@ -3221,7 +3222,7 @@ async fn test_restore_own_unblock_mark_without_its_batch_refused() {
     let (good, app_id) = backup_with_a_payment(&w).await;
     let mut layer = layer_of(&good);
     layer.push((
-        format!("bk/{}", pubky_switch_core::enc::b64(&w.bob_id())).into_bytes(),
+        format!("bk/{}", pubky_dispatch_core::enc::b64(&w.bob_id())).into_bytes(),
         serde_json::json!({ "v": 1, "d": { "blocked": false, "batch": null } }),
     ));
     layer.sort_by(|a, b| a.0.cmp(&b.0));
@@ -3381,7 +3382,8 @@ async fn test_restore_own_cancellation_in_a_record_unreadable_for_31_days_never_
         .await
         .unwrap()
         .is_some());
-    w.clock.advance_ms(31 * pubky_switch_core::records::DAY_MS);
+    w.clock
+        .advance_ms(31 * pubky_dispatch_core::records::DAY_MS);
     shop.receive(None).await.unwrap();
     assert!(shop
         .app()
@@ -3517,7 +3519,8 @@ async fn test_restore_own_record_found_unreadable_25_days_after_the_restore_wait
         .unwrap()
         .is_none());
     let before = w.carol.switch().entries_from(&w.bob_id());
-    w.clock.advance_ms(25 * pubky_switch_core::records::DAY_MS);
+    w.clock
+        .advance_ms(25 * pubky_dispatch_core::records::DAY_MS);
     seller_wallet.receive(None).await.unwrap();
     let nowhere = paykit_sdk::RequestRef {
         payee: w.bob_id(),
@@ -3542,7 +3545,7 @@ async fn test_restore_own_record_found_unreadable_25_days_after_the_restore_wait
         .await
         .unwrap()
         .is_none());
-    w.clock.advance_ms(4 * pubky_switch_core::records::DAY_MS);
+    w.clock.advance_ms(4 * pubky_dispatch_core::records::DAY_MS);
     shop.receive(None).await.unwrap();
     assert!(shop
         .app()
@@ -3550,7 +3553,7 @@ async fn test_restore_own_record_found_unreadable_25_days_after_the_restore_wait
         .await
         .unwrap()
         .is_none());
-    w.clock.advance_ms(2 * pubky_switch_core::records::DAY_MS);
+    w.clock.advance_ms(2 * pubky_dispatch_core::records::DAY_MS);
     shop.receive(None).await.unwrap();
     assert!(shop
         .app()
@@ -3614,7 +3617,7 @@ async fn family_bounded_at_restore(
 
 /// A mark of dropped messages from the sender `[i; 32]`, at its family's key `prefix`.
 fn drop_mark(prefix: &str, i: u8, due: bool) -> (String, serde_json::Value) {
-    let sender = pubky_switch_core::enc::b64(&[i; 32]);
+    let sender = pubky_dispatch_core::enc::b64(&[i; 32]);
     (
         format!("{prefix}{sender}"),
         serde_json::json!({
@@ -3630,14 +3633,14 @@ async fn test_restore_layer_lost_owed_past_its_bound_refused_writing_nothing() {
     // The runtime holds the next entry rather than keep a 65th notice owed: a backup with
     // more is no run's.
     let entry = |i: u8| {
-        let sender = pubky_switch_core::enc::b64(&[i; 32]);
+        let sender = pubky_dispatch_core::enc::b64(&[i; 32]);
         let msg_id = format!("{i:08x}-0000-4000-8000-000000000000");
         (
             format!("bl/{sender}/{msg_id}"),
             serde_json::json!({
                 "sender": sender,
                 "earliest_ms": 5, "latest_ms": 6, "raised_ms": 9,
-                "msg_id": msg_id, "hash": pubky_switch_core::enc::b64(&[3; 32]),
+                "msg_id": msg_id, "hash": pubky_dispatch_core::enc::b64(&[3; 32]),
             }),
         )
     };
@@ -3674,7 +3677,7 @@ async fn test_restore_layer_key_wait_marks_past_their_bound_refused_writing_noth
 }
 
 #[tokio::test]
-async fn test_restore_rebuilds_a_priced_outcome_without_authorizing_another_dispatch() {
+async fn test_restore_rebuilds_a_priced_outcome_without_authorizing_another_handoff() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
@@ -3728,7 +3731,7 @@ async fn test_restore_rebuilds_a_priced_outcome_without_authorizing_another_disp
 
 #[tokio::test]
 async fn test_restore_attempt_whose_batch_never_reached_the_claim_is_judged_by_the_history() {
-    // The backup holds a payment journaled before its attempt's batch reached the switch,
+    // The backup holds a payment journaled before its attempt's batch reached the Dispatch,
     // and the restore finds no claim for it at the same service: the restored journal can't
     // tell whether a batch applied, so the claim's silence proves nothing (Paykit spec 8.4).
     // A history authoritative across a restore that shows nothing means it never started:
@@ -3751,7 +3754,7 @@ async fn test_restore_attempt_whose_batch_never_reached_the_claim_is_judged_by_t
         wallet.receive(None).await.unwrap();
         w.alice
             .switch()
-            .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+            .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
                 path: "/ops".into(),
                 after: 0,
             });
@@ -3793,7 +3796,7 @@ async fn test_restore_attempt_whose_batch_never_reached_the_claim_is_judged_by_t
 
 #[tokio::test]
 async fn test_restore_attempt_no_claim_shows_resolved_paid_by_the_user_is_never_paid_again() {
-    // A payment journaled before its attempt's batch reached the switch, restored at the same
+    // A payment journaled before its attempt's batch reached the Dispatch, restored at the same
     // service with no claim, the method's history not surviving a restore: the user resolves
     // it as paid. With no claim to settle, the journal keeps the user's word, and the request
     // is refused as already paid, by hand and automatically (Paykit spec 7.2, 8.4).
@@ -3811,7 +3814,7 @@ async fn test_restore_attempt_no_claim_shows_resolved_paid_by_the_user_is_never_
     wallet.receive(None).await.unwrap();
     w.alice
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+        .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
             path: "/ops".into(),
             after: 0,
         });
@@ -3856,7 +3859,7 @@ async fn test_restore_attempt_no_claim_shows_resolved_paid_by_the_user_is_never_
 }
 
 /// A wallet whose payment of `request` was journaled before its attempt's batch reached the
-/// switch, backed up, lost, and restored at the same service with no claim showing it; the
+/// Dispatch, backed up, lost, and restored at the same service with no claim showing it; the
 /// method's history doesn't survive a restore. `phone`, another own app, runs `meanwhile`
 /// before the restore. Returns the restored wallet and the payment.
 async fn restored_unrecorded(
@@ -3879,7 +3882,7 @@ async fn restored_unrecorded(
     phone.receive(None).await.unwrap();
     w.alice
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+        .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
             path: "/ops".into(),
             after: 0,
         });
@@ -4058,7 +4061,7 @@ async fn test_restore_user_unknown_with_no_claim_refused() {
 }
 
 #[tokio::test]
-async fn test_restore_repeat_withheld_once_the_user_says_an_earlier_dispatch_paid() {
+async fn test_restore_repeat_withheld_once_the_user_says_an_earlier_handoff_paid() {
     // The user pays over the doubt of a restored payment no claim shows, on an idempotent
     // method with no history, and the new attempt is left in flight; then the user resolves
     // the restored payment as paid. A resume never repeats the new attempt (Paykit spec 7.2,
@@ -4107,10 +4110,10 @@ async fn test_restore_repeat_withheld_once_the_user_says_an_earlier_dispatch_pai
 async fn test_restore_older_in_place_keeps_a_kept_payee_cancellation() {
     // The wallet is backed up holding bob's request. Bob then cancels it: the wallet keeps
     // the cancellation as the stop, but its placement in the request record doesn't reach
-    // the switch, and the read is acknowledged, so the inbox no longer holds it. Restored in
+    // the Dispatch, and the read is acknowledged, so the inbox no longer holds it. Restored in
     // place from the older backup, the installation's stop stays: even once the user has
     // seen the request may have been cancelled, it isn't paid (Paykit spec 8.1).
-    use pubky_switch_client::testing::Fault;
+    use pubky_dispatch_client::testing::Fault;
     let w = World::new();
     let storage = store();
     let mut wallet = w.wallet_on("wallet", Arc::clone(&storage)).await;

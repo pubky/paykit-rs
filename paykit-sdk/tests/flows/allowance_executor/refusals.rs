@@ -14,8 +14,8 @@ use paykit_sdk::{
     AllowanceStatus, AppScopes, PayOptions, PayOutcome, PayResult, Paykit, PaykitConfig, Refusal,
     RequestDraft, RequestRef,
 };
-use pubky_switch_client::app::UserConfirmed;
-use pubky_switch_client::clock::Clock;
+use pubky_dispatch_client::app::UserConfirmed;
+use pubky_dispatch_client::clock::Clock;
 use serde_json::json;
 
 use super::{first_grant_as, first_grant_in, terms};
@@ -122,7 +122,7 @@ async fn conflict(w: &World, payer: &mut Paykit, key: &[u8; 32]) {
     );
 }
 
-/// A `missed` item at alice's switch, read: every Allowance on the wallet's consent list
+/// A `missed` item at alice's Dispatch, read: every Allowance on the wallet's consent list
 /// waits for the user's confirmation again.
 async fn missed(w: &World, payer: &mut Paykit) {
     let now = w.clock.now_ms();
@@ -223,7 +223,7 @@ async fn test_allowance_refusals_conflict_is_final() {
 
 #[tokio::test]
 async fn test_allowance_refusals_expired_terms_end_it() {
-    let start = pubky_switch_client::testing::START_MS;
+    let start = pubky_dispatch_client::testing::START_MS;
     let mut expiring = terms().to_json().unwrap();
     expiring["expires_at"] = json!(TermsTime::new(start + 2 * HOUR_MS).as_str());
     let expiring = AllowanceTerms::from_json(&expiring).unwrap();
@@ -408,7 +408,7 @@ async fn test_allowance_refusals_unanswered_proposal_is_not_now() {
 
 #[tokio::test]
 async fn test_allowance_refusals_terms_not_active_yet_is_not_now() {
-    let start = pubky_switch_client::testing::START_MS;
+    let start = pubky_dispatch_client::testing::START_MS;
     let later = terms_with(json!({ "active_from": TermsTime::new(start + 2 * HOUR_MS).as_str() }));
     let (w, mut payer, mut shop, key) = Box::pin(first_grant_in(store(), later)).await;
     w.rail.set_history_payer(payer.identity());
@@ -439,7 +439,7 @@ async fn test_allowance_refusals_payment_outside_the_per_payment_range_is_not_au
 async fn test_allowance_refusals_lifetime_limit_counts_a_dispatched_payment_as_spent() {
     let (w, mut payer, mut shop, key) = Box::pin(first_grant_in(store(), terms())).await;
     w.rail.set_history_payer(payer.identity());
-    // 70 of 100 dispatched and still pending: spent whether it pays or fails (Paykit spec
+    // 70 of 100 handed off and still pending: spent whether it pays or fails (Paykit spec
     // 8.3), so 50 never fits.
     let first = Box::pin(one_time(&w, &mut shop, &mut payer, "70")).await;
     w.rail.next(Behaviour::Hang);
@@ -468,7 +468,7 @@ async fn test_allowance_refusals_lifetime_limit_counts_a_dispatched_payment_as_s
         refused(Box::pin(payer.pay_under_allowance(&second, &key)).await),
         Refusal::NotAutomatic("the lifetime limit has no room".into())
     );
-    // 70 paid and 10 more dispatched: 25 and 40 never fit, whatever the 10 answer.
+    // 70 paid and 10 more handed off: 25 and 40 never fit, whatever the 10 answer.
     let third = Box::pin(one_time(&w, &mut shop, &mut payer, "10")).await;
     w.rail.next(Behaviour::Hang);
     assert!(matches!(
@@ -560,7 +560,7 @@ async fn test_allowance_refusals_lifetime_limit_waits_for_a_reservation_before_t
     let second = Box::pin(one_time(&w, &mut shop, &mut payer, "10")).await;
     w.alice
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::LoseAnswer {
+        .fail_next(pubky_dispatch_client::testing::Fault::LoseAnswer {
             path: "/ops".into(),
         });
     let lost = Box::pin(payer.pay_under_allowance(&second, &key))
@@ -785,7 +785,7 @@ async fn test_allowance_refusals_view_flag_is_off_for_a_conflicted_one() {
 
 /// Terms that expire two hours after the test clock's start.
 fn expiring() -> AllowanceTerms {
-    let start = pubky_switch_client::testing::START_MS;
+    let start = pubky_dispatch_client::testing::START_MS;
     terms_with(json!({ "expires_at": TermsTime::new(start + 2 * HOUR_MS).as_str() }))
 }
 
@@ -806,7 +806,7 @@ async fn test_allowance_refusals_expired_before_any_list_request_is_sent() {
     let request = Box::pin(request_from(&mut shop, w.alice_id(), to_any)).await;
     Box::pin(payer.receive(None)).await.unwrap();
     w.clock
-        .set_ms(pubky_switch_client::testing::START_MS + 3 * HOUR_MS);
+        .set_ms(pubky_dispatch_client::testing::START_MS + 3 * HOUR_MS);
     Box::pin(payer.receive(None)).await.unwrap();
     let sent_before = payer
         .app()
@@ -835,11 +835,11 @@ async fn test_allowance_refusals_expired_subscription_and_period_end_it() {
     // Past the terms' expiry, inside the third period, it is refused as ended, before
     // anything asks for its destination.
     w.clock
-        .set_ms(pubky_switch_client::testing::START_MS + 5 * HOUR_MS / 2);
+        .set_ms(pubky_dispatch_client::testing::START_MS + 5 * HOUR_MS / 2);
     Box::pin(payer.receive(None)).await.unwrap();
     let later = PeriodRef {
-        starts_at: pubky_switch_client::testing::START_MS + 2 * HOUR_MS,
-        ends_at: pubky_switch_client::testing::START_MS + 3 * HOUR_MS,
+        starts_at: pubky_dispatch_client::testing::START_MS + 2 * HOUR_MS,
+        ends_at: pubky_dispatch_client::testing::START_MS + 3 * HOUR_MS,
     };
     assert_eq!(
         refused(Box::pin(payer.pay_period_under_allowance(&request, &later)).await),
@@ -983,7 +983,7 @@ async fn test_allowance_refusals_expired_is_not_asked_to_confirm() {
     w.rail.set_history_payer(payer.identity());
     Box::pin(missed(&w, &mut payer)).await;
     w.clock
-        .set_ms(pubky_switch_client::testing::START_MS + 3 * HOUR_MS);
+        .set_ms(pubky_dispatch_client::testing::START_MS + 3 * HOUR_MS);
     Box::pin(payer.receive(None)).await.unwrap();
     assert!(!payer.allowance(&key).await.unwrap().confirmation_needed);
     assert_eq!(
@@ -1097,7 +1097,7 @@ async fn test_allowance_refusals_restore_after_a_payment_is_confirmed() {
 
 #[tokio::test]
 async fn test_allowance_refusals_kept_grant_write_is_not_now_until_it_lands() {
-    use pubky_switch_client::testing::Fault;
+    use pubky_dispatch_client::testing::Fault;
     let (w, mut payer, mut shop, key) = Box::pin(super::accepted_not_granted(store())).await;
     let unreachable = || Fault::Unreachable {
         path: "/ops".into(),
@@ -1138,7 +1138,7 @@ async fn test_allowance_refusals_kept_grant_write_is_not_now_until_it_lands() {
 async fn test_allowance_refusals_grant_applied_under_an_older_hold_asks_the_user() {
     // The first grant's batch is kept and lands after a `missed` item: the approval it was
     // made on is the earlier hold's, so the user confirms it, and confirming lifts it.
-    use pubky_switch_client::testing::Fault;
+    use pubky_dispatch_client::testing::Fault;
     let (w, mut payer, _shop, key) = Box::pin(super::accepted_not_granted(store())).await;
     w.alice.switch().fail_next(Fault::Unanswered {
         path: "/ops".into(),
@@ -1182,7 +1182,7 @@ async fn test_allowance_refusals_grant_applied_under_an_older_hold_asks_the_user
 async fn test_allowance_refusals_removal_before_the_consent_is_final() {
     // Another own app ends the Allowance once the kept grant applied, before its consent is
     // written: the removal is kept, and the grant paths refuse for good, asking nothing.
-    use pubky_switch_client::testing::Fault;
+    use pubky_dispatch_client::testing::Fault;
     let (w, mut payer, _shop, key) = Box::pin(super::accepted_not_granted(store())).await;
     let _phone = Box::pin(w.join(
         &w.alice,
@@ -1225,7 +1225,7 @@ async fn test_allowance_refusals_missed_mark_waits_with_its_reason() {
     // A `missed` item's mark is kept and the entries aren't marked yet, as after a crash
     // between the two commits: nothing is consented and the user is asked nothing until the
     // next receive marks them; then the user confirms.
-    use pubky_switch_client::app::LocalWrite;
+    use pubky_dispatch_client::app::LocalWrite;
     let (_w, mut payer, _shop, key) = Box::pin(first_grant_in(store(), terms())).await;
     payer
         .app_mut()
@@ -1336,16 +1336,16 @@ async fn test_allowance_refusals_confirmation_for_an_older_hold_asks_again() {
 /// grant, as a restore verdict or a `missed` item read with it would.
 #[derive(Default)]
 struct HoldOnLanding {
-    inner: pubky_switch_client::store::MemoryStore,
+    inner: pubky_dispatch_client::store::MemoryStore,
     armed: std::sync::atomic::AtomicBool,
 }
 
 impl HoldOnLanding {
     fn with_hold(
         &self,
-        batch: pubky_switch_client::store::WriteBatch,
-    ) -> pubky_switch_client::store::WriteBatch {
-        use pubky_switch_client::store::{Write, WriteBatch};
+        batch: pubky_dispatch_client::store::WriteBatch,
+    ) -> pubky_dispatch_client::store::WriteBatch {
+        use pubky_dispatch_client::store::{Write, WriteBatch};
         let landing = batch.writes().iter().find_map(|write| match write {
             Write::Delete { ns, key } if key.starts_with(b"p/paykit/gb/") => Some(ns.clone()),
             _ => None,
@@ -1363,7 +1363,7 @@ impl HoldOnLanding {
                 Write::DeletePrefix { ns, prefix } => out.delete_prefix(&ns, prefix).unwrap(),
             };
         }
-        let epoch = pubky_switch_core::enc::b64(&[0x5a; 16]);
+        let epoch = pubky_dispatch_core::enc::b64(&[0x5a; 16]);
         out.put(
             &ns,
             b"p/paykit/he".to_vec(),
@@ -1374,12 +1374,12 @@ impl HoldOnLanding {
     }
 }
 
-impl pubky_switch_client::store::StateStore for HoldOnLanding {
+impl pubky_dispatch_client::store::StateStore for HoldOnLanding {
     fn get(
         &self,
         ns: &str,
         key: &[u8],
-    ) -> Result<Option<Vec<u8>>, pubky_switch_client::error::StoreError> {
+    ) -> Result<Option<Vec<u8>>, pubky_dispatch_client::error::StoreError> {
         self.inner.get(ns, key)
     }
 
@@ -1389,33 +1389,35 @@ impl pubky_switch_client::store::StateStore for HoldOnLanding {
         prefix: &[u8],
         after: Option<&[u8]>,
         limit: u32,
-    ) -> Result<Vec<pubky_switch_client::store::KeyValue>, pubky_switch_client::error::StoreError>
+    ) -> Result<Vec<pubky_dispatch_client::store::KeyValue>, pubky_dispatch_client::error::StoreError>
     {
         self.inner.scan(ns, prefix, after, limit)
     }
 
     fn commit(
         &self,
-        batch: pubky_switch_client::store::WriteBatch,
-    ) -> Result<(), pubky_switch_client::error::StoreError> {
+        batch: pubky_dispatch_client::store::WriteBatch,
+    ) -> Result<(), pubky_dispatch_client::error::StoreError> {
         self.inner.commit(self.with_hold(batch))
     }
 
     fn acquire(
         &self,
         ns: &str,
-        owner: pubky_switch_client::store::StoreOwner,
-    ) -> Result<pubky_switch_client::store::AcquireOutcome, pubky_switch_client::error::StoreError>
-    {
+        owner: pubky_dispatch_client::store::StoreOwner,
+    ) -> Result<
+        pubky_dispatch_client::store::AcquireOutcome,
+        pubky_dispatch_client::error::StoreError,
+    > {
         self.inner.acquire(ns, owner)
     }
 
     fn commit_if(
         &self,
         ns: &str,
-        owner: pubky_switch_client::store::StoreOwner,
-        batch: pubky_switch_client::store::WriteBatch,
-    ) -> Result<pubky_switch_client::store::CommitOutcome, pubky_switch_client::error::StoreError>
+        owner: pubky_dispatch_client::store::StoreOwner,
+        batch: pubky_dispatch_client::store::WriteBatch,
+    ) -> Result<pubky_dispatch_client::store::CommitOutcome, pubky_dispatch_client::error::StoreError>
     {
         self.inner.commit_if(ns, owner, self.with_hold(batch))
     }
@@ -1426,7 +1428,7 @@ async fn test_allowance_refusals_hold_set_while_landing_the_grant_asks_again() {
     // The confirmed first grant's batch is kept; the read that lands it also sets a new
     // hold. The same call consents nothing: the hold it was confirmed for isn't the one in
     // force now, and it asks again with the new one.
-    use pubky_switch_client::testing::Fault;
+    use pubky_dispatch_client::testing::Fault;
     let disk = Arc::new(HoldOnLanding::default());
     let (w, mut payer, _shop, key) =
         Box::pin(super::accepted_not_granted(Arc::clone(&disk) as Arc<_>)).await;
@@ -1456,7 +1458,7 @@ async fn test_allowance_refusals_hold_set_while_landing_the_grant_asks_again() {
 async fn test_allowance_refusals_known_end_comes_before_a_kept_grant() {
     // The first grant's batch is kept while another own app's end is read: the grant paths
     // answer the end, as a payment does, not that the grant waits to be sent.
-    use pubky_switch_client::testing::Fault;
+    use pubky_dispatch_client::testing::Fault;
     let (w, mut payer, _shop, key) = Box::pin(super::accepted_not_granted(store())).await;
     let _phone = Box::pin(w.join(
         &w.alice,
@@ -1538,7 +1540,7 @@ async fn test_allowance_refusals_expiry_since_the_last_receive_ends_the_grant_pa
     let (w, mut payer, _shop, key) = Box::pin(first_grant_in(store(), expiring())).await;
     let hold = payer.allowance(&key).await.unwrap().hold;
     w.clock
-        .set_ms(pubky_switch_client::testing::START_MS + 3 * HOUR_MS);
+        .set_ms(pubky_dispatch_client::testing::START_MS + 3 * HOUR_MS);
     assert_eq!(
         refusal_of(Box::pin(payer.resume_allowance_executor(&key)).await),
         Refusal::AllowanceEnded
@@ -1553,7 +1555,7 @@ async fn test_allowance_refusals_expiry_since_the_last_receive_ends_the_grant_pa
 async fn test_allowance_refusals_removal_comes_before_a_missed_mark() {
     // Another own app's end is recorded as a removal, then a `missed` item's mark is kept
     // before the entries are marked: the removal is final all the same.
-    use pubky_switch_client::app::LocalWrite;
+    use pubky_dispatch_client::app::LocalWrite;
     let (w, mut payer, _shop, key) = Box::pin(first_grant_in(store(), terms())).await;
     let _phone = Box::pin(w.join(
         &w.alice,

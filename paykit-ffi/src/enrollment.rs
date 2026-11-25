@@ -1,8 +1,8 @@
 use crate::{NativeWallet, WalletError, WalletHost, WalletScopes, WalletStore, WalletStoreSession};
 use paykit_sdk::RequestedScopes;
-use pubky_switch_client::app::Protocol;
-use pubky_switch_client::store::StoreError;
-use pubky_switch_core::{
+use pubky_dispatch_client::app::Protocol;
+use pubky_dispatch_client::store::StoreError;
+use pubky_dispatch_core::{
     enc,
     keys::AppKeys,
     records::{
@@ -17,7 +17,7 @@ use std::sync::Arc;
 /// Installation information needed to open the user's authentication request.
 #[derive(uniffi::Record)]
 pub struct EnrollmentInfo {
-    /// The 16-byte Switch App ID.
+    /// The 16-byte Dispatch App ID.
     pub app_id: Vec<u8>,
     /// The public path to include in the requested Homeserver capabilities.
     pub app_record_path: String,
@@ -25,7 +25,7 @@ pub struct EnrollmentInfo {
 /// The original signed app request to deliver with the authentication exchange.
 #[derive(uniffi::Record)]
 pub struct EnrollmentRequest {
-    /// The 16-byte Switch App ID.
+    /// The 16-byte Dispatch App ID.
     pub app_id: Vec<u8>,
     /// The hash of the original signed request.
     pub request_hash: Vec<u8>,
@@ -154,7 +154,7 @@ impl WalletEnrollment {
         .await
     }
     /// Sign the chosen scopes and bind them to the original Pubky authentication request
-    /// (Paykit spec 3.1, 3.2, Switch wire 3.9). Retry with the same effective scope set.
+    /// (Paykit spec 3.1, 3.2, Dispatch wire 3.9). Retry with the same effective scope set.
     pub async fn prepare_enrollment(
         &self,
         reference: Vec<u8>,
@@ -230,7 +230,7 @@ impl WalletEnrollment {
     }
     /// Keep the selected identity's genuine companion and inner approval in protected
     /// storage before installation. Retrying an already verified approval is idempotent.
-    /// A different identity or companion cannot replace the original (Switch wire 3.10).
+    /// A different identity or companion cannot replace the original (Dispatch wire 3.10).
     pub async fn accept_approval(
         &self,
         reference: Vec<u8>,
@@ -332,7 +332,7 @@ impl WalletHost {
         let this = self.clone();
         crate::runtime::run(async move {
             use paykit_sdk::{JoinRequest, Paykit, PaykitError};
-            use pubky_switch_client::app::{AppError, Refusal};
+            use pubky_dispatch_client::app::{AppError, Refusal};
 
             let enrollment = WalletEnrollment {
                 store: this.store.clone(),

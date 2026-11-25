@@ -4,9 +4,9 @@
 //! host told in the summary; any other failure still ends the receive at once.
 
 use paykit_sdk::{Paykit, RequestRef, RequestStatus};
-use pubky_switch_client::clock::Clock;
-use pubky_switch_client::testing::Fault;
-use pubky_switch_core::http::ErrorCode;
+use pubky_dispatch_client::clock::Clock;
+use pubky_dispatch_client::testing::Fault;
+use pubky_dispatch_core::http::ErrorCode;
 
 use super::oversized_capabilities;
 use crate::common::{draft, endpoint, refuse_writes, request_from, World};
@@ -15,14 +15,14 @@ use crate::stored::kept;
 /// How the upkeep of the record fails at the receive under test.
 #[derive(Clone, Copy)]
 enum UpkeepFailure {
-    /// The payment method pays a list the record can't carry: the Switch client refuses the
-    /// update before anything is signed (Switch wire 6.1).
+    /// The payment method pays a list the record can't carry: the Dispatch client refuses the
+    /// update before anything is signed (Dispatch wire 6.1).
     Uncarriable,
-    /// The own switch answers the record's delivery that it is unavailable now.
-    SwitchUnavailable,
-    /// The own switch can't be reached for the record's delivery.
+    /// The own Dispatch answers the record's delivery that it is unavailable now.
+    DispatchUnavailable,
+    /// The own Dispatch can't be reached for the record's delivery.
     Unreachable,
-    /// The switch answers the record's delivery with `code`, which a later write would take
+    /// The Dispatch answers the record's delivery with `code`, which a later write would take
     /// as a refusal, or as a wallet-wide stop, rather than one to try again later.
     Refused(ErrorCode),
 }
@@ -52,7 +52,7 @@ async fn upkeep_due_over_pending_work(w: &World, failure: UpkeepFailure) -> (Pay
     };
     match failure {
         UpkeepFailure::Uncarriable => w.rail.set_endpoint_identifiers(oversized_capabilities()),
-        UpkeepFailure::SwitchUnavailable => {
+        UpkeepFailure::DispatchUnavailable => {
             w.rail
                 .set_endpoint_identifiers(vec![endpoint("btc-onchain-address")]);
             w.alice.switch().fail_next(fault(ErrorCode::Unavailable));
@@ -82,8 +82,8 @@ async fn work_done_past_failed_upkeep(failure: UpkeepFailure) {
     let (mut wallet, request) = upkeep_due_over_pending_work(&w, failure).await;
     let signed = wallet.app().record().clone();
     let app_id = wallet.app_id();
-    let at_switch = || w.alice.switch().app(&app_id).record.unwrap();
-    let delivered = at_switch();
+    let at_dispatch = || w.alice.switch().app(&app_id).record.unwrap();
+    let delivered = at_dispatch();
     let summary = wallet.receive(None).await.unwrap();
     assert!(summary.app_record_owed.is_some(), "{summary:?}");
     assert_eq!(
@@ -93,8 +93,8 @@ async fn work_done_past_failed_upkeep(failure: UpkeepFailure) {
     assert!(wallet.app_mut().parked_entries().await.unwrap().is_empty());
     // Placed in the request record, not only kept: the kept copy is gone.
     assert!(kept(&wallet, "kc/").await.is_empty());
-    // Nothing new reached the switch.
-    assert_eq!(at_switch(), delivered);
+    // Nothing new reached the dispatch.
+    assert_eq!(at_dispatch(), delivered);
     if let UpkeepFailure::Uncarriable = failure {
         // Refused before anything is signed: the record is the one signed before.
         assert_eq!(wallet.app().record(), &signed);
@@ -103,9 +103,9 @@ async fn work_done_past_failed_upkeep(failure: UpkeepFailure) {
     }
     let summary = wallet.receive(None).await.unwrap();
     assert_eq!(summary.app_record_owed, None, "{summary:?}");
-    // The record brought up to date is the one the switch holds now.
-    assert_ne!(at_switch(), delivered);
-    assert_eq!(&at_switch(), wallet.app().record());
+    // The record brought up to date is the one the Dispatch holds now.
+    assert_ne!(at_dispatch(), delivered);
+    assert_eq!(&at_dispatch(), wallet.app().record());
 }
 
 #[tokio::test]
@@ -114,8 +114,8 @@ async fn test_own_record_uncarriable_capabilities_leave_the_receive_work_done() 
 }
 
 #[tokio::test]
-async fn test_own_record_unavailable_switch_leaves_the_receive_work_done() {
-    work_done_past_failed_upkeep(UpkeepFailure::SwitchUnavailable).await;
+async fn test_own_record_unavailable_dispatch_leaves_the_receive_work_done() {
+    work_done_past_failed_upkeep(UpkeepFailure::DispatchUnavailable).await;
 }
 
 #[tokio::test]
@@ -141,19 +141,19 @@ async fn receive_ended_by_the_upkeep(code: ErrorCode) {
 
 #[tokio::test]
 async fn test_own_record_upkeep_stop_ends_the_receive() {
-    // A wallet-wide stop (Switch spec 3.6).
+    // A wallet-wide stop (Dispatch spec 3.6).
     receive_ended_by_the_upkeep(ErrorCode::CertExpired).await;
 }
 
 #[tokio::test]
-async fn test_own_record_upkeep_refused_by_the_switch_ends_the_receive() {
+async fn test_own_record_upkeep_refused_by_the_dispatch_ends_the_receive() {
     // A refusal the stored entries' writes would count toward their window, not try again.
     receive_ended_by_the_upkeep(ErrorCode::PermissionMissing).await;
 }
 
 #[tokio::test]
 async fn test_own_record_homeserver_write_owed_told_at_the_receive() {
-    // The switch takes the record listing what the payment method pays now, and its
+    // The Dispatch takes the record listing what the payment method pays now, and its
     // Homeserver write fails: the receive tells the host the record is owed, and the next one,
     // which writes it, clears that.
     let w = World::new();
@@ -216,7 +216,7 @@ async fn test_own_record_unchanged_record_with_its_homeserver_write_owed_told() 
 #[tokio::test]
 async fn test_own_record_unknown_store_result_told_at_a_receive_that_skips_the_upkeep() {
     // The store can't tell whether the wallet's last write of its record was applied. Its
-    // account is then gone at the switch: the receive returns at once, before the upkeep,
+    // account is then gone at the dispatch: the receive returns at once, before the upkeep,
     // and still tells the host the record is owed until the app is loaded again.
     use std::sync::atomic::{AtomicBool, Ordering};
     let w = World::new();
@@ -229,12 +229,12 @@ async fn test_own_record_unknown_store_result_told_at_a_receive_that_skips_the_u
         .wallet_on(
             "wallet",
             std::sync::Arc::clone(&faulty)
-                as std::sync::Arc<dyn pubky_switch_client::store::StateStore>,
+                as std::sync::Arc<dyn pubky_dispatch_client::store::StateStore>,
         )
         .await;
     let wallet_id = wallet.app_id();
     drop(wallet);
-    let transport = std::sync::Arc::new(crate::erasure::ErasedSwitch {
+    let transport = std::sync::Arc::new(crate::erasure::ErasedDispatch {
         inner: std::sync::Arc::clone(&w.router),
         erased: AtomicBool::new(false),
     });
@@ -242,10 +242,10 @@ async fn test_own_record_unknown_store_result_told_at_a_receive_that_skips_the_u
         .load_with_transport(
             &w.alice,
             std::sync::Arc::clone(&faulty)
-                as std::sync::Arc<dyn pubky_switch_client::store::StateStore>,
+                as std::sync::Arc<dyn pubky_dispatch_client::store::StateStore>,
             wallet_id,
             std::sync::Arc::clone(&transport)
-                as std::sync::Arc<dyn pubky_switch_client::transport::Transport>,
+                as std::sync::Arc<dyn pubky_dispatch_client::transport::Transport>,
         )
         .await;
     wallet.receive(None).await.unwrap();
@@ -255,7 +255,7 @@ async fn test_own_record_unknown_store_result_told_at_a_receive_that_skips_the_u
     assert!(wallet.update_own_record().await.is_err());
     transport.erased.store(true, Ordering::SeqCst);
     w.homeserver
-        .remove(w.alice_id(), pubky_switch_core::records::IDENTITY_PATH);
+        .remove(w.alice_id(), pubky_dispatch_core::records::IDENTITY_PATH);
     for _ in 0..4 {
         assert!(wallet.receive(None).await.is_err());
         w.clock.advance_ms(6 * crate::common::HOUR_MS);
@@ -270,7 +270,7 @@ async fn test_own_record_unknown_store_result_told_at_a_receive_that_skips_the_u
 async fn test_own_record_missing_copy_on_shared_keys_told_until_written_back() {
     // Alice's wallet runs on two devices that share its keys, and the record's copy on the
     // Homeserver goes missing: another device may have deleted it to leave, so the client
-    // writes it back only once the switch shows the app current. The second device's read
+    // writes it back only once the Dispatch shows the app current. The second device's read
     // waits for a data epoch's scope key, so it reads no feed to its end and shows nothing
     // current: the receive tells the host the copy is owed. Once the key comes, the next
     // receive reads the feed, writes the copy back and clears that.
@@ -302,12 +302,12 @@ async fn test_own_record_missing_copy_on_shared_keys_told_until_written_back() {
     // The host marks the device as one of several sharing the app's keys.
     second.app_mut().set_multi_device(true).await.unwrap();
     second.receive(None).await.unwrap();
-    let path = pubky_switch_core::records::app_record_path(&second.app_id());
+    let path = pubky_dispatch_core::records::app_record_path(&second.app_id());
     let alice = w.alice_id();
     w.alice.next_doc(|body| body.data_epoch += 1).unwrap();
     w.homeserver.remove(alice, &path);
     w.clock
-        .advance_ms(pubky_switch_client::app::PUBLISHED_CHECK_MS + 1);
+        .advance_ms(pubky_dispatch_client::app::PUBLISHED_CHECK_MS + 1);
     let summary = second.receive(None).await.unwrap();
     assert!(summary.scope_keys_awaited, "{summary:?}");
     let owed = summary.app_record_owed.unwrap();

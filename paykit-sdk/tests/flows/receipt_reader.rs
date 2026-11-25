@@ -4,12 +4,12 @@ use paykit_lib::collections::Collection;
 use paykit_lib::derive::natural_key;
 use paykit_lib::records::{ActivityRecord, ActivitySide};
 use paykit_sdk::{AppScopes, PayOptions, Paykit, Refusal};
-use pubky_switch_client::app::{Collection as SwitchCollection, RecordTarget};
-use pubky_switch_client::clock::Clock;
-use pubky_switch_client::testing::{Fault, ScriptedSwitch};
-use pubky_switch_client::transport::{BoxFuture, Request, Response, Transport};
-use pubky_switch_client::TransportError;
-use pubky_switch_core::ops::{Entry, OpsRequest};
+use pubky_dispatch_client::app::{Collection as DispatchCollection, RecordTarget};
+use pubky_dispatch_client::clock::Clock;
+use pubky_dispatch_client::testing::{Fault, ScriptedSwitch};
+use pubky_dispatch_client::transport::{BoxFuture, Request, Response, Transport};
+use pubky_dispatch_client::TransportError;
+use pubky_dispatch_core::ops::{Entry, OpsRequest};
 use std::sync::Arc;
 
 /// This reader can receive and acknowledge pages while another wallet of the same seller publishes.
@@ -32,7 +32,7 @@ impl Transport for ReaderQuota {
         {
             self.service.fail_next(Fault::Error {
                 path: "/ops".into(),
-                code: pubky_switch_core::http::ErrorCode::QuotaExceeded,
+                code: pubky_dispatch_core::http::ErrorCode::QuotaExceeded,
                 current: serde_json::Value::Null,
             });
         }
@@ -66,7 +66,7 @@ async fn test_receipt_reader_reloads_the_held_marked_receipt() {
 #[tokio::test]
 async fn test_receipt_reader_after_a_fresh_restore_keeps_the_restriction_over_the_repair() {
     // The backup carries the mark of the eager write, with its loss marker, but not the
-    // held version the repair builds on (Switch spec 12.4 "Seen marks"): the restored
+    // held version the repair builds on (Dispatch spec 12.4 "Seen marks"): the restored
     // reader can't verify the repair, so it keeps the restriction it saw and flags the
     // repair (Paykit wire 5).
     Box::pin(read_repaired_marker(ReadCase::FreshRestore)).await;
@@ -130,7 +130,7 @@ async fn read_repaired_marker(case: ReadCase) {
     let key = shop.payee_activity().await.unwrap()[0].record;
     let msg_id = shop.confirm_payment(&key).await.unwrap().unwrap();
     let target = RecordTarget::new(
-        SwitchCollection::new(
+        DispatchCollection::new(
             Collection::PayeeActivity.name(),
             Collection::PayeeActivity.fixed_policy(),
         ),
@@ -237,13 +237,13 @@ async fn read_repaired_marker(case: ReadCase) {
         return;
     }
     let mut eager = original.clone();
-    eager["lost_to_delete"] = pubky_switch_core::enc::b64(&notice.delete).into();
+    eager["lost_to_delete"] = pubky_dispatch_core::enc::b64(&notice.delete).into();
     let cert = eager["proof"]["cert"].as_object_mut().unwrap();
     cert.remove("merchant_note");
     cert.insert("shipping_note".into(), "delivered".into());
-    let condition = pubky_switch_core::ops::Condition::RecordCurrent {
+    let condition = pubky_dispatch_core::ops::Condition::RecordCurrent {
         key,
-        revision: pubky_switch_core::shared::ApplicationRef {
+        revision: pubky_dispatch_core::shared::ApplicationRef {
             generation: deletion.version.generation,
             seq: deletion.version.version,
             item_hash: notice.delete,
@@ -294,7 +294,7 @@ async fn read_repaired_marker(case: ReadCase) {
         .rev()
         .find(|op| {
             matches!(
-                &op.body().kind, pubky_switch_core::ops::OpKind::RecordPut(put) if put.key == key
+                &op.body().kind, pubky_dispatch_core::ops::OpKind::RecordPut(put) if put.key == key
             )
         })
         .unwrap()
@@ -303,9 +303,9 @@ async fn read_repaired_marker(case: ReadCase) {
     let conditions = if case == ReadCase::MissingCondition {
         Vec::new()
     } else {
-        vec![pubky_switch_core::ops::Condition::RecordCurrent {
+        vec![pubky_dispatch_core::ops::Condition::RecordCurrent {
             key,
-            revision: pubky_switch_core::shared::ApplicationRef {
+            revision: pubky_dispatch_core::shared::ApplicationRef {
                 generation: eager_write.version.generation,
                 seq: eager_write.version.version,
                 item_hash: eager_hash,
@@ -353,7 +353,7 @@ async fn read_repaired_marker(case: ReadCase) {
         serde_json::json!({
             "case": format!("{case:?}"), "delete": deletion.version.version, "marked_write": eager_write.version.version,
             "publication": repaired.version.version, "service_cursor": cursor, "accepted": read.version.version,
-            "receipt": pubky_switch_core::enc::b64(&signed.hash()), "flagged": read.flagged, "not_taken": read.not_taken,
+            "receipt": pubky_dispatch_core::enc::b64(&signed.hash()), "flagged": read.flagged, "not_taken": read.not_taken,
         })
     );
     assert_eq!(cursor >= deletion.version.version, covered);
@@ -414,7 +414,7 @@ async fn read_repaired_marker(case: ReadCase) {
         // put-back duty stays, as for any reader without the evidence to verify the repair.
         let mut kept: serde_json::Value =
             serde_json::from_slice(repaired.content.value().unwrap()).unwrap();
-        kept["lost_to_delete"] = pubky_switch_core::enc::b64(&notice.delete).into();
+        kept["lost_to_delete"] = pubky_dispatch_core::enc::b64(&notice.delete).into();
         shop.app_mut().read_record_fresh(&target).await.unwrap();
         let later = shop
             .app_mut()
@@ -425,7 +425,7 @@ async fn read_repaired_marker(case: ReadCase) {
         let other = witness
             .app()
             .record_key(&RecordTarget::new(
-                SwitchCollection::new(
+                DispatchCollection::new(
                     Collection::PayeeActivity.name(),
                     Collection::PayeeActivity.fixed_policy(),
                 ),
@@ -448,7 +448,7 @@ async fn read_repaired_marker(case: ReadCase) {
             .await
             .unwrap()
             .iter()
-            .any(|e| matches!(e, pubky_switch_client::app::AppEvent::PutBackWaits { .. })));
+            .any(|e| matches!(e, pubky_dispatch_client::app::AppEvent::PutBackWaits { .. })));
     }
 }
 
@@ -463,7 +463,7 @@ async fn keep_recovered_delete(
     let paykit_lib::Body::PaymentReceipt(payment) = receipt.body() else {
         panic!("expected signed receipt");
     };
-    let service = pubky_switch_client::testing::ScriptedSwitch::recovering(
+    let service = pubky_dispatch_client::testing::ScriptedSwitch::recovering(
         w.bob.identity().key(),
         [25; 32],
         w.clock.clone(),
@@ -478,7 +478,7 @@ async fn keep_recovered_delete(
         .sign_next(|body| {
             body.generation = 2;
             body.recovery_from = Some(1);
-            body.inbox = pubky_switch_core::records::Inbox::new(origin, service.service_key());
+            body.inbox = pubky_dispatch_core::records::Inbox::new(origin, service.service_key());
         })
         .unwrap();
     service.deliver_identity(&doc).unwrap();
@@ -490,7 +490,7 @@ async fn keep_recovered_delete(
         .applied()
         .into_iter()
         .find(|op| {
-            matches!(&op.body().kind, pubky_switch_core::ops::OpKind::RecordPut(put)
+            matches!(&op.body().kind, pubky_dispatch_core::ops::OpKind::RecordPut(put)
             if put.key == key && put.value_sealed.looks_like_delete())
         })
         .unwrap();
@@ -512,7 +512,7 @@ async fn keep_recovered_delete(
     recovery_cursors.push(service.app(&shop.app_id()).cursor);
     shop.app_mut().flush_cursor().await.unwrap();
     assert_eq!(shop.app().cursor().generation, 2);
-    let pubky_switch_core::ops::Condition::RecordCurrent {
+    let pubky_dispatch_core::ops::Condition::RecordCurrent {
         revision,
         deleted: true,
         ..
@@ -543,6 +543,6 @@ async fn keep_recovered_delete(
         Some(Refusal::CreditHistoryLost)
     ));
     assert!(service.applied().iter().all(|op|
-        !matches!(&op.body().kind, pubky_switch_core::ops::OpKind::RecordPut(put) if put.key == key)));
+        !matches!(&op.body().kind, pubky_dispatch_core::ops::OpKind::RecordPut(put) if put.key == key)));
     assert_eq!(w.rail.executions(&payment.attempt_id), 1);
 }

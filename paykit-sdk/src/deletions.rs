@@ -9,11 +9,11 @@ use crate::divergent::SeenVersion;
 use paykit_lib::collections::Collection;
 use paykit_lib::records::{ActivityRecord, ActivitySide, RecordBinding};
 use paykit_lib::{derive::natural_key, Label};
-use pubky_switch_client::app::{
+use pubky_dispatch_client::app::{
     PutBack, PutBackSuccessor, ReceiveContext, RecordDeletion, RecordRepair, RecordSuccessor,
     StoreFailure,
 };
-use pubky_switch_core::enc::{b64, serde_b64, serde_b64_vec};
+use pubky_dispatch_core::enc::{b64, serde_b64, serde_b64_vec};
 use serde::{Deserialize, Serialize};
 
 use crate::activity::ActivityTarget;
@@ -239,7 +239,7 @@ impl ReceiptEvidence {
     pub(crate) fn check(
         &self,
         own: &[u8; 32],
-        record_key: impl Fn(&pubky_switch_client::app::RecordTarget) -> Result<[u8; 32]>,
+        record_key: impl Fn(&pubky_dispatch_client::app::RecordTarget) -> Result<[u8; 32]>,
     ) -> Result<()> {
         let label = self.label.as_deref().map(Label::parse).transpose()?;
         let activity = ActivityRecord::read(&self.value, own, ActivitySide::Payee)?;
@@ -286,7 +286,7 @@ impl ReceiptEvidence {
         &mut self,
         own: &[u8; 32],
         settlement: Settlement<'_>,
-        record_key: impl Fn(&pubky_switch_client::app::RecordTarget) -> Result<[u8; 32]>,
+        record_key: impl Fn(&pubky_dispatch_client::app::RecordTarget) -> Result<[u8; 32]>,
         imported: bool,
     ) -> Result<(SourceDecision, ActivityRecord)> {
         let activity = ActivityRecord::read(&self.value, own, ActivitySide::Payee)?;
@@ -378,7 +378,7 @@ pub struct PayeeReceiptDeletion {
     /// The signed item hash of the deletion.
     pub delete: [u8; 32],
     /// The deletion's generation and sequence.
-    pub version: pubky_switch_core::ops::RecordVersion,
+    pub version: pubky_dispatch_core::ops::RecordVersion,
     /// The deleting app when the signed predecessor held this receipt.
     pub writer: Option<[u8; 16]>,
     /// The original verified feed-page time.
@@ -496,7 +496,7 @@ pub(crate) fn receipt_publication(
     let later = if needs_repair {
         let answers_delete = successor.expected_version == deletion.version
             && successor.conditions.iter().any(|condition| {
-            matches!(condition, pubky_switch_core::ops::Condition::RecordCurrent { key, revision, deleted: true }
+            matches!(condition, pubky_dispatch_core::ops::Condition::RecordCurrent { key, revision, deleted: true }
                 if key == deletion.key && revision.generation == deletion.version.generation
                     && revision.seq == deletion.version.version && revision.item_hash == deletion.item_hash)
         });
@@ -712,7 +712,7 @@ pub(crate) fn observe_payee_deletion(
     }))
 }
 
-fn usable(r: &pubky_switch_client::app::SharedRecord, label: Option<&Label>) -> bool {
+fn usable(r: &pubky_dispatch_client::app::SharedRecord, label: Option<&Label>) -> bool {
     !r.not_taken
         && !r.flagged
         && !r.different_write_at_held_version

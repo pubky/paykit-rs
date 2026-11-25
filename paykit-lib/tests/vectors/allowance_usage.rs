@@ -235,7 +235,7 @@ fn spelling_terms(limits: &Value) -> Value {
 /// regeneration driver (`regenerate.rs`).
 pub(crate) fn generate(keys: &Keys) {
     let mut inputs = paykit("allowance_usage.json");
-    let q = pubky_switch_core::enc::b64(
+    let q = pubky_dispatch_core::enc::b64(
         &crate::sealed::stored_message(keys, "allowance_acceptance").hash(),
     );
     for case in inputs["cases"].as_array_mut().unwrap() {

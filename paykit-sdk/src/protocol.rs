@@ -1,5 +1,5 @@
 //! [`PaykitProtocol`]: Paykit as the client's [`Protocol`], the rules the app layer can't
-//! know (Switch spec 1).
+//! know (Dispatch spec 1).
 //!
 //! - **Members and scopes:** the opaque members of Paykit's bodies, which scopes have keys and
 //!   check 8 with labels, all from `paykit-lib` (Paykit spec 3, Paykit wire 1.1, 3.1, 4.1).
@@ -10,7 +10,7 @@
 //!   place these rules run, so a push peek and the receive step agree.
 //! - **Receiving** ([`Protocol::receive`]): the effect of a message that passed check 10,
 //!   built through the client's receive context so the record write it causes, any claim entry and
-//!   local write go in the batch that moves the cursor (Switch spec 8.2; `crate::receive`).
+//!   local write go in the batch that moves the cursor (Dispatch spec 8.2; `crate::receive`).
 //!   After `409 conflict` the client reads the records again and calls it once more, and the
 //!   effect is built again from them.
 //! - **Collections** with their fixed policies, `payee_activity` with one policy per label,
@@ -21,7 +21,7 @@
 //!
 //! Security: check 8 and the label rules decide which apps send and take each kind, and the
 //! record marks keep an own app from silently dropping a message another app recorded
-//! (Switch spec 8.2). Destinations never come from shared state alone (Paykit spec 6).
+//! (Dispatch spec 8.2). Destinations never come from shared state alone (Paykit spec 6).
 
 use std::sync::{Arc, PoisonError, RwLock};
 
@@ -37,20 +37,20 @@ use paykit_lib::records::{
 };
 use paykit_lib::scopes::{acts_as_payee, check_certificate, PaykitScope, ScopeName};
 use paykit_lib::{Label, PaykitKindRules};
-use pubky_switch_client::app::{
-    decode_local_state, AppBackup, AppError, Collection as SwitchCollection, Effect, LocalView,
+use pubky_dispatch_client::app::{
+    decode_local_state, AppBackup, AppError, Collection as DispatchCollection, Effect, LocalView,
     LocalWrite, LossActions, MissedEntries, OpaqueRule, Outcome, Protocol, ProtocolLayer,
     ProviderLoss, PutBack, PutBackSuccessor, ReceiveContext, ReceivedMessage, RecordDeletion,
     RecordExpiry, RecordMarkContext, RecordRepair, RecordSuccessor, ResendNeeded, RestoreContext,
     StoreFailure, WriteBase,
 };
-use pubky_switch_client::app::{DenyListChange, DenyListGap};
-use pubky_switch_client::error::StoreError;
-use pubky_switch_core::enc::{serde_b64, unb64_array};
-use pubky_switch_core::message::{Message, MessagePlaintext};
-use pubky_switch_core::receive::KindRules;
-use pubky_switch_core::records::{AppCert, AppRecord};
-use pubky_switch_core::scopes as switch_scopes;
+use pubky_dispatch_client::app::{DenyListChange, DenyListGap};
+use pubky_dispatch_client::error::StoreError;
+use pubky_dispatch_core::enc::{serde_b64, unb64_array};
+use pubky_dispatch_core::message::{Message, MessagePlaintext};
+use pubky_dispatch_core::receive::KindRules;
+use pubky_dispatch_core::records::{AppCert, AppRecord};
+use pubky_dispatch_core::scopes as dispatch_scopes;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -177,7 +177,7 @@ impl PaykitProtocol {
     }
 
     /// Set whether the app publishes its record, as its configuration says
-    /// (`pubky_switch_client::app::AppConfig::publishes_record`).
+    /// (`pubky_dispatch_client::app::AppConfig::publishes_record`).
     pub(crate) fn set_publishes_record(&self, publishes: bool) {
         let value = if publishes {
             PUBLISHES_YES
@@ -318,7 +318,7 @@ pub(crate) fn check_message(message: &ReceivedMessage) -> Result<(), String> {
 }
 
 /// The stored copy of a message whose body passed check 10, as its records hold it
-/// (Paykit wire 5.2, Switch spec 8.2): nothing is checked again.
+/// (Paykit wire 5.2, Dispatch spec 8.2): nothing is checked again.
 pub(crate) fn stored_copy(message: &ReceivedMessage) -> Result<StoredMessage, String> {
     StoredMessage::from_received(
         message.sender,
@@ -367,9 +367,9 @@ pub(crate) fn list_loss_marker(value: &[u8]) -> Option<serde_json::Value> {
 }
 
 /// A failure of the client's store as a protocol call's failure.
-pub(crate) fn store_failure(error: pubky_switch_client::app::AppError) -> StoreFailure {
+pub(crate) fn store_failure(error: pubky_dispatch_client::app::AppError) -> StoreFailure {
     match error {
-        pubky_switch_client::app::AppError::Store(error) => StoreFailure::from(error),
+        pubky_dispatch_client::app::AppError::Store(error) => StoreFailure::from(error),
         _ => StoreFailure::unavailable(StoreError::Unavailable),
     }
 }
@@ -386,7 +386,7 @@ pub(crate) fn step_failure(failure: Fail) -> StoreFailure {
 pub(crate) fn view_failure(error: crate::PaykitError) -> StoreFailure {
     match error {
         crate::PaykitError::Client(error)
-            if error != pubky_switch_client::app::AppError::Store(StoreError::Corrupt) =>
+            if error != pubky_dispatch_client::app::AppError::Store(StoreError::Corrupt) =>
         {
             store_failure(error)
         }
@@ -396,7 +396,7 @@ pub(crate) fn view_failure(error: crate::PaykitError) -> StoreFailure {
 
 /// Recheck this message's sender and the current deny copy before its delivery or re-send.
 pub(crate) fn may_deliver_to_contact(
-    delivery: &pubky_switch_client::app::DeliveryView<'_>,
+    delivery: &pubky_dispatch_client::app::DeliveryView<'_>,
 ) -> crate::error::Result<bool> {
     let cert = delivery.cert();
     if check_certificate(cert).is_err()
@@ -477,7 +477,7 @@ impl BoundedFamilies {
     }
 }
 
-/// The name of Paykit's layer in app backups (Switch spec 12.4).
+/// The name of Paykit's layer in app backups (Dispatch spec 12.4).
 pub const BACKUP_NAME: &str = "paykit";
 
 /// The newest provider loss the installation an in-place restore replaces has recorded
@@ -525,7 +525,7 @@ fn previous_floor_kept(
     let hash = policy
         .hash()
         .map_err(|_| "the block floor policy cannot be hashed")?;
-    let floor_key = pubky_switch_core::ident::record_key_from_blinded(
+    let floor_key = pubky_dispatch_core::ident::record_key_from_blinded(
         Collection::BlockFloor.name(),
         &restoring.blind(&paykit_lib::derive::natural_key::block_floor(
             &restoring.identity(),
@@ -544,14 +544,14 @@ fn previous_floor_kept(
     Ok(kept)
 }
 
-/// The writes that install Paykit's backup layer (Switch spec 12.4): every key of its local
+/// The writes that install Paykit's backup layer (Dispatch spec 12.4): every key of its local
 /// state, as the default layer holds it, with the payment journal checked whole first and
 /// its entries marked restored (Paykit spec 7.2). The journal's checks are
 /// [`JournalEntry::check_restored`]'s, as every runtime read checks an entry, its claim
 /// keys blinded under the backup's naming key, each entry at its own attempt's key, and at
 /// most one open entry not restored before for one obligation, since a payment in progress
 /// blocks any other; an entry an earlier restore left open beside it is that payment's
-/// doubt, never dispatched again. `Err` names the rule,
+/// doubt, never handed off again. `Err` names the rule,
 /// without content: nothing is written. Pure: it is called at backup time too.
 ///
 /// The layer's schema is closed (`state::StateKey`): a key no builder of the SDK writes is
@@ -1236,7 +1236,7 @@ pub(crate) fn restore_paykit_layer(
                 continue;
             }
             StateKey::EndBatch(_) => {
-                // A backup omits the unresolved Switch batch. Its signed end's origin
+                // A backup omits the unresolved Dispatch batch. Its signed end's origin
                 // can survive independently of the outcome of its counterparty delivery.
                 state::restored::<[u8; 16]>(&key, &value, &binder).map_err(|_| unread())?;
                 continue;
@@ -1363,7 +1363,7 @@ pub(crate) fn restore_paykit_layer(
                 // keeps them, so a history over the bounds is cut and raises the floor.
                 let unread = || {
                     String::from(
-                        "Switch spec 4.2: a payee's seen app records in the backup don't verify",
+                        "Dispatch spec 4.2: a payee's seen app records in the backup don't verify",
                     )
                 };
                 let seen =
@@ -1378,7 +1378,7 @@ pub(crate) fn restore_paykit_layer(
                 let message =
                     state::restored::<KeptMessage>(&key, &value, &binder).map_err(|_| {
                         String::from(
-                            "Switch spec 8.2: a kept payer's reply in the backup doesn't verify",
+                            "Dispatch spec 8.2: a kept payer's reply in the backup doesn't verify",
                         )
                     })?;
                 if message.pending_source.is_some() {
@@ -1490,7 +1490,7 @@ pub(crate) fn restore_paykit_layer(
             state::restored::<JournalEntry>(&key, &value, &binder).map_err(|_| bad())?;
         // An app has one payment of an obligation in progress at a time; an entry an earlier
         // restore left open beside it is that payment's doubt, which the user paid over, and
-        // is never dispatched again (Paykit spec 7.2, 12.4).
+        // is never handed off again (Paykit spec 7.2, 12.4).
         if entry.open() && !entry.restored && !open.insert(entry.obligation) {
             return Err("Paykit spec 7.2: two open journal entries for one obligation".into());
         }
@@ -1653,8 +1653,8 @@ pub(crate) fn restore_paykit_layer(
     for ((record, digest), ids) in ledger_batches {
         let suffix = format!(
             "{}/{}",
-            pubky_switch_core::enc::b64(&record),
-            pubky_switch_core::enc::b64(&digest)
+            pubky_dispatch_core::enc::b64(&record),
+            pubky_dispatch_core::enc::b64(&digest)
         );
         let proposal = format!("{}{suffix}", key::LEDGER_PROPOSALS).into_bytes();
         let value = proposals
@@ -1704,7 +1704,7 @@ pub(crate) fn restore_paykit_layer(
 /// - every block of its own the list doesn't show yet, which the restored app writes
 ///   again (Paykit spec 8.1);
 /// - the payee app records it has seen, merged with the backup's as one set, so a record
-///   older than one seen, or one side of a conflict either saw, is never used again (Switch
+///   older than one seen, or one side of a conflict either saw, is never used again (Dispatch
 ///   spec 4.2);
 /// - a list it holds over a record that doesn't read, where it is newer than the backup's,
 ///   so a later list, a withdrawal included, is never lost under an older one (Paykit wire
@@ -1866,7 +1866,7 @@ fn keep_installation_stops(
 ///
 /// # Errors
 ///
-/// [`pubky_switch_client::app::AppError::InvalidData`] for such a backup, and for one
+/// [`pubky_dispatch_client::app::AppError::InvalidData`] for such a backup, and for one
 /// keeping a loss whose client's generation can't be read; the client's errors for one
 /// whose bytes don't read.
 pub(crate) fn check_restored_loss(backup: &AppBackup) -> crate::error::Result<()> {
@@ -1935,7 +1935,7 @@ impl Protocol for PaykitProtocol {
     ) -> Result<Vec<LocalWrite>, String> {
         // The certificate the restore installs passes Paykit's checks as every other does
         // (Paykit wire 3.1). Checked here, before the restore's one commit, a backup whose
-        // certificate the Switch takes and Paykit refuses writes nothing.
+        // certificate the Dispatch takes and Paykit refuses writes nothing.
         check_certificate(restoring.cert())
             .map_err(|error| format!("the backup's certificate: {error}"))?;
         restore_paykit_layer(layer, restoring, &|endpoint, proof| {
@@ -1956,7 +1956,7 @@ impl Protocol for PaykitProtocol {
     /// 8.1, 9).
     fn may_send(
         &self,
-        delivery: &pubky_switch_client::app::DeliveryView<'_>,
+        delivery: &pubky_dispatch_client::app::DeliveryView<'_>,
     ) -> Result<bool, StoreFailure> {
         // Nothing goes under a certificate Paykit refuses, or one that no longer sends the
         // kind, before any rule of the kind's own (Paykit spec 3.1 to 3.3, 7.2, 9).
@@ -2019,19 +2019,19 @@ impl Protocol for PaykitProtocol {
 
     fn append_records(
         &self,
-        delivery: &pubky_switch_client::app::DeliveryView<'_>,
-    ) -> Result<Vec<pubky_switch_client::app::RecordTarget>, StoreFailure> {
+        delivery: &pubky_dispatch_client::app::DeliveryView<'_>,
+    ) -> Result<Vec<pubky_dispatch_client::app::RecordTarget>, StoreFailure> {
         crate::allowances::append_records(delivery)
     }
 
     fn judge_append(
         &self,
-        delivery: &pubky_switch_client::app::DeliveryView<'_>,
+        delivery: &pubky_dispatch_client::app::DeliveryView<'_>,
         records: &[(
-            pubky_switch_client::app::RecordTarget,
-            pubky_switch_client::app::RecordRead,
+            pubky_dispatch_client::app::RecordTarget,
+            pubky_dispatch_client::app::RecordRead,
         )],
-    ) -> Result<pubky_switch_client::app::AppendDecision, StoreFailure> {
+    ) -> Result<pubky_dispatch_client::app::AppendDecision, StoreFailure> {
         crate::allowances::judge_append(delivery, records)
     }
 
@@ -2065,7 +2065,7 @@ impl Protocol for PaykitProtocol {
         sender: &AppCert,
         own: &AppCert,
     ) -> Result<(), String> {
-        // Under an own certificate Paykit refuses, such as a renewal's the Switch took, the
+        // Under an own certificate Paykit refuses, such as a renewal's the Dispatch took, the
         // message isn't judged by it: the receive step holds the entry until a certificate
         // that passes replaces it, and this check runs again then (Paykit wire 3.1).
         if check_certificate(own).is_err() {
@@ -2089,9 +2089,9 @@ impl Protocol for PaykitProtocol {
         crate::own_record::member_under(member, ask, cert, self.publishes_record())
     }
 
-    /// The kinds this SDK handles that the certificate's scopes receive (Switch spec 3.4):
+    /// The kinds this SDK handles that the certificate's scopes receive (Dispatch spec 3.4):
     /// none for a certificate Paykit's verifiers refuse (Paykit wire 3.1), such as a
-    /// renewal's that the Switch took.
+    /// renewal's that the Dispatch took.
     fn accepts(&self, cert: &AppCert) -> Vec<String> {
         if check_certificate(cert).is_err() {
             return Vec::new();
@@ -2102,7 +2102,7 @@ impl Protocol for PaykitProtocol {
             .map(|kind| kind.as_str().to_owned())
             .collect();
         // The registered extension kinds whose `ext:<prefix>` the certificate holds (Paykit
-        // wire 4.3): never wider than what its scopes receive (Switch spec 3.4).
+        // wire 4.3): never wider than what its scopes receive (Dispatch spec 3.4).
         for ext in &self.extensions {
             let kind = ext.as_string();
             if cert.scopes().contains(&ext.prefix().scope()) && !kinds.contains(&kind) {
@@ -2115,7 +2115,7 @@ impl Protocol for PaykitProtocol {
     /// Whether another app's scopes receive `kind` by Paykit's table (Paykit spec 3.3), which
     /// a sender checks before it wraps the kind to that app, and before
     /// [`Protocol::sends_to`] narrows by its scopes. An app whose certificate Paykit's
-    /// verifiers refuse (Paykit wire 3.1) receives none: the Switch takes such a
+    /// verifiers refuse (Paykit wire 3.1) receives none: the Dispatch takes such a
     /// certificate, Paykit doesn't.
     fn receives(&self, kind: &str, cert: &AppCert) -> bool {
         if check_certificate(cert).is_err() {
@@ -2166,17 +2166,17 @@ impl Protocol for PaykitProtocol {
     }
 
     /// The effect of a message that passed check 10, added to the batch that moves the
-    /// cursor (Switch spec 8.2; `crate::receive`). Called again after `409 conflict`, with
+    /// cursor (Dispatch spec 8.2; `crate::receive`). Called again after `409 conflict`, with
     /// the records read again: the effect is built anew from them.
     fn receive(&self, message: &ReceivedMessage, cx: &mut ReceiveContext<'_>) -> Outcome {
         // A released entry whose effect the app wrote since, by a write of its own, is
-        // declined: its effect isn't applied twice (Switch spec 8.2; `stored.rs`).
+        // declined: its effect isn't applied twice (Dispatch spec 8.2; `stored.rs`).
         if message.released {
             let note_key = key::stored_note(&message.sender, &message.message.msg_id);
             match state::cx_get::<crate::stored::StoredNote>(cx, &note_key) {
                 Ok(note) if crate::stored::declines(note.as_ref()) => {
                     return Outcome::Drop {
-                        reason: "Switch spec 8.2: a released entry whose effect the app wrote \
+                        reason: "Dispatch spec 8.2: a released entry whose effect the app wrote \
                                  since"
                             .into(),
                     };
@@ -2217,7 +2217,7 @@ impl Protocol for PaykitProtocol {
         match effect {
             Ok(outcome) => outcome,
             // A write the context couldn't build for want of a key: the context holds the
-            // entry itself, whatever is returned (Switch spec 3.5).
+            // entry itself, whatever is returned (Dispatch spec 3.5).
             Err(Fail::NotNow) => Outcome::Apply(Effect::default()),
             Err(Fail::Need(needs)) => Outcome::Need(needs),
             Err(Fail::Consume) => Outcome::Consume,
@@ -2229,7 +2229,7 @@ impl Protocol for PaykitProtocol {
             Err(Fail::Drop(reason)) => Outcome::Drop { reason },
             Err(Fail::Store(failure)) => Outcome::Retry(failure),
             // A record value waits for its scope key: the client stores the entry and passes
-            // it at once, and runs the step again once the key comes (Switch spec 8.2). One
+            // it at once, and runs the step again once the key comes (Dispatch spec 8.2). One
             // it drops past its bounds first was never processed: the SDK tells the host and
             // marks its sender to ask again once the key is held (`stored.rs`, `marks.rs`).
             Err(Fail::AwaitsKey { data_epoch }) => Outcome::AwaitKey { data_epoch },
@@ -2246,7 +2246,7 @@ impl Protocol for PaykitProtocol {
         Ok(vec![local_write(key::LISTS_TOLD, &change.at_ms)?])
     }
 
-    /// A gap in the deny list's history (Switch spec 8.3), taken as a change, with its list
+    /// A gap in the deny list's history (Dispatch spec 8.3), taken as a change, with its list
     /// kept for the receive (`Paykit::take_learned_lists`).
     fn deny_list_gap(&self, gap: &DenyListGap) -> Result<Vec<LocalWrite>, StoreFailure> {
         self.delivery.learned(gap.list_read.then_some(&gap.denied));
@@ -2274,7 +2274,7 @@ impl Protocol for PaykitProtocol {
     /// seen later only when created before the item's last acceptance time plus the clock
     /// tolerance, the time the item carries (`MissedEntries::accepted_until_ms`). The client
     /// hands `u64::MAX` there when no end is known: for a gap the cursor the service holds
-    /// shows ahead (Switch spec 8.3 "Ahead"), and for a call it kept owed without one. That
+    /// shows ahead (Dispatch spec 8.3 "Ahead"), and for a call it kept owed without one. That
     /// is no time: the item sets the hold's end as not known (`mu`), which holds every open
     /// request, and leaves the bound an earlier item set in place, since this step can't
     /// read it; the receive bounds the hold once its read completes, by the service time it
@@ -2349,7 +2349,7 @@ impl Protocol for PaykitProtocol {
         ])
     }
 
-    /// A provider loss (Switch spec 12.6 steps 2 and 4): ask every counterparty with Paykit
+    /// A provider loss (Dispatch spec 12.6 steps 2 and 4): ask every counterparty with Paykit
     /// activity to send again from the old cursor's time, and add their reply grants
     /// back.
     fn provider_lost(
@@ -2397,7 +2397,7 @@ impl Protocol for PaykitProtocol {
     /// Paykit's collections with their fixed policies (Paykit spec 6, Paykit wire 5.1):
     /// `payee_activity` with one policy per label, so an app holding `paykit_request` lists and
     /// takes every label's records, and one holding `paykit_request:<label>` its label's.
-    fn collections(&self) -> Vec<SwitchCollection> {
+    fn collections(&self) -> Vec<DispatchCollection> {
         let mut collections = crate::hold::RecordSide::All.collections();
         collections.push(crate::publish::collection());
         collections
@@ -2405,7 +2405,7 @@ impl Protocol for PaykitProtocol {
 
     fn observe_record(
         &self,
-        observation: &pubky_switch_client::app::RecordObservation<'_>,
+        observation: &pubky_dispatch_client::app::RecordObservation<'_>,
         context: &ReceiveContext<'_>,
     ) -> Result<Vec<LocalWrite>, StoreFailure> {
         if observation.record.collection == Collection::AllowanceProposals.name() {
@@ -2424,7 +2424,7 @@ impl Protocol for PaykitProtocol {
     fn record_lifetime_ended(
         &self,
         record: &RecordMarkContext<'_>,
-        version: pubky_switch_core::ops::RecordVersion,
+        version: pubky_dispatch_core::ops::RecordVersion,
         context: &ReceiveContext<'_>,
     ) -> Result<Vec<LocalWrite>, StoreFailure> {
         crate::allowances::lifetime_ended(record, version, context)
@@ -2686,7 +2686,7 @@ impl PaykitProtocol {
 /// Whether `scopes` holds the write scope of a payee record under `label`'s policy.
 pub(crate) fn writes_payee_label(scopes: &[String], label: Option<&Label>) -> bool {
     match label {
-        Some(label) => switch_scopes::holds(scopes, &label.scope()),
+        Some(label) => dispatch_scopes::holds(scopes, &label.scope()),
         None => scopes.iter().any(|s| s == "paykit_request"),
     }
 }
@@ -2840,9 +2840,9 @@ mod receive_tests {
     use paykit_lib::derive::natural_key;
     use paykit_lib::records::ActivityRecord;
     use paykit_lib::Body;
-    use pubky_switch_client::app::RecordTarget;
-    use pubky_switch_core::ident::record_key_from_blinded;
-    use pubky_switch_core::records::Standing;
+    use pubky_dispatch_client::app::RecordTarget;
+    use pubky_dispatch_core::ident::record_key_from_blinded;
+    use pubky_dispatch_core::records::Standing;
     use serde_json::json;
 
     use super::*;
@@ -2853,7 +2853,7 @@ mod receive_tests {
     fn received(stored: &StoredMessage) -> ReceivedMessage {
         ReceivedMessage {
             // Supplied callback metadata, not a fixture proving feed acceptance.
-            receipt: pubky_switch_client::app::EntryReceipt {
+            receipt: pubky_dispatch_client::app::EntryReceipt {
                 entry_id: [1; 16],
                 service_key: [2; 32],
                 read_at_ms: NOW,
@@ -3013,13 +3013,13 @@ mod receive_tests {
         ] {
             let message = Message::new(
                 Kind::PrivatePaymentList.as_str(),
-                pubky_switch_core::message::Sender::of_app(shop.id(), &shop.keys),
+                pubky_dispatch_core::message::Sender::of_app(shop.id(), &shop.keys),
                 [4; 32],
                 NOW,
                 vec![],
                 object(json!({
                     "version": {"generation": 1, "counter": 1},
-                    "expires_at": pubky_switch_core::time::rfc3339(NOW + 3_600_000),
+                    "expires_at": pubky_dispatch_core::time::rfc3339(NOW + 3_600_000),
                     "payment_endpoints": endpoints
                 })),
             )
@@ -3051,7 +3051,7 @@ mod receive_tests {
         let other = payee.message(&payer, "paykit.payment_request", vec![], next_order);
         let attempt = "mAFdg5_0tVNjmrgiTUZW4g";
         let proof = payer.message(&payee, "paykit.payment_proof", vec![request.hash()], object(json!({
-            "attempt_id": attempt, "payment_app_id": pubky_switch_core::enc::app_id(&payee.keys.signing_public()),
+            "attempt_id": attempt, "payment_app_id": pubky_dispatch_core::enc::app_id(&payee.keys.signing_public()),
             "payment_endpoint_identifier":"btc-bitcoin-p2wpkh", "proof": {"rail":"fake","tx":"t1"}
         })));
         let receipt = payee.message(
@@ -3241,14 +3241,14 @@ mod receive_tests {
 
     #[test]
     fn test_protocol_cert_paykit_refuses_receives_and_accepts_nothing() {
-        use pubky_switch_core::scopes::Permission;
+        use pubky_dispatch_core::scopes::Permission;
         let p = protocol_of(&Party::new(
             "alice",
             "wallet",
             &["paykit_pay", "paykit_contacts"],
         ));
         // A payee app's scopes need exactly `lists.read` and `reply.add` (Paykit wire
-        // 3.1): one without them, or with `claims.read` beside them, is a certificate the Switch
+        // 3.1): one without them, or with `claims.read` beside them, is a certificate the Dispatch
         // takes and Paykit refuses.
         let missing = Party::with_permissions(
             "bob",
@@ -3283,7 +3283,7 @@ mod receive_tests {
     fn test_protocol_pay_certificate_without_contacts_refused() {
         // A paying app reads the deny list (Paykit spec 3.1): a certificate holding `paykit_pay`
         // without `paykit_contacts`, its permissions exactly what its scopes need, is one the
-        // Switch takes and Paykit's verifiers refuse, as a sender, a recipient and an own
+        // Dispatch takes and Paykit's verifiers refuse, as a sender, a recipient and an own
         // certificate.
         let wallet = Party::new("alice", "wallet", &["paykit_pay", "paykit_contacts"]);
         let bob = Party::new(
@@ -3298,7 +3298,7 @@ mod receive_tests {
         assert!(p.accepts(&pay_only.cert).is_empty());
         let proof = Message::new(
             "paykit.payment_proof",
-            pubky_switch_core::message::Sender::of_app(pay_only.id(), &pay_only.keys),
+            pubky_dispatch_core::message::Sender::of_app(pay_only.id(), &pay_only.keys),
             bob.id(),
             NOW,
             vec![[1; 32]],
@@ -3409,7 +3409,7 @@ mod receive_tests {
 
     /// A stand-in for the naming key's blinding a restore is given.
     fn fake_blind(input: &[u8]) -> [u8; 32] {
-        pubky_switch_core::enc::hash(input)
+        pubky_dispatch_core::enc::hash(input)
     }
 
     /// The record key of `target` under [`fake_blind`], as the client derives it.
@@ -3445,7 +3445,7 @@ mod receive_tests {
         );
         let value = state::encode(&KeptMessage::taken_at(
             &reply,
-            pubky_switch_client::app::FeedPosition {
+            pubky_dispatch_client::app::FeedPosition {
                 generation: 1,
                 seq: 1,
             },
@@ -3611,8 +3611,8 @@ mod receive_tests {
             .is_some());
     }
 
-    fn handoff_version(version: u64) -> pubky_switch_core::ops::RecordVersion {
-        pubky_switch_core::ops::RecordVersion {
+    fn handoff_version(version: u64) -> pubky_dispatch_core::ops::RecordVersion {
+        pubky_dispatch_core::ops::RecordVersion {
             generation: 1,
             version,
         }
@@ -3726,7 +3726,7 @@ mod receive_tests {
             &signed.item_hash,
         );
         let refs: Vec<&[u8]> = fields.iter().map(Vec::as_slice).collect();
-        pubky_switch_core::sig::verify(
+        pubky_dispatch_core::sig::verify(
             &signer.keys.signing_public(),
             LEDGER_HANDOFF_LABEL,
             &refs,
@@ -3871,7 +3871,7 @@ mod receive_tests {
         );
         let value = state::encode(&KeptMessage::taken_at(
             &receipt,
-            pubky_switch_client::app::FeedPosition {
+            pubky_dispatch_client::app::FeedPosition {
                 generation: 1,
                 seq: 1,
             },
@@ -3895,7 +3895,7 @@ mod receive_tests {
             panic!("an acceptance");
         };
         let record = fake_key(&allowance_target(&alice.id(), &body.allowance_id));
-        let at = pubky_switch_client::app::FeedPosition {
+        let at = pubky_dispatch_client::app::FeedPosition {
             generation: 1,
             seq: 1,
         };
@@ -4092,7 +4092,7 @@ mod receive_tests {
             object(json!({ "allowance_id": body.allowance_id.as_str() })),
         );
         for conflict in [&proposal, &response] {
-            let position = pubky_switch_client::app::FeedPosition {
+            let position = pubky_dispatch_client::app::FeedPosition {
                 generation: 1,
                 seq: 1,
             };
@@ -4122,7 +4122,7 @@ mod receive_tests {
             vec![],
             object(json!({
                 "version": { "generation": 1, "counter": 7 },
-                "expires_at": pubky_switch_core::time::rfc3339(NOW + 3_600_000),
+                "expires_at": pubky_dispatch_core::time::rfc3339(NOW + 3_600_000),
                 "payment_endpoints": {
                     "btc-bitcoin-p2wpkh": { "payload": "bc1q", "single_use": true }
                 }
@@ -4192,7 +4192,7 @@ mod receive_tests {
         let at = key::kept_reply(&alice.id(), &[9; 32], &proof.message().msg_id);
         let value = state::encode(&KeptMessage::taken_at(
             &proof,
-            pubky_switch_client::app::FeedPosition {
+            pubky_dispatch_client::app::FeedPosition {
                 generation: 1,
                 seq: 3,
             },
@@ -4244,7 +4244,7 @@ mod receive_tests {
         );
         let value = state::encode(&KeptMessage::taken_at(
             &cancellation,
-            pubky_switch_client::app::FeedPosition {
+            pubky_dispatch_client::app::FeedPosition {
                 generation: 1,
                 seq: 1,
             },

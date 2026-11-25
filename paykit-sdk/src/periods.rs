@@ -29,10 +29,10 @@ use paykit_lib::records::{
     MAX_PERIOD_DETAILS,
 };
 use paykit_lib::{AttemptId, Body, PaymentEndpointIdentifier, Rate};
-use pubky_switch_client::app::{Initiator, KeptReason, RecordContent, RecordRead, SharedRecord};
-use pubky_switch_core::claims::{ClaimStatus, ClaimView, Outcome};
-use pubky_switch_core::http::ErrorCode;
-use pubky_switch_core::ops::{Condition, OpKind};
+use pubky_dispatch_client::app::{Initiator, KeptReason, RecordContent, RecordRead, SharedRecord};
+use pubky_dispatch_core::claims::{ClaimStatus, ClaimView, Outcome};
+use pubky_dispatch_core::http::ErrorCode;
+use pubky_dispatch_core::ops::{Condition, OpKind};
 
 use crate::activity::{ActivityTarget, Role};
 use crate::app_records::PublicAppFailure;
@@ -312,7 +312,7 @@ pub(crate) enum Window {
 /// Whether the payer stores the period details `stored` for the request `record` holds
 /// (Paykit spec 8.2), `period` the payer's period record of the period they name, if it
 /// reads and binds: the one rule every path that stores them follows: at receive, once a
-/// request record comes for details kept before it, and when a write the switch refused is
+/// request record comes for details kept before it, and when a write the Dispatch refused is
 /// made later.
 ///
 /// - **A subscription running:** only for a request the payer accepted, as v0.1 holds
@@ -489,7 +489,7 @@ impl Paykit {
             RecordRead::Kept {
                 reason: KeptReason::Unreachable(why),
                 ..
-            } => return Err(Refusal::SwitchUnavailable(why).into()),
+            } => return Err(Refusal::DispatchUnavailable(why).into()),
             RecordRead::Kept {
                 record: Some(held), ..
             } if held.content == RecordContent::Deleted => {
@@ -657,9 +657,9 @@ impl Paykit {
     /// take details now, or details expired on the highest service time verified;
     /// [`Refusal::NotNow`] while the period record's value waits for its scope key, and while
     /// no service time is verified to judge the period by; [`Refusal::HeldForUser`] while
-    /// it is held as a value that doesn't read, or the switch holds a newer write of it this
+    /// it is held as a value that doesn't read, or the Dispatch holds a newer write of it this
     /// app refused;
-    /// [`Refusal::SwitchUnavailable`] when the records can't be read again now;
+    /// [`Refusal::DispatchUnavailable`] when the records can't be read again now;
     /// [`crate::PaykitError::Conflict`] when the record kept changing; the client's errors.
     /// A failure that leaves the batch kept (the network, `429`, `503`) is no error: the
     /// details are reported sent, [`MessageDelivery::Kept`], so the host doesn't send them
@@ -692,7 +692,7 @@ impl Paykit {
         self.refuse_while_sends_held(&held.counterparty).await?;
         let mut tries = 0;
         let msg_id = loop {
-            // Judged on what the switch holds now: the request record read again shows a
+            // Judged on what the Dispatch holds now: the request record read again shows a
             // rejection or a cancellation another own app recorded meanwhile, and it and the
             // period record read again below verify the service's time now, which the
             // period-details window is judged on (Paykit spec 8.2): a time verified a while
@@ -723,12 +723,12 @@ impl Paykit {
                 target.label().as_ref(),
             );
             // The period record, read again, is never written over while its value isn't
-            // open, or is held as a value that doesn't read or bind, nor while the switch
+            // open, or is held as a value that doesn't read or bind, nor while the Dispatch
             // holds a newer write this app refused: either may hold what another own app
             // wrote (Paykit spec 8.1).
-            // Nor while the switch shows another write at the version held, as recovery
+            // Nor while the Dispatch shows another write at the version held, as recovery
             // uploads can leave: the client builds the next write on that one, which this
-            // app hasn't read, and may hold a receipt (Switch spec 12.6 step 3).
+            // app hasn't read, and may hold a receipt (Dispatch spec 12.6 step 3).
             match self.app.read_record_fresh(&into.record_target()).await? {
                 RecordRead::Fresh(_)
                 | RecordRead::Kept {
@@ -739,7 +739,7 @@ impl Paykit {
                 RecordRead::Kept {
                     reason: KeptReason::Unreachable(why),
                     ..
-                } => return Err(Refusal::SwitchUnavailable(why).into()),
+                } => return Err(Refusal::DispatchUnavailable(why).into()),
                 _ => return Err(period_record_unread()),
             }
             let held = self.app.shared_record(&self.activity_key(&into)?).await?;
@@ -873,7 +873,7 @@ pub(crate) fn attempted_with(listed: &[u64], start: u64, finished: &[u64]) -> Op
 /// write that drops the period from `attempted_periods`, or a payer's cancellation, is
 /// conditioned (Paykit spec 8.2): 0 for no claim. `None` while an attempt is open or its
 /// outcome `unknown`, which counts as open: it may have paid, and stays so until its owner
-/// reports it or another own app writes it `failed` (Switch spec 10.2 row 5). The period
+/// reports it or another own app writes it `failed` (Dispatch spec 10.2 row 5). The period
 /// stays listed.
 pub(crate) fn finished_step(view: Option<&ClaimView>) -> Option<u64> {
     match view {
@@ -930,7 +930,7 @@ pub(crate) fn automatic_window_ended(
 }
 
 /// The physical write checked by an app paying under its policy, and whether it held
-/// the payee's signed stop that crosses this first dispatch (Paykit spec 8.1, 8.2).
+/// the payee's signed stop that crosses this first handoff (Paykit spec 8.1, 8.2).
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct AutomaticPeriodWrite {
     condition: Condition,
@@ -1002,7 +1002,7 @@ impl Paykit {
     /// period its user confirms paying, with the confirmations of [`Paykit::pay_request`] in
     /// `options`. A payment priced by this period's signed details shows its rate and exact
     /// rounded amount for confirmation. The proof names the details used. The device and
-    /// verified service clocks must still be inside their validity at dispatch.
+    /// verified service clocks must still be inside their validity at handoff.
     ///
     /// - The attempt carries `server_time_in(s, null)`: `s` the period's start, or, for a
     ///   period that hasn't started on the latest service time verified, that time, once the
@@ -1055,7 +1055,7 @@ impl Paykit {
     ///
     /// The request and period must be open, eligible for automatic payment, and free of
     /// Allowance funding. The SDK checks the automatic window before opening the attempt
-    /// and again immediately before its first dispatch. The proof names only this period
+    /// and again immediately before its first handoff. The proof names only this period
     /// and attempt. Each new payment during a restore or missed-item hold requires the
     /// ordinary reconciliation or confirmation that clears that hold.
     ///
@@ -1278,7 +1278,7 @@ impl Paykit {
         // A blocked payee's period is paid only once the user confirms it (Paykit spec 8.1).
         let blocked = if options.quote_only {
             // Acting on a fresh deny-list read can publish an unblock floor. Leave it to
-            // the real dispatch; a quote never authorizes that write.
+            // the real handoff; a quote never authorizes that write.
             if self.floor_write_is_kept().await? {
                 return Err(crate::floor::unreadable_floor());
             }
@@ -1486,7 +1486,7 @@ impl Paykit {
             attempt_id: AttemptId::generate()?.to_text(),
             obligation,
             payee: request.payee,
-            request_hash: Some(pubky_switch_core::enc::b64(&request.request_hash)),
+            request_hash: Some(pubky_dispatch_core::enc::b64(&request.request_hash)),
             natural_key: period_target.natural_key.clone(),
             amount: KeptAmount::of(&body.amount),
             payment_amount: KeptAmount::of(&payment_amount),
@@ -1706,7 +1706,7 @@ impl Paykit {
 #[cfg(test)]
 mod not_open_tests {
     use super::*;
-    use pubky_switch_client::app::Unopened;
+    use pubky_dispatch_client::app::Unopened;
 
     #[test]
     fn test_periods_request_record_waiting_for_its_key_waits() {

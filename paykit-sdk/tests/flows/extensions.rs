@@ -6,8 +6,8 @@ use std::sync::Arc;
 use paykit_lib::kinds::ExtensionKind;
 use paykit_lib::scopes::ExtensionPrefix;
 use paykit_sdk::{AppScopes, Paykit, PaykitConfig, Rail, Refusal, LISTS_REFRESH_MS};
-use pubky_switch_client::clock::Clock;
-use pubky_switch_client::store::StateStore;
+use pubky_dispatch_client::clock::Clock;
+use pubky_dispatch_client::store::StateStore;
 use serde_json::{json, Map, Value};
 
 use crate::common::{store, ListsStore, World};
@@ -78,7 +78,7 @@ async fn sender_on(w: &World, config: PaykitConfig, storage: Arc<dyn StateStore>
 
 /// The kinds `app`'s record accepts.
 fn accepts(app: &Paykit, identity: [u8; 32]) -> Vec<String> {
-    pubky_switch_core::records::AppRecord::verify(app.app().record(), &identity)
+    pubky_dispatch_core::records::AppRecord::verify(app.app().record(), &identity)
         .unwrap()
         .body()
         .accepts
@@ -86,13 +86,13 @@ fn accepts(app: &Paykit, identity: [u8; 32]) -> Vec<String> {
 }
 
 /// The next `n` reads of `who`'s lists fail.
-fn fail_list_reads(signer: &pubky_switch_client::testing::TestSigner, n: usize) {
+fn fail_list_reads(signer: &pubky_dispatch_client::testing::TestSigner, n: usize) {
     for _ in 0..n {
         signer
             .switch()
-            .fail_next(pubky_switch_client::testing::Fault::Error {
+            .fail_next(pubky_dispatch_client::testing::Fault::Error {
                 path: "/allow".into(),
-                code: pubky_switch_core::http::ErrorCode::Unavailable,
+                code: pubky_dispatch_core::http::ErrorCode::Unavailable,
                 current: serde_json::Value::Null,
             });
     }
@@ -153,7 +153,7 @@ async fn test_extensions_payer_receives_while_the_unblock_floor_cannot_be_checke
 #[tokio::test]
 async fn test_extensions_host_loaded_wallet_delivers_and_remembers_acknowledgment() {
     use paykit_sdk::{App, PaykitError};
-    use pubky_switch_client::app::{AppError, Refusal as ClientRefusal};
+    use pubky_dispatch_client::app::{AppError, Refusal as ClientRefusal};
 
     let w = World::new();
     let storage = store();
@@ -202,7 +202,7 @@ async fn test_extensions_host_loaded_wallet_delivers_and_remembers_acknowledgmen
     assert_eq!(kept[0].sender, wallet.identity());
     assert_eq!(kept[0].sender_app, wallet.app_id());
     assert_eq!(kept[0].msg_id, id);
-    assert_eq!(kept[0].refs, vec![pubky_switch_core::enc::b64(&[7; 32])]);
+    assert_eq!(kept[0].refs, vec![pubky_dispatch_core::enc::b64(&[7; 32])]);
     assert_eq!(kept[0].body, body(1));
     shop.acknowledge_extension_message(&wallet.identity(), &id)
         .await
@@ -326,7 +326,7 @@ async fn test_extensions_bounded_per_sender_oldest_dropped_and_asked_again() {
     assert_eq!(kept.len() as u64, max);
     assert!(kept.iter().any(|m| m.body == body(max + 1)));
     assert!(!kept.iter().any(|m| m.body == body(0) || m.body == body(1)));
-    let mark = format!("pd/{}", pubky_switch_core::enc::b64(&w.alice_id()));
+    let mark = format!("pd/{}", pubky_dispatch_core::enc::b64(&w.alice_id()));
     assert!(shop
         .app()
         .protocol_get("paykit", mark.as_bytes())
@@ -338,7 +338,7 @@ async fn test_extensions_bounded_per_sender_oldest_dropped_and_asked_again() {
 #[tokio::test]
 async fn test_extensions_wait_for_room_to_report_an_eviction() {
     use crate::replies::{keep_loss_fixture, loss_notice};
-    use pubky_switch_client::app::{AppEvent, ParkReason};
+    use pubky_dispatch_client::app::{AppEvent, ParkReason};
 
     let w = World::new();
     let mut shop = shop_on(&w, handling(), store()).await;
@@ -404,7 +404,7 @@ async fn test_extensions_stored_copies_do_not_prevent_eviction_or_restore() {
             .send_extension(w.bob_id(), &offer(), Vec::new(), body(0))
             .await
             .unwrap();
-        let count = pubky_switch_client::app::PARKED_RETRIES_PER_READ + 1;
+        let count = pubky_dispatch_client::app::PARKED_RETRIES_PER_READ + 1;
         for _ in 1..count {
             w.clock.advance_ms(1);
             wallet.app_mut().resend(&msg_id).await.unwrap();
@@ -426,7 +426,7 @@ async fn test_extensions_stored_copies_do_not_prevent_eviction_or_restore() {
         assert_eq!(kept.len(), paykit_sdk::MAX_EXTENSION_MESSAGES_PER_SENDER);
         assert!(kept.iter().all(|message| message.msg_id != msg_id));
         assert!(shop.app_mut().parked_entries().await.unwrap().is_empty());
-        let key = format!("pd/{}", pubky_switch_core::enc::b64(&w.alice_id()));
+        let key = format!("pd/{}", pubky_dispatch_core::enc::b64(&w.alice_id()));
         assert!(shop
             .app()
             .protocol_get("paykit", key.as_bytes())
@@ -459,7 +459,7 @@ async fn test_extensions_earlier_stored_input_is_evicted_and_can_return_after_re
         config.app.park_after_ms = 0;
         let mut shop = shop_on(&w, config, Arc::clone(&lists) as Arc<dyn StateStore>).await;
         let mut wallet = sender(&w).await;
-        let count = pubky_switch_client::app::PARKED_RETRIES_PER_READ + 1;
+        let count = pubky_dispatch_client::app::PARKED_RETRIES_PER_READ + 1;
         let mut oldest_id = String::new();
         let mut oldest_at = 0;
         lists.lists_unknown(true);
@@ -496,7 +496,7 @@ async fn test_extensions_earlier_stored_input_is_evicted_and_can_return_after_re
         shop.receive(None).await.unwrap();
         assert_eq!(shop.extension_messages().await.unwrap(), newer);
         assert!(shop.app_mut().parked_entries().await.unwrap().is_empty());
-        let key = format!("pd/{}", pubky_switch_core::enc::b64(&w.alice_id()));
+        let key = format!("pd/{}", pubky_dispatch_core::enc::b64(&w.alice_id()));
         let bytes = shop
             .app()
             .protocol_get("paykit", key.as_bytes())
@@ -552,9 +552,9 @@ async fn test_extensions_restored_sender_waits_for_its_first_feed_read() {
     .unwrap();
     w.alice
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::Error {
+        .fail_next(pubky_dispatch_client::testing::Fault::Error {
             path: "/feed".into(),
-            code: pubky_switch_core::http::ErrorCode::Unavailable,
+            code: pubky_dispatch_core::http::ErrorCode::Unavailable,
             current: Value::Null,
         });
     assert!(restored.receive(None).await.is_err());
@@ -572,7 +572,7 @@ async fn test_extensions_restored_sender_waits_for_its_first_feed_read() {
         Arc::clone(&w.clock),
     ));
     let mut env = w.env(&w.alice, storage);
-    env.homeserver = Arc::clone(&reads) as Arc<dyn pubky_switch_client::app::HomeserverReader>;
+    env.homeserver = Arc::clone(&reads) as Arc<dyn pubky_dispatch_client::app::HomeserverReader>;
     let mut restored = Paykit::load(
         env,
         PaykitConfig::default(),
@@ -617,7 +617,7 @@ async fn test_extensions_restored_sender_waits_for_its_first_feed_read() {
 
 #[tokio::test]
 async fn test_extensions_send_returns_the_queued_id_after_a_local_delivery_error() {
-    use pubky_switch_client::store::{Fault, FaultStore};
+    use pubky_dispatch_client::store::{Fault, FaultStore};
 
     let w = World::new();
     let mut shop = shop_on(&w, handling(), store()).await;
@@ -747,9 +747,9 @@ async fn test_extensions_queued_delivery_checks_the_block_and_the_current_certif
     let mut wallet = sender(&w).await;
     w.bob
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::Error {
+        .fail_next(pubky_dispatch_client::testing::Fault::Error {
             path: "/inbox".into(),
-            code: pubky_switch_core::http::ErrorCode::Unavailable,
+            code: pubky_dispatch_core::http::ErrorCode::Unavailable,
             current: Value::Null,
         });
     let id = wallet
@@ -835,7 +835,7 @@ async fn test_extensions_kept_messages_carried_through_a_restore() {
     assert_eq!(
         original[0].refs,
         refs.iter()
-            .map(|r| pubky_switch_core::enc::b64(r))
+            .map(|r| pubky_dispatch_core::enc::b64(r))
             .collect::<Vec<_>>()
     );
     assert_eq!(original[0].body, body(1));
@@ -855,7 +855,7 @@ async fn test_extensions_kept_messages_carried_through_a_restore() {
 
 #[tokio::test]
 async fn test_extensions_unverifiable_mailbox_entry_refused_on_read_and_restore() {
-    use pubky_switch_client::app::LocalWrite;
+    use pubky_dispatch_client::app::LocalWrite;
 
     let w = World::new();
     let mut shop = shop_on(&w, handling(), store()).await;

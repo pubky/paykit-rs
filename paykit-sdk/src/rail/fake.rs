@@ -14,12 +14,12 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use paykit_lib::{AttemptId, PaymentAmount, PaymentEndpointIdentifier, PaymentEndpointPayload};
-use pubky_switch_client::clock::Clock;
-use pubky_switch_client::transport::BoxFuture;
+use pubky_dispatch_client::clock::Clock;
+use pubky_dispatch_client::transport::BoxFuture;
 use serde_json::{Map, Value};
 
 use super::{
-    AllowanceDispatch, CandidateId, EndpointSelection, PaymentEndpointCandidate, ProofCheck, Rail,
+    AllowanceHandoff, CandidateId, EndpointSelection, PaymentEndpointCandidate, ProofCheck, Rail,
     RailDeclaration, RailError, RailOutcome, RailPaid, RailPayment, Transfer,
 };
 
@@ -33,7 +33,7 @@ type Choice = Arc<
         + Sync,
 >;
 
-/// The longest a fake dispatch takes to complete or fail, as its declaration says: an hour.
+/// The longest a fake handoff takes to complete or fail, as its declaration says: an hour.
 pub const FAKE_LONGEST_COMPLETION_MS: u64 = 3_600_000;
 /// How early the fake method's verified payment time may lie: it reports the time it pays.
 pub const FAKE_PAYMENT_TIME_TOLERANCE_MS: u64 = 0;
@@ -69,7 +69,7 @@ struct Inner {
     payments: BTreeMap<AttemptId, Paid>,
     history_payer: Option<[u8; 32]>,
     held_history_outcomes: BTreeMap<AttemptId, RailOutcome>,
-    lost_dispatch: bool,
+    lost_handoff: bool,
     executions: BTreeMap<AttemptId, u64>,
     next: VecDeque<Behaviour>,
     counter: u64,
@@ -140,7 +140,7 @@ impl FakeRail {
     }
 
     /// Bind this rail instance to one payer for account-wide enumeration after restore.
-    /// The test wallet routes all of that payer's manual and automatic dispatches here.
+    /// The test wallet routes all of that payer's manual and automatic handoffs here.
     pub fn set_history_payer(&self, payer: [u8; 32]) {
         self.lock().history_payer = Some(payer);
     }
@@ -395,8 +395,9 @@ impl FakeRail {
 }
 
 fn paid_outcome(key: &AttemptId, counter: u64, now: Option<u64>) -> RailOutcome {
-    let digest =
-        pubky_switch_core::enc::hash(&[key.to_bytes().as_slice(), &counter.to_be_bytes()].concat());
+    let digest = pubky_dispatch_core::enc::hash(
+        &[key.to_bytes().as_slice(), &counter.to_be_bytes()].concat(),
+    );
     paid_in_settlement(&digest, now)
 }
 
@@ -550,7 +551,7 @@ impl Rail for FakeRail {
                     let amount = Self::fixed_amount(payment.payload.as_str(), &payment.amount)
                         .flatten()
                         .unwrap_or(payment.amount.clone());
-                    inner.lost_dispatch |= inner.payments.contains_key(&key);
+                    inner.lost_handoff |= inner.payments.contains_key(&key);
                     inner.payments.insert(
                         key,
                         Paid {
@@ -603,7 +604,7 @@ impl Rail for FakeRail {
     fn allowance_history(
         &self,
         payer: [u8; 32],
-    ) -> BoxFuture<'_, Result<Option<Vec<AllowanceDispatch>>, RailError>> {
+    ) -> BoxFuture<'_, Result<Option<Vec<AllowanceHandoff>>, RailError>> {
         let declaration = self.declaration();
         let inner = self.lock();
         let complete = inner.history_payer == Some(payer)
@@ -611,12 +612,12 @@ impl Rail for FakeRail {
             && declaration.history_survives_restore
             && declaration.history_retention_ms.is_none()
             && inner.forgotten.is_empty()
-            && !inner.lost_dispatch;
+            && !inner.lost_handoff;
         let history = complete.then(|| {
             inner
                 .payments
                 .iter()
-                .map(|(id, p)| AllowanceDispatch {
+                .map(|(id, p)| AllowanceHandoff {
                     attempt_id: *id,
                     amount: p.amount.clone(),
                     outcome: inner

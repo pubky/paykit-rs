@@ -4,9 +4,9 @@ use super::method::Account;
 use super::refusal::categorized;
 use super::wallet::{enrolled_payer, host, run};
 use crate::{ExtensionMessage, NativeWallet, RefusalKind, StorageError, WalletError};
-use pubky_switch_client::app::LocalWrite;
-use pubky_switch_core::enc::b64;
-use pubky_switch_harness::{Backend, World};
+use pubky_dispatch_client::app::LocalWrite;
+use pubky_dispatch_core::enc::b64;
+use pubky_dispatch_harness::{Backend, World};
 use serde_json::{json, Value};
 use std::{error::Error, sync::Arc};
 
@@ -157,7 +157,7 @@ async fn send_extension(world: &World) -> super::TestResult {
     let id = wallet
         .send_extension(recipient.into(), KIND.into(), vec![], "{}".into())
         .await?;
-    pubky_switch_core::json::check_uuid_v4(&id)?;
+    pubky_dispatch_core::json::check_uuid_v4(&id)?;
     assert!(wallet.message_delivery(id).await?.is_some());
     wallet.shutdown().await?;
     Ok(())

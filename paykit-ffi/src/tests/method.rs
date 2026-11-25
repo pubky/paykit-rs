@@ -12,7 +12,7 @@ use tokio::sync::Notify;
 pub(super) struct Account {
     file: PathBuf,
     /// The clock the account stamps each payment's verified time from.
-    clock: Arc<dyn pubky_switch_client::clock::Clock>,
+    clock: Arc<dyn pubky_dispatch_client::clock::Clock>,
     pub calls: AtomicUsize,
     pub lookups: AtomicUsize,
     /// A proof check never answers.
@@ -38,7 +38,7 @@ enum Coverage {
     Unavailable,
 }
 impl Account {
-    pub fn open(root: &Path, clock: Arc<dyn pubky_switch_client::clock::Clock>) -> Self {
+    pub fn open(root: &Path, clock: Arc<dyn pubky_dispatch_client::clock::Clock>) -> Self {
         let file = root.join("account.sqlite");
         super::storage::create(&file, "CREATE TABLE IF NOT EXISTS payments(attempt TEXT PRIMARY KEY,asset TEXT NOT NULL,amount TEXT NOT NULL,endpoint TEXT NOT NULL,payload TEXT NOT NULL,paid_at INTEGER NOT NULL);");
         Self {
@@ -169,7 +169,7 @@ impl PaymentMethod for Account {
     async fn allowance_history(
         &self,
         _: Vec<u8>,
-    ) -> Result<Option<Vec<MethodDispatch>>, MethodError> {
+    ) -> Result<Option<Vec<MethodHandoff>>, MethodError> {
         match *self.coverage.lock().unwrap() {
             Coverage::Complete => {}
             Coverage::Incomplete => return Ok(None),
@@ -186,7 +186,7 @@ impl PaymentMethod for Account {
         let rows = query
             .query_map([], |r| {
                 let id: String = r.get(0)?;
-                Ok(MethodDispatch {
+                Ok(MethodHandoff {
                     outcome: self.paid(&id),
                     attempt_id: id,
                     amount: Amount {
@@ -246,7 +246,7 @@ fn test_method_settlement_id_gets_the_endpoint_through_the_host_callback() {
     let directory = tempfile::tempdir().unwrap();
     let account = Arc::new(Account::open(
         directory.path(),
-        Arc::new(pubky_switch_client::clock::TestClock::new(0)),
+        Arc::new(pubky_dispatch_client::clock::TestClock::new(0)),
     ));
     let rail = account.rail();
     let proof = serde_json::json!({ "payment": "same" })
@@ -278,7 +278,7 @@ async fn test_method_history_distinguishes_complete_empty_from_missing_and_unava
     let directory = tempfile::tempdir().unwrap();
     let account = Arc::new(Account::open(
         directory.path(),
-        Arc::new(pubky_switch_client::clock::TestClock::new(0)),
+        Arc::new(pubky_dispatch_client::clock::TestClock::new(0)),
     ));
     let rail = account.rail();
     let payer = [17; 32];
@@ -301,7 +301,7 @@ fn test_method_declaration_forwards_the_payment_time_tolerance() {
     let directory = tempfile::tempdir().unwrap();
     let rail = Arc::new(Account::open(
         directory.path(),
-        Arc::new(pubky_switch_client::clock::TestClock::new(0)),
+        Arc::new(pubky_dispatch_client::clock::TestClock::new(0)),
     ))
     .rail();
     assert_eq!(rail.declaration().payment_time_tolerance_ms, 7_200_000);
@@ -315,7 +315,7 @@ fn test_method_thrown_transfer_and_settlement_id_answer_unknown_and_none() {
     let directory = tempfile::tempdir().unwrap();
     let account = Arc::new(Account::open(
         directory.path(),
-        Arc::new(pubky_switch_client::clock::TestClock::new(0)),
+        Arc::new(pubky_dispatch_client::clock::TestClock::new(0)),
     ));
     let rail = account.rail();
     let (endpoint, _) = Account::endpoints().remove(0);
@@ -347,7 +347,7 @@ fn test_method_fraction_digits_come_from_the_declared_endpoints() {
     let directory = tempfile::tempdir().unwrap();
     let account = Arc::new(Account::open(
         directory.path(),
-        Arc::new(pubky_switch_client::clock::TestClock::new(0)),
+        Arc::new(pubky_dispatch_client::clock::TestClock::new(0)),
     ));
     let other = paykit_lib::PaymentEndpointIdentifier::new("btc-onchain").unwrap();
     let rail = HostRail::new(

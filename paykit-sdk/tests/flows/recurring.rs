@@ -2,12 +2,12 @@
 //! their proposal expires, never both, and not yet paid by this SDK.
 
 use paykit_sdk::{PayOptions, Paykit, Refusal, RequestRef, RequestStatus};
-use pubky_switch_client::clock::Clock;
+use pubky_dispatch_client::clock::Clock;
 use serde_json::json;
 
 use crate::common::{World, HOUR_MS};
 
-/// Bob's shop sends alice's `wallet` a monthly request, entered at her switch directly,
+/// Bob's shop sends alice's `wallet` a monthly request, entered at her Dispatch directly,
 /// with its proposal open until `expires_at`. Returns it as the wallet holds it.
 async fn monthly_to(w: &World, wallet: &mut Paykit, expires_at: u64) -> RequestRef {
     monthly(w, &[wallet.app_id()], expires_at, "plan-1");
@@ -18,12 +18,12 @@ async fn monthly_to(w: &World, wallet: &mut Paykit, expires_at: u64) -> RequestR
 }
 
 /// Bob's shop sends alice's apps `targets` a monthly request with `reference`, entered at
-/// her switch directly, its proposal open until `expires_at`.
+/// her Dispatch directly, its proposal open until `expires_at`.
 pub(crate) fn monthly(w: &World, targets: &[[u8; 16]], expires_at: u64, reference: &str) {
     let body = json!({
         "amount": { "asset": "btc", "value": "1" },
         "payment_reference": reference,
-        "proposal_expires_at": pubky_switch_core::time::rfc3339(expires_at),
+        "proposal_expires_at": pubky_dispatch_core::time::rfc3339(expires_at),
         "payment_endpoints": { "btc-lightning-bolt11": "lnbc1invoice" },
         "recurrence": {
             "anchor": "2026-01-31T00:00:00.000Z",
@@ -82,7 +82,7 @@ async fn rejections_received(shop: &mut Paykit) -> usize {
         .filter(|e| {
             matches!(
                 e,
-                pubky_switch_client::app::AppEvent::MessageReceived { kind, .. }
+                pubky_dispatch_client::app::AppEvent::MessageReceived { kind, .. }
                     if kind == "paykit.payment_request_rejection"
             )
         })
@@ -163,8 +163,8 @@ fn phone_acceptance(w: &World, request: &RequestRef) -> paykit_lib::records::Sto
 
 /// Alice's wallet and phone both hold bob's monthly request, open for an hour. The phone
 /// answers it first, as `first` says; the clock then passes the proposal expiry, and the
-/// wallet, which last heard from its switch before then and still holds the request record
-/// as it was, rejects it. With `heard`, the wallet has heard from its switch since the
+/// wallet, which last heard from its Dispatch before then and still holds the request record
+/// as it was, rejects it. With `heard`, the wallet has heard from its Dispatch since the
 /// expiry, so it sees it passed before it sends anything; otherwise its batch is refused with
 /// `409`, which the service answers past the expiry. Returns the wallet's refusal, and the
 /// wallet.
@@ -273,22 +273,22 @@ async fn test_recurring_rejection_failing_otherwise_past_expiry_is_the_failure()
     w.clock.advance_ms(expires_at + 1 - w.clock.now_ms());
     w.alice
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::Error {
+        .fail_next(pubky_dispatch_client::testing::Fault::Error {
             path: "/ops".into(),
-            code: pubky_switch_core::http::ErrorCode::QuotaExceeded,
+            code: pubky_dispatch_core::http::ErrorCode::QuotaExceeded,
             current: serde_json::Value::Null,
         });
     let failed = wallet.reject_request(&request, None).await.unwrap_err();
     assert_eq!(
         failed.code(),
-        Some(pubky_switch_core::http::ErrorCode::QuotaExceeded),
+        Some(pubky_dispatch_core::http::ErrorCode::QuotaExceeded),
         "{failed:?}"
     );
 }
 
 #[tokio::test]
 async fn test_recurring_rejection_past_expiry_seen_first_shows_what_another_app_did() {
-    // The wallet has heard from its switch past the expiry, and still holds the request
+    // The wallet has heard from its Dispatch past the expiry, and still holds the request
     // record as it was before the phone answered it: the record read again decides, before
     // anything is sent.
     for (first, expected) in [
@@ -312,14 +312,14 @@ enum PhoneWrite {
     Invalid,
     /// The record of another request, bound to that request's key.
     AnotherRequest,
-    /// Nothing; the switch then answers the record's read `404`, the wallet keeping its
+    /// Nothing; the Dispatch then answers the record's read `404`, the wallet keeping its
     /// copy.
-    NotFoundAtTheSwitch,
+    NotFoundAtTheDispatch,
 }
 
 /// Alice's wallet and phone hold bob's monthly request, open for an hour; the phone writes
 /// its record as `write` says, and the clock passes the expiry. The wallet, holding the
-/// record as it was, rejects it: having heard from its switch since the expiry with `heard`,
+/// record as it was, rejects it: having heard from its Dispatch since the expiry with `heard`,
 /// otherwise with its batch refused with `409` past the expiry. Returns the wallet's error.
 async fn rejected_over(w: &World, write: PhoneWrite, heard: bool) -> paykit_sdk::PaykitError {
     use std::sync::atomic::Ordering;
@@ -330,7 +330,7 @@ async fn rejected_over(w: &World, write: PhoneWrite, heard: bool) -> paykit_sdk:
     let mut wallet = w
         .wallet_on(
             "wallet",
-            Arc::clone(&store) as Arc<dyn pubky_switch_client::store::StateStore>,
+            Arc::clone(&store) as Arc<dyn pubky_dispatch_client::store::StateStore>,
         )
         .await;
     let mut phone = w.wallet("phone").await;
@@ -352,7 +352,7 @@ async fn rejected_over(w: &World, write: PhoneWrite, heard: bool) -> paykit_sdk:
     // The wallet keeps no mark of what it saw: a later value is taken as it is.
     store.armed.store(true, Ordering::SeqCst);
     let value = match write {
-        PhoneWrite::Delete | PhoneWrite::NotFoundAtTheSwitch => None,
+        PhoneWrite::Delete | PhoneWrite::NotFoundAtTheDispatch => None,
         PhoneWrite::Invalid => Some(crate::outcome_record::INVALID.to_vec()),
         PhoneWrite::AnotherRequest => {
             let target = crate::outcome_record::payer_record(&other);
@@ -360,12 +360,12 @@ async fn rejected_over(w: &World, write: PhoneWrite, heard: bool) -> paykit_sdk:
             Some(held.content.value().unwrap().to_vec())
         }
     };
-    if let PhoneWrite::NotFoundAtTheSwitch = write {
+    if let PhoneWrite::NotFoundAtTheDispatch = write {
         w.alice
             .switch()
-            .fail_next(pubky_switch_client::testing::Fault::Error {
+            .fail_next(pubky_dispatch_client::testing::Fault::Error {
                 path: "/records/".into(),
-                code: pubky_switch_core::http::ErrorCode::NotFound,
+                code: pubky_dispatch_core::http::ErrorCode::NotFound,
                 current: serde_json::Value::Null,
             });
     } else {
@@ -380,14 +380,14 @@ async fn rejected_over(w: &World, write: PhoneWrite, heard: bool) -> paykit_sdk:
 
 #[tokio::test]
 async fn test_recurring_rejection_past_expiry_over_a_record_gone_or_unreadable() {
-    // The record read again isn't there, the switch answering `404` over the wallet's copy
+    // The record read again isn't there, the Dispatch answering `404` over the wallet's copy
     // included, doesn't read, or holds another request: none of them shows this request
     // unanswered, so none is refused as expired. Seen before
     // anything is sent, a record gone is not found, and one that doesn't read as this
     // request a conflict; after a `409`, the conflict is the answer.
     for (write, heard, gone) in [
         (PhoneWrite::Delete, true, true),
-        (PhoneWrite::NotFoundAtTheSwitch, true, true),
+        (PhoneWrite::NotFoundAtTheDispatch, true, true),
         (PhoneWrite::Invalid, true, false),
         (PhoneWrite::AnotherRequest, true, false),
         (PhoneWrite::Delete, false, false),
