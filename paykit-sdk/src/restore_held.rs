@@ -83,6 +83,33 @@ pub(crate) enum HeldPass {
     HeldOnly,
 }
 
+/// What becomes of the owed mark (`hm`) at the end of a pass.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MarkAfter {
+    /// Nothing is left to decide: the mark goes.
+    Gone,
+    /// The carried lists are done and held messages remain.
+    HeldOnly,
+    /// The mark stays as it is, for a later pass.
+    Stays,
+}
+
+/// The owed mark's fate from the pass's end: `swept` when the end-of-pass listing read and
+/// its notices were shown, `mark_stays` when a carried list is left to decide, and the held
+/// messages still listed (`None` when they couldn't be). A sweep that couldn't list keeps
+/// the mark, so a pending stop notice is shown at a later pass: the mark never goes before
+/// the sweep over what the client still holds (Paykit spec 7.2).
+fn mark_after(swept: bool, mark_stays: bool, pass: HeldPass, still_held: Option<u32>) -> MarkAfter {
+    if !swept || mark_stays {
+        return MarkAfter::Stays;
+    }
+    match still_held {
+        Some(0) => MarkAfter::Gone,
+        Some(_) if pass == HeldPass::CarriedLists => MarkAfter::HeldOnly,
+        Some(_) | None => MarkAfter::Stays,
+    }
+}
+
 /// What the record read afresh shows of a carried stop or proof (Paykit spec 7.2).
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum StopEvidence {
@@ -400,26 +427,30 @@ impl Paykit {
                 }
             }
         }
-        // The withdrawals of this pass show their notices before the mark can go. A sweep
-        // that can't list keeps the mark, so a later pass shows them: the sweep runs only
-        // while the mark stands.
-        match self.app.held_messages(BACKUP_NAME).await {
-            Ok(left) => Box::pin(self.show_pending_stops(&left)).await?,
+        // The withdrawals of this pass show their notices before the mark can go
+        // (`mark_after`): the sweep runs only while the mark stands.
+        let swept = match self.app.held_messages(BACKUP_NAME).await {
+            Ok(left) => {
+                Box::pin(self.show_pending_stops(&left)).await?;
+                true
+            }
             Err(error) => {
                 crate::pay::unless_stop(error)?;
-                mark_stays = true;
+                false
             }
-        }
-        if !mark_stays {
-            match self.still_held().await? {
-                Some(0) => self.local_delete(key::HELD_MESSAGES_OWED).await?,
-                Some(_) if pass == HeldPass::CarriedLists => {
-                    self.local_put(key::HELD_MESSAGES_OWED, &HeldPass::HeldOnly)
-                        .await?;
-                }
-                // Still held, or not listed now: the mark stays as it is.
-                Some(_) | None => {}
+        };
+        let still_held = if swept && !mark_stays {
+            self.still_held().await?
+        } else {
+            None
+        };
+        match mark_after(swept, mark_stays, pass, still_held) {
+            MarkAfter::Gone => self.local_delete(key::HELD_MESSAGES_OWED).await?,
+            MarkAfter::HeldOnly => {
+                self.local_put(key::HELD_MESSAGES_OWED, &HeldPass::HeldOnly)
+                    .await?;
             }
+            MarkAfter::Stays => {}
         }
         Ok((released, withdrawn))
     }
@@ -809,6 +840,242 @@ impl Paykit {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn test_restore_held_unplaced_for_every_family() {
+        use crate::allowances::{allowance_record_target, allowance_target};
+        use crate::stored::StoredNote;
+        use crate::testkit::{object, Dispatches};
+        use crate::AppScopes;
+        use pubky_dispatch_client::app::FeedPosition;
+        use pubky_dispatch_client::clock::Clock;
+        use pubky_dispatch_client::testing::Fault;
+        use pubky_dispatch_core::http::ErrorCode;
+        use serde_json::json;
+
+        let w = Dispatches::new();
+        let mut wallet = Box::pin(w.join(
+            &w.alice,
+            "wallet",
+            AppScopes::new().pay().allowance().build().unwrap(),
+        ))
+        .await;
+        let shop = Box::pin(w.join(
+            &w.bob,
+            "shop",
+            AppScopes::new().request().allowance().build().unwrap(),
+        ))
+        .await;
+        let alice = wallet.identity();
+        let bob = shop.identity();
+        let generation = wallet.app.own_identity().generation();
+        wallet.app_mut().invite(&bob).await.unwrap();
+        let sign = |kind, refs, body| shop.sign(alice, kind, refs, object(body)).unwrap();
+        let id = paykit_lib::AllowanceId::generate().unwrap();
+        let proposal = |limit: &str| {
+            sign(
+                Kind::AllowanceProposal,
+                vec![],
+                json!({
+                    "allowance_id": id.as_str(), "proposer_role": "allowee",
+                    "allower_generation": generation,
+                    "terms": {
+                        "asset": "btc", "lifetime_amount_limit": limit, "period_limits": [],
+                        "per_payment_amount": null, "active_from": null, "expires_at": null,
+                        "allowed_payment_endpoint_identifiers": null
+                    }
+                }),
+            )
+        };
+        let original = proposal("0.10");
+        let second = proposal("0.20");
+        let deferred = proposal("0.30");
+        let end = sign(
+            Kind::AllowanceEnd,
+            vec![original.hash()],
+            json!({ "allowance_id": id.as_str() }),
+        );
+        let request = sign(
+            Kind::PaymentRequest,
+            vec![],
+            json!({
+                "amount": { "asset": "btc", "value": "1" },
+                "payment_reference": "order-1", "proposal_expires_at": null
+            }),
+        );
+        let cancel = sign(
+            Kind::PaymentRequestCancellation,
+            vec![request.hash()],
+            json!({}),
+        );
+        let payer = ActivityTarget::payer(natural_key::request_record(&bob, &request.hash()));
+        let request_key = wallet.activity_key(&payer).unwrap();
+        let allowance = wallet.app.record_key(&allowance_target(&bob, &id)).unwrap();
+        let target = allowance_record_target(Collection::AllowanceProposals, &bob, &id);
+        let pending = wallet.app.record_key(&target).unwrap();
+        let cert = shop.app.cert();
+        let reply_key = key::kept_reply(&bob, &allowance, original.msg_id());
+        let cancel_key = key::kept_cancellation(&request_key, &cert.hash(), generation);
+        let end_key = key::allowance_end(&allowance, end.msg_id());
+        let note_key = key::stored_note(&bob, request.msg_id());
+        let rows = [
+            ("pr/", allowance, reply_key, &original),
+            ("kc/", request_key, cancel_key, &cancel),
+            ("ae/", allowance, end_key, &end),
+            ("pc/", pending, key::pending_conflict(&pending), &second),
+            ("cf/", allowance, key::conflict(&allowance), &second),
+            ("se/", request_key, note_key, &request),
+            ("ax/", pending, key::allowance_evidence(&pending), &deferred),
+        ];
+        let mut competing = None;
+        for (prefix, record, at, message) in rows {
+            // Read the inbox before Paykit places the messages kept by that read.
+            let receive = async |app: &mut Paykit| {
+                let seq = w
+                    .alice
+                    .switch()
+                    .send_plaintext(bob, cert, message.plaintext(), &[app.app_id()])
+                    .unwrap_or_else(|e| panic!("{prefix} delivery: {e}"));
+                Box::pin(app.app_mut().receive(None))
+                    .await
+                    .unwrap_or_else(|e| panic!("{prefix} receive: {e}"));
+                seq
+            };
+            match prefix {
+                "pc/" => {
+                    let accepted_at = w.clock.now_ms();
+                    let seq = receive(&mut wallet).await;
+                    let stored = StoredMessage::new(
+                        bob,
+                        cert.signed(),
+                        message.plaintext().clone(),
+                        Some(accepted_at),
+                        &alice,
+                    )
+                    .unwrap();
+                    competing = Some(KeptMessage::taken_at(
+                        &stored,
+                        FeedPosition { generation, seq },
+                    ));
+                }
+                "cf/" => {
+                    // The same competing proposal at the permanent Allowance key.
+                    wallet
+                        .local_put(&at, competing.as_ref().expect("cf/ competing proposal"))
+                        .await
+                        .unwrap();
+                }
+                "ax/" => {
+                    // A competing proposal cannot be placed over the divergent original.
+                    w.alice
+                        .switch()
+                        .make_divergent([0x5a; 16], pending, [1; 32])
+                        .unwrap();
+                    Box::pin(wallet.receive(None)).await.unwrap();
+                    receive(&mut wallet).await;
+                    w.clock.advance_ms(crate::KEPT_MESSAGE_MS);
+                    wallet.app_mut().rotate().await.unwrap();
+                    wallet.app_mut().flush_cursor().await.unwrap();
+                    Box::pin(wallet.receive(None)).await.unwrap();
+                }
+                "se/" => {
+                    // The refused request write leaves the verified entry in the client's store.
+                    wallet.app_mut().flush_cursor().await.unwrap();
+                    w.alice.switch().fail_next(Fault::Error {
+                        path: "/ops".into(),
+                        code: ErrorCode::PermissionMissing,
+                        current: serde_json::Value::Null,
+                    });
+                    receive(&mut wallet).await;
+                    let duties = wallet.app_mut().unacknowledged_events().await.unwrap();
+                    Box::pin(wallet.take_stored_events(&duties)).await.unwrap();
+                }
+                _ => {
+                    receive(&mut wallet).await;
+                }
+            }
+
+            let unplaced = async |app: &Paykit, key, peer| {
+                app.unplaced_for(&[key], &peer)
+                    .await
+                    .unwrap_or_else(|e| panic!("{prefix} {e}"))
+            };
+            assert!(
+                wallet.local_holds(&at).await.unwrap(),
+                "{prefix} missing entry"
+            );
+            assert!(
+                unplaced(&wallet, record, bob).await,
+                "{prefix} matching record"
+            );
+            let other = if record == allowance {
+                pending
+            } else {
+                allowance
+            };
+            assert!(
+                !unplaced(&wallet, other, bob).await,
+                "{prefix} other record"
+            );
+            if matches!(prefix, "pr/" | "se/") {
+                assert!(
+                    !unplaced(&wallet, record, alice).await,
+                    "{prefix} other sender"
+                );
+            }
+            match prefix {
+                // Placing the original removes the kept reply and opens the pending record.
+                "pr/" => {
+                    Box::pin(wallet.receive(None)).await.unwrap();
+                }
+                "se/" => {
+                    let mut note = wallet.local_get::<StoredNote>(&at).await.unwrap().unwrap();
+                    note.placed = true;
+                    wallet.local_put(&at, &note).await.unwrap();
+                }
+                _ => wallet.local_delete(&at).await.unwrap(),
+            }
+            assert!(
+                !unplaced(&wallet, record, bob).await,
+                "{prefix} after placement or removal"
+            );
+        }
+    }
+
+    #[test]
+    fn test_restore_held_mark_stays_when_the_sweep_cannot_list() {
+        for pass in [HeldPass::CarriedLists, HeldPass::HeldOnly] {
+            for held in [None, Some(0), Some(2)] {
+                assert_eq!(mark_after(false, false, pass, held), MarkAfter::Stays);
+            }
+        }
+    }
+
+    #[test]
+    fn test_restore_held_mark_goes_after_a_sweep_listing_nothing_held() {
+        for pass in [HeldPass::CarriedLists, HeldPass::HeldOnly] {
+            assert_eq!(mark_after(true, false, pass, Some(0)), MarkAfter::Gone);
+            // A carried list left to decide keeps it.
+            assert_eq!(mark_after(true, true, pass, Some(0)), MarkAfter::Stays);
+        }
+    }
+
+    #[test]
+    fn test_restore_held_mark_stays_while_messages_are_held() {
+        assert_eq!(
+            mark_after(true, false, HeldPass::CarriedLists, Some(2)),
+            MarkAfter::HeldOnly
+        );
+        assert_eq!(
+            mark_after(true, false, HeldPass::HeldOnly, Some(2)),
+            MarkAfter::Stays
+        );
+        // Not listed after a sweep that listed: kept for a later pass.
+        assert_eq!(
+            mark_after(true, false, HeldPass::HeldOnly, None),
+            MarkAfter::Stays
+        );
+    }
 
     #[test]
     fn test_held_decide_every_role() {

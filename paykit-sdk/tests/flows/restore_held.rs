@@ -1969,6 +1969,34 @@ async fn test_restore_held_stop_notice_shown_once_after_withdrawal_is_told() {
     assert!(stop_notice_ids(&wallet, &stop).await.is_empty());
 }
 
+// restore_held.rs `mark_after`: whichever listing of the client's held messages fails,
+// the owed mark goes only after a sweep, so the stop's notice is still shown, once.
+#[tokio::test]
+async fn test_restore_held_stop_notice_shown_whichever_hold_listing_fails() {
+    // The deciding receive lists them twice: at the pass's start (0) and for its
+    // end-of-pass sweep (1).
+    for after in 0..2 {
+        let w = World::new();
+        let (wallet, _, stop, backup) = Box::pin(unrecorded_rejection(&w)).await;
+        drop(wallet);
+        let storage = Arc::new(FaultStore::new(store(), StoreFault::None));
+        let mut wallet = Box::pin(restore(&w, &w.alice, storage.clone(), &backup)).await;
+        storage.fail_scan(b"outheld/", after);
+        // The receive that meets the failed listing fails with it; the ones after go on.
+        let mut failed = 0;
+        for _ in 0..4 {
+            failed += usize::from(wallet.receive(None).await.is_err());
+        }
+        assert_eq!(failed, 1, "after {after}");
+        assert!(!held(&wallet, &stop).await, "after {after}");
+        assert_eq!(
+            stop_notice_ids(&wallet, &stop).await.len(),
+            1,
+            "after {after}"
+        );
+    }
+}
+
 // Held messages are decided only in a Paykit receive, after its own read succeeded
 // (`Paykit::held_decisions_open`): a read made through the client, as another protocol's,
 // decides nothing, and nor does a flush until a Paykit receive has read.
