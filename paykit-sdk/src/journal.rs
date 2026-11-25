@@ -451,6 +451,35 @@ pub(crate) enum UserResolution {
     Failed,
 }
 
+/// Whether an entry at `stage` holds these members together, as the journal's writers leave
+/// them ([`JournalEntry::check`]):
+///
+/// - the method's failure never beside its proof;
+/// - "no payment started" ([`JournalEntry::failed_before_call`]) only for this app's own
+///   finished failure, or a refused first call's before its outcome is written, never with
+///   a proof or the method's failure;
+/// - the user's resolution, on the claim ([`JournalEntry::user_resolved`]) or off it
+///   ([`JournalEntry::user_paid`]), only on a finished entry, as the resolution finishes it
+///   (Paykit spec 7.3), or beside the method's proof. One writer leaves it there: the recheck
+///   of a payment the method reported failed, which opens the entry again at `RailPaid` with
+///   the proof once the method's history shows the payment made after all, the user's
+///   resolution kept beside it (Paykit spec 7.2, "What a payment method declares"). Never
+///   on an open entry without a proof, which would finish reported resolved over what the
+///   method said.
+pub(crate) fn stage_members_hold(
+    stage: Stage,
+    proof: bool,
+    failed_by_method: bool,
+    failed_before_call: bool,
+    user_resolved: bool,
+) -> bool {
+    let failure_with_proof = failed_by_method && proof;
+    let no_payment_started_misplaced = failed_before_call
+        && (!matches!(stage, Stage::Finished | Stage::RailFailed) || proof || failed_by_method);
+    let resolution_misplaced = user_resolved && stage != Stage::Finished && !proof;
+    !failure_with_proof && !no_payment_started_misplaced && !resolution_misplaced
+}
+
 impl std::fmt::Debug for JournalEntry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "JournalEntry({:?})", self.stage)
@@ -701,8 +730,8 @@ impl JournalEntry {
         if self.allowance.is_none() && self.allowance_expires_at_ms.is_some() {
             return bad();
         }
-        // Only a restored dispatch the user resolved, and so finished, is paid by the user.
-        if self.user_paid && (!self.restored || self.stage != Stage::Finished) {
+        // Only a restored dispatch the user resolved is paid by the user.
+        if self.user_paid && !self.restored {
             return bad();
         }
         if self.offline.is_some()
@@ -768,7 +797,13 @@ impl JournalEntry {
         {
             return bad();
         }
-        if self.failed_by_method && self.rail_proof.is_some() {
+        if !stage_members_hold(
+            self.stage,
+            self.rail_proof.is_some(),
+            self.failed_by_method,
+            self.failed_before_call,
+            self.user_resolved.is_some() || self.user_paid,
+        ) {
             return bad();
         }
         // A payment of a request keeps the request, and only such a payment does.
@@ -788,15 +823,6 @@ impl JournalEntry {
             return bad();
         }
         if (self.record_held || self.failed_on_claim) && self.rail_proof.is_none() {
-            return bad();
-        }
-        // "No payment started" is this app's own finished failure, or a refused call's before
-        // its outcome is written, never a method's word that it failed.
-        if self.failed_before_call
-            && (!matches!(self.stage, Stage::Finished | Stage::RailFailed)
-                || self.rail_proof.is_some()
-                || self.failed_by_method)
-        {
             return bad();
         }
         // The call amount is the amount asked, but for a payment of a request: one priced by
@@ -1165,6 +1191,91 @@ pub(crate) fn dispatched(stage: Stage, restored: bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_journal_user_resolution_only_on_a_finished_or_paid_entry() {
+        let hold = |stage, proof, failed_by_method, failed_before_call, user_resolved| {
+            stage_members_hold(
+                stage,
+                proof,
+                failed_by_method,
+                failed_before_call,
+                user_resolved,
+            )
+        };
+        // As the user's resolution leaves it: finished, beside the method's failure or not.
+        assert!(hold(Stage::Finished, false, false, false, true));
+        assert!(hold(Stage::Finished, false, true, false, true));
+        // As the recheck leaves it, opened again with the proof the method's history gave.
+        assert!(hold(Stage::RailPaid, true, false, false, true));
+        assert!(hold(Stage::AcceptanceOwed, true, false, false, true));
+        // Never on an open entry without a proof, the method's failure beside it or not.
+        for stage in [
+            Stage::Recorded,
+            Stage::Attempted,
+            Stage::Paying,
+            Stage::RailFailed,
+            Stage::Abandoned,
+        ] {
+            assert!(!hold(stage, false, true, false, true), "{stage:?}");
+            assert!(!hold(stage, false, false, false, true), "{stage:?}");
+            assert!(hold(stage, false, false, false, false), "{stage:?}");
+        }
+    }
+
+    #[test]
+    fn test_journal_no_payment_started_and_the_methods_failure_where_their_writers_leave_them() {
+        // The method's failure never beside its proof.
+        assert!(!stage_members_hold(
+            Stage::RailFailed,
+            true,
+            true,
+            false,
+            false
+        ));
+        assert!(stage_members_hold(
+            Stage::RailFailed,
+            false,
+            true,
+            false,
+            false
+        ));
+        // "No payment started": finished, or a refused first call before its outcome.
+        assert!(stage_members_hold(
+            Stage::Finished,
+            false,
+            false,
+            true,
+            false
+        ));
+        assert!(stage_members_hold(
+            Stage::RailFailed,
+            false,
+            false,
+            true,
+            false
+        ));
+        for stage in [Stage::Attempted, Stage::Paying, Stage::RailPaid] {
+            assert!(
+                !stage_members_hold(stage, false, false, true, false),
+                "{stage:?}"
+            );
+        }
+        assert!(!stage_members_hold(
+            Stage::Finished,
+            true,
+            false,
+            true,
+            false
+        ));
+        assert!(!stage_members_hold(
+            Stage::Finished,
+            false,
+            true,
+            true,
+            false
+        ));
+    }
 
     #[test]
     fn test_journal_transfer_bound_refuses_a_fee_from_earlier_builds() {

@@ -6972,10 +6972,17 @@ mod tests {
                             Some(UserResolution::Unknown),
                             Some(UserResolution::Failed),
                         ] {
-                            // The states the journal refuses to hold.
-                            if proof && (failed_by_method || failed_before_call)
-                                || stage == Stage::RailPaid && !proof
-                                || failed_before_call && stage != Stage::Finished
+                            // The states the journal refuses to hold
+                            // ([`crate::journal::stage_members_hold`]), and a stage only a
+                            // proof reaches without one.
+                            if !crate::journal::stage_members_hold(
+                                stage,
+                                proof,
+                                failed_by_method,
+                                failed_before_call,
+                                user_resolved.is_some(),
+                            ) || matches!(stage, Stage::RailPaid | Stage::AcceptanceOwed)
+                                && !proof
                             {
                                 continue;
                             }
