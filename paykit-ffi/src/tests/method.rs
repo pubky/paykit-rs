@@ -1,5 +1,5 @@
 use crate::*;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, OptionalExtension};
 use std::{
     path::{Path, PathBuf},
     sync::{
@@ -40,7 +40,7 @@ enum Coverage {
 impl Account {
     pub fn open(root: &Path, clock: Arc<dyn pubky_switch_client::clock::Clock>) -> Self {
         let file = root.join("account.sqlite");
-        Connection::open(&file).unwrap().execute_batch("CREATE TABLE IF NOT EXISTS payments(attempt TEXT PRIMARY KEY,asset TEXT NOT NULL,amount TEXT NOT NULL,endpoint TEXT NOT NULL,payload TEXT NOT NULL,paid_at INTEGER NOT NULL);").unwrap();
+        super::storage::create(&file, "CREATE TABLE IF NOT EXISTS payments(attempt TEXT PRIMARY KEY,asset TEXT NOT NULL,amount TEXT NOT NULL,endpoint TEXT NOT NULL,payload TEXT NOT NULL,paid_at INTEGER NOT NULL);");
         Self {
             file,
             clock,
@@ -58,8 +58,7 @@ impl Account {
         }
     }
     pub fn count(&self) -> usize {
-        Connection::open(&self.file)
-            .unwrap()
+        super::storage::connect(&self.file)
             .query_row("SELECT count(*) FROM payments", [], |r| r.get(0))
             .unwrap()
     }
@@ -130,8 +129,7 @@ impl PaymentMethod for Account {
     }
     async fn pay(&self, p: MethodPayment) -> Result<MethodOutcome, MethodError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        Connection::open(&self.file)
-            .unwrap()
+        super::storage::connect(&self.file)
             .execute(
                 "INSERT INTO payments VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(attempt) DO NOTHING",
                 params![
@@ -160,8 +158,7 @@ impl PaymentMethod for Account {
         if self.lookup_pending.load(Ordering::SeqCst) {
             return Ok(Some(MethodOutcome::Pending));
         }
-        let paid = Connection::open(&self.file)
-            .unwrap()
+        let paid = super::storage::connect(&self.file)
             .query_row("SELECT attempt FROM payments WHERE attempt=?1", [id], |r| {
                 r.get::<_, String>(0)
             })
@@ -182,7 +179,7 @@ impl PaymentMethod for Account {
                 })
             }
         }
-        let db = Connection::open(&self.file).unwrap();
+        let db = super::storage::connect(&self.file);
         let mut query = db
             .prepare("SELECT attempt,asset,amount FROM payments ORDER BY attempt")
             .unwrap();
@@ -221,7 +218,7 @@ impl PaymentMethod for Account {
         {
             return Ok(None);
         }
-        let found=Connection::open(&self.file).unwrap().query_row("SELECT paid_at FROM payments WHERE attempt=?1 AND asset=?2 AND amount=?3 AND endpoint=?4 AND (?5 IS NULL OR payload=?5)",params![p.attempt_id,p.amount.asset,p.amount.value,p.endpoint,p.payload],|r|r.get::<_,i64>(0)).optional().unwrap();
+        let found=super::storage::connect(&self.file).query_row("SELECT paid_at FROM payments WHERE attempt=?1 AND asset=?2 AND amount=?3 AND endpoint=?4 AND (?5 IS NULL OR payload=?5)",params![p.attempt_id,p.amount.asset,p.amount.value,p.endpoint,p.payload],|r|r.get::<_,i64>(0)).optional().unwrap();
         Ok(found.map(|at| u64::try_from(at).unwrap()))
     }
     /// The account names a settlement by the endpoint paid and the proof's `payment`, so

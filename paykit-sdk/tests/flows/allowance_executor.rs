@@ -378,7 +378,8 @@ async fn test_unanswered_owner_resolution_advances_the_reserved_ledger_once() {
     drop(combined);
 
     // The other installed store accepted the same resolution, but is now missing
-    // two moves of the ledger. Knowing the old batch succeeded cannot fill that gap.
+    // two moves of the ledger. Knowing the old batch succeeded cannot fill that gap, so
+    // the restored executor refuses for good, as one restored behind its ledger.
     let next_ledger = Ledger::from_json(successor.content.value().unwrap()).unwrap();
     let next_entry = next_ledger
         .entries
@@ -397,10 +398,14 @@ async fn test_unanswered_owner_resolution_advances_the_reserved_ledger_once() {
     .unwrap();
     drop(second);
     let mut gap = Box::pin(restore_funded_wallet(&world, older_store, &backup)).await;
-    assert!(Box::pin(gap.reconcile_allowance(&key))
-        .await
-        .unwrap()
-        .is_none());
+    let behind = Box::pin(gap.reconcile_allowance(&key)).await.unwrap_err();
+    assert_eq!(
+        behind.refusal(),
+        Some(&paykit_sdk::Refusal::HeldForUser(
+            paykit_sdk::HeldForUserReason::AllowanceNotResumedAfterRestore
+        )),
+        "{behind:?}"
+    );
     assert_eq!(world.record_writes(&world.alice, &ledger.key), writes + 3);
     assert_eq!(world.rail.pay_calls(&attempt_id), 1);
 }
