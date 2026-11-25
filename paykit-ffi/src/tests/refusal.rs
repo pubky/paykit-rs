@@ -178,7 +178,7 @@ fn test_wallet_errors_categorize_each_failure_with_a_stable_code() {
         ),
         (
             PaykitError::Client(AppError::ExpiredUnsent),
-            "not_sent",
+            "retry_later",
             "expired_unsent",
         ),
         (
@@ -213,7 +213,7 @@ fn test_wallet_errors_categorize_each_failure_with_a_stable_code() {
         ),
         (
             PaykitError::Client(dispatch_answer(ErrorCode::StaleIdentity, None)),
-            "retry_later",
+            "not_sent",
             "dispatch_stale_identity",
         ),
         (
@@ -824,19 +824,25 @@ fn test_wallet_errors_match_the_host_guide_table() {
             "client_usage",                     // not sent: breaks a Dispatch rule
             "conflict",                         // nothing applied: the state changed first
             "destination",                      // refused before the attempt was written
-            "dispatch_conflict",                // refused by the Dispatch, nothing applied
+            "dispatch_identity_needed",         // refused by the Dispatch, nothing applied
+            "dispatch_moved",                   // refused by the Dispatch, nothing applied
             "dispatch_not_admitted", // refused by the recipient's Dispatch, nothing applied
             "dispatch_quota_connect_requests", // the recipient's pending list is full
+            "dispatch_quota_wait",   // refused by the Dispatch, nothing applied
+            "dispatch_stale_epoch",  // refused by the Dispatch, nothing applied
+            "dispatch_stale_generation", // refused by the Dispatch, nothing applied
+            "dispatch_stale_identity", // refused by the Dispatch, nothing applied
+            "dispatch_stale_key",    // refused by the Dispatch, nothing applied
             "dispatch_too_large",    // refused by the Dispatch as over a cap, nothing applied
+            "display_read_pending",  // not sent: a display read comes first
             "duties_too_large",      // nothing written by the backup
-            "expired_unsent",        // retired before its first send
             "invalid_input",         // the caller's value breaks a Paykit rule
             "label",                 // refused before the request was sent
             "method_not_submitted",  // the method submitted nothing
             "no_destination",        // refused before the attempt was written
             "recurring",             // refused before the attempt was written
             "transport_first_send_expired", // a first send never released
-            "transport_first_send_unavailable", // a first send the transport can't hand over
+            "transport_first_send_unavailable", // a first send that couldn't be timed
             "transport_invalid_request", // the transport couldn't build the request
             "transport_refused",     // the transport may not connect to the origin
             "unpinned",              // not sent without a pinned key
@@ -1044,9 +1050,9 @@ fn test_wallet_errors_each_refusal_variant_comes_as_one_case() {
 #[test]
 fn test_wallet_errors_full_quota_comes_as_what_frees_it() {
     for (limit, case, code) in [
-        (Some("inbox"), "retry_later", "dispatch_quota_wait"),
-        (Some("sender_share"), "retry_later", "dispatch_quota_wait"),
-        (Some("claim_share"), "retry_later", "dispatch_quota_wait"),
+        (Some("inbox"), "not_sent", "dispatch_quota_wait"),
+        (Some("sender_share"), "not_sent", "dispatch_quota_wait"),
+        (Some("claim_share"), "not_sent", "dispatch_quota_wait"),
         (
             Some("open_attempts"),
             "needs_user",
@@ -1058,7 +1064,7 @@ fn test_wallet_errors_full_quota_comes_as_what_frees_it() {
         (Some("invite_codes"), "needs_user", "dispatch_quota_full"),
         (Some("storage"), "needs_user", "dispatch_quota_full"),
         (Some("contacts"), "needs_user", "dispatch_quota_full"),
-        (Some("claims"), "retry_later", "dispatch_quota_wait"),
+        (Some("claims"), "not_sent", "dispatch_quota_wait"),
         (
             Some("connect_requests"),
             "not_sent",
@@ -1450,4 +1456,103 @@ fn test_wallet_errors_failures_after_sending_are_outcome_unknown() {
     });
     let (_, delayed) = categorized(PaykitError::Client(delayed).into()).expect("categorized");
     assert_eq!(delayed.retry_after_ms, Some(7_000));
+}
+
+/// Every Dispatch client failure, every answer of the Dispatch and every quota limit: the case
+/// is `RetryLater` exactly when the SDK's table, the one a resume applies, counts it a wait
+/// (`PaykitError::is_wait`, Paykit spec 7.2). A failure after the request may have left stays
+/// `OutcomeUnknown`, and a stop of the wallet stays `Recovery`, wait or not.
+#[test]
+fn test_wallet_errors_dispatch_client_failures_follow_the_sdk_wait_table() {
+    use pubky_dispatch_client::error::{ClientError as C, TransportError as T};
+    let reason = || String::from("reason");
+    let unread = |status, code| {
+        AppError::Switch(C::BodyUnread {
+            status,
+            code,
+            retry_after: None,
+        })
+    };
+    let mut errors = vec![
+        AppError::ExpiredUnsent,
+        AppError::NotAnsweringAsAccount { since_ms: 0 },
+        AppError::Transport(T::Connect(reason())),
+        AppError::Transport(T::Timeout),
+        AppError::Transport(T::Other(reason())),
+        AppError::Transport(T::UnreadableSignedHeader { status: 503 }),
+        AppError::Transport(T::UnreadableSignedHeader { status: 401 }),
+        AppError::Transport(T::FirstSendUnavailable),
+        AppError::Transport(T::FirstSendExpired),
+        AppError::Transport(T::Refused(reason())),
+        AppError::Transport(T::TooLarge(1)),
+        AppError::Transport(T::InvalidRequest(reason())),
+        AppError::Switch(C::Transport(T::Timeout)),
+        AppError::Switch(C::BadServiceSignature { status: 503 }),
+        AppError::Switch(C::BadServiceSignature { status: 401 }),
+        unread(429, ErrorCode::RateLimited),
+        unread(404, ErrorCode::NotFound),
+        unread(413, ErrorCode::TooLarge),
+        AppError::Switch(C::StaleAnswer { server_time_ms: 0 }),
+        AppError::Switch(C::DisplayReadPending),
+        AppError::Switch(C::InvalidResponse(reason())),
+        AppError::Switch(C::Core(pubky_dispatch_core::Error::Invalid(reason()))),
+        AppError::Switch(C::Usage(reason())),
+        AppError::Switch(C::BodyOverCap { cap: 1 }),
+        AppError::Switch(C::Unpinned),
+        AppError::Switch(C::OwnRecoveryRequired { generation: 1 }),
+        AppError::InvalidData(reason()),
+        AppError::Refused(AppRefusal::NotNow(reason())),
+        AppError::Refused(AppRefusal::Usage(reason())),
+    ];
+    errors.extend(ErrorCode::ALL.map(|code| dispatch_answer(code, None)));
+    for limit in [
+        "inbox",
+        "sender_share",
+        "claims",
+        "claim_share",
+        "open_attempts",
+        "storage",
+        "record_keys",
+        "contacts",
+        "conversations",
+        "deny",
+        "invite_codes",
+        "connect_requests",
+        "attempts",
+        "a limit these bindings don't know",
+    ] {
+        let mut answer = dispatch_answer(ErrorCode::QuotaExceeded, None);
+        if let AppError::Switch(C::Switch { current, .. }) = &mut answer {
+            *current = serde_json::json!({ "limit": limit });
+        }
+        errors.push(answer);
+    }
+    let mut checked = 0;
+    for error in errors {
+        let waits = PaykitError::Client(error.clone()).is_wait();
+        let (case, failure) =
+            categorized(PaykitError::Client(error.clone()).into()).expect("categorized");
+        if !matches!(case, "outcome_unknown" | "recovery") {
+            assert_eq!(case == "retry_later", waits, "{}: {case}", failure.code);
+            checked += 1;
+        }
+        // Behind a kept batch it may have applied; behind an earlier batch nothing of this
+        // call was sent. A stop of the wallet stays one either way.
+        let kept = AppError::Kept {
+            batch_id: [3; 16],
+            error: Box::new(error),
+        };
+        let (kept_case, kept) = categorized(PaykitError::Client(kept).into()).expect("kept");
+        let expected = if case == "recovery" {
+            "recovery"
+        } else {
+            "outcome_unknown"
+        };
+        assert_eq!(
+            (kept_case, kept.code.as_str()),
+            (expected, failure.code.as_str())
+        );
+    }
+    // The waits and the failures that aren't, each told apart by the table.
+    assert!(checked > 40, "{checked}");
 }
