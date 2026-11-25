@@ -185,6 +185,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   from the newest event found by a recent request (reused across reconnects
   within one topology epoch), and the startup audit reconciles earlier slots.
   The storage format is unchanged.
+- In the Rust-only SSE-assisted private intake API (`start_private_intake` and
   `PrivateIntakeSupervisor`), files a Linked Peer writes under its private
   directory for other Encrypted Links (except Encrypted Link Handshake slots),
   its Receipts, and deletes no longer each trigger an expected-slot fetch

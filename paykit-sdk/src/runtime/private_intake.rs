@@ -649,8 +649,9 @@ enum PrivateIntakeEventRoute {
 /// slot from the stored Encrypted Link. Healthy audits remain the delivery
 /// guarantee, so a stale scope can only drop a hint. An ignored event writes
 /// no cursor by itself, so a reconnect before the next successful audit
-/// replays it and filters it again. A poisoned scope lock leaves every peer
-/// unfiltered.
+/// replays it from the stored cursor and filters it again. A peer with no
+/// stored cursor may instead subscribe from a newer seed that skips it, and
+/// audits still cover it. A poisoned scope lock leaves every peer unfiltered.
 fn route_private_intake_event(
     group: &SubscriptionGroup,
     scopes: &std::sync::Mutex<PrivateIntakeEventScopes>,

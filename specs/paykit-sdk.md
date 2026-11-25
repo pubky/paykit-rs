@@ -1395,11 +1395,18 @@ snapshot it used. A link that moves to a new folder, for example through a
 recovery or a relink finished outside intake, is followed from the next
 acquisition that starts after the move and derives the expected slot, at the
 latest the next successful audit. A link that moves while an acquisition runs
-is therefore followed from the acquisition after that one, because the running
-one records the folder of the snapshot it read before the move. Recorded
-folders live for the stream group's task: they survive reconnects of that
-group's stream, and a topology change, such as a homeserver move, or a restart
-after buffer capacity is released starts a new task with no recorded folders.
+is followed by that same acquisition when the move also changes the stored
+Encrypted Link generation before the running attempt's last generation-checked
+storage step (the counter read, the buffer insert or the absent-slot check):
+that step finds the generation moved, and the retried attempt reads the new
+snapshot and records its folder. Any other move, for example one committed
+after that step, or one whose acquisition ends in a failure that is not
+retried or runs out of retries, is followed from the next acquisition, because
+the running one records the folder of the snapshot it read before the move.
+Recorded folders live for the stream group's task: they survive reconnects of
+that group's stream, and a topology change, such as a homeserver move, or a
+restart after buffer capacity is released starts a new task with no recorded
+folders.
 
 The connected stream remembers the highest ignored event per peer in memory. A
 later relevant event from that peer whose acquisition succeeds drops it, which
