@@ -184,11 +184,21 @@ async fn funded_ledger(world: &World, proposer: AllowanceRole) -> TestResult {
         .delete_record(&ledger, vec![])
         .await
         .unwrap_err();
-    // The client refuses the write before it is sent, a usage refusal carrying only its text
-    // (Dispatch spec 10.3).
-    for error in [update, delete] {
+    // The client refuses each write before it is sent, a usage refusal carrying only its
+    // text: the update for its missing scope (Dispatch spec 10.3), the delete already for the
+    // permanent policy's rule, which is checked before scopes (Dispatch wire 6.2).
+    for (error, why_refused) in [
+        (
+            update,
+            "the certificate lacks the scope required for the record write",
+        ),
+        (
+            delete,
+            "a delete at a permanent policy, in a generation it doesn't pass",
+        ),
+    ] {
         assert!(
-            matches!(&error, AppError::Refused(Refusal::Usage(why)) if why.contains("the certificate lacks the scope required for the record write")),
+            matches!(&error, AppError::Refused(Refusal::Usage(why)) if why.contains(why_refused)),
             "{error}"
         );
     }
