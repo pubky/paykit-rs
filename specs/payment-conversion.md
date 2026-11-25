@@ -183,7 +183,7 @@ A newer quote never overwrites an older one. **Each issued quote remains usable
 from its validity start until its own expiry**, subject to the request deadline and cancellation policy.
 The payee commits to each price for that interval; applications should choose
 quote lifetimes accordingly. A wallet may choose a newer quote before approval,
-but cannot silently Dispatch the approved amount or selected quote afterward.
+but cannot silently switch the approved amount or selected quote afterward.
 Quote publication or receipt never grants spending authorization.
 
 The payer sets the Payment Proof's optional `conversion_quote_id` to the selected

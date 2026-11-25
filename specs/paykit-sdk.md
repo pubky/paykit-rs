@@ -2222,7 +2222,7 @@ Restore requires an empty destination, apart from initialized identity metadata;
 it never replaces live shared state. Restored accounting invalidates prepared
 handoffs and blocks new admission until complete wallet reconciliation. Paykit key rotation retains
 payment history and imposes the same recovery block. Sign-out and local session
-clearing leave the shared ledger intact. Dispatching identities accesses that
+clearing leave the shared ledger intact. Switching identities accesses that
 identity's separate state; missing history requires complete wallet
 reconciliation before further admission. Restored identifiers must have canonical
 lowercase UUID-v4 spelling, and malformed or inconsistent accounting fails closed.
