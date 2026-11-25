@@ -149,7 +149,16 @@ async fn grant(
         rail.clone(),
     ))
     .await?;
-    let (key, allowance_id) = Box::pin(accept(&mut payer, &mut seller, proposer)).await?;
+    // The acceptance runs as a task of its own on the local set and hands the wallets back:
+    // the send path it drives starts from the runtime, not under this harness's frames,
+    // which are large in a debug build; the stack the acceptance itself needs is unchanged.
+    let (payer_back, seller_back, accepted) = tokio::task::spawn_local(async move {
+        let accepted = Box::pin(accept(&mut payer, &mut seller, proposer)).await;
+        (payer, seller, accepted)
+    })
+    .await?;
+    let (mut payer, mut seller) = (payer_back, seller_back);
+    let (key, allowance_id) = accepted?;
     let permanent = payer
         .app()
         .shared_record(&key)

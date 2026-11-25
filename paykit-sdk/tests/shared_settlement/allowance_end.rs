@@ -4,6 +4,23 @@ use paykit_lib::allowances::AllowanceTerms;
 use paykit_sdk::{AllowanceRole, AllowanceStatus, NoticeKind, Refusal};
 use pubky_dispatch_client::app::{AppEvent, RecordApplication, UserConfirmed};
 
+/// Run one step of a wallet as a task of its own on the test's local set, then take the
+/// wallet back. The step's poll starts from the runtime, so the send path it drives runs
+/// under the runtime's frames only, not under this harness's, which are large in a debug
+/// build; the stack the step itself needs is unchanged.
+macro_rules! in_task {
+    ($app:ident . $($step:tt)*) => {{
+        let mut app = $app;
+        let (app, result) = tokio::task::spawn_local(async move {
+            let result = Box::pin(app.$($step)*).await;
+            (app, result)
+        })
+        .await?;
+        $app = app;
+        result
+    }};
+}
+
 #[tokio::test]
 async fn test_enrolled_allowance_ends_before_and_after_placing_the_original() -> TestResult {
     for backend in [Backend::Scripted, Backend::Service] {
@@ -207,19 +224,25 @@ enum RecoveredProposal {
 }
 
 async fn terminal_after_loss(case: RecoveredProposal) -> TestResult {
-    for backend in [Backend::Scripted, Backend::Service] {
-        let Some(world) = World::start(backend)? else {
-            continue;
-        };
-        let result = Box::pin(withdraw_recovered_proposal(&world, case)).await;
-        world.close().await?;
-        result?;
-    }
-    Ok(())
+    // A local set, so the deepest steps can run as tasks of their own (`in_task!`).
+    tokio::task::LocalSet::new()
+        .run_until(Box::pin(async move {
+            for backend in [Backend::Scripted, Backend::Service] {
+                let Some(world) = World::start(backend)? else {
+                    continue;
+                };
+                let result = Box::pin(withdraw_recovered_proposal(&world, case)).await;
+                world.close().await?;
+                result?;
+            }
+            Ok(())
+        }))
+        .await
 }
 
 async fn withdraw_recovered_proposal(w: &World, case: RecoveredProposal) -> TestResult {
-    if let Some(withdrawn) = Box::pin(receive_fenced_acceptance(w, case)).await? {
+    let setup = Box::pin(fenced_setup(w, case)).await?;
+    if let Some(withdrawn) = Box::pin(receive_fenced_acceptance(w, case, setup)).await? {
         Box::pin(receive_withdrawal_return(w, withdrawn)).await?;
     }
     Ok(())
@@ -343,13 +366,17 @@ async fn check_incomplete_backup(
     Ok(key.clone())
 }
 
-async fn receive_fenced_acceptance(
-    w: &World,
-    case: RecoveredProposal,
-) -> TestResult<Option<Box<Withdrawn>>> {
-    use pubky_dispatch_client::app::{Collection, RecordTarget};
-    use pubky_dispatch_core::ops::Condition;
+/// The signer, wallets, rail and payer store [`receive_fenced_acceptance`] starts from, set
+/// up before it so their setup runs under the smaller frames of its caller.
+struct FencedSetup {
+    rail: Arc<FakeRail>,
+    payer_store: Arc<MemoryStore>,
+    signer: Signer,
+    payer: Paykit,
+    shop: Paykit,
+}
 
+async fn fenced_setup(w: &World, case: RecoveredProposal) -> TestResult<FencedSetup> {
     let rail = Arc::new(FakeRail::with_clock(w.clock().clone()));
     let payer_store = Arc::new(MemoryStore::new());
     let payer_scopes = AppScopes::new().allowance_execute();
@@ -358,7 +385,7 @@ async fn receive_fenced_acceptance(
     } else {
         payer_scopes
     };
-    let (mut signer, mut payer, mut shop) = Box::pin(wallets(
+    let (signer, payer, shop) = Box::pin(wallets(
         w,
         payer_store.clone(),
         Arc::new(MemoryStore::new()),
@@ -366,12 +393,39 @@ async fn receive_fenced_acceptance(
         &rail,
     ))
     .await?;
+    Ok(FencedSetup {
+        rail,
+        payer_store,
+        signer,
+        payer,
+        shop,
+    })
+}
+
+async fn receive_fenced_acceptance(
+    w: &World,
+    case: RecoveredProposal,
+    setup: FencedSetup,
+) -> TestResult<Option<Box<Withdrawn>>> {
+    use pubky_dispatch_client::app::{Collection, RecordTarget};
+    use pubky_dispatch_core::ops::Condition;
+
+    let FencedSetup {
+        rail,
+        payer_store,
+        signer,
+        payer,
+        shop,
+    } = setup;
+    // Boxed, so each step that runs as a task of its own moves a pointer, not a wallet.
+    let (mut signer, mut payer, mut shop) = (Box::new(signer), Box::new(payer), Box::new(shop));
     let peer = shop.identity();
     let unrelated = if case == RecoveredProposal::Unrelated {
-        let other =
-            Box::pin(payer.propose_executable_allowance(peer, terms()?, UserConfirmed::new()))
-                .await?;
-        Box::pin(shop.receive(None)).await?;
+        let other = {
+            let proposal = terms()?;
+            in_task!(payer.propose_executable_allowance(peer, proposal, UserConfirmed::new()))?
+        };
+        in_task!(shop.receive(None))?;
         let mirror = shop
             .allowances()
             .await?
@@ -379,8 +433,8 @@ async fn receive_fenced_acceptance(
             .find(|v| v.allowance_id == other.allowance_id)
             .ok_or("missing unrelated seller proposal")?
             .record;
-        Box::pin(shop.accept_allowance(&mirror)).await?;
-        Box::pin(payer.receive(None)).await?;
+        in_task!(shop.accept_allowance(&mirror))?;
+        in_task!(payer.receive(None))?;
         assert_eq!(
             payer.allowance(&other.record).await?.status,
             AllowanceStatus::Accepted
@@ -410,8 +464,10 @@ async fn receive_fenced_acceptance(
     if case == RecoveredProposal::Interrupted {
         w.lose_answer("POST", "/ops");
     }
-    let offer =
-        Box::pin(payer.propose_executable_allowance(peer, terms()?, UserConfirmed::new())).await?;
+    let offer = {
+        let proposal = terms()?;
+        in_task!(payer.propose_executable_allowance(peer, proposal, UserConfirmed::new()))?
+    };
     if case == RecoveredProposal::Interrupted {
         assert!(matches!(
             offer.delivery,
@@ -419,17 +475,19 @@ async fn receive_fenced_acceptance(
         ));
         let id = payer.app_id();
         drop(payer);
-        payer = Box::pin(Paykit::load(
-            w.app_env(payer_store.clone()),
-            Default::default(),
-            id,
-            rail.clone(),
-            Arc::new(TestTimer),
-        ))
-        .await?;
+        payer = Box::new(
+            Box::pin(Paykit::load(
+                w.app_env(payer_store.clone()),
+                Default::default(),
+                id,
+                rail.clone(),
+                Arc::new(TestTimer),
+            ))
+            .await?,
+        );
         Box::pin(finish_restored_withdrawal(&mut payer)).await?;
     }
-    Box::pin(shop.receive(None)).await?;
+    in_task!(shop.receive(None))?;
     let mirror = shop
         .allowances()
         .await?
@@ -460,14 +518,16 @@ async fn receive_fenced_acceptance(
         // The same app imports its older backup while G1 can still authenticate P.
         // Its new store learns P from the service without the original create receipt.
         drop(payer);
-        payer = Box::pin(Paykit::restore(
-            w.app_env(Arc::new(MemoryStore::new())),
-            Default::default(),
-            &before_proposal,
-            rail.clone(),
-            Arc::new(TestTimer),
-        ))
-        .await?;
+        payer = Box::new(
+            Box::pin(Paykit::restore(
+                w.app_env(Arc::new(MemoryStore::new())),
+                Default::default(),
+                &before_proposal,
+                rail.clone(),
+                Arc::new(TestTimer),
+            ))
+            .await?,
+        );
         Box::pin(finish_restored_withdrawal(&mut payer)).await?;
         let RecordApplication {
             record: known,
@@ -493,24 +553,25 @@ async fn receive_fenced_acceptance(
     let next = "https://replacement.buyer.allowance.test";
     w.lose_dispatch("https://buyer.allowance.test");
     w.add_dispatch(next, &[&w.identity("buyer")?]).await?;
-    Box::pin(signer.declare_provider_loss(
+    in_task!(signer.declare_provider_loss(
         next,
         pubky_dispatch_signer::UserConfirmed::shown_and_confirmed(),
-    ))
-    .await?;
-    Box::pin(signer.end_staged_admission()).await?;
+    ))?;
+    in_task!(signer.end_staged_admission())?;
     if case == RecoveredProposal::Missing {
         drop(payer);
-        payer = Box::pin(Paykit::restore(
-            w.app_env(Arc::new(MemoryStore::new())),
-            Default::default(),
-            &before_proposal,
-            rail.clone(),
-            Arc::new(TestTimer),
-        ))
-        .await?;
+        payer = Box::new(
+            Box::pin(Paykit::restore(
+                w.app_env(Arc::new(MemoryStore::new())),
+                Default::default(),
+                &before_proposal,
+                rail.clone(),
+                Arc::new(TestTimer),
+            ))
+            .await?,
+        );
         // The restored wallet first reads with its original enrollment.
-        Box::pin(payer.receive(None)).await?;
+        in_task!(payer.receive(None))?;
     }
     if let Some(phone) = phone.as_mut() {
         Box::pin(upload_without_proof(w, phone, next, opening, &original_op)).await?;
@@ -583,7 +644,7 @@ async fn receive_fenced_acceptance(
     } else {
         None
     };
-    let answer = Box::pin(shop.accept_allowance(&mirror)).await?;
+    let answer = in_task!(shop.accept_allowance(&mirror))?;
     assert_eq!(
         shop.allowance(&mirror).await?.status,
         AllowanceStatus::Accepted
@@ -603,8 +664,8 @@ async fn receive_fenced_acceptance(
             .put_record(&target, pending, vec![condition])
             .await?;
         assert_ne!(later.version, original.version);
-        Box::pin(payer.receive(None)).await?;
-        Box::pin(payer.flush()).await?;
+        in_task!(payer.receive(None))?;
+        in_task!(payer.flush())?;
         let RecordApplication {
             record: retained, ..
         } = payer
@@ -622,9 +683,9 @@ async fn receive_fenced_acceptance(
                 && n.msg_id.as_deref() == Some(answer.as_str())));
     }
     if case == RecoveredProposal::Denied {
-        Box::pin(payer.block(&peer)).await?;
-        Box::pin(payer.receive(None)).await?;
-        Box::pin(payer.flush()).await?;
+        in_task!(payer.block(&peer))?;
+        in_task!(payer.receive(None))?;
+        in_task!(payer.flush())?;
         let RecordApplication {
             application: revision,
             ..
@@ -667,7 +728,7 @@ async fn receive_fenced_acceptance(
     } else if case == RecoveredProposal::UploadWithoutProof {
         w.unreachable("POST", "/ops");
     }
-    let read = Box::pin(payer.receive(None)).await?;
+    let read = in_task!(payer.receive(None))?;
     assert!(read
         .report
         .events
@@ -683,8 +744,8 @@ async fn receive_fenced_acceptance(
             })
             .ok_or("missing permanent-refusal notice")?;
         payer.acknowledge_notice(&notice.id).await?;
-        Box::pin(payer.receive(None)).await?;
-        Box::pin(payer.flush()).await?;
+        in_task!(payer.receive(None))?;
+        in_task!(payer.flush())?;
         assert!(payer.notices().await?.iter().all(|n| n.id != notice.id));
         let RecordApplication {
             application: installed,
@@ -739,14 +800,14 @@ async fn receive_fenced_acceptance(
                 .refusal(),
             Some(Refusal::NotFound)
         ));
-        Box::pin(payer.flush()).await?;
+        in_task!(payer.flush())?;
         assert!(!payer
             .app()
             .sent_to(&peer, 0, u64::MAX)
             .await?
             .iter()
             .any(|m| m.kind == "paykit.allowance_end"));
-        Box::pin(shop.receive(None)).await?;
+        in_task!(shop.receive(None))?;
         assert_eq!(
             shop.allowance(&mirror).await?.status,
             AllowanceStatus::Accepted
@@ -800,14 +861,16 @@ async fn receive_fenced_acceptance(
         );
         let id = payer.app_id();
         drop(payer);
-        payer = Box::pin(Paykit::load(
-            w.app_env(payer_store.clone()),
-            Default::default(),
-            id,
-            rail.clone(),
-            Arc::new(TestTimer),
-        ))
-        .await?;
+        payer = Box::new(
+            Box::pin(Paykit::load(
+                w.app_env(payer_store.clone()),
+                Default::default(),
+                id,
+                rail.clone(),
+                Arc::new(TestTimer),
+            ))
+            .await?,
+        );
         Box::pin(finish_restored_withdrawal(&mut payer)).await?;
     }
     assert!(payer
@@ -815,7 +878,7 @@ async fn receive_fenced_acceptance(
         .await
         .is_err());
     let selection = selection.unwrap();
-    Box::pin(payer.flush()).await?;
+    in_task!(payer.flush())?;
     let sent = payer.app().sent_to(&peer, 0, u64::MAX).await?;
     let end = sent
         .iter()
@@ -851,8 +914,8 @@ async fn receive_fenced_acceptance(
         case,
         rail,
         payer_store,
-        payer,
-        shop,
+        payer: *payer,
+        shop: *shop,
         offer,
         pending_key,
         mirror,
