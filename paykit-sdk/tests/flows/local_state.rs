@@ -588,11 +588,15 @@ async fn test_local_state_users_resolution_beside_a_proof_the_recheck_found_read
         .await
         .unwrap();
     let key = journal(&attempt_id);
-    let mut entry = held_json(&wallet, &key).await;
+    let entry = held_json(&wallet, &key).await;
     assert_eq!(entry["d"]["stage"], json!("finished"), "{entry}");
     assert_eq!(entry["d"]["user_resolved"], json!("failed"), "{entry}");
-    entry["d"]["failed_by_method"] = json!(true);
-    put(&mut wallet, &key, &entry).await;
+    // The method's failure, kept beside the entry, still asked about.
+    let facts_key = format!("jf/{}", attempt_id.to_text());
+    let mut facts = held_json(&wallet, &facts_key).await;
+    facts["d"]["method_failed"] = json!(true);
+    facts["d"]["ask_again"] = json!(true);
+    put(&mut wallet, &facts_key, &facts).await;
     w.rail.settle(&attempt_id, false);
     w.rail.complete_after_failure(&attempt_id);
     // The outcome's write and its retry on the last flush go unanswered.

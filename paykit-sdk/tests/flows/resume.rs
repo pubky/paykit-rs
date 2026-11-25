@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use paykit_lib::AttemptId;
 use paykit_sdk::rail::Behaviour;
-use paykit_sdk::{PayOptions, PayOutcome, Paykit, PaykitConfig, Rail, Stage};
+use paykit_sdk::{PayOptions, PayOutcome, PayeeStatus, Paykit, PaykitConfig, Rail, Stage};
 use pubky_switch_client::clock::Clock;
 use pubky_switch_client::error::TransportError;
 use pubky_switch_client::testing::Fault;
@@ -16,8 +16,13 @@ use crate::common::{draft, request_from, store, World};
 /// Two payments left in flight, in the order a resume visits them.
 async fn two_in_flight(w: &World, wallet: &mut Paykit) -> [AttemptId; 2] {
     let mut shop = w.shop().await;
+    two_in_flight_from(w, wallet, &mut shop).await
+}
+
+/// [`two_in_flight`], to requests `shop` sends.
+async fn two_in_flight_from(w: &World, wallet: &mut Paykit, shop: &mut Paykit) -> [AttemptId; 2] {
     for amount in ["1", "2"] {
-        request_from(&mut shop, w.alice_id(), draft(amount, w.clock.now_ms())).await;
+        request_from(shop, w.alice_id(), draft(amount, w.clock.now_ms())).await;
     }
     wallet.receive(None).await.unwrap();
     for request in wallet.requests().await.unwrap() {
@@ -438,10 +443,19 @@ async fn test_resume_returns_paid_outcomes_when_a_timed_out_write_applied() {
 /// Two payments in flight on a wallet whose transport refuses its next `/ops` write with
 /// the error put in `next`.
 async fn in_flight_behind(w: &World) -> (Paykit, [AttemptId; 2], Arc<RefusingOps>) {
+    let mut shop = w.shop().await;
+    in_flight_behind_from(w, &mut shop).await
+}
+
+/// [`in_flight_behind`], to requests `shop` sends.
+async fn in_flight_behind_from(
+    w: &World,
+    shop: &mut Paykit,
+) -> (Paykit, [AttemptId; 2], Arc<RefusingOps>) {
     let base = store();
     let mut wallet = w.wallet_on("wallet", Arc::clone(&base)).await;
     let app_id = wallet.app_id();
-    let attempts = two_in_flight(w, &mut wallet).await;
+    let attempts = two_in_flight_from(w, &mut wallet, shop).await;
     drop(wallet);
     let transport = Arc::new(RefusingOps {
         inner: Arc::clone(&w.router),
@@ -496,12 +510,30 @@ async fn second_resolved_failed_and_kept(w: &World) -> (Paykit, [AttemptId; 2], 
     second_resolved_and_kept(w, paykit_sdk::Resolution::Failed).await
 }
 
+/// [`second_resolved_failed_and_kept`], to requests `shop` sends.
+async fn second_resolved_failed_and_kept_from(
+    w: &World,
+    shop: &mut Paykit,
+) -> (Paykit, [AttemptId; 2], Arc<RefusingOps>) {
+    second_resolved_and_kept_from(w, shop, paykit_sdk::Resolution::Failed).await
+}
+
 /// [`second_resolved_failed_and_kept`], the user resolving it as `resolution`.
 async fn second_resolved_and_kept(
     w: &World,
     resolution: paykit_sdk::Resolution,
 ) -> (Paykit, [AttemptId; 2], Arc<RefusingOps>) {
-    let (mut wallet, [first, second], transport) = in_flight_behind(w).await;
+    let mut shop = w.shop().await;
+    second_resolved_and_kept_from(w, &mut shop, resolution).await
+}
+
+/// [`second_resolved_and_kept`], to requests `shop` sends.
+async fn second_resolved_and_kept_from(
+    w: &World,
+    shop: &mut Paykit,
+    resolution: paykit_sdk::Resolution,
+) -> (Paykit, [AttemptId; 2], Arc<RefusingOps>) {
+    let (mut wallet, [first, second], transport) = in_flight_behind_from(w, shop).await;
     let obligation = wallet
         .payments()
         .await
@@ -624,6 +656,88 @@ async fn test_resume_keeps_the_methods_proof_over_a_replayed_resolution() {
     }
     let paid = wallet.payments().await.unwrap();
     assert!(paid.iter().all(|p| p.paid_by_method), "{paid:?}");
+}
+
+#[tokio::test]
+async fn test_resume_delivers_the_proof_kept_over_a_replayed_resolution_to_the_payee() {
+    // As above, with the payee reading: the proof the method gave, which the replayed
+    // resolution's journal write doesn't take back, reaches the payee for both payments.
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let (mut wallet, [first, second], transport) =
+        second_resolved_failed_and_kept_from(&w, &mut shop).await;
+    for attempt in [first, second] {
+        w.rail.settle(&attempt, true);
+    }
+    *transport.next.lock().unwrap() = Some(TransportError::Timeout);
+    let outcomes = wallet.resume_payments().await.unwrap();
+    assert!(
+        outcomes.iter().all(|outcome| matches!(
+            outcome,
+            PayOutcome::Paid {
+                proof_msg_id: Some(_),
+                ..
+            }
+        )),
+        "{outcomes:?}"
+    );
+    wallet.flush().await.unwrap();
+    shop.receive(None).await.unwrap();
+    let activity = shop.payee_activity().await.unwrap();
+    assert_eq!(activity.len(), 2, "{activity:?}");
+    for record in &activity {
+        assert!(
+            matches!(
+                record.status,
+                PayeeStatus::ProofReceived | PayeeStatus::Receipted
+            ),
+            "{activity:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_resume_rechecks_every_failed_payment_past_a_lookup_it_cant_read() {
+    // Both payments were reported failed by the method, then made after all. The method's
+    // history can't be read for the first now: a wait, so the recheck leaves it and still
+    // finds the second made. The next recheck finds the first.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let [first, second] = two_in_flight(&w, &mut wallet).await;
+    for attempt in [first, second] {
+        w.rail.settle(&attempt, false);
+    }
+    let outcomes = wallet.resume_payments().await.unwrap();
+    assert!(
+        outcomes
+            .iter()
+            .all(|outcome| matches!(outcome, PayOutcome::Failed { .. })),
+        "{outcomes:?}"
+    );
+    for attempt in [first, second] {
+        w.rail.complete_after_failure(&attempt);
+    }
+    w.rail.set_lookup_unavailable(&first, true);
+    let outcomes = wallet.resume_payments().await.unwrap();
+    assert!(
+        matches!(
+            outcomes.as_slice(),
+            [PayOutcome::Paid { attempt_id, .. }] if *attempt_id == second
+        ),
+        "{outcomes:?}"
+    );
+    w.rail.set_lookup_unavailable(&first, false);
+    let outcomes = wallet.resume_payments().await.unwrap();
+    assert!(
+        matches!(
+            outcomes.as_slice(),
+            [PayOutcome::Paid { attempt_id, .. }] if *attempt_id == first
+        ),
+        "{outcomes:?}"
+    );
+    for attempt in [first, second] {
+        assert_eq!(w.rail.pay_calls(&attempt), 1);
+    }
 }
 
 #[tokio::test]
@@ -822,6 +936,9 @@ async fn resumed_under(
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let attempts = two_in_flight(&w, &mut wallet).await;
+    // The user's `failed`, kept behind a timeout, which no call has reported yet.
+    let mut user_failed_kept = false;
+    let mut told = Vec::new();
     let ops_time_out = |n: usize| {
         for _ in 0..n {
             w.alice.switch().fail_next(Fault::Unanswered {
@@ -847,6 +964,8 @@ async fn resumed_under(
             Sent::Applied => {}
         }
         // Refused, kept or applied: each is a state a resume may meet.
+        user_failed_kept =
+            matches!(resolution, paykit_sdk::Resolution::Failed) && sent != Sent::Applied;
         let _ = wallet
             .resolve_attempt(
                 &obligation,
@@ -881,15 +1000,47 @@ async fn resumed_under(
                     .all(|outcome| attempts.contains(&outcome.attempt_id())),
                 "{case}: {outcomes:?}"
             );
+            told.extend(outcomes);
         }
     }
-    for attempt in attempts {
-        assert!(w.rail.executions(&attempt) <= 1, "{case}");
-    }
+    // No payment is made twice, under its attempt or any other.
+    let executions = w.rail.all_executions();
+    assert!(
+        executions.keys().all(|attempt| attempts.contains(attempt)),
+        "{case}: {executions:?}"
+    );
+    assert!(
+        executions.values().all(|n| *n <= 1),
+        "{case}: {executions:?}"
+    );
     // With the switch answering again, the journal settles: nothing is left told as open
     // that the journal holds as over, which the check inside judges once more.
     let settled = wallet.resume_payments().await;
     assert!(settled.is_ok(), "{case}: {settled:?}");
+    told.extend(settled.unwrap_or_default());
+    // The user's `failed`, applied by its kept batch, is reported as the user's, once, where
+    // the method neither paid nor failed it.
+    if user_failed_kept && shows[target] == Shows::Pending {
+        let over: Vec<_> = told
+            .iter()
+            .filter(|outcome| outcome.attempt_id() == attempts[target])
+            .filter(|outcome| {
+                matches!(
+                    outcome,
+                    PayOutcome::Failed { .. }
+                        | PayOutcome::Resolved { .. }
+                        | PayOutcome::Paid { .. }
+                )
+            })
+            .collect();
+        assert!(
+            matches!(
+                over.as_slice(),
+                [PayOutcome::Failed { reason, .. }] if reason == "the user resolved it as failed"
+            ),
+            "{case}: {told:?}"
+        );
+    }
 }
 
 /// Every combination for a resolution of the payment at `target`.

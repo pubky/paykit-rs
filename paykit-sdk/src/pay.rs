@@ -64,7 +64,8 @@ use crate::conversion::{self, Priced, PricedPayment, RateSource};
 use crate::destination::{payee_copy_usable, Carrier, Need};
 use crate::error::{PaykitError, Refusal, Result};
 use crate::journal::{
-    Destination, JournalEntry, KeptAmount, KeptPrice, PaymentView, Stage, TransferBound,
+    AttemptFacts, Destination, JournalEntry, KeptAmount, KeptPrice, PaymentView, Stage,
+    TransferBound,
 };
 use crate::notices::NoticeKind;
 use crate::paykit::Paykit;
@@ -1189,16 +1190,32 @@ const NO_PAYMENT_STARTED: &str = "Paykit spec 7.2: no payment started";
 const USER_FAILED: &str = "the user resolved it as failed";
 
 /// What a resume gathered at the entries' turns that the journal doesn't hold when the call
-/// ends ([`resume_outcomes`]).
+/// ends ([`resume_outcomes`]): what a step told of an entry it left open that says more than
+/// its stage does, that the method's history can't tell, that the app isn't current, or
+/// that the payer's record holds the outcome back.
 #[derive(Default)]
 struct Turns {
-    /// What a step told of an entry it left open that says more than its stage does: that
-    /// the method's history can't tell, that the app isn't current, or that the payer's
-    /// record holds the outcome back.
     open: HashMap<AttemptId, PayOutcome>,
-    /// The attempts whose entry held the method's word that the payment failed, right after
-    /// its step: the recheck of failed attempts may clear that word in the same call.
-    method_failed: std::collections::HashSet<AttemptId>,
+}
+
+/// What a failure kept at a resume failed at, so the call returns it only while that work
+/// is still to do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Work {
+    /// An entry's own step.
+    Step,
+    /// Placing an acceptance owed.
+    Acceptance,
+    /// The recheck's lookup of a failure the method reported.
+    Recheck,
+}
+
+/// A failure a resume met short of a wallet-wide stop, judged once the call's work is done.
+struct Pending {
+    error: PaykitError,
+    /// The attempt and its claim, where the failure is one entry's.
+    attempt: Option<(AttemptId, [u8; 32])>,
+    work: Work,
 }
 
 impl Turns {
@@ -1229,28 +1246,49 @@ struct EntryFacts {
     /// The method's proof is held.
     proof: bool,
     proof_msg_id: Option<String>,
-    failed_by_method: bool,
+    /// The method said the payment failed ([`AttemptFacts::method_failed`]).
+    method_failed: bool,
+    /// The recheck still asks the method's history about it.
+    ask_again: bool,
     failed_before_call: bool,
     user_resolved: Option<crate::journal::UserResolution>,
+    /// A call returned its outcome once it was over ([`AttemptFacts::told`]).
+    told: bool,
+    /// That outcome was paid ([`AttemptFacts::told_paid`]).
+    told_paid: bool,
 }
 
 impl EntryFacts {
-    /// The facts of every entry that names its attempt, in the journal's order.
-    fn of(journal: &[JournalEntry]) -> Vec<Self> {
+    /// The facts of every entry that names its attempt, in the journal's order, each read
+    /// through the method's word.
+    fn of(journal: &[(JournalEntry, AttemptFacts)]) -> Vec<Self> {
         journal
             .iter()
-            .filter_map(|entry| {
+            .filter_map(|(entry, facts)| {
                 Some(Self {
                     attempt_id: entry.attempt().ok()?,
                     stage: entry.stage,
                     proof: entry.rail_proof.is_some(),
                     proof_msg_id: entry.proof_msg_id.clone(),
-                    failed_by_method: entry.failed_by_method,
+                    method_failed: facts.method_failed || entry.failed_by_method,
+                    ask_again: entry.failed_by_method,
                     failed_before_call: entry.failed_before_call,
                     user_resolved: entry.user_resolved,
+                    told: facts.told,
+                    told_paid: facts.told_paid,
                 })
             })
             .collect()
+    }
+
+    /// Whether a call returned the outcome the entry stands at now: paid, with the method's
+    /// proof, or the one it had without a proof.
+    fn told_as_it_stands(&self) -> bool {
+        if self.proof {
+            self.told_paid
+        } else {
+            self.told
+        }
     }
 
     /// Whether the entry still has work a resume does, as [`JournalEntry::open`].
@@ -1270,28 +1308,24 @@ impl EntryFacts {
 ///
 /// Each entry is reported at most once, in the journal's order:
 ///
-/// - **over before the call:** nothing, unless the call found its payment made after all,
-///   which it reports as it stands now, paid or paid and unwritten;
-/// - **open before, over now,** by its own step or by a batch sent at another's:
-///   exactly one outcome, read from the entry ([`over_outcome`]); only an entry abandoned
-///   before its attempt reached the claim reports none, having no attempt to report;
-/// - **still open:** its open form ([`open_outcome`]).
-fn resume_outcomes(before: &[EntryFacts], after: &[EntryFacts], turns: &Turns) -> Vec<PayOutcome> {
+/// - **still open:** its open form ([`open_outcome`]);
+/// - **over, and not yet told** ([`AttemptFacts::told`]), whether this call ended it, by
+///   its own step or by a batch sent at another's, or an earlier call that returned an
+///   error or never returned did: exactly one outcome, read from the entry
+///   ([`over_outcome`]); only an entry abandoned before its attempt reached the claim reports
+///   none, having no attempt to report;
+/// - **over and told already as it stands:** nothing. One told without a proof and since
+///   found paid stands paid, and is reported paid once more.
+fn resume_outcomes(after: &[EntryFacts], turns: &Turns) -> Vec<PayOutcome> {
     let mut out = Vec::new();
     for now in after {
-        let was = before.iter().find(|was| was.attempt_id == now.attempt_id);
-        let was_over = was.is_some_and(|was| !was.open());
         let outcome = if now.open() {
             // Open, or opened again by a payment found made after its failure was written.
             Some(open_outcome(now, turns))
-        } else if was_over {
-            let gained = now.proof && was.is_some_and(|was| !was.proof);
-            gained.then(|| PayOutcome::Paid {
-                attempt_id: now.attempt_id,
-                proof_msg_id: now.proof_msg_id.clone(),
-            })
+        } else if now.told_as_it_stands() {
+            None
         } else {
-            over_outcome(was, now, turns)
+            over_outcome(now)
         };
         out.extend(outcome);
     }
@@ -1343,25 +1377,26 @@ fn open_outcome(now: &EntryFacts, turns: &Turns) -> PayOutcome {
     }
 }
 
-/// The one outcome of an entry the call found open and leaves over, `None` only for one
-/// abandoned before its attempt reached the claim. Read from the entry, in this order:
+/// The one outcome of an entry over and not yet told, `None` only for one abandoned before
+/// its attempt reached the claim. Read from the entry, in this order:
 ///
-/// 1. the method's proof: paid;
+/// 1. the method's proof: paid, whatever else the entry says;
 /// 2. an acceptance still owed, which only a payment `done` says was made owes, and the
 ///    user's resolution ([`JournalEntry::user_resolved`]): failed where the user said so,
 ///    and otherwise [`PayOutcome::Resolved`], never a failure the user didn't state;
-/// 3. the method's word that the payment failed, held by the entry before the call, now,
-///    or right after its step: failed, as the method reported;
+/// 3. the method's word that the payment failed ([`AttemptFacts::method_failed`]): failed,
+///    as the method reported;
 /// 4. this app's own `failed` written on the claim while the attempt was before the
 ///    method's call, or the method's refusal of a first call
 ///    ([`JournalEntry::failed_before_call`]): failed, no payment started. The
 ///    mark is in the journal copy that write's batch carries, so it is there only once the
-///    write applied; a write that didn't go through leaves the entry open, and it is
+///    write applied, and only where the claim this call read didn't show the attempt
+///    otherwise ended; a write that didn't go through leaves the entry open, and it is
 ///    reported pending;
 /// 5. anything else: [`PayOutcome::Resolved`]. An entry finished with no such evidence, as
 ///    one another own app resolved on the claim, is never reported failed: a failure is
 ///    reported only on positive evidence that no payment was made (Paykit spec 7.2, 8.4).
-fn over_outcome(was: Option<&EntryFacts>, now: &EntryFacts, turns: &Turns) -> Option<PayOutcome> {
+fn over_outcome(now: &EntryFacts) -> Option<PayOutcome> {
     use crate::journal::UserResolution;
     let attempt_id = now.attempt_id;
     let failed = |reason: &str| PayOutcome::Failed {
@@ -1381,15 +1416,12 @@ fn over_outcome(was: Option<&EntryFacts>, now: &EntryFacts, turns: &Turns) -> Op
     if now.stage == Stage::AcceptanceOwed {
         return Some(PayOutcome::Resolved { attempt_id });
     }
+    // The user's word that it was paid, or may have been, outlasts the method's failure; where
+    // both the method and the user said it failed, the method's word is the reason.
     Some(match now.user_resolved {
-        Some(UserResolution::Failed) => failed(USER_FAILED),
         Some(UserResolution::Done | UserResolution::Unknown) => PayOutcome::Resolved { attempt_id },
-        None if now.failed_by_method
-            || was.is_some_and(|was| was.failed_by_method)
-            || turns.method_failed.contains(&attempt_id) =>
-        {
-            failed(METHOD_FAILED)
-        }
+        Some(UserResolution::Failed) | None if now.method_failed => failed(METHOD_FAILED),
+        Some(UserResolution::Failed) => failed(USER_FAILED),
         None if now.failed_before_call => failed(NO_PAYMENT_STARTED),
         None => PayOutcome::Resolved { attempt_id },
     })
@@ -1399,18 +1431,19 @@ fn over_outcome(was: Option<&EntryFacts>, now: &EntryFacts, turns: &Turns) -> Op
 /// it agrees. Written apart from [`resume_outcomes`], as the rule that function must keep:
 ///
 /// - no attempt is reported twice, and every outcome names an entry the journal holds;
-/// - no entry lost a proof it held before the call, nor one the method's history gave in the
-///   call (`paid_in_call`);
+/// - no entry the call found is gone before its end, and none lost a proof it held;
 /// - an entry still open is reported once, in an open form that agrees with its proof;
-/// - an entry the call found open and leaves over is reported exactly once: paid with a
-///   proof, failed or resolved without one, a failure never for an entry the user resolved
-///   as paid or unknown; one abandoned is not reported;
-/// - an entry over before the call is reported only when it gained a proof.
+/// - an entry over and not told as it stands is reported exactly once: paid with a
+///   proof, resolved without one, failed only without a proof and on evidence that no
+///   payment was made (the method's word, this app's failure before the call, or the
+///   user's), never for an entry the user resolved as paid or unknown; one abandoned is not
+///   reported;
+/// - an entry over and told as it stands ([`EntryFacts::told_as_it_stands`]) isn't reported;
+///   any other over entry is reported as above.
 #[cfg(any(test, feature = "test-support"))]
 fn resume_disagreement(
     before: &[EntryFacts],
     after: &[EntryFacts],
-    paid_in_call: &[AttemptId],
     out: &[PayOutcome],
 ) -> Option<String> {
     use crate::journal::UserResolution;
@@ -1420,14 +1453,18 @@ fn resume_disagreement(
             return Some(format!("{:?} is reported twice", outcome.attempt_id()));
         }
     }
+    for was in before {
+        if !after.iter().any(|now| now.attempt_id == was.attempt_id) {
+            return Some(format!("{:?} is gone from the journal", was.attempt_id));
+        }
+    }
     for now in after {
         let attempt_id = now.attempt_id;
         let was = before.iter().find(|was| was.attempt_id == attempt_id);
-        if !now.proof && (was.is_some_and(|was| was.proof) || paid_in_call.contains(&attempt_id)) {
+        if !now.proof && was.is_some_and(|was| was.proof) {
             return Some(format!("{attempt_id:?} lost its proof"));
         }
         let outcome = reported.remove(&attempt_id);
-        let was_over = was.is_some_and(|was| !was.open());
         let agrees = if now.open() {
             match outcome {
                 Some(
@@ -1437,15 +1474,15 @@ fn resume_disagreement(
                     | PayOutcome::RecordDivergent { .. },
                 ) => now.proof,
                 Some(PayOutcome::Pending { .. } | PayOutcome::Uncertain { .. }) => !now.proof,
-                _ => false,
+                Some(
+                    PayOutcome::Paid { .. }
+                    | PayOutcome::Failed { .. }
+                    | PayOutcome::Resolved { .. },
+                )
+                | None => false,
             }
-        } else if was_over {
-            let gained = now.proof && was.is_some_and(|was| !was.proof);
-            match outcome {
-                Some(PayOutcome::Paid { .. }) => gained,
-                None => !gained,
-                Some(_) => false,
-            }
+        } else if now.told_as_it_stands() {
+            outcome.is_none()
         } else if now.stage == Stage::Abandoned && !now.proof {
             outcome.is_none()
         } else {
@@ -1454,22 +1491,32 @@ fn resume_disagreement(
                 Some(PayOutcome::Failed { .. }) => {
                     !now.proof
                         && now.stage == Stage::Finished
-                        && !matches!(
-                            now.user_resolved,
-                            Some(UserResolution::Done | UserResolution::Unknown)
-                        )
+                        && match now.user_resolved {
+                            Some(UserResolution::Failed) => true,
+                            Some(UserResolution::Done | UserResolution::Unknown) => false,
+                            None => now.method_failed || now.failed_before_call,
+                        }
                 }
                 Some(PayOutcome::Resolved { .. }) => !now.proof,
-                _ => false,
+                Some(
+                    PayOutcome::Pending { .. }
+                    | PayOutcome::Uncertain { .. }
+                    | PayOutcome::PaidOutcomeUnwritten { .. }
+                    | PayOutcome::PaidUnreported { .. }
+                    | PayOutcome::RecordHeld { .. }
+                    | PayOutcome::RecordDivergent { .. },
+                )
+                | None => false,
             }
         };
         if !agrees {
             return Some(format!(
                 "{attempt_id:?} is reported {outcome:?}; its entry was {:?} and is {:?}, proof \
-                 {}, resolved by the user {:?}",
+                 {}, told {}, resolved by the user {:?}",
                 was.map(|was| was.stage),
                 now.stage,
                 now.proof,
+                now.told,
                 now.user_resolved
             ));
         }
@@ -1478,27 +1525,6 @@ fn resume_disagreement(
         .keys()
         .next()
         .map(|attempt_id| format!("{attempt_id:?} is reported and not in the journal"))
-}
-
-/// Whether the journal's entry `held` lost what the method's history told for `answered`, the
-/// same entry as this call left it: a write kept from before the answer replaced it. A
-/// proof gone is always lost. A failure the method reported is lost unless the entry holds a
-/// proof or the user resolved it as paid or unknown, on the claim or off it, which a
-/// method's failure doesn't undo (Paykit spec 7.2, 8.4).
-fn replaced_by_an_older_write(answered: &JournalEntry, held: &JournalEntry) -> bool {
-    use crate::journal::UserResolution;
-    if answered.rail_proof.is_some() {
-        return held.rail_proof.is_none();
-    }
-    let user_paid_or_unknown = held.user_paid
-        || matches!(
-            held.user_resolved,
-            Some(UserResolution::Done | UserResolution::Unknown)
-        );
-    answered.failed_by_method
-        && !held.failed_by_method
-        && !user_paid_or_unknown
-        && held.rail_proof.is_none()
 }
 
 /// The wallet-wide stop a read of this app's own record carries in the reason it kept the
@@ -1839,6 +1865,7 @@ impl Paykit {
             &mut public_failures,
         ))
         .await;
+        let outcome = self.tell(outcome).await;
         PayResult {
             outcome,
             public_failures,
@@ -1871,6 +1898,7 @@ impl Paykit {
             &mut public_failures,
         ))
         .await;
+        let outcome = self.tell(outcome).await;
         PayResult {
             outcome,
             public_failures,
@@ -1915,6 +1943,7 @@ impl Paykit {
             &mut public_failures,
         ))
         .await;
+        let outcome = self.tell(outcome).await;
         PayResult {
             outcome,
             public_failures,
@@ -2284,6 +2313,7 @@ impl Paykit {
         let mut public_failures = Vec::new();
         // The call's future goes on the heap, as `receive`'s does: it nests deep.
         let outcome = Box::pin(self.pay_without_request_inner(payment, &mut public_failures)).await;
+        let outcome = self.tell(outcome).await;
         PayResult {
             outcome,
             public_failures,
@@ -2482,7 +2512,8 @@ impl Paykit {
         // A delivery operation for the whole call (Paykit spec 8.1).
         let _delivery = self.delivery_operation();
         // The call's future goes on the heap, as `receive`'s does: it nests deep.
-        Box::pin(self.repair_activity_record_inner(attempt_id)).await
+        let outcome = Box::pin(self.repair_activity_record_inner(attempt_id)).await;
+        self.tell(outcome).await
     }
 
     async fn repair_activity_record_inner(&mut self, attempt_id: &AttemptId) -> Result<PayOutcome> {
@@ -2525,14 +2556,34 @@ impl Paykit {
         })
     }
 
-    /// The journal, every entry read back bound to its key (`state::Stored`).
+    /// The journal, every entry read back bound to its key (`state::Stored`), as the
+    /// method's word says it stands ([`JournalEntry::with_facts`]).
     pub(crate) async fn journal(&self) -> Result<Vec<JournalEntry>> {
         Ok(self
-            .local_scan::<JournalEntry>(key::JOURNAL)
+            .journal_with_facts()
             .await?
             .into_iter()
-            .map(|(_, entry)| entry)
+            .map(|(entry, _)| entry)
             .collect())
+    }
+
+    /// [`Paykit::journal`], each entry with the facts laid over it ([`AttemptFacts`]): the
+    /// one read of the whole journal.
+    pub(crate) async fn journal_with_facts(&self) -> Result<Vec<(JournalEntry, AttemptFacts)>> {
+        let mut facts: HashMap<String, AttemptFacts> = self
+            .local_scan::<AttemptFacts>(key::ATTEMPT_FACTS)
+            .await?
+            .into_iter()
+            .collect();
+        self.local_scan::<JournalEntry>(key::JOURNAL)
+            .await?
+            .into_iter()
+            .map(|(_, entry)| {
+                // A scan names each value by its key past the prefix: the attempt ID.
+                let kept = facts.remove(&entry.attempt()?.to_text());
+                Ok((entry.with_facts(kept.as_ref()), kept.unwrap_or_default()))
+            })
+            .collect()
     }
 
     /// The journal entry of `attempt`, read back checked and bound to its key: of that
@@ -2544,7 +2595,84 @@ impl Paykit {
     ///
     /// A store failure, or an entry that doesn't read or isn't the attempt its key names.
     pub(crate) async fn journal_entry(&self, attempt: &AttemptId) -> Result<Option<JournalEntry>> {
-        self.local_get::<JournalEntry>(&key::journal(attempt)).await
+        let facts = self.attempt_facts(attempt).await?;
+        Ok(self
+            .local_get::<JournalEntry>(&key::journal(attempt))
+            .await?
+            .map(|entry| entry.with_facts(facts.as_ref())))
+    }
+
+    /// What this app keeps beside `attempt`'s journal entry ([`AttemptFacts`]).
+    async fn attempt_facts(&self, attempt: &AttemptId) -> Result<Option<AttemptFacts>> {
+        self.local_get::<AttemptFacts>(&key::attempt_facts(attempt))
+            .await
+    }
+
+    /// Keep what the payment method said of `entry`'s attempt, with the entry, in one commit
+    /// ([`AttemptFacts`]): `change` makes the new facts from the ones held. Only the places
+    /// that learn the method's word call it: the history pass, a payment's own answer, the
+    /// method's refusal of a first call, the recheck and a reconcile. The facts only grow
+    /// ([`AttemptFacts::grows_to`]): a change that would lose a proof, the method's failure
+    /// or the entry told is refused as a corrupt store and writes nothing, in every build.
+    pub(crate) async fn learn(
+        &mut self,
+        entry: &mut JournalEntry,
+        change: impl FnOnce(&mut AttemptFacts),
+    ) -> Result<()> {
+        let attempt = entry.attempt()?;
+        let held = self.attempt_facts(&attempt).await?.unwrap_or_default();
+        let mut next = held.clone();
+        change(&mut next);
+        next.check()?;
+        if !held.grows_to(&next) {
+            return Err(PaykitError::corrupt());
+        }
+        *entry = entry.clone().with_facts(Some(&next));
+        entry.check_bound(|input| self.app.blind(input))?;
+        let mut tx = state::Tx::default();
+        tx.put(&key::journal(&attempt), entry)?
+            .put(&key::attempt_facts(&attempt), &next)?;
+        self.local_commit(tx).await
+    }
+
+    /// A call returns `outcome` to the host: where its attempt's entry is over, it is marked
+    /// told first ([`AttemptFacts::told`]), so a resume never reports it again. Where that mark
+    /// can't be written, the call returns the error and the next resume reports the outcome
+    /// ([`resume_outcomes`]).
+    pub(crate) async fn tell(&mut self, outcome: Result<PayOutcome>) -> Result<PayOutcome> {
+        let outcome = outcome?;
+        self.mark_told_if_over(&outcome.attempt_id()).await?;
+        Ok(outcome)
+    }
+
+    /// Mark `attempt` told where its entry is over; nothing where it is open or not journaled.
+    pub(crate) async fn mark_told_if_over(&mut self, attempt: &AttemptId) -> Result<()> {
+        if let Some(entry) = self.journal_entry(attempt).await?.filter(|e| !e.open()) {
+            self.mark_told(&[(*attempt, entry.rail_proof.is_some())])
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Mark the entries of `attempts` told, in one commit: a call returned each one's
+    /// outcome once it was over ([`AttemptFacts::told`]), paid where it held the method's
+    /// proof ([`AttemptFacts::told_paid`]).
+    async fn mark_told(&mut self, attempts: &[(AttemptId, bool)]) -> Result<()> {
+        let mut tx = state::Tx::default();
+        for (attempt, paid) in attempts {
+            let held = self.attempt_facts(attempt).await?.unwrap_or_default();
+            let next = AttemptFacts {
+                told: true,
+                told_paid: held.told_paid || *paid,
+                ..held.clone()
+            };
+            next.check()?;
+            if !held.grows_to(&next) {
+                return Err(PaykitError::corrupt());
+            }
+            tx.put(&key::attempt_facts(attempt), &next)?;
+        }
+        self.local_commit(tx).await
     }
 
     /// [`Paykit::journal_entry`], bound to `obligation` as well, the claim the caller looks
@@ -4581,20 +4709,15 @@ impl Paykit {
             RailOutcome::Paid(RailPaid {
                 proof, paid_at_ms, ..
             }) => {
-                // The proof is journaled first: nothing after it can lose the payment. Then
+                // The proof is kept first: nothing after it can lose the payment. Then
                 // the acceptance goes, the one signed for this dispatch (Paykit spec 7.2
                 // step 2); one that can't be queued now is left to the report.
-                entry.rail_proof = Some(proof);
-                entry.paid_at_ms = paid_at_ms;
-                self.set_stage(entry, Stage::RailPaid).await?;
+                self.learn_paid(entry, proof, paid_at_ms).await?;
                 if let Err(error) = self.release_acceptance(entry, acceptance).await {
                     unless_stop(error)?;
                 }
             }
-            RailOutcome::Failed => {
-                entry.failed_by_method = true;
-                self.set_stage(entry, Stage::RailFailed).await?;
-            }
+            RailOutcome::Failed => self.learn_failed(entry, true).await?,
             RailOutcome::Pending => {
                 // The method shows the payment running, so its acceptance may go (Paykit spec
                 // 7.2 step 2); one the dispatch couldn't queue is queued now, best effort, at
@@ -4740,17 +4863,12 @@ impl Paykit {
                 .journal_entry_on(&attempt_id, &entry.obligation)
                 .await?
             {
+                // Read through the method's word: an entry an older write finished without
+                // the proof this outcome carries reads paid and open again, so only an
+                // outcome that holds what this one writes is taken as done.
                 if matches!(kept.stage, Stage::Finished | Stage::AcceptanceOwed) {
-                    if !replaced_by_an_older_write(entry, &kept) {
-                        *entry = kept;
-                        return Ok(Written::Done);
-                    }
-                    // Finished without what the method told for this outcome: another write
-                    // kept from before did it, such as the user's resolution. The entry as
-                    // this step holds it goes back, and the outcome is still written, on
-                    // what the claim and the record show now.
-                    entry.step = None;
-                    self.save(entry).await?;
+                    *entry = kept;
+                    return Ok(Written::Done);
                 }
             }
             // The record's update is settled first: without it nothing is written, `done`
@@ -5247,17 +5365,21 @@ impl Paykit {
     /// acts, as it is, while its entry is still open or still owes its acceptance; nothing
     /// is pruned then. The result is computed once, when the call ends, from the journal
     /// as the call found it and as it leaves it: every entry still open is reported in its
-    /// open form, and every entry the call found open and leaves over is reported exactly
-    /// once, whichever step or kept batch ended it. That one is [`PayOutcome::Paid`] with
-    /// the method's proof, [`PayOutcome::Failed`] only where the journal holds that no
-    /// payment was made (the method's word, this app's own failure written before the
-    /// method's call, the method's refusal of a first call, or the user's), and [`PayOutcome::Resolved`] otherwise. An entry
-    /// already over before the call is reported only when its payment was found made after
-    /// all (Paykit spec 7.2 steps 3 and 4). The client's
-    /// and the rail's errors from the work before and after the entries (the first read, the
-    /// first flush, the recheck of failed attempts, the ledger and pruning), as they are. A
-    /// call that returns an error carries no outcome: [`Paykit::payments`] lists every
-    /// payment with [`crate::PaymentView::paid_by_method`].
+    /// open form, and every entry over whose outcome no call has returned yet is reported
+    /// exactly once, whichever step, kept batch or earlier call ended it. That one is
+    /// [`PayOutcome::Paid`] with the method's proof, [`PayOutcome::Failed`] only where the
+    /// journal holds that no payment was made (the method's word, this app's own failure
+    /// written before the method's call, the method's refusal of a first call, or the
+    /// user's), and [`PayOutcome::Resolved`]
+    /// otherwise. An entry whose outcome a call returned already, this one or a payment
+    /// call or [`Paykit::resolve_attempt`], is reported again only when its payment was
+    /// found made after all (Paykit spec 7.2 steps 3 and 4). Each recheck lookup is judged as
+    /// an entry's step is: one that isn't a wait is returned while the recheck still asks
+    /// about its attempt. The client's and the rail's errors from the work before and after
+    /// the entries (the first read, the first flush, the ledger and pruning), as they are. A
+    /// call that returns an error carries no outcome: the next call that returns reports
+    /// the entries it ended, and [`Paykit::payments`] lists every payment with
+    /// [`crate::PaymentView::paid_by_method`].
     pub async fn resume_payments(&mut self) -> Result<Vec<PayOutcome>> {
         let _delivery = self.delivery_operation();
         // The call's future goes on the heap, as `receive`'s does: it nests deep.
@@ -5267,7 +5389,7 @@ impl Paykit {
     async fn resume_payments_inner(&mut self) -> Result<Vec<PayOutcome>> {
         // The journal as the call finds it, before any read or flush can move an entry: what
         // the call returns is computed against it ([`resume_outcomes`]).
-        let before = EntryFacts::of(&self.journal().await?);
+        let before = EntryFacts::of(&self.journal_with_facts().await?);
         self.refresh_own()?;
         Box::pin(self.first_read_before_writing()).await?;
         self.refresh_own()?;
@@ -5300,7 +5422,7 @@ impl Paykit {
         // The method's history before any entry, which needs no switch: a payment it reports
         // made is journaled with its proof before anything an entry's step meets can end the
         // resume. It comes after the flush, so a kept batch's journal writes are in place.
-        let answers = self.journal_method_answers(payer_waits).await?;
+        self.journal_method_answers(payer_waits).await?;
         // Each entry's work stands alone. A wallet-wide stop ([`stops_resume`]) ends the
         // resume and is returned. Any other failure of one entry's step leaves that entry for
         // the next resume, told for it, and the next entry goes on, so a payment the method
@@ -5309,14 +5431,15 @@ impl Paykit {
         //
         // An entry is read from the journal again at its turn ([`Paykit::at_its_turn`]): an
         // earlier entry's write may have sent a batch kept for this one, whose journal write
-        // replaced what was listed.
+        // replaced what was listed. What the method said of it is laid over it at that read
+        // ([`JournalEntry::with_facts`]), so no such write takes the method's word back.
         let mut turns = Turns::default();
         let mut failures = Vec::new();
         for listed in self.journal().await? {
-            let Some(mut entry) = self.at_its_turn(listed, &answers).await? else {
+            let Some(mut entry) = self.at_its_turn(listed).await? else {
                 continue;
             };
-            let claim = entry.attempt().ok().map(|id| (id, entry.obligation));
+            let attempt = entry.attempt().ok().map(|id| (id, entry.obligation));
             // An outcome written whose acceptance is still owed: queued and placed now.
             // One that can't be placed now stays owed for the next resume.
             if entry.stage == Stage::AcceptanceOwed {
@@ -5326,7 +5449,11 @@ impl Paykit {
                             return Err(error);
                         }
                         if judged_at_resume(&error) && !entry_waits(&error) {
-                            failures.push((error, claim, true));
+                            failures.push(Pending {
+                                error,
+                                attempt,
+                                work: Work::Acceptance,
+                            });
                         }
                     }
                 }
@@ -5339,18 +5466,11 @@ impl Paykit {
                         return Err(error);
                     }
                     if !entry_waits(&error) {
-                        failures.push((error, claim, false));
-                    }
-                }
-                // The method's word that the payment failed, as the entry holds it right
-                // after its step: the recheck below may clear it in this same call.
-                if let Some((attempt_id, obligation)) = claim {
-                    if self
-                        .journal_entry_on(&attempt_id, &obligation)
-                        .await?
-                        .is_some_and(|entry| entry.failed_by_method)
-                    {
-                        turns.method_failed.insert(attempt_id);
+                        failures.push(Pending {
+                            error,
+                            attempt,
+                            work: Work::Step,
+                        });
                     }
                 }
             }
@@ -5362,10 +5482,11 @@ impl Paykit {
             }
         }
         if self.holds("paykit_pay") && !payer_waits {
-            self.recheck_failed()
-                .await?
+            let (rechecked, lookups) = self.recheck_failed().await?;
+            rechecked
                 .into_iter()
                 .for_each(|outcome| turns.tell(outcome));
+            failures.extend(lookups);
             Box::pin(self.record_ledger_outcomes()).await?;
         }
         // After every payment's own work: what can't be delivered now stays queued, but a
@@ -5377,100 +5498,61 @@ impl Paykit {
                 return Err(error);
             }
         }
-        // That flush may have sent a batch kept from before the call over an entry the
-        // method's history answered for, after that entry's turn: what the method told goes
-        // back once more, so the journal the result is read from holds it.
-        for (attempt_id, answered) in &answers {
-            if let Some(entry) = self
-                .journal_entry_on(attempt_id, &answered.obligation)
-                .await?
-            {
-                if replaced_by_an_older_write(answered, &entry) {
-                    let mut answered = answered.clone();
-                    answered.step = None;
-                    self.save(&answered).await?;
-                }
-            }
-        }
         // What the call returns: one function of the journal before and after it.
-        let after = EntryFacts::of(&self.journal().await?);
-        let out = resume_outcomes(&before, &after, &turns);
+        let after = EntryFacts::of(&self.journal_with_facts().await?);
+        let out = resume_outcomes(&after, &turns);
         // A failure stands only while what it failed at is still to do: a step's while its
-        // entry is open, and an owed acceptance's while the entry still owes it. A later
-        // resume meets it again. One whose work is done by now is past, and one whose entry
-        // can't be read back stands.
-        for (error, claim, acceptance) in failures {
-            let entry = claim
+        // entry is open, an owed acceptance's while the entry still owes it, a recheck's
+        // lookup while the recheck still asks. A later resume meets it again. One whose work
+        // is done by now is past, and one whose entry can't be read back stands. A call that
+        // returns an error carries no outcome, and its entries ended are told by the next
+        // call that returns one ([`AttemptFacts::told`]); nothing is pruned then.
+        for failure in failures {
+            let entry = failure
+                .attempt
                 .and_then(|(attempt_id, _)| after.iter().find(|now| now.attempt_id == attempt_id));
-            let past = entry.is_some_and(|entry| {
-                if acceptance {
-                    matches!(entry.stage, Stage::Finished | Stage::Abandoned)
-                } else {
-                    !entry.open()
-                }
+            let past = entry.is_some_and(|entry| match failure.work {
+                Work::Step => !entry.open(),
+                Work::Acceptance => matches!(entry.stage, Stage::Finished | Stage::Abandoned),
+                Work::Recheck => !entry.ask_again,
             });
             if !past {
-                // A call that returns an error carries no outcome, so nothing is pruned
-                // then: `payments` still lists every entry this call finished.
-                return Err(error);
+                return Err(failure.error);
             }
         }
         // Test builds check the result against the journals it was computed from, in every
-        // test that resumes: only here, on the way to `Ok`.
+        // test that resumes, on the way to `Ok`.
         #[cfg(feature = "test-support")]
         {
-            let paid_in_call: Vec<AttemptId> = answers
-                .iter()
-                .filter(|(_, answered)| answered.rail_proof.is_some())
-                .map(|(attempt_id, _)| *attempt_id)
-                .collect();
-            let disagreement = resume_disagreement(&before, &after, &paid_in_call, &out);
+            let disagreement = resume_disagreement(&before, &after, &out);
             assert!(
                 disagreement.is_none(),
                 "resume_payments: {}",
                 disagreement.unwrap_or_default()
             );
         }
+        // Every entry over is told now, in one commit, just before the call returns: a call
+        // that ends before this, by an error or a crash, leaves them for the next call to
+        // report ([`resume_outcomes`]).
+        let ended: Vec<(AttemptId, bool)> = after
+            .iter()
+            .filter(|now| !now.open() && !now.told_as_it_stands())
+            .map(|now| (now.attempt_id, now.proof))
+            .collect();
+        self.mark_told(&ended).await?;
         self.prune_journal().await?;
         Ok(out)
     }
 
-    /// The journal entry `listed` names as the journal holds it now, `None` once it is gone:
-    /// no step of a resume acts on an entry read before the call's last write.
-    ///
-    /// `answers` holds the entries the method's history changed earlier in this call, as
-    /// that pass left them. A batch kept from before, such as the user's resolution, sent
-    /// with another entry's write, replaces the entry in the journal with the copy taken
-    /// when the batch was built, which is older than the method's answer. Where the entry
-    /// no longer holds that answer, the entry as the pass left it goes back
-    /// ([`replaced_by_an_older_write`]): the payment made is reported and its proof sent,
-    /// with the acceptance released for it, and a failure the method reported stays one its
-    /// history is asked about again (Paykit spec 7.2).
-    async fn at_its_turn(
-        &mut self,
-        listed: JournalEntry,
-        answers: &HashMap<AttemptId, JournalEntry>,
-    ) -> Result<Option<JournalEntry>> {
+    /// The journal entry `listed` names as the journal holds it now, through the method's word
+    /// ([`JournalEntry::with_facts`]), `None` once it is gone: no step of a resume acts on an
+    /// entry read before the call's last write.
+    async fn at_its_turn(&mut self, listed: JournalEntry) -> Result<Option<JournalEntry>> {
         // An entry that names no attempt can't be read back by one: it goes as listed.
         let Ok(attempt_id) = listed.attempt() else {
             return Ok(Some(listed));
         };
-        let Some(entry) = self
-            .journal_entry_on(&attempt_id, &listed.obligation)
-            .await?
-        else {
-            return Ok(None);
-        };
-        match answers.get(&attempt_id) {
-            Some(answered) if replaced_by_an_older_write(answered, &entry) => {
-                // Built on what the claim shows now, which that batch may have moved.
-                let mut answered = answered.clone();
-                answered.step = None;
-                self.save(&answered).await?;
-                Ok(Some(answered))
-            }
-            _ => Ok(Some(entry)),
-        }
+        self.journal_entry_on(&attempt_id, &listed.obligation).await
     }
 
     /// Ask the payment method's history about every entry this app left `Paying`, and journal
@@ -5482,20 +5564,13 @@ impl Paykit {
     /// keys (`payer_waits`), when the report releases it later; a restored entry, which reads
     /// its claim first, and an offline one wait for their own step. A lookup the method
     /// can't answer leaves that entry as it is, for its own step to ask again; a wallet-wide
-    /// stop, such as a store failure, is returned.
-    ///
-    /// Returns the entries the method's answer changed, by attempt, as this pass left them:
-    /// a batch kept from before that a later write sends may replace such an entry in the
-    /// journal, and it is put back at the entry's turn ([`Paykit::at_its_turn`]).
-    async fn journal_method_answers(
-        &mut self,
-        payer_waits: bool,
-    ) -> Result<HashMap<AttemptId, JournalEntry>> {
-        let mut answers = HashMap::new();
+    /// stop, such as a store failure, is returned. What it learns is kept beside the entry
+    /// ([`Paykit::learn`]), where no batch kept from before can take it back.
+    async fn journal_method_answers(&mut self, payer_waits: bool) -> Result<()> {
         for listed in self.journal().await? {
             // As the journal holds it now: an acceptance released for an earlier entry may
             // have sent a batch kept for this one.
-            let Some(mut entry) = self.at_its_turn(listed, &answers).await? else {
+            let Some(mut entry) = self.at_its_turn(listed).await? else {
                 continue;
             };
             if entry.stage != Stage::Paying || entry.restored || entry.offline.is_some() {
@@ -5521,13 +5596,8 @@ impl Paykit {
                     unless_stop(error)?;
                 }
             }
-            if matches!(entry.stage, Stage::RailPaid | Stage::RailFailed) {
-                if let Ok(attempt_id) = entry.attempt() {
-                    answers.insert(attempt_id, entry);
-                }
-            }
         }
-        Ok(answers)
+        Ok(())
     }
 
     /// The wallet-wide stop the Switch client holds now, if any: a recovery notice, an alarm,
@@ -5684,18 +5754,52 @@ impl Paykit {
         match self.rail.payment(entry.attempt()?).await? {
             Some(RailOutcome::Paid(RailPaid {
                 proof, paid_at_ms, ..
-            })) => {
-                entry.rail_proof = Some(proof);
-                entry.paid_at_ms = paid_at_ms;
-                self.set_stage(entry, Stage::RailPaid).await?;
-            }
-            Some(RailOutcome::Failed) => {
-                entry.failed_by_method = true;
-                self.set_stage(entry, Stage::RailFailed).await?;
-            }
-            Some(RailOutcome::Pending) | None => {}
+            })) => self.learn_paid(entry, proof, paid_at_ms).await,
+            Some(RailOutcome::Failed) => self.learn_failed(entry, true).await,
+            Some(RailOutcome::Pending) | None => Ok(()),
         }
-        Ok(())
+    }
+
+    /// Keep the method's word that `entry`'s payment was made, with its proof, and the entry
+    /// paid with its outcome to write (`RailPaid`, Paykit spec 7.2) ([`Paykit::learn`]).
+    pub(crate) async fn learn_paid(
+        &mut self,
+        entry: &mut JournalEntry,
+        proof: serde_json::Map<String, serde_json::Value>,
+        paid_at_ms: Option<u64>,
+    ) -> Result<()> {
+        entry.rail_proof = Some(proof.clone());
+        entry.paid_at_ms = paid_at_ms;
+        entry.failed_by_method = false;
+        entry.stage = Stage::RailPaid;
+        self.learn(entry, |facts| {
+            // A proof the facts hold already is this attempt's, and stays as it is.
+            if facts.proof.is_none() {
+                facts.proof = Some(proof);
+                facts.paid_at_ms = paid_at_ms;
+            }
+            facts.ask_again = false;
+        })
+        .await
+    }
+
+    /// Keep the method's word that `entry`'s payment failed, and the entry with that failure
+    /// to write (`RailFailed`) ([`Paykit::learn`]). `ask_again` for a payment the method was
+    /// called for, whose history the recheck asks again; not for a call it refused, which
+    /// submitted nothing (Paykit spec 7.2). A proof the facts hold already stands over it.
+    pub(crate) async fn learn_failed(
+        &mut self,
+        entry: &mut JournalEntry,
+        ask_again: bool,
+    ) -> Result<()> {
+        if entry.rail_proof.is_none() {
+            entry.stage = Stage::RailFailed;
+        }
+        self.learn(entry, |facts| {
+            facts.method_failed = true;
+            facts.ask_again = ask_again && facts.proof.is_none();
+        })
+        .await
     }
 
     /// Drop the journal entries past their claim's reconciliation window (Paykit spec 7.1,
@@ -5743,6 +5847,7 @@ impl Paykit {
             if bound_passed(bound, service, now) {
                 let attempt = entry.attempt()?;
                 tx.delete(&key::journal(&attempt))
+                    .delete(&key::attempt_facts(&attempt))
                     .delete(&key::offline_batch(&attempt));
                 // Its acknowledged notices go with it; one not acknowledged stays for the
                 // host, and goes when acknowledged.
@@ -5767,14 +5872,14 @@ impl Paykit {
     /// payee's receipt corrects the claim. Such a payment is reported as any other, its
     /// activity record and its proof in one batch; a dispatch the history no longer keeps
     /// isn't asked about again.
-    async fn recheck_failed(&mut self) -> Result<Vec<PayOutcome>> {
+    async fn recheck_failed(&mut self) -> Result<(Vec<PayOutcome>, Vec<Pending>)> {
         let declaration = self.rail.declaration();
         let mut out = Vec::new();
-        let none = HashMap::new();
+        let mut failures = Vec::new();
         for listed in self.journal().await? {
             // As the journal holds it now: an earlier entry's report may have sent a batch
             // kept for this one.
-            let Some(mut entry) = self.at_its_turn(listed, &none).await? else {
+            let Some(mut entry) = self.at_its_turn(listed).await? else {
                 continue;
             };
             if entry.stage != Stage::Finished || !entry.failed_by_method {
@@ -5787,29 +5892,49 @@ impl Paykit {
                     self.now(),
                 );
             if !kept {
+                // The recheck's own flag, which only it clears; the method's word stays.
                 entry.failed_by_method = false;
-                self.save(&entry).await?;
+                self.learn(&mut entry, |facts| facts.ask_again = false)
+                    .await?;
                 continue;
             }
+            let attempt_id = entry.attempt()?;
+            // Each entry's lookup is judged as the entries' steps are: a wait leaves it for
+            // the next recheck, any other failure is kept and judged at the end, and only a
+            // wallet-wide stop ends the call; the entries after it are asked all the same.
+            let answer = match self.rail.payment(attempt_id).await {
+                Ok(answer) => answer,
+                Err(error) => {
+                    let error = PaykitError::from(error);
+                    if stops_resume(&error) {
+                        return Err(error);
+                    }
+                    if !entry_waits(&error) {
+                        failures.push(Pending {
+                            error,
+                            attempt: Some((attempt_id, entry.obligation)),
+                            work: Work::Recheck,
+                        });
+                    }
+                    continue;
+                }
+            };
             let Some(RailOutcome::Paid(RailPaid {
                 proof, paid_at_ms, ..
-            })) = self.rail.payment(entry.attempt()?).await?
+            })) = answer
             else {
                 continue;
             };
-            entry.failed_by_method = false;
             // The attempt is `failed` on the claim: no claim entry is written, and the
             // payee's receipt settles it by evidence (Switch spec 10.2 row 3), or, once the
             // claim is gone, tells the user it was paid.
             entry.failed_on_claim = entry.offline.is_none() || entry.step.is_some();
             entry.step = None;
-            entry.rail_proof = Some(proof);
-            entry.paid_at_ms = paid_at_ms;
             // Opened again, so the outcome's batch is built afresh rather than taken as done.
-            self.set_stage(&mut entry, Stage::RailPaid).await?;
+            self.learn_paid(&mut entry, proof, paid_at_ms).await?;
             out.push(self.report(&mut entry).await?);
         }
-        Ok(out)
+        Ok((out, failures))
     }
 
     /// Resolve an attempt whose payment may have been dispatched (Paykit spec 7.2, "What a
@@ -6949,7 +7074,11 @@ mod tests {
 
     use super::*;
 
-    /// Every state a resume's result reads of an entry.
+    /// Every state the journal can hold for an entry, as a resume's result reads it: a stage
+    /// that needs the method's proof only with it (`RailPaid`, `AcceptanceOwed`), a proof
+    /// with and without its message, no payment started only for an entry finished, or
+    /// failed by a refused call, that the method never answered, the recheck asking only about the method's failure, and
+    /// told only for an entry over.
     fn every_entry(attempt_id: AttemptId) -> Vec<EntryFacts> {
         use crate::journal::UserResolution;
         let mut all = Vec::new();
@@ -6963,36 +7092,61 @@ mod tests {
             Stage::Finished,
             Stage::Abandoned,
         ] {
-            for proof in [false, true] {
-                for failed_by_method in [false, true] {
-                    for failed_before_call in [false, true] {
-                        for user_resolved in [
-                            None,
-                            Some(UserResolution::Done),
-                            Some(UserResolution::Unknown),
-                            Some(UserResolution::Failed),
-                        ] {
-                            // The states the journal refuses to hold
-                            // ([`crate::journal::members_hold`]).
-                            if !crate::journal::members_hold(&crate::journal::EntryMembers {
-                                stage: Some(stage),
-                                proof,
-                                failed_by_method,
-                                failed_before_call,
-                                user_resolved,
-                                ..Default::default()
-                            }) {
-                                continue;
+            for proof_msg_id in [None, Some(None), Some(Some("m"))] {
+                let proof = proof_msg_id.is_some();
+                for method_failed in [false, true] {
+                    for ask_again in [false, true] {
+                        for failed_before_call in [false, true] {
+                            for user_resolved in [
+                                None,
+                                Some(UserResolution::Done),
+                                Some(UserResolution::Unknown),
+                                Some(UserResolution::Failed),
+                            ] {
+                                for (told, told_paid) in
+                                    [(false, false), (true, false), (true, true)]
+                                {
+                                    let open = !matches!(
+                                        stage,
+                                        Stage::AcceptanceOwed | Stage::Finished | Stage::Abandoned
+                                    );
+                                    // The states the journal refuses to hold, the
+                                    // entry's own failure mark being the recheck's flag
+                                    // ([`crate::journal::members_hold`]); facts no write
+                                    // leaves ([`AttemptFacts::check`]); no payment started
+                                    // beside the method's word, which the overlay clears;
+                                    // told paid only with a proof; told and open only when
+                                    // the recheck opened it again with a proof found after.
+                                    if !crate::journal::members_hold(
+                                        &crate::journal::EntryMembers {
+                                            stage: Some(stage),
+                                            proof,
+                                            failed_by_method: ask_again,
+                                            failed_before_call,
+                                            user_resolved,
+                                            ..Default::default()
+                                        },
+                                    ) || ask_again && (!method_failed || proof)
+                                        || failed_before_call && method_failed
+                                        || told_paid && !proof
+                                        || told && open && (!proof || told_paid)
+                                    {
+                                        continue;
+                                    }
+                                    all.push(EntryFacts {
+                                        attempt_id,
+                                        stage,
+                                        proof,
+                                        proof_msg_id: proof_msg_id.flatten().map(Into::into),
+                                        method_failed,
+                                        ask_again,
+                                        failed_before_call,
+                                        user_resolved,
+                                        told,
+                                        told_paid,
+                                    });
+                                }
                             }
-                            all.push(EntryFacts {
-                                attempt_id,
-                                stage,
-                                proof,
-                                proof_msg_id: proof.then(|| "m".into()),
-                                failed_by_method,
-                                failed_before_call,
-                                user_resolved,
-                            });
                         }
                     }
                 }
@@ -7024,31 +7178,69 @@ mod tests {
         let mut checked = 0;
         for was in states.iter().map(Some).chain([None]) {
             for now in &states {
-                // A call never takes a proof away ([`replaced_by_an_older_write`]).
-                if was.is_some_and(|was| was.proof) && !now.proof {
+                // No call takes a proof back, nor the method's failure, nor told
+                // ([`AttemptFacts::grows_to`]).
+                if was.is_some_and(|was| {
+                    was.proof && !now.proof
+                        || was.method_failed && !now.method_failed
+                        || was.told && !now.told
+                }) {
                     continue;
                 }
                 for told in &told {
-                    for method_failed in [false, true] {
-                        let mut turns = Turns::default();
-                        told.iter().for_each(|outcome| turns.tell(outcome.clone()));
-                        if method_failed {
-                            turns.method_failed.insert(attempt_id);
-                        }
-                        let before: Vec<_> = was.cloned().into_iter().collect();
-                        let after = [now.clone()];
-                        let out = resume_outcomes(&before, &after, &turns);
-                        assert_eq!(
-                            resume_disagreement(&before, &after, &[], &out),
-                            None,
-                            "{was:?} -> {now:?}, told {told:?}: {out:?}"
-                        );
-                        checked += 1;
-                    }
+                    let mut turns = Turns::default();
+                    told.iter().for_each(|outcome| turns.tell(outcome.clone()));
+                    let before: Vec<_> = was.cloned().into_iter().collect();
+                    let after = [now.clone()];
+                    let out = resume_outcomes(&after, &turns);
+                    assert_eq!(
+                        resume_disagreement(&before, &after, &out),
+                        None,
+                        "{was:?} -> {now:?}, told {told:?}: {out:?}"
+                    );
+                    checked += 1;
                 }
             }
         }
         assert!(checked > 10_000, "{checked}");
+    }
+
+    #[test]
+    fn test_resume_outcomes_keep_what_a_step_told_of_an_open_entry() {
+        let attempt_id = AttemptId::from_bytes([7; 16]);
+        let open = |proof: bool| EntryFacts {
+            attempt_id,
+            stage: if proof {
+                Stage::RailPaid
+            } else {
+                Stage::Paying
+            },
+            proof,
+            proof_msg_id: None,
+            method_failed: false,
+            ask_again: false,
+            failed_before_call: false,
+            user_resolved: None,
+            told: false,
+            told_paid: false,
+        };
+        for (proof, told) in [
+            (false, PayOutcome::Uncertain { attempt_id }),
+            (true, PayOutcome::PaidUnreported { attempt_id }),
+            (true, PayOutcome::RecordHeld { attempt_id }),
+            (
+                true,
+                PayOutcome::RecordDivergent {
+                    attempt_id,
+                    record: [1; 32],
+                },
+            ),
+        ] {
+            let mut turns = Turns::default();
+            turns.tell(told.clone());
+            let entry = [open(proof)];
+            assert_eq!(resume_outcomes(&entry, &turns), vec![told]);
+        }
     }
 
     #[test]
@@ -7060,16 +7252,19 @@ mod tests {
             stage,
             proof: false,
             proof_msg_id: None,
-            failed_by_method: false,
+            method_failed: false,
+            ask_again: false,
             failed_before_call: false,
             user_resolved: None,
+            told: false,
+            told_paid: false,
         };
-        let one = |was: &EntryFacts, now: &EntryFacts, turns: &Turns| {
-            let out = resume_outcomes(std::slice::from_ref(was), std::slice::from_ref(now), turns);
+        let one = |was: &EntryFacts, now: &EntryFacts| {
+            let _ = was;
+            let out = resume_outcomes(std::slice::from_ref(now), &Turns::default());
             assert!(out.len() <= 1, "{out:?}");
             out.into_iter().next()
         };
-        let none = Turns::default();
         let resolved = Some(PayOutcome::Resolved { attempt_id });
         let failed = |reason: &str| {
             Some(PayOutcome::Failed {
@@ -7084,18 +7279,18 @@ mod tests {
                 user_resolved: Some(resolution),
                 ..entry(Stage::Finished)
             };
-            assert_eq!(one(&entry(Stage::Attempted), &now, &none), resolved);
+            assert_eq!(one(&entry(Stage::Attempted), &now), resolved);
         }
         // The user's `failed` is the user's.
         let now = EntryFacts {
             user_resolved: Some(UserResolution::Failed),
             ..entry(Stage::Finished)
         };
-        assert_eq!(one(&entry(Stage::Paying), &now, &none), failed(USER_FAILED));
+        assert_eq!(one(&entry(Stage::Paying), &now), failed(USER_FAILED));
         // Another own app resolved it on the claim: this journal holds no mark, so nothing
         // says no payment was made.
         for was in [Stage::Recorded, Stage::Attempted, Stage::Paying] {
-            assert_eq!(one(&entry(was), &entry(Stage::Finished), &none), resolved);
+            assert_eq!(one(&entry(was), &entry(Stage::Finished)), resolved);
         }
         // This app's own `failed` before the method's call, once its write applied.
         let now = EntryFacts {
@@ -7103,67 +7298,69 @@ mod tests {
             ..entry(Stage::Finished)
         };
         assert_eq!(
-            one(&entry(Stage::Attempted), &now, &none),
+            one(&entry(Stage::Attempted), &now),
             failed(NO_PAYMENT_STARTED)
         );
         // That write not through yet: the entry is open, and pending.
         assert_eq!(
-            one(&entry(Stage::Attempted), &entry(Stage::Attempted), &none),
+            one(&entry(Stage::Attempted), &entry(Stage::Attempted)),
             Some(PayOutcome::Pending { attempt_id })
         );
-        // The method's failure, also where the recheck cleared its mark in the same call:
-        // held before the call, or right after the entry's step.
-        let was = EntryFacts {
-            failed_by_method: true,
-            ..entry(Stage::RailFailed)
+        // The method's failure, whatever the recheck has done with its own flag since.
+        let now = EntryFacts {
+            method_failed: true,
+            ..entry(Stage::Finished)
         };
-        assert_eq!(
-            one(&was, &entry(Stage::Finished), &none),
-            failed(METHOD_FAILED)
-        );
-        let mut at_its_turn = Turns::default();
-        at_its_turn.method_failed.insert(attempt_id);
-        assert_eq!(
-            one(&entry(Stage::Paying), &entry(Stage::Finished), &at_its_turn),
-            failed(METHOD_FAILED)
-        );
+        assert_eq!(one(&entry(Stage::Paying), &now), failed(METHOD_FAILED));
         // The user's `done` outlasts the method's failure.
         let now = EntryFacts {
             user_resolved: Some(UserResolution::Done),
+            method_failed: true,
             ..entry(Stage::Finished)
         };
-        assert_eq!(one(&was, &now, &at_its_turn), resolved);
+        assert_eq!(one(&entry(Stage::RailFailed), &now), resolved);
+        // A proof outlasts everything else.
+        let now = EntryFacts {
+            proof: true,
+            user_resolved: Some(UserResolution::Failed),
+            method_failed: true,
+            ..entry(Stage::Finished)
+        };
+        assert!(matches!(
+            one(&entry(Stage::Paying), &now),
+            Some(PayOutcome::Paid { .. })
+        ));
         // Abandoned before its attempt reached the claim: no attempt to report.
-        assert_eq!(
-            one(&entry(Stage::Recorded), &entry(Stage::Abandoned), &none),
-            None
-        );
+        assert_eq!(one(&entry(Stage::Recorded), &entry(Stage::Abandoned)), None);
     }
 
     #[test]
-    fn test_resume_outcomes_report_every_entry_ended_in_the_call_once() {
+    fn test_resume_outcomes_report_every_entry_ended_until_it_is_told() {
         let first = AttemptId::from_bytes([1; 16]);
         let second = AttemptId::from_bytes([2; 16]);
-        let entry = |attempt_id, stage, proof: bool| EntryFacts {
+        let entry = |attempt_id, stage, proof: bool, told: bool| EntryFacts {
             attempt_id,
             stage,
             proof,
             proof_msg_id: proof.then(|| "m".into()),
-            failed_by_method: false,
+            method_failed: false,
+            ask_again: false,
             failed_before_call: false,
             user_resolved: None,
+            told,
+            told_paid: false,
         };
         // Both paid and unwritten; the second's outcome applied by a batch sent at the
         // first's turn, so its own turn found it finished: both are reported.
         let before = [
-            entry(first, Stage::RailPaid, true),
-            entry(second, Stage::RailPaid, true),
+            entry(first, Stage::RailPaid, true, false),
+            entry(second, Stage::RailPaid, true, false),
         ];
         let after = [
-            entry(first, Stage::Finished, true),
-            entry(second, Stage::Finished, true),
+            entry(first, Stage::Finished, true, false),
+            entry(second, Stage::Finished, true, false),
         ];
-        let out = resume_outcomes(&before, &after, &Turns::default());
+        let out = resume_outcomes(&after, &Turns::default());
         assert!(
             matches!(
                 out.as_slice(),
@@ -7172,30 +7369,202 @@ mod tests {
             ),
             "{out:?}"
         );
-        // Already over before the call: nothing, unless its payment was found made.
-        let over = [entry(first, Stage::Finished, false)];
-        assert!(resume_outcomes(&over, &over, &Turns::default()).is_empty());
-        let found = [entry(first, Stage::Finished, true)];
+        assert_eq!(resume_disagreement(&before, &after, &out), None);
+        // Ended by a call that returned an error, or never returned, so never told: the next
+        // call reports it, though the entry was over before that call.
+        let untold = [entry(first, Stage::Finished, true, false)];
         assert!(matches!(
-            resume_outcomes(&over, &found, &Turns::default()).as_slice(),
+            resume_outcomes(&untold, &Turns::default()).as_slice(),
             [PayOutcome::Paid { .. }]
         ));
-        let unwritten = [entry(first, Stage::RailPaid, true)];
+        // Told: nothing, unless its payment was found made after all.
+        let told = [entry(first, Stage::Finished, false, true)];
+        assert!(resume_outcomes(&told, &Turns::default()).is_empty());
+        let found = [entry(first, Stage::Finished, true, true)];
         assert!(matches!(
-            resume_outcomes(&over, &unwritten, &Turns::default()).as_slice(),
+            resume_outcomes(&found, &Turns::default()).as_slice(),
+            [PayOutcome::Paid { .. }]
+        ));
+        let unwritten = [entry(first, Stage::RailPaid, true, false)];
+        assert!(matches!(
+            resume_outcomes(&unwritten, &Turns::default()).as_slice(),
             [PayOutcome::PaidOutcomeUnwritten { .. }]
         ));
-        // The check itself: an entry ended in the call and left out, and one told twice.
-        assert!(resume_disagreement(&before, &after, &[], &out[..1]).is_some());
-        let twice = [out[0].clone(), out[0].clone(), out[1].clone()];
-        assert!(resume_disagreement(&before, &after, &[], &twice).is_some());
-        // A proof the method's history gave in the call and the journal no longer holds.
-        let lost = [
-            entry(first, Stage::Finished, false),
+        // Told as failed, then opened again by the recheck with the proof: its open form,
+        // and once finished, paid, however many calls lie between; once told paid, nothing.
+        let reopened = [entry(first, Stage::RailPaid, true, true)];
+        assert!(matches!(
+            resume_outcomes(&reopened, &Turns::default()).as_slice(),
+            [PayOutcome::PaidOutcomeUnwritten { .. }]
+        ));
+        assert!(matches!(
+            resume_outcomes(&found, &Turns::default()).as_slice(),
+            [PayOutcome::Paid { .. }]
+        ));
+        let told_paid = [EntryFacts {
+            told_paid: true,
+            ..entry(first, Stage::Finished, true, true)
+        }];
+        assert!(resume_outcomes(&told_paid, &Turns::default()).is_empty());
+    }
+
+    #[test]
+    fn test_resume_disagreement_refuses_each_broken_rule() {
+        let first = AttemptId::from_bytes([1; 16]);
+        let second = AttemptId::from_bytes([2; 16]);
+        let entry = |attempt_id, stage, proof: bool| EntryFacts {
+            attempt_id,
+            stage,
+            proof,
+            proof_msg_id: None,
+            method_failed: false,
+            ask_again: false,
+            failed_before_call: false,
+            user_resolved: None,
+            told: false,
+            told_paid: false,
+        };
+        let before = [
+            entry(first, Stage::RailPaid, true),
+            entry(second, Stage::RailPaid, true),
+        ];
+        let after = [
+            entry(first, Stage::Finished, true),
             entry(second, Stage::Finished, true),
         ];
-        let told = resume_outcomes(&before[..0], &lost, &Turns::default());
-        assert!(resume_disagreement(&before[..0], &lost, &[first], &told).is_some());
+        let out = resume_outcomes(&after, &Turns::default());
+        assert_eq!(resume_disagreement(&before, &after, &out), None);
+        // An entry ended in the call and left out.
+        assert!(resume_disagreement(&before, &after, &out[..1]).is_some());
+        // One told twice.
+        let twice = [out[0].clone(), out[0].clone(), out[1].clone()];
+        assert!(resume_disagreement(&before, &after, &twice).is_some());
+        // An entry gone from the journal before the call ends.
+        assert!(resume_disagreement(&before, &after[..1], &out[..1]).is_some());
+        // A proof lost.
+        let lost = [entry(first, Stage::Finished, false), after[1].clone()];
+        let told = resume_outcomes(&lost, &Turns::default());
+        assert!(resume_disagreement(&before, &lost, &told).is_some());
+        // A failure with no evidence that no payment was made.
+        let ended = [entry(first, Stage::Finished, false)];
+        let unfounded = [PayOutcome::Failed {
+            attempt_id: first,
+            reason: METHOD_FAILED.into(),
+        }];
+        assert!(
+            resume_disagreement(&[entry(first, Stage::Paying, false)], &ended, &unfounded)
+                .is_some()
+        );
+        // An outcome of no entry.
+        let stranger = [PayOutcome::Pending {
+            attempt_id: AttemptId::from_bytes([9; 16]),
+        }];
+        assert!(resume_disagreement(&[], &[], &stranger).is_some());
+    }
+
+    #[test]
+    fn test_journal_entries_are_read_only_through_the_methods_word() {
+        // Every read of a journal entry from the store lays what the method said over it
+        // ([`JournalEntry::with_facts`]): the whole journal, one entry, a receipt's entry and a
+        // restored one. A new read that skips it fails here.
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut stack = vec![root];
+        let mut reads = Vec::new();
+        while let Some(dir) = stack.pop() {
+            for item in std::fs::read_dir(&dir).unwrap() {
+                let path = item.unwrap().path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().is_none_or(|e| e != "rs") {
+                    continue;
+                }
+                let text = std::fs::read_to_string(&path).unwrap();
+                let code = text.split("#[cfg(test)]\nmod tests {").next().unwrap();
+                let lines: Vec<&str> = code.lines().collect();
+                for (at, line) in lines.iter().enumerate() {
+                    let typed = line.contains("::<JournalEntry>");
+                    let keyed = line.contains("key::journal(") || line.contains("key::JOURNAL)");
+                    let writes = ["put(", "delete(", "local(&key::journal"]
+                        .iter()
+                        .any(|write| line.contains(write));
+                    if !typed && (!keyed || writes) {
+                        continue;
+                    }
+                    let near = lines[at..(at + 8).min(lines.len())].join("\n");
+                    let name = path.file_name().unwrap().to_string_lossy().into_owned();
+                    assert!(near.contains(".with_facts("), "{name}:{}: {line}", at + 1);
+                    reads.push(name);
+                }
+            }
+        }
+        reads.sort();
+        assert_eq!(reads, ["pay.rs", "pay.rs", "protocol.rs", "receive.rs"]);
+    }
+
+    #[test]
+    fn test_attempt_facts_only_grow_and_survive_every_older_copy() {
+        use crate::journal::AttemptFacts;
+        let proof: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(r#"{"ref":"a"}"#).unwrap();
+        let paid = AttemptFacts {
+            proof: Some(proof.clone()),
+            paid_at_ms: Some(5),
+            method_failed: true,
+            ask_again: false,
+            told: false,
+            told_paid: false,
+        };
+        // A write that would take the proof, the method's failure or told back is refused.
+        for lost in [
+            AttemptFacts {
+                proof: None,
+                paid_at_ms: None,
+                ..paid.clone()
+            },
+            AttemptFacts {
+                method_failed: false,
+                ..paid.clone()
+            },
+        ] {
+            assert!(!paid.grows_to(&lost), "{lost:?}");
+        }
+        let told = AttemptFacts {
+            told: true,
+            told_paid: false,
+            ..AttemptFacts::default()
+        };
+        assert!(!told.grows_to(&AttemptFacts::default()));
+        // The recheck's own flag may go.
+        let asking = AttemptFacts {
+            method_failed: true,
+            ask_again: true,
+            ..AttemptFacts::default()
+        };
+        assert!(asking.grows_to(&AttemptFacts {
+            ask_again: false,
+            ..asking.clone()
+        }));
+        // A restore keeps what either copy holds.
+        let merged = AttemptFacts::default().merged(paid.clone());
+        assert_eq!(merged.proof.as_ref(), Some(&proof));
+        assert!(merged.method_failed && !merged.ask_again);
+        assert!(paid.grows_to(&merged.clone().merged(asking.clone())));
+        // Facts no write could leave are refused.
+        assert!(AttemptFacts {
+            paid_at_ms: Some(1),
+            ..AttemptFacts::default()
+        }
+        .check()
+        .is_err());
+        assert!(AttemptFacts {
+            ask_again: true,
+            ..AttemptFacts::default()
+        }
+        .check()
+        .is_err());
+        assert!(paid.check().is_ok() && asking.check().is_ok());
     }
 
     fn is_client(error: &PaykitError, expected: &ClientRefusal) -> bool {

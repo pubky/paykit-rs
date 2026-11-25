@@ -451,6 +451,126 @@ pub(crate) enum UserResolution {
     Failed,
 }
 
+/// What this app knows of one attempt beside its journal entry (`jf/<attempt_id>`): what the
+/// payment method said of it, and whether a resume has reported it over. No batch carries
+/// it. A batch kept from before carries the entry's journal copy as it was when the batch
+/// was built, and applying it replaces the entry, so the method's word could not survive in
+/// the entry alone; here nothing but the writers of [`Paykit::learn`] touches it, and it only
+/// grows ([`AttemptFacts::grows_to`]). Every read of an entry lays it over the entry
+/// ([`JournalEntry::with_facts`]). Deleted only with its entry (Paykit spec 7.2).
+///
+/// [`Paykit::learn`]: crate::Paykit
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AttemptFacts {
+    /// The method's proof that the payment was made. Never removed or replaced.
+    pub(crate) proof: Option<Map<String, Value>>,
+    /// The method's time of that payment, kept with the proof.
+    pub(crate) paid_at_ms: Option<u64>,
+    /// The method said the payment failed, or refused the call. Never cleared: a proof that
+    /// comes later says the payment was made after all, and the proof decides.
+    pub(crate) method_failed: bool,
+    /// The recheck asks the method's history about that failure again, while the history
+    /// keeps it. Only the recheck clears it.
+    pub(crate) ask_again: bool,
+    /// A call returned the entry's outcome once the entry was over. Never cleared.
+    pub(crate) told: bool,
+    /// The outcome a call returned was paid, with the method's proof. Never cleared: a
+    /// payment found made after its failure or the user's resolution was told is reported
+    /// paid once more, until this is set.
+    pub(crate) told_paid: bool,
+}
+
+impl AttemptFacts {
+    /// Whether `next` keeps everything `self` holds: the same proof and its time once one is
+    /// held, the method's failure once said, the entry told once told. Only the recheck's
+    /// own flag may go. A write that would lose any of them is refused.
+    pub(crate) fn grows_to(&self, next: &Self) -> bool {
+        (self.proof.is_none() || (next.proof == self.proof && next.paid_at_ms == self.paid_at_ms))
+            && (!self.method_failed || next.method_failed)
+            && (!self.told || next.told)
+            && (!self.told_paid || next.told_paid)
+    }
+
+    /// The facts both copies hold, for an in-place restore: a proof either holds, the first
+    /// one where both do (Paykit spec 7.2), the method's failure where either says it, and
+    /// told where either was. The recheck asks again where either still asks and no proof
+    /// answers it.
+    pub(crate) fn merged(self, other: Self) -> Self {
+        let (proof, paid_at_ms) = match (self.proof, other.proof) {
+            (Some(proof), _) => (Some(proof), self.paid_at_ms),
+            (None, Some(proof)) => (Some(proof), other.paid_at_ms),
+            (None, None) => (None, None),
+        };
+        Self {
+            ask_again: (self.ask_again || other.ask_again) && proof.is_none(),
+            proof,
+            paid_at_ms,
+            method_failed: self.method_failed || other.method_failed,
+            told: self.told || other.told,
+            told_paid: self.told_paid || other.told_paid,
+        }
+    }
+
+    /// Whether these facts can be held: a time only with a proof, the recheck asking only
+    /// about a failure no proof answers, and told paid only once told.
+    pub(crate) fn check(&self) -> Result<()> {
+        if (self.paid_at_ms.is_some() && self.proof.is_none())
+            || (self.ask_again && (!self.method_failed || self.proof.is_some()))
+            || (self.told_paid && !self.told)
+        {
+            return Err(PaykitError::corrupt());
+        }
+        Ok(())
+    }
+}
+
+impl JournalEntry {
+    /// The entry as the method's word and the resume's facts say it stands
+    /// ([`AttemptFacts`]): the one read every entry goes through. An entry that doesn't hold
+    /// the method's proof the facts hold gets it, and stands paid with its outcome to write
+    /// (`RailPaid`): an older copy a kept batch put back, the user's resolution or another
+    /// app's included, never ends a payment the method made. The method's failure stands
+    /// beside whatever ended the entry, and the recheck's flag is the facts'. A payment the
+    /// method's word says reached the method is never one that ended before its call.
+    pub(crate) fn with_facts(mut self, facts: Option<&AttemptFacts>) -> Self {
+        let Some(facts) = facts else {
+            return self;
+        };
+        if let Some(proof) = &facts.proof {
+            if self.rail_proof.is_none() {
+                self.rail_proof = Some(proof.clone());
+                self.paid_at_ms = facts.paid_at_ms;
+                self.proof_msg_id = None;
+                // Its outcome is built again on what the claim and the record show now.
+                self.step = None;
+                self.stage = Stage::RailPaid;
+                // The user's word that it was paid off any claim stands in the proof now.
+                self.user_paid = false;
+            }
+            self.failed_by_method = false;
+        } else {
+            self.failed_by_method = facts.ask_again;
+            // An older copy from before the method's failure stands at `RailFailed`, its
+            // failure to write, as the failure's own journal write left it
+            // ([`members_hold`]).
+            if facts.method_failed
+                && matches!(
+                    self.stage,
+                    Stage::Recorded | Stage::Attempted | Stage::Paying
+                )
+            {
+                self.stage = Stage::RailFailed;
+            }
+        }
+        if facts.proof.is_some() || facts.method_failed {
+            self.never_dispatched = false;
+            self.failed_before_call = false;
+        }
+        self
+    }
+}
+
 /// The members of a journal entry whose values only go together as the journal's writers
 /// leave them ([`members_hold`]).
 #[derive(Clone, Copy, Debug, Default)]
@@ -1227,6 +1347,153 @@ pub(crate) fn dispatched(stage: Stage, restored: bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An entry at `stage`, as a payment journals it, holding nothing the method said.
+    fn an_entry(stage: Stage) -> JournalEntry {
+        let amount = PaymentAmount {
+            value: Decimal::new("1").unwrap(),
+            asset: Asset::new("btc").unwrap(),
+        };
+        JournalEntry {
+            user_started: true,
+            allowance: None,
+            attempt_id: paykit_lib::AttemptId::from_bytes([7; 16]).to_text(),
+            obligation: [1; 32],
+            payee: [2; 32],
+            request_hash: None,
+            natural_key: Vec::new(),
+            amount: KeptAmount::of(&amount),
+            payment_amount: KeptAmount::of(&amount),
+            destination: Destination::new(
+                [1; 16],
+                &PaymentEndpointIdentifier::new("onchain").unwrap(),
+                &PaymentEndpointPayload::new("payload").unwrap(),
+                DestinationSource::Request,
+                None,
+                false,
+            ),
+            deadline: None,
+            stage,
+            step: None,
+            label: None,
+            payment_reference: None,
+            acceptance_owed: false,
+            acceptance_msg_id: None,
+            acceptance_plaintext: None,
+            acceptance_cert: None,
+            acceptance_released: false,
+            rail_proof: None,
+            paid_at_ms: None,
+            proof_msg_id: None,
+            offline: None,
+            restored: false,
+            journaled_at_ms: 0,
+            allowance_expires_at_ms: None,
+            carrier: None,
+            carrier_record: None,
+            attempt_proof: None,
+            failed_by_method: false,
+            never_dispatched: false,
+            user_paid: false,
+            request: None,
+            record_held: false,
+            transfer_bound: None,
+            price: None,
+            failed_on_claim: false,
+            failed_before_call: false,
+            user_resolved: None,
+            billing_period: None,
+        }
+    }
+
+    #[test]
+    fn test_journal_facts_outlast_every_older_copy_of_an_entry() {
+        // Any copy of an entry a kept batch may write back, whatever the call that wrote it
+        // knew, is read through what the method said, kept apart from every batch: no copy
+        // takes that word back, and nothing has to put it back after a write.
+        let proof: Map<String, Value> = serde_json::from_str(r#"{"ref":"a"}"#).unwrap();
+        let paid = AttemptFacts {
+            proof: Some(proof.clone()),
+            paid_at_ms: Some(5),
+            ..AttemptFacts::default()
+        };
+        // A proof the history pass journaled, then a copy from before it written back by a
+        // replayed batch, or after a crash by the restart's flush: the proof stands, and the
+        // entry is open again to write its outcome.
+        for older in [
+            Stage::Attempted,
+            Stage::Paying,
+            Stage::RailFailed,
+            Stage::Finished,
+        ] {
+            let mut copy = an_entry(older);
+            copy.failed_by_method = true;
+            copy.never_dispatched = true;
+            copy.failed_before_call = older == Stage::Finished;
+            copy.user_resolved = (older == Stage::Finished).then_some(UserResolution::Failed);
+            let read = copy.with_facts(Some(&paid));
+            assert_eq!(read.rail_proof.as_ref(), Some(&proof), "{older:?}");
+            assert_eq!(read.paid_at_ms, Some(5));
+            assert_eq!(read.stage, Stage::RailPaid, "{older:?}");
+            assert!(!read.failed_by_method && !read.never_dispatched && !read.failed_before_call);
+        }
+        // A proof the recheck found after the method's failure was written: the same, from
+        // the one place every read goes through, wherever in the call it was learned.
+        let found = AttemptFacts {
+            method_failed: true,
+            ..paid.clone()
+        };
+        let mut failed = an_entry(Stage::Finished);
+        failed.failed_by_method = true;
+        let read = failed.with_facts(Some(&found));
+        assert_eq!(read.rail_proof.as_ref(), Some(&proof));
+        assert!(!read.failed_by_method);
+        // The method's failure laid over a copy holding the user's `done` or `unknown` on
+        // the claim keeps the user's word: the overlay never writes it.
+        let asking = AttemptFacts {
+            method_failed: true,
+            ask_again: true,
+            ..AttemptFacts::default()
+        };
+        for resolution in [UserResolution::Done, UserResolution::Unknown] {
+            let mut resolved = an_entry(Stage::Finished);
+            resolved.user_resolved = Some(resolution);
+            let read = resolved.with_facts(Some(&asking));
+            assert_eq!(read.user_resolved, Some(resolution));
+            assert!(read.failed_by_method);
+        }
+        // The recheck stopped asking once the history expired: a copy from before, still
+        // asking, is read as the recheck left it, and one from before the method's word is
+        // read as asking while the recheck still does.
+        let past = AttemptFacts {
+            ask_again: false,
+            ..asking.clone()
+        };
+        let mut stale = an_entry(Stage::Finished);
+        stale.failed_by_method = true;
+        assert!(!stale.with_facts(Some(&past)).failed_by_method);
+        let mut before_the_word = an_entry(Stage::Paying);
+        before_the_word.never_dispatched = true;
+        let read = before_the_word.with_facts(Some(&asking));
+        assert!(read.failed_by_method && !read.never_dispatched);
+        // And stands where the method's failure is written, as its writers leave it.
+        assert_eq!(read.stage, Stage::RailFailed);
+        for older in [Stage::Recorded, Stage::Attempted, Stage::Paying] {
+            for facts in [&asking, &past] {
+                let read = an_entry(older).with_facts(Some(facts));
+                assert_eq!(read.stage, Stage::RailFailed, "{older:?}");
+                assert!(members_hold(&EntryMembers {
+                    stage: Some(read.stage),
+                    failed_by_method: read.failed_by_method,
+                    ..EntryMembers::default()
+                }));
+            }
+        }
+        // An entry nothing was learned of reads as it was written.
+        let mut plain = an_entry(Stage::Paying);
+        plain.failed_by_method = true;
+        assert!(plain.with_facts(None).failed_by_method);
+    }
 
     #[test]
     fn test_journal_members_hold_only_as_their_writers_leave_them() {

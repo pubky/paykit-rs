@@ -360,11 +360,9 @@ impl Paykit {
                             proof, paid_at_ms, ..
                         })) => {
                             if let Some(mut entry) = self.rebuilt_entry(&obligation, id).await? {
-                                entry.rail_proof = Some(proof);
-                                entry.paid_at_ms = paid_at_ms;
-                                // Journaled first: a report whose write fails leaves it for a
+                                // Kept first: a report whose write fails leaves it for a
                                 // resume, as [`PayOutcome::PaidOutcomeUnwritten`] says.
-                                self.set_stage(&mut entry, Stage::RailPaid).await?;
+                                self.learn_paid(&mut entry, proof, paid_at_ms).await?;
                                 report.resolved.push(self.report(&mut entry).await?);
                                 continue;
                             }
@@ -377,10 +375,9 @@ impl Paykit {
                             // payment while a late success could never be reported: the
                             // attempt stays doubtful, for a receipt or the user.
                             if let Some(mut entry) = self.rebuilt_entry(&obligation, id).await? {
-                                entry.failed_by_method = true;
-                                // Journaled first: a report whose write fails leaves it for a
+                                // Kept first: a report whose write fails leaves it for a
                                 // resume, as [`PayOutcome::PaidOutcomeUnwritten`] says.
-                                self.set_stage(&mut entry, Stage::RailFailed).await?;
+                                self.learn_failed(&mut entry, true).await?;
                                 report.resolved.push(self.report(&mut entry).await?);
                                 continue;
                             }
@@ -687,7 +684,10 @@ impl Paykit {
         // A delivery operation for the whole call (Paykit spec 8.1).
         let _delivery = self.delivery_operation();
         // The call's future goes on the heap, as `receive`'s does: it nests deep.
-        Box::pin(self.resolve_attempt_inner(obligation, attempt, resolution, _confirmed)).await
+        Box::pin(self.resolve_attempt_inner(obligation, attempt, resolution, _confirmed)).await?;
+        // The user ended it, and the call tells them so: a resume reports it again only
+        // where its payment is found made after all.
+        self.mark_told_if_over(&attempt).await
     }
 
     async fn resolve_attempt_inner(

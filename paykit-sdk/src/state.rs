@@ -32,6 +32,7 @@
 //! | `mi/<from>` | entries missed while lagging, a `missed` item's: the counterparties of open requests and unfinished payments are asked to re-send; kept, with those asked already, while a record whose counterparty it may ask is sealed | |
 //! | `off/<attempt_id>` | the original batch ID for an unresolved offline recording, committed with its signed operations before first submission (Paykit spec 8.4) | yes |
 //! | `j/<attempt_id>` | the payment journal: one payment, from before its `attempt` | yes |
+//! | `jf/<attempt_id>` | what the payment method said of that payment (its proof, its failure, the recheck's flag) and whether a resume reported it over (`AttemptFacts`): written only beside the entry, no batch carries it, it only grows, and it is laid over every read of the entry; deleted with the entry; an in-place restore merges both copies | yes |
 //! | `side/<msg_id>` | the side a cancellation is sent from, kept with the batch that queues it | |
 //! | `ex/<msg_id>` | why an acceptance this app sent may go while sends to its payee are held: a payment dispatched, or the user's confirmation of that blocked subscription, bound to its payee and request; kept before or with the batch that queues it (`send_holds.rs`) | |
 //! | `qs/<msg_id>` | a held message this app queued (a rejection or payer's cancellation, a payment request, period details, a list request or a subscription acceptance): its kind, counterparty, request, signed hash, `created_at` and the activity record that holds it, written in the commit that queues it, so the receive step ends its outbox copy past 30 days, telling the host as its request record decides, with that decision; gone once neither the outbox nor a report of its end the host hasn't acknowledged names it (`send_holds.rs`); restored whole, since a restored outbox can hold the copy and a restored client an unacknowledged report of its end | |
@@ -1377,6 +1378,19 @@ impl Stored for JournalEntry {
     }
 }
 
+impl sealed::Sealed for crate::journal::AttemptFacts {}
+
+/// What the payment method said of an attempt, and whether a resume reported it over
+/// ([`crate::journal::AttemptFacts`]): at its attempt's key, holding only what can be held.
+impl Stored for crate::journal::AttemptFacts {
+    fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
+        if !matches!(family, StateKey::AttemptFacts(_)) {
+            return corrupt();
+        }
+        self.check()
+    }
+}
+
 impl sealed::Sealed for MissedItemMark {}
 
 /// A `missed` item's mark: of the time its key names, the counterparties it asked each once,
@@ -1998,6 +2012,7 @@ pub(crate) mod key {
     pub(crate) const MISSED: &str = "missed/";
     pub(crate) const MISSED_ITEMS: &str = "mi/";
     pub(crate) const JOURNAL: &str = "j/";
+    pub(crate) const ATTEMPT_FACTS: &str = "jf/";
     pub(crate) const PEERS: &str = "peer/";
     pub(crate) const KEPT_CANCELLATIONS: &str = "kc/";
     pub(crate) const CURSOR_TIME: &str = "ct";
@@ -2349,6 +2364,10 @@ pub(crate) mod key {
         format!("{JOURNAL}{}", attempt_id.to_text())
     }
 
+    pub(crate) fn attempt_facts(attempt_id: &AttemptId) -> String {
+        format!("{ATTEMPT_FACTS}{}", attempt_id.to_text())
+    }
+
     pub(crate) fn offline_batch(attempt: &AttemptId) -> String {
         format!("off/{}", attempt.to_text())
     }
@@ -2549,6 +2568,7 @@ pub(crate) enum StateKey {
     },
     /// `j/<attempt ID>`: a journal entry.
     Journal(AttemptId),
+    AttemptFacts(AttemptId),
     /// The original Switch batch ID of a paid offline attempt.
     OfflineBatch(AttemptId),
     /// A requested receipt delivery, awaiting its answer or holding its verified application.
@@ -2948,15 +2968,15 @@ impl StateKey {
                             delete: b64_32(hash)?,
                         }
                     }
-                    "j" | "off" => {
+                    "j" | "jf" | "off" => {
                         let attempt = AttemptId::parse(rest).ok()?;
                         if attempt.to_text() != rest {
                             return None;
                         }
-                        if family == "j" {
-                            Self::Journal(attempt)
-                        } else {
-                            Self::OfflineBatch(attempt)
+                        match family {
+                            "j" => Self::Journal(attempt),
+                            "jf" => Self::AttemptFacts(attempt),
+                            _ => Self::OfflineBatch(attempt),
                         }
                     }
                     "ask" => {
@@ -4139,6 +4159,10 @@ mod tests {
             ),
             (key::journal(&attempt), StateKey::Journal(attempt)),
             (
+                key::attempt_facts(&attempt),
+                StateKey::AttemptFacts(attempt),
+            ),
+            (
                 key::offline_batch(&attempt),
                 StateKey::OfflineBatch(attempt),
             ),
@@ -4468,6 +4492,7 @@ mod tests {
             "missed/1",
             "mi/1",
             "j/",
+            "jf/",
             "ctx",
             "side/123E4567-E89B-42D3-A456-426614174000",
             "lq/AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM/not-an-app",

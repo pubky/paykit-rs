@@ -3264,6 +3264,25 @@ async fn test_resume_returns_a_service_answer_no_retry_passes_after_the_later_pa
             "{later:?}"
         );
         assert_eq!(w.rail.pay_calls(&attempt_id), 1);
+        // The call that ended it returned an error, so it is told by the next one, once.
+        let resumed = wallet.resume_payments().await.unwrap();
+        assert_eq!(
+            resumed
+                .iter()
+                .filter(|outcome| matches!(
+                    outcome,
+                    PayOutcome::Paid { attempt_id: paid, proof_msg_id: Some(_), .. } if *paid == attempt_id
+                ))
+                .count(),
+            1,
+            "{resumed:?}"
+        );
+        assert!(!wallet
+            .resume_payments()
+            .await
+            .unwrap()
+            .iter()
+            .any(|outcome| outcome.attempt_id() == attempt_id));
         return;
     }
     panic!("no world put the stopped payment first");
@@ -3272,9 +3291,13 @@ async fn test_resume_returns_a_service_answer_no_retry_passes_after_the_later_pa
 #[tokio::test]
 async fn test_pay_reports_paid_when_a_stop_follows_its_written_outcome() {
     // The store stops after some commit of the payment. Wherever that falls after the outcome
-    // batch committed, which finishes the entry, the payment is reported `Paid`: nothing
-    // later reports a finished entry, and the proof's delivery is the outbox's.
+    // batch committed, which finishes the entry, the payment is reported `Paid` once: by the
+    // call, where it marked the outcome told first, or else by the next resume. The one
+    // exception is a stop right after the told mark, the call's last commit: the host never
+    // gets the call's answer, and the journal shows the payment made.
     use pubky_switch_client::store::{Fault, FaultStore};
+    let mut reported_by_resume = false;
+    let mut stopped_after_told = None;
     for after in 1..64 {
         let w = World::new();
         let (store, app_id, request) = with_a_request(&w).await;
@@ -3294,18 +3317,39 @@ async fn test_pay_reports_paid_when_a_stop_follows_its_written_outcome() {
             .pay_request(&request, PayOptions::default())
             .await
             .outcome;
-        if faulty.stopped() && matches!(outcome, Ok(PayOutcome::Paid { .. })) {
-            let journal = reload(&w, &store, app_id).await.payments().await.unwrap();
-            assert_eq!(journal[0].stage, paykit_sdk::Stage::Finished);
+        let mut reloaded = reload(&w, &store, app_id).await;
+        let journal = reloaded.payments().await.unwrap();
+        if journal
+            .first()
+            .is_some_and(|p| p.stage == paykit_sdk::Stage::Finished)
+        {
             assert!(journal[0].paid_by_method);
+            let resumed = reloaded.resume_payments().await.unwrap();
+            if matches!(outcome, Ok(PayOutcome::Paid { .. })) {
+                assert!(resumed.is_empty(), "after {after}: {resumed:?}");
+            } else if resumed.is_empty() {
+                stopped_after_told = Some(after);
+            } else {
+                assert!(
+                    matches!(resumed.as_slice(), [PayOutcome::Paid { .. }]),
+                    "after {after}: {outcome:?} then {resumed:?}"
+                );
+                reported_by_resume = true;
+                assert!(reloaded.resume_payments().await.unwrap().is_empty());
+            }
+        }
+        if !faulty.stopped() {
+            assert!(
+                matches!(outcome, Ok(PayOutcome::Paid { .. })),
+                "{outcome:?}"
+            );
+            assert!(reported_by_resume, "no stop fell after the written outcome");
+            // The only stop after which nothing reports it is the one after the last commit.
+            assert_eq!(stopped_after_told, Some(after - 1));
             return;
         }
-        assert!(
-            faulty.stopped(),
-            "the payment finished within {after} commits without meeting the stop"
-        );
     }
-    panic!("no stop fell after the written outcome");
+    panic!("the payment never finished within the commits tried");
 }
 
 #[tokio::test]
