@@ -694,7 +694,7 @@ A stop or a proof is released with its original bytes while the record, read afr
 | Allowance acceptance or rejection | Withdrawn. The user may answer a still-pending proposal again. A rejected proposal can remain pending at the proposer until withdrawn or the retained rejection arrives. |
 | Proposer's withdrawal | Withdrawn. The late-withdrawal duty still applies, and the user may withdraw again (Paykit spec 8.3.1). |
 | Executor notice | Withdrawn. Executors read the Allowance record themselves. |
-| Empty or nonempty Private Payment List | Withdrawn, its unknown delivery kept as a notice while it matters. A fresh empty withdrawal is owed and goes once the app holds plain `paykit_request`. Show the previous list, reapply the user's withdrawals, then let the user set the list and choose recipients again. |
+| Empty or nonempty Private Payment List | Withdrawn and told, as every withdrawal is. A fresh empty withdrawal is owed and goes once the app holds plain `paykit_request`. Until that withdrawal is reserved, the list's `ListDeliveryUnknown` notice also stands, and the list calls report `Refusal::ListDeliveryUnknown`; the receive that reserves it removes the notice as superseded, so a host may not see it. Show the previous list, reapply the user's withdrawals, then let the user set the list and choose recipients again. |
 | Extension message | Withdrawn. The extension's owner may send again through its own call. |
 
 ## The payment method's proof

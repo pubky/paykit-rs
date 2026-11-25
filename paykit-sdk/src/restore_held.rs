@@ -179,7 +179,11 @@ fn paykit_kind(kind: &str) -> bool {
 // - A carried list: the withdrawal owed to its recipient and, while its outcome matters,
 //   its unknown-delivery notice are written first, then the withdrawal, and before any
 //   path can expire it, the expiry step and the outbox's flush (`carried_lists_owed`). Both
-//   are kept once, so a replay writes nothing twice.
+//   are kept once, so a replay writes nothing twice. The host is told of the carried
+//   list's delivery by the client's give-up event. The notice backs the list calls'
+//   `Refusal::ListDeliveryUnknown` and stands until a newer version supersedes it: it
+//   goes in the same receive once the fresh withdrawal is reserved there, and stays while
+//   none can be, such as without plain `paykit_request` (`Paykit::prune_list_notices`).
 // - The client's withdrawal tells its give-up as a duty event the host acknowledges. A
 //   withdrawal in this pass reaches the host in the next receive's report, since this
 //   report's events were taken right after the read.
@@ -209,18 +213,49 @@ impl Paykit {
             && self.holds_scope_keys())
     }
 
-    /// Let the client give up each held Paykit message past its replay deadline, telling
-    /// the host, whatever the gate: the deadline doesn't wait for Paykit's first read.
-    /// A non-stop error makes the step best effort, tried again at the next call; a stop of
-    /// the wallet is returned, typed.
+    /// Give up each held Paykit message past its deadline, telling the host, whatever the
+    /// gate: the deadline doesn't wait for Paykit's first read. One past the 30 days from
+    /// its `created_at` is withdrawn (`Paykit::held_window_open`); the client gives up one
+    /// past its own replay deadline at a flush. A non-stop error makes the step best
+    /// effort, tried again at the next call; a stop of the wallet is returned, typed.
     pub(crate) async fn give_up_expired_held(&mut self) -> Result<()> {
         let Some(queued) = Box::pin(self.carried_lists_owed()).await? else {
             return Ok(());
         };
+        let held: Vec<String> = queued
+            .iter()
+            .filter(|q| q.held && paykit_kind(&q.kind))
+            .map(|q| q.msg_id.clone())
+            .collect();
+        if held.is_empty() {
+            return Ok(());
+        }
+        let read = self.protocol.held_inventory.begin(&held);
+        let listed = self.app.queued_messages(BACKUP_NAME).await;
+        let originals = read.0.lock().take().unwrap_or_default();
+        drop(read);
+        if let Err(error) = listed {
+            crate::pay::unless_stop(error)?;
+        }
         for q in queued.iter().filter(|q| q.held && paykit_kind(&q.kind)) {
+            let past = originals
+                .get(&q.msg_id)
+                .and_then(Option::as_ref)
+                .is_some_and(|original| !self.held_window_open(Some(original)));
             // A held message isn't tried: the flush only gives it up once it is too old. A
             // stopped client gives up nothing, and delivers nothing, until it can act.
-            if let Err(error) = self.app.flush_message(&q.msg_id).await {
+            let given_up = if past {
+                // As the pass withdraws one past its window: no stop notice (`decide`).
+                self.local_delete(&key::unrecorded_stop(&q.to, &q.msg_id))
+                    .await?;
+                self.app
+                    .withdraw_message(BACKUP_NAME, &q.msg_id)
+                    .await
+                    .map(drop)
+            } else {
+                self.app.flush_message(&q.msg_id).await.map(drop)
+            };
+            if let Err(error) = given_up {
                 crate::pay::unless_stop(error)?;
             }
         }
@@ -320,7 +355,7 @@ impl Paykit {
         Box::pin(self.show_pending_stops(&ids)).await?;
         // A carried list the installation and backup both owed isn't held, and is
         // decided in the first pass only.
-        let mut lists_left = false;
+        let mut mark_stays = false;
         if !ids.is_empty() || pass == HeldPass::CarriedLists {
             let read = self.protocol.held_inventory.begin(&ids);
             let queued = self.app.queued_messages(BACKUP_NAME).await;
@@ -347,7 +382,7 @@ impl Paykit {
                         Ok(false) => {}
                         Err(error) => {
                             crate::pay::unless_stop(error)?;
-                            lists_left = true;
+                            mark_stays = true;
                             continue;
                         }
                     }
@@ -356,20 +391,26 @@ impl Paykit {
                 match Box::pin(self.check_held_message(report, q, msg)).await {
                     Ok(Outcome::Released) => released = released.saturating_add(1),
                     Ok(Outcome::Withdrawn) => withdrawn = withdrawn.saturating_add(1),
-                    Ok(Outcome::Waiting) => lists_left |= carried_list,
+                    Ok(Outcome::Waiting) => mark_stays |= carried_list,
                     Ok(Outcome::Gone) => {}
                     Err(error) => {
                         crate::pay::unless_stop(error)?;
-                        lists_left |= carried_list;
+                        mark_stays |= carried_list;
                     }
                 }
             }
         }
-        // The withdrawals of this pass show their notices before the mark can go.
-        if let Ok(left) = self.app.held_messages(BACKUP_NAME).await {
-            Box::pin(self.show_pending_stops(&left)).await?;
+        // The withdrawals of this pass show their notices before the mark can go. A sweep
+        // that can't list keeps the mark, so a later pass shows them: the sweep runs only
+        // while the mark stands.
+        match self.app.held_messages(BACKUP_NAME).await {
+            Ok(left) => Box::pin(self.show_pending_stops(&left)).await?,
+            Err(error) => {
+                crate::pay::unless_stop(error)?;
+                mark_stays = true;
+            }
         }
-        if !lists_left {
+        if !mark_stays {
             match self.still_held().await? {
                 Some(0) => self.local_delete(key::HELD_MESSAGES_OWED).await?,
                 Some(_) if pass == HeldPass::CarriedLists => {
@@ -528,7 +569,10 @@ impl Paykit {
             Fresh::Missing => return Ok(Absent),
             Fresh::Unreadable => return Ok(Unreadable),
         };
-        if self.kept_unplaced(&target, &q.to).await? {
+        if self
+            .unplaced_for(&[self.activity_key(&target)?], &q.to)
+            .await?
+        {
             return Ok(Unreadable);
         }
         let stop = if cancellation {
@@ -596,7 +640,10 @@ impl Paykit {
             Fresh::Missing => return Ok(Absent),
             Fresh::Unreadable => return Ok(Unreadable),
         };
-        if self.kept_unplaced(&target, &q.to).await? {
+        if self
+            .unplaced_for(&[self.activity_key(&target)?], &q.to)
+            .await?
+        {
             return Ok(Unreadable);
         }
         let receipted = record.receipt.as_ref().is_some_and(|receipt| {
@@ -618,27 +665,52 @@ impl Paykit {
         )
     }
 
-    /// Whether a counterparty's message for this record is kept and not placed in it yet:
-    /// a payee's cancellation kept for the payer's record, or a reply, a stop or a receipt
-    /// the counterparty sent kept before its record (Paykit spec 8.1, "Replies before their
-    /// record", "Messages that cross"). The record can't show what it doesn't hold yet, so
-    /// a held stop or proof waits for its placing (Paykit spec 7.2).
-    async fn kept_unplaced(
+    /// Whether a message of `counterparty`'s for one of `records` is kept and not placed
+    /// in it yet: a held decision waits for its placing, which may bring the counterparty's
+    /// stop, receipt or conflict (Paykit spec 7.2, 8.1, 8.3). The one list of every family
+    /// that can hold such a message: kept replies (`pr/`), kept payee cancellations (`kc/`),
+    /// an Allowance's kept end (`ae/`), conflict (`cf/`), conflict evidence (`ax/`) and a
+    /// pending proposal's conflict (`pc/`), and the client's stored entries noted and not
+    /// placed (`se/`). Messages kept over a divergent record (`dw/`) pause it, which waits
+    /// already (`Paykit::held_record_paused`).
+    pub(crate) async fn unplaced_for(
         &self,
-        target: &ActivityTarget,
+        records: &[[u8; 32]],
         counterparty: &[u8; 32],
     ) -> Result<bool> {
-        let record = self.activity_key(target)?;
-        let mut prefixes = vec![format!(
-            "{}{}/",
-            key::kept_replies_of(counterparty),
-            pubky_switch_core::enc::b64(&record)
-        )];
-        if target.side == SideTag::Payer {
-            prefixes.push(key::kept_cancellations(&record));
+        for record in records {
+            let replies = format!(
+                "{}{}/",
+                key::kept_replies_of(counterparty),
+                pubky_switch_core::enc::b64(record)
+            );
+            if !self.local_scan::<KeptMessage>(&replies).await?.is_empty()
+                || !self
+                    .local_scan::<KeptMessage>(&key::kept_cancellations(record))
+                    .await?
+                    .is_empty()
+                || !self
+                    .local_scan::<KeptMessage>(&key::allowance_ends(record))
+                    .await?
+                    .is_empty()
+                || self
+                    .local_get::<KeptMessage>(&key::conflict(record))
+                    .await?
+                    .is_some()
+                || self.unresolved_allowance(record).await?
+                || self
+                    .local_get::<crate::allowances::PendingConflict>(&key::pending_conflict(record))
+                    .await?
+                    .is_some()
+            {
+                return Ok(true);
+            }
         }
-        for prefix in prefixes {
-            if !self.local_scan::<KeptMessage>(&prefix).await?.is_empty() {
+        for (_, note) in self
+            .local_scan::<crate::stored::BoundNote>(&key::stored_notes_of(counterparty))
+            .await?
+        {
+            if self.unplaced_note_in(&note, records).await? {
                 return Ok(true);
             }
         }

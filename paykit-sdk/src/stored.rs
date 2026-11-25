@@ -62,6 +62,7 @@
 //! such as `AppEvent::ListsUnverified`, which the host shows the user, stays for the host,
 //! and never holds back the acknowledgement of a later one Paykit took.
 
+use paykit_lib::collections::Collection;
 use paykit_lib::derive::natural_key;
 use paykit_lib::records::{ActivityRecord, StoredMessage};
 use paykit_lib::Body;
@@ -651,6 +652,38 @@ impl Paykit {
         };
         tx.put(&note_key, &note)?;
         Ok(true)
+    }
+
+    /// Whether the stored note `bound`, not placed yet, may go into one of `records`: its
+    /// place is one of them, an Allowance's or its proposal's at one of them, or not decided
+    /// yet, which may be one of them (Paykit spec 7.2: a held decision waits for it).
+    pub(crate) async fn unplaced_note_in(
+        &self,
+        bound: &BoundNote,
+        records: &[[u8; 32]],
+    ) -> Result<bool> {
+        if bound.note.placed {
+            return Ok(false);
+        }
+        let seq = bound.note.message.order()?.1;
+        Ok(match self.place_of(&bound.message, seq).await? {
+            Some(Place::Record { target, .. }) => records.contains(&self.activity_key(&target)?),
+            Some(Place::Allowance | Place::Stop(_)) => {
+                let Some(id) = crate::allowances::named_allowance(bound.message.body()) else {
+                    return Ok(true);
+                };
+                let sender = bound.message.sender();
+                let mut named = false;
+                for collection in [Collection::Allowances, Collection::AllowanceProposals] {
+                    let target =
+                        crate::allowances::allowance_record_target(collection, &sender, id);
+                    named |= records.contains(&self.app.record_key(&target)?);
+                }
+                named
+            }
+            Some(Place::AwaitsRequest(_) | Place::AwaitsWrite | Place::Undecided) => true,
+            Some(Place::List(_) | Place::Taken) | None => false,
+        })
     }
 
     /// Where `stored` goes for this app: a request into the payer's request record; a

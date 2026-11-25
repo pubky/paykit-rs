@@ -305,6 +305,42 @@ async fn test_restore_held_past_deadline_is_given_up_by_switch() {
     assert!(!wallet.receive(None).await.unwrap().applied.contains(&stop));
 }
 
+// restore_held.rs:247 withdraws a stop past its signed window while a scope key is missing.
+#[tokio::test]
+async fn test_restore_held_past_thirty_days_withdrawn_while_the_gate_is_closed() {
+    use crate::common::HOUR_MS;
+
+    let w = World::new();
+    let (mut wallet, request, stop, _shop, _) = Box::pin(carried_rejection(&w, store())).await;
+    let signed_at = w.clock.now_ms();
+    w.clock.advance_ms(2 * HOUR_MS);
+    wallet
+        .app_mut()
+        .read_record_fresh(&outcome_record::payer_record(&request))
+        .await
+        .unwrap();
+    let backup = wallet.backup().await.unwrap();
+    drop(wallet);
+
+    let mut wallet = Box::pin(restore(&w, &w.alice, store(), &backup)).await;
+    read_restored_client(&mut wallet).await;
+    let epoch = w
+        .alice
+        .next_doc(|body| body.data_epoch += 1)
+        .unwrap()
+        .data_epoch();
+    wallet.app_mut().refresh_identity().await.unwrap();
+    w.clock.set_ms(signed_at + SENT_RETENTION_MS + HOUR_MS);
+    wallet.app_mut().flush_message(&stop).await.unwrap();
+    assert!(held(&wallet, &stop).await);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(wallet.app().data_epoch(), epoch);
+    assert!(wallet.app().scope_key(epoch, "paykit_pay").is_none());
+    assert!(!held(&wallet, &stop).await);
+    unknown(&mut wallet, &stop).await;
+    assert!(stop_notice_ids(&wallet, &stop).await.is_empty());
+}
+
 // Even a stop owed only by the restored store expires and is reported after 30 days
 // while its record cannot be read (Paykit spec 7.2).
 #[tokio::test]
@@ -506,6 +542,16 @@ async fn carried_list(in_place: bool) {
     let mut shop = Box::pin(restore(&w, &w.bob, target, &backup)).await;
     assert_eq!(held(&shop, &original.msg_id).await, !in_place);
     withdrawn(&mut shop).await;
+    // The host is told of the carried list's delivery by the client's give-up event, in the
+    // next receive's report, whatever became of the list's notice (Paykit spec 7.2, 9).
+    let next = shop.receive(None).await.unwrap();
+    assert!(
+        next.report.events.iter().any(|e| matches!(e,
+            AppEvent::DeliveryUnknown { msg_id, .. } | AppEvent::MessageUndelivered { msg_id, .. }
+                if msg_id == &original.msg_id)),
+        "{:?}",
+        next.report.events
+    );
     shop.flush().await.unwrap();
     let (fresh, list) = sent_list(&shop, &to).await;
     assert_ne!(fresh, original.msg_id);
@@ -620,6 +666,48 @@ async fn test_restore_held_proof_withdrawn_once_its_receipt_is_recorded() {
     assert_eq!(w.rail.pay_calls(&attempt), 1);
 }
 
+async fn assert_receipt_unplaced(wallet: &Paykit, key: &str) {
+    let note = wallet
+        .app()
+        .protocol_get("paykit", key.as_bytes())
+        .await
+        .unwrap()
+        .unwrap();
+    let note: serde_json::Value = serde_json::from_slice(&note).unwrap();
+    assert_eq!(note["d"]["placed"], false);
+}
+
+// restore_held.rs:713 keeps the proof held while its payee's stored receipt awaits placement.
+#[tokio::test]
+async fn test_restore_held_proof_waits_for_a_stored_receipt_not_placed() {
+    let w = World::new();
+    let (mut wallet, mut shop, request, (_, proof), backup) = Box::pin(carried_proof(&w)).await;
+    let key = wallet.request(&request).await.unwrap().record;
+    wallet.flush().await.unwrap();
+    receive_message(&mut shop, &proof).await;
+    let sale = shop.payee_activity().await.unwrap()[0].record;
+    let receipt = shop.confirm_payment(&sale).await.unwrap().unwrap();
+    let note = format!("se/{}/{receipt}", pubky_switch_core::enc::b64(&w.bob_id()));
+    w.alice.switch().keep_passed_entries();
+    crate::common::refuse_writes(&w.alice, 2);
+    wallet.receive(None).await.unwrap();
+    assert_receipt_unplaced(&wallet, &note).await;
+    drop(wallet);
+
+    let (mut wallet, placement) =
+        Box::pin(restore_before_placement(&w, &w.alice, &backup, key)).await;
+    let counts = decisions_through_listing(&mut wallet).await;
+    assert_eq!(
+        (counts.released, counts.withdrawn, counts.still_held),
+        (0, 1, Some(1))
+    );
+    assert_receipt_unplaced(&wallet, &note).await;
+    assert!(held(&wallet, &proof).await);
+    placement.refusing.store(false, Ordering::Relaxed);
+    withdrawn(&mut wallet).await;
+    assert!(!held(&wallet, &proof).await);
+}
+
 // restore_held.rs:546 withdraws a proof missing from the payer's record.
 #[tokio::test]
 async fn test_restore_held_paid_proof_withdrawn_then_credited_once() {
@@ -696,6 +784,59 @@ async fn test_restore_held_paid_proof_withdrawn_then_credited_once() {
             .len(),
         1
     );
+    assert_eq!(w.rail.pay_calls(&attempt_id), 1);
+}
+
+// pay.rs:3835 leaves the payment owed until the restored acceptance has been decided.
+#[tokio::test]
+async fn test_restore_held_acceptance_keeps_its_payment_owed_until_decided() {
+    use paykit_sdk::{Resolution, Stage};
+    use pubky_switch_client::app::UserConfirmed;
+
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    let bob = w.bob_id();
+    let kind = "paykit.payment_request_acceptance";
+    wallet.app_mut().hold_queued(&bob).await.unwrap();
+    let attempt_id = Box::pin(crate::stored::pending(&w, &mut wallet, &request)).await;
+    let queued = wallet.app().queued_messages("paykit").await.unwrap();
+    let original = queued.into_iter().find(|q| q.kind == kind).unwrap().msg_id;
+    w.rail.settle(&attempt_id, true);
+    let obligation = wallet.payments().await.unwrap()[0].obligation;
+    wallet.app_mut().release_queued(&bob).await.unwrap();
+    let backup = wallet.backup().await.unwrap();
+    drop(wallet);
+
+    // Once the attempt can be resolved by another app, the phone records it as paid.
+    w.clock.advance_ms(2 * crate::common::HOUR_MS);
+    let mut phone = w.wallet("phone").await;
+    phone
+        .resolve_attempt(
+            &obligation,
+            attempt_id,
+            Resolution::Done,
+            UserConfirmed::new(),
+        )
+        .await
+        .unwrap();
+    let mut wallet = Box::pin(restore(&w, &w.alice, store(), &backup)).await;
+    read_restored_client(&mut wallet).await;
+    wallet.resume_payments().await.unwrap();
+    assert!(held(&wallet, &original).await);
+    assert_eq!(wallet.payments().await.unwrap()[0].stage, Stage::Paying);
+    withdrawn(&mut wallet).await;
+    assert!(!held(&wallet, &original).await);
+    unknown(&mut wallet, &original).await;
+
+    wallet.resume_payments().await.unwrap();
+    assert_eq!(wallet.payments().await.unwrap()[0].stage, Stage::Finished);
+    wallet.flush().await.unwrap();
+    let sent = wallet.app().sent_to(&bob, 0, u64::MAX).await.unwrap();
+    let replacement = sent.iter().find(|m| m.kind == kind).unwrap();
+    assert_ne!(replacement.msg_id, original);
+    receive_message(&mut shop, &replacement.msg_id).await;
     assert_eq!(w.rail.pay_calls(&attempt_id), 1);
 }
 
@@ -2230,9 +2371,9 @@ async fn test_restore_held_unheld_carried_list_owes_its_withdrawal_before_flush(
     receive_message(&mut wallet, &fresh).await;
 }
 
-// send_holds.rs:959 leaves a restore-held qs/ stop to the restore's expiry.
+// restore_held.rs give_up_expired_held: past its 30 days, while more of the feed keeps the gate closed.
 #[tokio::test]
-async fn test_restore_held_held_stop_not_withdrawn_by_the_other_expiry() {
+async fn test_restore_held_past_thirty_days_withdrawn_while_the_feed_has_more() {
     use pubky_switch_client::app::{AppConfig, FEED_PAGES_PER_READ};
 
     let w = World::new();
@@ -2274,8 +2415,8 @@ async fn test_restore_held_held_stop_not_withdrawn_by_the_other_expiry() {
 
     let cutoff = signed_at + SENT_RETENTION_MS - pubky_switch_core::records::CLOCK_TOLERANCE_MS;
     w.clock.set_ms(cutoff + 1);
-    // The records are listed, so ordinary stop expiry runs. The rest of the feed
-    // keeps the restore decision closed until the Switch deadline has passed too.
+    // The records are listed, so ordinary stop expiry runs too. The rest of the feed
+    // keeps the restore's decisions closed; the Switch deadline is an hour later.
     for _ in 0..=FEED_PAGES_PER_READ {
         w.inject(
             &w.bob,
@@ -2291,19 +2432,13 @@ async fn test_restore_held_held_stop_not_withdrawn_by_the_other_expiry() {
     assert!(read.report.more && !read.report.stopped);
     assert!(read.records_unlisted.is_none() && !read.scope_keys_awaited);
     assert!(!wallet.app().listing_owed().await.unwrap());
-    assert_eq!(
-        read.held_messages,
-        HeldMessages {
-            still_held: Some(1),
-            ..HeldMessages::default()
-        }
-    );
-    assert!(held(&wallet, &stop).await);
-
-    w.clock.advance_ms(crate::common::HOUR_MS + 1);
-    let read = wallet.receive(None).await.unwrap();
+    // Past its 30 days the restore's own expiry withdraws it while the rest of the feed
+    // keeps the decisions closed, before the client's deadline: told once, no stop notice,
+    // and the ordinary stop expiry forgets its queued stop.
     assert_eq!(read.held_messages, nothing_held());
+    assert!(!held(&wallet, &stop).await);
     assert!(wallet.message_delivery(&stop).await.unwrap().is_none());
+    assert!(stop_notice_ids(&wallet, &stop).await.is_empty());
     let duties = wallet.app_mut().pending_duty_events().await.unwrap();
     assert_eq!(
         duties
@@ -2314,6 +2449,12 @@ async fn test_restore_held_held_stop_not_withdrawn_by_the_other_expiry() {
             .count(),
         1
     );
+    assert!(wallet
+        .app()
+        .protocol_get("paykit", queued_stop.as_bytes())
+        .await
+        .unwrap()
+        .is_none());
 }
 
 // protocol.rs:1492 gives the installation's stop notice precedence over the backup's.

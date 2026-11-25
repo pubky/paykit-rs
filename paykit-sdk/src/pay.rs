@@ -3827,6 +3827,15 @@ impl Paykit {
         if Box::pin(self.dispatched_write_waits(&key)).await? {
             return Ok(());
         }
+        // An acceptance a restore holds isn't decided yet: the entry stays owed until the
+        // restore's pass releases or withdraws it, so a withdrawn one is signed again here
+        // while the payer record holds no response (Paykit spec 7.2).
+        if let Some(msg_id) = &entry.acceptance_msg_id {
+            let held = self.app.held_messages(crate::protocol::BACKUP_NAME).await?;
+            if held.contains(msg_id) {
+                return Ok(());
+            }
+        }
         self.release_acceptance(entry, None).await?;
         let held = self.app.shared_record(&key).await?;
         let write = match held.as_ref().map(|r| &r.content) {

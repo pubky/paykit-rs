@@ -280,15 +280,15 @@ impl crate::Paykit {
                 },
             );
         }
-        // A counterparty's end or a conflict kept and not placed yet waits for its placing
-        // (Paykit spec 8.3, "Ends reach the executor", "Conflicted").
-        let ends = key::allowance_ends(&key);
-        if !self.local_scan::<KeptMessage>(&ends).await?.is_empty()
-            || self
-                .local_get::<KeptMessage>(&key::conflict(&key))
-                .await?
-                .is_some()
-        {
+        // A counterparty's end, answer or conflict kept and not placed yet, for the
+        // Allowance or its proposal, waits for its placing (Paykit spec 8.3, "Ends reach the
+        // executor", "Conflicted").
+        let pending = self.app.record_key(&allowance_record_target(
+            Collection::AllowanceProposals,
+            &q.to,
+            id,
+        ))?;
+        if self.unplaced_for(&[key, pending], &q.to).await? {
             return Ok(Unreadable);
         }
         // The one order of every held decision: paused waits; a confirmed view is decided

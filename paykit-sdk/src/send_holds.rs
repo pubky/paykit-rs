@@ -952,12 +952,7 @@ impl Paykit {
                 gone.delete(&at);
                 continue;
             }
-            // A message a restore holds is the restore pass's to decide (`restore_held.rs`).
-            let restore_held = queued.get(&stop.msg_id).is_some_and(|copy| copy.held);
-            if !restore_held
-                && past_replay_window(stop.created_at_ms, now)
-                && !self.delivery_held(&stop.to).await?
-            {
+            if past_replay_window(stop.created_at_ms, now) && !self.delivery_held(&stop.to).await? {
                 expired.push(stop);
             }
         }
