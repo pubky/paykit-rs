@@ -2217,6 +2217,8 @@ async fn test_receive_copies_a_later_owner_failure_once() {
         .await
         .unwrap()
         .unwrap();
+    // The method answers that the payment failed, and the owner records it on the claim.
+    world.rail.settle(&id, false);
     let op = ClaimOp::failed(entry.obligation, claim.view.step, id.to_bytes());
     payer
         .app_mut()
@@ -3010,7 +3012,90 @@ async fn compacted_failure_paid_by_receipt(retire_copy_key: bool) {
 }
 
 #[tokio::test]
-async fn test_allowance_release_gives_back_a_pending_attempt_that_fails() {
+async fn test_allowance_release_holds_a_failure_its_method_reports_pending() {
+    use pubky_dispatch_client::app::{ClaimOp, OpBatch};
+
+    // One payment a day, 10 in all.
+    let terms = AllowanceTerms::from_json(&json!({
+        "asset": "btc", "lifetime_amount_limit": "10",
+        "period_limits": [{
+            "amount_limit": null,
+            "payment_count_limit": 1,
+            "period": {"kind": "rolling", "every": 1, "unit": "day"},
+        }],
+        "per_payment_amount": null, "active_from": null, "expires_at": null,
+        "allowed_payment_endpoint_identifiers": null
+    }))
+    .unwrap();
+    let (world, mut payer, mut shop, key) =
+        Box::pin(first_grant_in(crate::common::store(), terms)).await;
+    world.rail.set_history_payer(payer.identity());
+    // The method takes the 7 and leaves them pending.
+    let attempt_id = Box::pin(open_funded_request(
+        &world, &mut payer, &mut shop, &key, "7",
+    ))
+    .await;
+    let (reserved, revision) = only_ledger(&payer).await;
+    let entry = reserved.entries[0].clone();
+    // A failure is recorded on the claim while the method still reports the payment
+    // pending: the money might still move, so nothing is copied into the ledger and the 7
+    // stay reserved, amount and count (Paykit spec 8.3, Pending holds a failure).
+    let claim = payer
+        .app_mut()
+        .read_claim(&entry.obligation)
+        .await
+        .unwrap()
+        .unwrap();
+    let op = ClaimOp::failed(entry.obligation, claim.view.step, attempt_id.to_bytes());
+    payer
+        .app_mut()
+        .submit_batch(OpBatch::new().op(op.kind()))
+        .await
+        .unwrap();
+    Box::pin(payer.receive(None)).await.unwrap();
+    Box::pin(payer.resume_payments()).await.unwrap();
+    let (held, held_revision) = only_ledger(&payer).await;
+    assert_eq!(held_revision, revision, "nothing is copied while pending");
+    assert_eq!(held.entries[0].outcome, None);
+    let usage = Box::pin(payer.reconcile_allowance(&key))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (
+            usage.lifetime().as_str(),
+            usage.reserved_amount().as_str(),
+            usage.periods()[0].count(),
+            usage.released()
+        ),
+        ("7", "7", 1, 0)
+    );
+    // A payment that needs that room waits for it.
+    let next = Box::pin(request_from(
+        &mut shop,
+        payer.identity(),
+        draft("3", world.clock.now_ms()),
+    ))
+    .await;
+    Box::pin(payer.receive(None)).await.unwrap();
+    let waits = Box::pin(payer.pay_under_allowance(&next, &key))
+        .await
+        .outcome
+        .unwrap_err();
+    assert_eq!(
+        waits.refusal(),
+        Some(&paykit_sdk::Refusal::NotNow(
+            paykit_sdk::NotNowReason::AllowanceLimit {
+                limit: "period_count".into()
+            }
+        )),
+        "{waits:?}"
+    );
+    assert_eq!(world.rail.executions(&attempt_id), 1);
+}
+
+#[tokio::test]
+async fn test_allowance_release_gives_back_a_pending_attempt_once_its_method_says_failed() {
     // One payment a day, 10 in all.
     let terms = AllowanceTerms::from_json(&json!({
         "asset": "btc", "lifetime_amount_limit": "10",
@@ -3440,10 +3525,26 @@ async fn confirm_foreign_failure_under(
                 after: 2,
             });
     }
-    // The receive that takes the renewed certificate copies the failure.
     let ledger_key = payer.app().records_of("allowance_ledgers").await.unwrap()[0].key;
     let writes = world.record_writes(&world.alice, &ledger_key);
-    Box::pin(payer.receive(None)).await.unwrap();
+    if case == ForeignFailure::AfterHandoff {
+        // The executor's method still reports the payment pending: the confirmed failure
+        // isn't copied, and the 9 stay reserved until the method answers (Paykit spec 8.3,
+        // Pending holds a failure).
+        Box::pin(payer.receive(None)).await.unwrap();
+        assert_eq!(world.record_writes(&world.alice, &ledger_key), writes);
+        let usage = Box::pin(payer.reconcile_allowance(&key))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!((usage.lifetime().as_str(), usage.released()), ("9", 0));
+        // The method answers that it failed: the resume copies the failure.
+        world.rail.settle(&entry.attempt_id, false);
+        Box::pin(payer.resume_payments()).await.unwrap();
+    } else {
+        // The receive that takes the renewed certificate copies the failure.
+        Box::pin(payer.receive(None)).await.unwrap();
+    }
     assert_eq!(world.record_writes(&world.alice, &ledger_key), writes + 1);
     if case == ForeignFailure::LostCopy {
         // The copy's answer was lost and the receive went on: the service applied it, and a

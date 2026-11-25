@@ -1013,6 +1013,10 @@ pub struct AttemptEvidence {
     pub claim: Option<ClaimState>,
     /// The payer's validated proof or durable journal shows the attempt was paid.
     pub paid: bool,
+    /// The executor's own payment method still reports the attempt pending: handed off,
+    /// neither paid nor failed. A failure then stays reserved until that method's history
+    /// answers (Paykit spec 8.3, Pending holds a failure).
+    pub method_pending: bool,
 }
 
 impl From<ClaimState> for AttemptEvidence {
@@ -1026,7 +1030,9 @@ impl From<ClaimState> for AttemptEvidence {
 
 /// How an entry counts (Paykit spec 8.3, `failed` releases; Paykit wire 5.5). A paid
 /// outcome, claim or proof spends. Every failed attempt, whoever recorded the failure, is
-/// released. Without an outcome, open and unknown reserve, and a missing claim spends.
+/// released, except one the executor's own payment method still reports pending, which
+/// stays reserved (Paykit spec 8.3, Pending holds a failure). Without an outcome, open and
+/// unknown reserve, and a missing claim spends.
 pub fn counts(entry: &LedgerEntry, evidence: AttemptEvidence) -> Counting {
     counting(entry.outcome, evidence)
 }
@@ -1039,6 +1045,13 @@ fn counting(outcome: Option<EntryOutcome>, evidence: AttemptEvidence) -> Countin
     }
     match (outcome, evidence.claim) {
         (Some(EntryOutcome::Done), _) | (_, Some(ClaimState::Done)) => Counting::Spent,
+        // The method hasn't said the money did not move (Paykit spec 8.3, Pending holds a
+        // failure).
+        (Some(EntryOutcome::Failed), _) | (None, Some(ClaimState::Failed { .. }))
+            if evidence.method_pending =>
+        {
+            Counting::Reserved
+        }
         (Some(EntryOutcome::Failed), _) | (None, Some(ClaimState::Failed { .. })) => {
             Counting::Released
         }
@@ -1185,8 +1198,8 @@ pub fn usage(
             evidence.get(&item.attempt_id).copied().unwrap_or_default(),
         ) {
             Counting::Released => {}
-            // A failed outcome counts as released or spent, never reserved; were it reserved,
-            // its room could come back.
+            // A failure its method still reports pending stays reserved: its room may come
+            // back once the method answers (Paykit spec 8.3, Pending holds a failure).
             Counting::Reserved => {
                 lifetime = add(lifetime, item.value.scaled())?;
                 reserved_amount = add(reserved_amount, item.value.scaled())?;
@@ -2228,6 +2241,75 @@ mod tests {
     }
 
     #[test]
+    fn test_allowance_failure_stays_reserved_while_its_method_reports_pending() {
+        let mut attempt = entry(1, "0.01", "2026-02-01T00:00:00.000Z", None);
+        let pending = |claim| AttemptEvidence {
+            claim,
+            paid: false,
+            method_pending: true,
+        };
+        // A failure, the entry's own or its claim's, holds its room while the method
+        // still reports the attempt pending, and releases once it doesn't.
+        for (outcome, claim) in [
+            (Some(EntryOutcome::Failed), None),
+            (
+                Some(EntryOutcome::Failed),
+                Some(ClaimState::Failed { by_owner: true }),
+            ),
+            (None, Some(ClaimState::Failed { by_owner: false })),
+        ] {
+            attempt.outcome = outcome;
+            assert_eq!(counts(&attempt, pending(claim)), Counting::Reserved);
+            assert_eq!(
+                counts(
+                    &attempt,
+                    AttemptEvidence {
+                        method_pending: false,
+                        ..pending(claim)
+                    }
+                ),
+                Counting::Released
+            );
+            // Paid evidence spends over a pending method.
+            assert_eq!(
+                counts(
+                    &attempt,
+                    AttemptEvidence {
+                        paid: true,
+                        ..pending(claim)
+                    }
+                ),
+                Counting::Spent
+            );
+        }
+        // Pending changes nothing where no failure is recorded.
+        attempt.outcome = None;
+        assert_eq!(counts(&attempt, pending(None)), Counting::Spent);
+        assert_eq!(
+            counts(&attempt, pending(Some(ClaimState::Open))),
+            Counting::Reserved
+        );
+        attempt.outcome = Some(EntryOutcome::Done);
+        assert_eq!(counts(&attempt, pending(None)), Counting::Spent);
+        // A compacted failure on pending history is reserved, amount and count.
+        let terms = AllowanceTerms::from_json(&terms()).unwrap();
+        let mut l = ledger(Vec::new());
+        let id = AttemptId::from_bytes([8; 16]);
+        l.failed.push(CompactedFailed {
+            obligation: [8; 32],
+            attempt_id: id,
+            value: Decimal::parse("0.01").unwrap(),
+        });
+        let at = t("2026-03-01T00:00:00.000Z");
+        let evidence = HashMap::from([(id, pending(None))]);
+        let used = super::usage(&terms, &l, &evidence, at).unwrap();
+        assert_eq!(
+            (used.lifetime().as_str(), used.reserved_amount().as_str()),
+            ("0.01", "0.01")
+        );
+    }
+
+    #[test]
     fn test_allowance_compacted_failure_releases_until_paid_evidence() {
         let terms = AllowanceTerms::from_json(&terms()).unwrap();
         let mut l = ledger(Vec::new());
@@ -2244,8 +2326,14 @@ mod tests {
             Some(ClaimState::Failed { by_owner: false }),
         ] {
             {
-                let mut evidence =
-                    HashMap::from([(attempt, AttemptEvidence { claim, paid: false })]);
+                let mut evidence = HashMap::from([(
+                    attempt,
+                    AttemptEvidence {
+                        claim,
+                        paid: false,
+                        method_pending: false,
+                    },
+                )]);
                 let used = super::usage(&terms, &l, &evidence, at).unwrap();
                 assert_eq!(used.lifetime().as_str(), "0");
                 evidence.get_mut(&attempt).unwrap().paid = true;
@@ -2304,6 +2392,7 @@ mod tests {
             AttemptEvidence {
                 claim: None,
                 paid: true,
+                method_pending: false,
             },
         );
         let used = super::usage(&terms, &l, &evidence, at).unwrap();

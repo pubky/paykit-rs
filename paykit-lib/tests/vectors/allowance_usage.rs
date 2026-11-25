@@ -522,7 +522,12 @@ fn failure_cases(v: &Value) -> Vec<Value> {
             l["entries"] = json!([]);
             l["totals"]["failed"] = json!([{ "attempt_id": entry["attempt_id"], "obligation": entry["obligation"], "value": entry["value"] }]);
         }
-        let evidence = AttemptEvidence { claim, paid };
+        // The vectors hold no payment-method history (vectors README).
+        let evidence = AttemptEvidence {
+            claim,
+            paid,
+            method_pending: false,
+        };
         let attempt = AttemptId::parse(st(&entry, "attempt_id")).unwrap();
         let u = usage(&AllowanceTerms::from_json(&terms).unwrap(), &ledger(&l), &HashMap::from([(attempt, evidence)]), time(st(&v["cases"][3], "t"))).unwrap();
         // Independent exact expected amount prevents regeneration blessing an undercount.

@@ -129,7 +129,10 @@ struct Verdict {
 /// safe answer. Only what another installation can check is written: a dated proof or a
 /// signed `done`. A payment counted spent on anything else writes nothing, so no ledger
 /// write ever records `failed` for an attempt this app counts paid. Without such evidence,
-/// the failure the wallet recorded releases, as the spec says the wallet decides.
+/// the failure the wallet recorded releases, as the spec says the wallet decides, unless
+/// this executor's own method still reports the attempt pending: then it stays reserved and
+/// no `failed` is copied until the method answers (Paykit spec 8.3, Pending holds a
+/// failure).
 fn attempt_verdict(seen: Seen) -> Verdict {
     let claim = match seen.claim {
         ClaimShows::Verified(state) => Some(state),
@@ -146,13 +149,23 @@ fn attempt_verdict(seen: Seen) -> Verdict {
         || seen.sighted
         || seen.claim == ClaimShows::ShownDone
         || method_paid;
-    let counts = AttemptEvidence { claim, paid };
-    let writes = match (paid, provable) {
-        // Counted paid on evidence another installation can't check: nothing is written.
-        (true, false) => AttemptEvidence::default(),
-        (true, true) | (false, _) => AttemptEvidence {
+    let method_pending = match seen.method {
+        MethodShows::Pending => true,
+        MethodShows::Nothing | MethodShows::Failed | MethodShows::Paid => false,
+    };
+    let counts = AttemptEvidence {
+        claim,
+        paid,
+        method_pending,
+    };
+    let writes = match (paid, provable, method_pending) {
+        // Counted paid on evidence another installation can't check, or a failure its method
+        // still reports pending: nothing is written.
+        (true, false, _) | (false, _, true) => AttemptEvidence::default(),
+        (true, true, _) | (false, _, false) => AttemptEvidence {
             claim,
             paid: seen.dated_proof,
+            method_pending: false,
         },
     };
     Verdict { counts, writes }
@@ -403,9 +416,12 @@ mod tests {
                 (Recorded, HistFailed, Gone, Absent, false),
                 Some(("0", "0", Failed_)),
             ),
+            // The method still reports it pending: the failure stays reserved, and nothing
+            // more is written, until the method answers (Paykit spec 8.3, Pending holds a
+            // failure).
             (
                 (Recorded, HistPending, VFailed, Absent, false),
-                Some(("0", "0", Failed_)),
+                Some(("70", "70", Failed_)),
             ),
             (
                 (Recorded, HistPaid, VFailed, Absent, false),
@@ -444,7 +460,7 @@ mod tests {
             ),
             (
                 (Unset, HistPending, VFailed, Absent, false),
-                Some(("0", "0", Failed_)),
+                Some(("70", "70", Unset_)),
             ),
             (
                 (Unset, NotListed, VFailed, Undated, false),

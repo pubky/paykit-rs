@@ -972,6 +972,7 @@ mod tests {
         let evidence = |claim, paid| AttemptEvidence {
             claim: Some(claim),
             paid,
+            method_pending: false,
         };
         let room = |entries: &[LedgerEntry], facts: &[(u8, AttemptEvidence)], value: &str| {
             let ledger = Ledger {
