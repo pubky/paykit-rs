@@ -753,7 +753,7 @@ Between apps of one identity only, through the own inbox, wrapped only to the ex
 
 ```json
 {
-  "allowance_record": "kNgxYqkcwbzOglKDpn58fw-UwvdX7mAeDCJKhK1bBUA",
+  "allowance_record": "NVzuzRtwQjwMC1lVxORmQIb8Gk7nz_7hic-lhJD2aPs",
   "reason": "ended"
 }
 ```
@@ -893,11 +893,11 @@ Example (alice's `payer_activity` record of bob's request, certificate and plain
     "sender": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
     "cert": {
       "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktZGlzcGF0Y2gu...",
-      "sig": "4bAiKsZ2ITml9GP7Nqxgz3-lJ5WB25fIqYRarBxke89Mye8URlPFAM5qGTqWMxRcPS5lWLy1aDPt6IyRVQsoDA"
+      "sig": "TG9IwjvdmTsxjVUXZvQXNEHmi7OlcYIlGUbrFb-BsWLz0dFh5nR5Z_WFiPPmvdMjveGQJV1-7zJj6ULMmFSLBQ"
     },
     "plaintext": {
       "sender_app": "CQl8r8bZGV9VwrqRrTtDSw",
-      "signature": "9AI7IHiwT4Ze9m4FJmNLSlcb9gR0gjXtW9WQP--XzeWUaaVjIuTXkuBMzJNAzOIq-I_WsvGpOPsggy4Och3JCg",
+      "signature": "kGq59lBdRYFqoHr5yWqrwv3jiqxRgh7vZxKr4KeAQyVoVn_LY3zS9f1WDhSRfC14p6DIhQvh9KlmxK_TP8B3CA",
       "json": "eyJ2IjoxLCJraW5kIjoicGF5a2l0LnBheW1lbnRf..."
     },
     "accepted_at": "2026-01-01T00:00:00.412Z"

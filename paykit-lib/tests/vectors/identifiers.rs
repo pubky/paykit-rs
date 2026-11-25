@@ -193,8 +193,8 @@ const POLICIES_DESCRIPTION: &str = "Wire 1.5, Dispatch wire 1.5: the policies of
 collections, each with its read scope, its write scopes and its policy hash, \
 hash(lp(\"pubky-dispatch/v1/policy\", read_scope, u64(n), write_scope_1, ..., write_scope_n)), \
 hashed_bytes_hex being the bytes hashed: the fixed policy of each collection, by its name, \
-permanent policies use the permanent-policy label and append their generation as a u64, \
-or zero for a null generation, and, last, \
+a permanent policy appending two more parts, \"permanent\" and u64(generation), \
+zero for a null generation, and, last, \
 payee_activity's policy for a request labelled shop1.";
 
 /// `policies`: each collection's fixed policy, and `payee_activity`'s under the label
