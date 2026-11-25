@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::{PaykitError, Refusal, Result};
 use crate::journal::JournalEntry;
 use crate::paykit::Paykit;
-use crate::state::{key, StateKey};
+use crate::state::{key, StateKey, Tx};
 
 /// What a notice tells the user.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -413,6 +413,9 @@ pub(crate) enum GivenUpOrigin {
     HeldAnswer,
     /// A held stop absent from its current active record (Paykit spec 7.2).
     UnrecordedStop,
+    /// The same, written before the stop's withdrawal and shown only once the client tells
+    /// that withdrawal: a crash between leaves no notice for a stop still held.
+    UnrecordedStopPending,
     /// This app's own payment request, period details or subscription acceptance, held in
     /// the outbox while sends to its counterparty were held (`qs/`), passed its replay
     /// window unsent; its activity record still holds it.
@@ -425,7 +428,7 @@ pub(crate) enum GivenUpOrigin {
 impl GivenUpOrigin {
     fn notice_kind(origin: Option<Self>) -> NoticeKind {
         match origin {
-            Some(Self::UnrecordedStop) => NoticeKind::StopNotRecorded,
+            Some(Self::UnrecordedStop | Self::UnrecordedStopPending) => NoticeKind::StopNotRecorded,
             Some(Self::AllowanceConflict) => NoticeKind::AllowancePlacementExpired,
             Some(Self::AllowanceBeforeLoss) => NoticeKind::AllowanceAcceptanceBeforeLoss,
             // A message given up with no origin of its own is told as given up.
@@ -952,7 +955,8 @@ impl Paykit {
         let mut out = Vec::new();
         // Each read whole and bound to its key ([`bind_notice`]).
         for (id, kept) in self.local_scan::<KeptNotice>(key::NOTICES).await? {
-            if !kept.acknowledged {
+            // A stop's notice waits for its withdrawal to be told (`show_pending_stop`).
+            if !kept.acknowledged && kept.origin != Some(GivenUpOrigin::UnrecordedStopPending) {
                 let mut notice = kept.view(id)?;
                 if let Some(SettlementSubject::Conflicting { bucket, settlement }) =
                     notice.settlement
@@ -974,6 +978,24 @@ impl Paykit {
         }
         out.sort_by_key(|notice| notice.raised_at_ms);
         Ok(out)
+    }
+
+    /// Show, in `tx`, the pending notice of the stop `msg_id` whose withdrawal the client
+    /// told: written before the withdrawal, it is shown in the commit that takes that duty
+    /// (Paykit spec 7.2). Whether there was one.
+    pub(crate) async fn show_pending_stop(&self, tx: &mut Tx, msg_id: &str) -> Result<bool> {
+        let prefix = key::unrecorded_stop_prefix();
+        let mut shown = false;
+        for (rest, mut kept) in self.local_scan::<KeptNotice>(&prefix).await? {
+            if kept.origin == Some(GivenUpOrigin::UnrecordedStopPending)
+                && kept.msg_id.as_deref() == Some(msg_id)
+            {
+                kept.origin = Some(GivenUpOrigin::UnrecordedStop);
+                tx.put(&format!("{prefix}{rest}"), &kept)?;
+                shown = true;
+            }
+        }
+        Ok(shown)
     }
 
     /// Acknowledge `id` once the user has seen the notice. The wallet stops listing it.

@@ -61,7 +61,8 @@ impl From<HeldCursor> for CursorStatus {
 pub struct WalletHeldMessages {
     /// Messages released in this receive.
     pub released: u32,
-    /// Messages withdrawn in this receive, each told as of unknown outcome.
+    /// Held messages and carried lists withdrawn in this receive, each told as an unknown
+    /// delivery, or as undelivered for a re-send of a message already accepted.
     pub withdrawn: u32,
     /// Messages still held after this receive.
     pub still_held: u32,

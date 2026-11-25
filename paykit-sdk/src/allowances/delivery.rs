@@ -272,16 +272,27 @@ impl crate::Paykit {
             }
             return Ok(Unreadable);
         }
-        let Some(Some(value)) = current(&target, &key, &read, false) else {
+        // The one order of every held decision: paused waits; a confirmed view is decided
+        // on, divergent or not (`Paykit::held_record_paused`).
+        if self.held_record_paused(&key).await? {
             return Ok(Unreadable);
+        }
+        let value = match &read {
+            RecordRead::Fresh(r) if super::replies::qualified_confirmed(r, &target, &key) => {
+                match &r.content {
+                    RecordContent::Value(v) => v.as_slice(),
+                    _ => return Ok(Absent),
+                }
+            }
+            _ => return Ok(Unreadable),
         };
         let Some(record) = bind_at(value, &self.identity(), &q.to, id) else {
             return Ok(Unreadable);
         };
-        // A record seen divergent and not confirmed since decides nothing, though writing
-        // the end cleared its view (Paykit spec 7.2, 8.1).
-        if self.pause_seen(&key).await?.paused {
-            return Ok(Unreadable);
+        // "An app sends no acceptance, rejection or end for a conflicted Allowance" and "the
+        // counterparty is told nothing" (Paykit spec 8.3, Conflicted): withdrawn, no notice.
+        if record.conflicted.is_some() {
+            return Ok(Absent);
         }
         let accepted = super::acceptance(&record);
         if let Some(end) = &record.end {

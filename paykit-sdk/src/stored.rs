@@ -464,94 +464,103 @@ impl Paykit {
     /// one whose message can't be kept, which stays for the host.
     async fn take_stored_event(&mut self, event: &AppEvent, mark: &str) -> Result<bool> {
         let mut tx = Tx::default();
-        let taken = match event {
-            AppEvent::MessagesHeldAtRestore { .. } => {
-                let owed = self
-                    .local_get::<crate::restore_held::HeldPass>(key::HELD_MESSAGES_OWED)
-                    .await?
-                    .unwrap_or(crate::restore_held::HeldPass::HeldOnly);
-                tx.put(key::HELD_MESSAGES_OWED, &owed)?;
-                true
-            }
-            AppEvent::Parked {
-                stored_id, reason, ..
-            } if !matches!(reason, ParkReason::Released | ParkReason::AwaitingAdmission) => {
-                self.note_stored(*stored_id, &mut tx).await?
-            }
-            AppEvent::EffectRefused { stored_id, .. }
-            | AppEvent::EffectUncertain { stored_id, .. } => {
-                self.note_stored(*stored_id, &mut tx).await?
-            }
-            AppEvent::ReleasedDuplicate { sender, msg_id, .. } => {
-                tx.delete(&key::stored_note(sender, msg_id));
-                true
-            }
-            // A copy dropped while it waited for a scope key. Its sender is asked
-            // again once the app holds the key, and the host is told once, by the copy that
-            // names the message, even while the copy of the records may lack its record.
-            AppEvent::StoredEntryDropped {
-                sender,
-                accepted_at_ms,
-                waiting: pubky_switch_client::app::WaitingReason::Key { data_epoch },
-                message,
-                ..
-            } => {
-                self.count_key_wait(&mut tx, *sender, *accepted_at_ms, *data_epoch)
-                    .await?;
-                self.give_up_key_wait(&mut tx, *sender, &message.msg_id)
-                    .await?;
-                true
-            }
-            AppEvent::StoredEntryDropped {
-                sender,
-                accepted_at_ms,
-                waiting: pubky_switch_client::app::WaitingReason::Sender,
-                ..
-            } => {
-                self.count_dropped_unverified(&mut tx, *sender, *accepted_at_ms)
-                    .await?;
-                true
-            }
-            // A record a view showed divergent pauses (`divergent.rs`): its mark is its own
-            // commit, before this event's, and taking the event again changes nothing.
-            AppEvent::RecordDivergent {
-                key: record, id, ..
-            } => {
-                Box::pin(self.take_divergent_event(record, id)).await?;
-                true
-            }
-            // The Switch owns the member and its expiry policy, including any pending
-            // edit. Normal record upkeep runs after this receive completes.
-            AppEvent::MemberChanged { protocol, .. }
-                if protocol == paykit_lib::app_record::PROTOCOL_NAME =>
-            {
-                true
-            }
-            AppEvent::MessageUndelivered {
-                msg_id,
-                resend: false,
-                ..
-            } if self
-                .take_list_delivery(&mut tx, msg_id, FirstDelivery::Undelivered)
-                .await? =>
-            {
-                true
-            }
+        // A withdrawn stop's notice is shown in the commit that takes its give-up.
+        let shown = match event {
             AppEvent::DeliveryUnknown { msg_id, .. }
-                if self
-                    .take_list_delivery(&mut tx, msg_id, FirstDelivery::Unknown)
-                    .await? =>
-            {
-                true
+            | AppEvent::MessageUndelivered { msg_id, .. } => {
+                self.show_pending_stop(&mut tx, msg_id).await?
             }
-            // A `resend_request` given up settles its delivery evidence in the same commit,
-            // so an overlapping recovery request may go (Paykit spec 7.2).
-            _ if self.take_expired_stop(&mut tx, event).await? => {
-                self.take_reply_ask_duty(&mut tx, event).await?;
-                true
-            }
-            _ => self.take_reply_ask_duty(&mut tx, event).await?,
+            _ => false,
         };
+        let taken = shown
+            | match event {
+                AppEvent::MessagesHeldAtRestore { .. } => {
+                    let owed = self
+                        .local_get::<crate::restore_held::HeldPass>(key::HELD_MESSAGES_OWED)
+                        .await?
+                        .unwrap_or(crate::restore_held::HeldPass::HeldOnly);
+                    tx.put(key::HELD_MESSAGES_OWED, &owed)?;
+                    true
+                }
+                AppEvent::Parked {
+                    stored_id, reason, ..
+                } if !matches!(reason, ParkReason::Released | ParkReason::AwaitingAdmission) => {
+                    self.note_stored(*stored_id, &mut tx).await?
+                }
+                AppEvent::EffectRefused { stored_id, .. }
+                | AppEvent::EffectUncertain { stored_id, .. } => {
+                    self.note_stored(*stored_id, &mut tx).await?
+                }
+                AppEvent::ReleasedDuplicate { sender, msg_id, .. } => {
+                    tx.delete(&key::stored_note(sender, msg_id));
+                    true
+                }
+                // A copy dropped while it waited for a scope key. Its sender is asked
+                // again once the app holds the key, and the host is told once, by the copy that
+                // names the message, even while the copy of the records may lack its record.
+                AppEvent::StoredEntryDropped {
+                    sender,
+                    accepted_at_ms,
+                    waiting: pubky_switch_client::app::WaitingReason::Key { data_epoch },
+                    message,
+                    ..
+                } => {
+                    self.count_key_wait(&mut tx, *sender, *accepted_at_ms, *data_epoch)
+                        .await?;
+                    self.give_up_key_wait(&mut tx, *sender, &message.msg_id)
+                        .await?;
+                    true
+                }
+                AppEvent::StoredEntryDropped {
+                    sender,
+                    accepted_at_ms,
+                    waiting: pubky_switch_client::app::WaitingReason::Sender,
+                    ..
+                } => {
+                    self.count_dropped_unverified(&mut tx, *sender, *accepted_at_ms)
+                        .await?;
+                    true
+                }
+                // A record a view showed divergent pauses (`divergent.rs`): its mark is its own
+                // commit, before this event's, and taking the event again changes nothing.
+                AppEvent::RecordDivergent {
+                    key: record, id, ..
+                } => {
+                    Box::pin(self.take_divergent_event(record, id)).await?;
+                    true
+                }
+                // The Switch owns the member and its expiry policy, including any pending
+                // edit. Normal record upkeep runs after this receive completes.
+                AppEvent::MemberChanged { protocol, .. }
+                    if protocol == paykit_lib::app_record::PROTOCOL_NAME =>
+                {
+                    true
+                }
+                AppEvent::MessageUndelivered {
+                    msg_id,
+                    resend: false,
+                    ..
+                } if self
+                    .take_list_delivery(&mut tx, msg_id, FirstDelivery::Undelivered)
+                    .await? =>
+                {
+                    true
+                }
+                AppEvent::DeliveryUnknown { msg_id, .. }
+                    if self
+                        .take_list_delivery(&mut tx, msg_id, FirstDelivery::Unknown)
+                        .await? =>
+                {
+                    true
+                }
+                // A `resend_request` given up settles its delivery evidence in the same commit,
+                // so an overlapping recovery request may go (Paykit spec 7.2).
+                _ if self.take_expired_stop(&mut tx, event).await? => {
+                    self.take_reply_ask_duty(&mut tx, event).await?;
+                    true
+                }
+                _ => self.take_reply_ask_duty(&mut tx, event).await?,
+            };
         if taken {
             tx.put(mark, &true)?;
             self.local_commit(tx).await?;

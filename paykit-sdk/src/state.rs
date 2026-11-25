@@ -2327,6 +2327,11 @@ pub(crate) mod key {
         format!("{NOTICES}stop/{}/{id}", b64(to))
     }
 
+    /// The prefix of every [`unrecorded_stop`] notice.
+    pub(crate) fn unrecorded_stop_prefix() -> String {
+        format!("{NOTICES}stop/")
+    }
+
     /// A restored outgoing message, bound to its recipient, ID and signed JSON hash.
     pub(crate) fn restored_delivery(to: &[u8; 32], id: &str, hash: &[u8; 32]) -> String {
         format!("{RESTORED_DELIVERIES}{}/{id}/{}", b64(to), b64(hash))

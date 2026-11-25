@@ -169,22 +169,32 @@ fn paykit_kind(kind: &str) -> bool {
 // - A stop's routing marks (its side, an end's origin) are written while its evidence is
 //   read, before the release. They only route; a replay reads them and decides again.
 // - A stop the open record no longer shows: its `StopNotRecorded` notice is written
-//   first, then the withdrawal. A crash between leaves the message held; the next pass
-//   decides again, and any decision other than this one removes the notice it left.
+//   pending (not listed), then the client withdraws it. The commit that takes that
+//   withdrawal's give-up duty shows the notice (`show_pending_stop`), so it is shown once,
+//   only for a stop that went. A crash before the withdrawal leaves the message held and the
+//   notice pending; the next pass decides again, and any other decision removes it.
 // - A carried list: the withdrawal owed to its recipient and, while its outcome matters,
-//   its unknown-delivery notice are written first, then the withdrawal. Both are kept
-//   once (`keep_list_withdrawal`, `note_carried_list`), so a replay writes nothing twice.
+//   its unknown-delivery notice are written first, then the withdrawal, and before any
+//   held list can expire (`give_up_expired_held`). Both are kept once, so a replay writes
+//   nothing twice.
 // - The client's withdrawal tells its give-up as a duty event the host acknowledges. A
 //   withdrawal in this pass reaches the host in the next receive's report, since this
 //   report's events were taken right after the read.
-// - The owed mark (`hm`) is lowered or removed last, once nothing it covers is left: a
-//   crash before it only runs the pass again, which finds nothing left to decide.
+// - The owed mark (`hm`) is lowered or removed last, once the client lists nothing it
+//   covers; while the client can't list them, it stays. A crash before it only runs the
+//   pass again, which finds nothing left to decide.
+// - The counts of each release and withdrawal go on the Paykit value as each is made, and
+//   the next summary returned takes them, so an error that stops the pass loses none.
 // One message that can't be decided now, for an error other than a stop of the app,
 // waits for the next receive; it never fails the pass for the others.
 impl Paykit {
     /// The one gate for deciding held messages: Paykit's own first read is complete, its
     /// records are listed and their scope keys held, and nothing stops the app (Paykit
-    /// spec 7.2, Switch spec 12.4).
+    /// spec 7.2, Switch spec 12.4). It is asked only in a Paykit receive, after that
+    /// receive's own read succeeded and its stops were placed, so another protocol's read
+    /// never decides a Paykit message. Every listing Paykit owes is in `unlisted()`; a
+    /// listing the client owes while those marks are clear comes from a data epoch whose
+    /// key is missing, which `holds_scope_keys()` refuses.
     pub(crate) async fn held_decisions_open(&self, report: &ReceiveReport) -> Result<bool> {
         Ok(!report.stopped
             && self.certificate_refused().is_none()
@@ -192,7 +202,7 @@ impl Paykit {
             && self.app.alarm().is_none()
             && self.confirmed_first_read()
             && self.unlisted().await?.is_none()
-            && self.scope_keys_awaited().await?.is_none())
+            && self.holds_scope_keys())
     }
 
     /// Let the client give up each held Paykit message past its replay deadline, telling
@@ -205,50 +215,57 @@ impl Paykit {
         {
             return Ok(());
         }
-        let ids = match self.app.held_messages(BACKUP_NAME).await {
-            Ok(ids) => ids,
+        let queued = match self.app.queued_messages(BACKUP_NAME).await {
+            Ok(queued) => queued,
             Err(error) => return crate::pay::unless_stop(error),
         };
-        for id in ids {
-            // A held message isn't tried: the flush only gives it up once it is too old.
-            if let Err(error) = self.app.flush_message(&id).await {
+        for q in queued.iter().filter(|q| q.held && paykit_kind(&q.kind)) {
+            // What is owed is recorded before anything can expire: a carried list's fresh
+            // withdrawal and its unknown-delivery notice (Paykit spec 7.2, 8.4).
+            if q.kind == Kind::PrivatePaymentList.as_str() {
+                self.keep_list_withdrawal(&q.to).await?;
+                self.note_carried_list(q).await?;
+            }
+            // A held message isn't tried: the flush only gives it up once it is too old. A
+            // stopped client gives up nothing, and delivers nothing, until it can act.
+            if let Err(error) = self.app.flush_message(&q.msg_id).await {
                 crate::pay::unless_stop(error)?;
             }
         }
         Ok(())
     }
 
-    /// The Paykit messages the client still holds after a restore.
-    pub(crate) async fn still_held(&self) -> Result<u32> {
+    /// The Paykit messages the client still holds after a restore; `None` when the client
+    /// can't list them now, which keeps every mark that covers them.
+    pub(crate) async fn still_held(&self) -> Result<Option<u32>> {
         if self
             .local_get::<HeldPass>(key::HELD_MESSAGES_OWED)
             .await?
             .is_none()
         {
-            return Ok(0);
+            return Ok(Some(0));
         }
-        let held = match self.app.queued_messages(BACKUP_NAME).await {
-            Ok(queued) => queued
-                .iter()
-                .filter(|q| q.held && paykit_kind(&q.kind))
-                .count(),
+        match self.app.queued_messages(BACKUP_NAME).await {
+            Ok(queued) => {
+                let held = queued
+                    .iter()
+                    .filter(|q| q.held && paykit_kind(&q.kind))
+                    .count();
+                Ok(Some(u32::try_from(held).unwrap_or(u32::MAX)))
+            }
             Err(error) => {
                 crate::pay::unless_stop(error)?;
-                0
+                Ok(None)
             }
-        };
-        Ok(u32::try_from(held).unwrap_or(u32::MAX))
+        }
     }
 
-    /// Decide each held message once the gate is open (Paykit spec 7.2): the counts of
-    /// messages released and withdrawn in this pass.
-    pub(crate) async fn decide_held_messages(
-        &mut self,
-        report: &ReceiveReport,
-    ) -> Result<(u32, u32)> {
-        let (mut released, mut withdrawn) = (0u32, 0u32);
+    /// Decide each held message once the gate is open (Paykit spec 7.2), counting each
+    /// release and withdrawal on the Paykit value as it is made, so an error that stops
+    /// the pass loses none of them (`Paykit::held_counts`).
+    pub(crate) async fn decide_held_messages(&mut self, report: &ReceiveReport) -> Result<()> {
         let Some(pass) = self.local_get::<HeldPass>(key::HELD_MESSAGES_OWED).await? else {
-            return Ok((0, 0));
+            return Ok(());
         };
         let ids = self.app.held_messages(BACKUP_NAME).await?;
         // A carried list the installation and backup both owed isn't held, and is
@@ -280,8 +297,12 @@ impl Paykit {
                 }
                 let msg = originals.get(&q.msg_id).and_then(Option::as_ref);
                 match Box::pin(self.check_held_message(report, q, msg)).await {
-                    Ok(Outcome::Released) => released = released.saturating_add(1),
-                    Ok(Outcome::Withdrawn) => withdrawn = withdrawn.saturating_add(1),
+                    Ok(Outcome::Released) => {
+                        self.held_counts.released = self.held_counts.released.saturating_add(1);
+                    }
+                    Ok(Outcome::Withdrawn) => {
+                        self.held_counts.withdrawn = self.held_counts.withdrawn.saturating_add(1);
+                    }
                     Ok(Outcome::Waiting) => lists_left |= carried_list,
                     Ok(Outcome::Gone) => {}
                     Err(error) => {
@@ -292,14 +313,17 @@ impl Paykit {
             }
         }
         if !lists_left {
-            if self.still_held().await? == 0 {
-                self.local_delete(key::HELD_MESSAGES_OWED).await?;
-            } else if pass == HeldPass::CarriedLists {
-                self.local_put(key::HELD_MESSAGES_OWED, &HeldPass::HeldOnly)
-                    .await?;
+            match self.still_held().await? {
+                Some(0) => self.local_delete(key::HELD_MESSAGES_OWED).await?,
+                Some(_) if pass == HeldPass::CarriedLists => {
+                    self.local_put(key::HELD_MESSAGES_OWED, &HeldPass::HeldOnly)
+                        .await?;
+                }
+                // Still held, or not listed now: the mark stays as it is.
+                Some(_) | None => {}
             }
         }
-        Ok((released, withdrawn))
+        Ok(())
     }
 
     async fn check_held_message(
@@ -371,7 +395,8 @@ impl Paykit {
                 &q.msg_id,
                 request,
                 self.service_time().unwrap_or(0),
-                GivenUpFrom::Origin(GivenUpOrigin::UnrecordedStop),
+                // Shown only once the withdrawal is told (`Paykit::show_pending_stop`).
+                GivenUpFrom::Origin(GivenUpOrigin::UnrecordedStopPending),
             );
             self.local_put(&at, &notice).await?;
         }
@@ -486,12 +511,14 @@ impl Paykit {
             // A kind and body that disagree carry no proof: the message is withdrawn.
             return Ok(Absent);
         };
+        // `refs`: the request hash, then the hash of the period details the payment used,
+        // if any (Paykit wire 4.10). A Billing Period's proof is in its period record.
         let key = match (msg.refs.as_slice(), &proof.billing_period) {
-            ([hash], Some(period)) => crate::periods::period_key(&q.to, hash, period),
+            ([hash] | [hash, _], Some(period)) => crate::periods::period_key(&q.to, hash, period),
             ([hash], None) => natural_key::request_record(&q.to, hash),
             ([], _) => natural_key::payer_payment_record(&self.identity(), &proof.attempt_id),
-            // More than one reference names no record of a proof (Paykit wire 4.10).
-            ([_, _, ..], _) => return Ok(Absent),
+            // Period details with no period, or more references, name no record.
+            ([_, _], None) | ([_, _, _, ..], _) => return Ok(Absent),
         };
         let record = match self
             .fresh_held_activity(&ActivityTarget::payer(key))
@@ -549,20 +576,30 @@ impl Paykit {
         Ok(None)
     }
 
+    /// Whether a held message's record is paused, which decides nothing about it, in the one
+    /// order every held decision reads its record (Paykit spec 7.2, 8.1 Blocked
+    /// counterparties): seen divergent and not confirmed since, or with messages kept over
+    /// it still to be written, it waits. Once its user confirmed it, the view the user
+    /// confirmed is decided on, divergent or not.
+    pub(crate) async fn held_record_paused(&self, key: &[u8; 32]) -> Result<bool> {
+        let pause = self.pause_seen(key).await?;
+        Ok(pause.paused || pause.writes_waiting)
+    }
+
     /// Read the exact record, including its current write and any earlier unapplied stop
     /// (Paykit spec 6, 8.1). A cached value cannot establish absence after a failed read.
     async fn fresh_held_activity(&mut self, target: &ActivityTarget) -> Result<Fresh> {
         let read = self.fresh_request(target).await?;
         let key = self.activity_key(target)?;
-        // Nothing is decided on a held message while its record is paused as divergent
-        // and unconfirmed (Paykit spec 7.2, 8.1 Blocked counterparties).
-        let pause = self.pause_seen(&key).await?;
-        if pause.paused || pause.adds_no_stop_waits() {
+        if self.held_record_paused(&key).await? {
             return Ok(Fresh::Unreadable);
         }
-        if matches!(&read, Fresh::Held(record) if record.lost_to_delete.is_some()) {
-            return Ok(Fresh::Unreadable);
-        }
+        // A record that carries `lost_to_delete` is decided on what it holds. Paykit spec
+        // 7.2 asks only that "the record read afresh ... holds that exact message" (and no
+        // receipt for its attempt, or no stop of the counterparty's). The loss marker's
+        // rule is about paying through the record: a reader takes a payer's record "as one
+        // whose occurrence ... is paid never, automatically or by hand" (Paykit wire 5,
+        // `lost_to_delete`). Releasing the original proof or stop pays nothing again.
         if let Some(held) = self.app.shared_record(&key).await? {
             if !held.authenticated
                 || held.flagged

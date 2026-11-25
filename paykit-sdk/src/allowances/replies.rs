@@ -520,6 +520,23 @@ fn qualified_unless_unauthenticated(
         && !held.different_write_at_held_version
 }
 
+/// As [`qualified_at`], for a record whose user has confirmed the view it shows, divergent
+/// or not (Paykit spec 6, 8.1 Blocked counterparties).
+pub(super) fn qualified_confirmed(
+    held: &SharedRecord,
+    target: &pubky_switch_client::app::RecordTarget,
+    key: &[u8; 32],
+) -> bool {
+    held.authenticated
+        && held.key == *key
+        && held.collection == target.collection.name
+        && held.policy == target.collection.policy
+        && !held.doubtful
+        && !held.not_taken
+        && !held.flagged
+        && !held.different_write_at_held_version
+}
+
 pub(super) fn qualified(
     held: &SharedRecord,
     target: &pubky_switch_client::app::RecordTarget,
