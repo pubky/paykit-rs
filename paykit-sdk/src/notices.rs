@@ -44,9 +44,11 @@ pub enum NoticeKind {
     /// [`crate::PayOutcome::Pending`] or [`crate::PayOutcome::PaidOutcomeUnwritten`]
     /// meanwhile.
     HeldWithoutPay,
-    /// A message whose effect the Dispatch refused for good, kept to write into its record
-    /// later, wasn't written within [`crate::KEPT_MESSAGE_MS`] of its acceptance: the SDK gave
-    /// it up (Dispatch spec 8.2). Its entry stays stored, for the host
+    /// A message kept to write into its record later (a stored entry, a reply kept before its
+    /// record, one kept over a divergent record) wasn't written, and the SDK gave it up
+    /// (Paykit spec 8.1, Dispatch spec 8.2): past [`crate::KEPT_MESSAGE_MS`] from its
+    /// acceptance, its record unable to take it or the Dispatch having answered its write.
+    /// Never while the client keeps a batch of its write, which may still land. Its entry stays stored, for the host
     /// ([`pubky_dispatch_client::app::App::parked_entries`]), and a request it was no longer
     /// shows as [`crate::RequestStatus::Unrecorded`]. Acknowledging the notice
     /// ([`Paykit::acknowledge_notice`]) forgets the entry first

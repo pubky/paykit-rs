@@ -1520,6 +1520,8 @@ impl Paykit {
             transfer_bound: Some(bound),
             price,
             failed_on_claim: false,
+            failed_before_call: false,
+            user_resolved: None,
             billing_period: Some(KeptPeriod::of(&period)),
         };
         Ok(Plan {

@@ -3024,10 +3024,11 @@ pub(crate) fn make_room_for_reply(
         Err(AppError::Refused(ClientRefusal::Usage(_))) => {}
         Err(error) => return Err(error.into()),
     }
+    let kept_key = &dropped.key;
     keep_local(
         cx,
         LocalWrite::Delete {
-            key: dropped.key.as_bytes().to_vec(),
+            key: kept_key.as_bytes().to_vec(),
         },
     );
     mark_dropped(cx, [(from, (at, at))])
@@ -3543,7 +3544,9 @@ impl Paykit {
                         .side_unlisted(crate::stored::record_side(&target))
                         .await?
                 {
-                    self.local_delete(&kept_key).await?;
+                    // Never while a batch of its write may still land (`end_kept_copy`).
+                    self.end_kept_copy(&kept_key, &reply, crate::stored::KeptEnd::Retired)
+                        .await?;
                 }
                 continue;
             }
@@ -3564,7 +3567,8 @@ impl Paykit {
                 // A proof of a payment without a request from anyone but the record's
                 // counterparty goes now, with no notice: the record names who paid.
                 Some(record) if unrequested && record.counterparty != reply.sender() => {
-                    self.local_delete(&kept_key).await?;
+                    self.end_kept_copy(&kept_key, &reply, crate::stored::KeptEnd::Retired)
+                        .await?;
                     continue;
                 }
                 Some(record) if record.counterparty != reply.sender() => Placed::Not,
@@ -3623,7 +3627,8 @@ impl Paykit {
                         // Invalid against its request, or details the payer doesn't store:
                         // dropped, as at receive.
                         PeriodPlace::Invalid | PeriodPlace::Taken => {
-                            self.local_delete(&kept_key).await?;
+                            self.end_kept_copy(&kept_key, &reply, crate::stored::KeptEnd::Retired)
+                                .await?;
                             continue;
                         }
                         // A proof naming details the period record doesn't hold waits for
