@@ -1963,17 +1963,23 @@ fn receipt_effect(
     let read = match cx.switch_claim(&obligation) {
         Some(ClaimFetch::Read(read)) => Some(SwitchClaim::Read(Some(read.view.clone()))),
         Some(ClaimFetch::Absent) => Some(SwitchClaim::Read(None)),
-        // An answer a later read may pass, such as `409 conflict` or `stale_epoch`, says
-        // nothing of the claim: the entry waits on the feed and reads it again
-        // ([`claim_read_refused`]).
+        // Refused for good: no later read by this app passes, such as without `claims.read`.
         Some(ClaimFetch::Refused(code))
             if pubky_switch_core::http::ErrorCode::parse(code)
-                .is_some_and(|code| !claim_read_refused(code)) =>
+                .is_some_and(claim_read_refused_for_good) =>
         {
-            return Err(Fail::wait_for("claim read to try again"));
+            Some(SwitchClaim::Refused)
         }
-        // Refused for good, such as without `claims.read`.
-        Some(_) => Some(SwitchClaim::Refused),
+        // An answer a later read may pass says nothing of the claim, and neither does a code
+        // or a fetch outcome this version doesn't know: the entry is held and reads the claim
+        // again, for at most its 30 days, then given up, the host told (`hold_entry_for`;
+        // Paykit spec 8.1). The client refuses for good, before this sees them, a read
+        // answered `409 conflict`, `stale_epoch`, `stale_generation`, `stale_key`,
+        // `not_current`, `cert_expired` or `stale_identity`; it holds the entry itself on the
+        // others a later read may pass.
+        Some(_) => {
+            return hold_entry_for(cx, stored, crate::notices::GivenUpOrigin::ClaimUnread);
+        }
         None => None,
     };
     let view = match failure_view(cx.claim_view(&obligation)?, read) {
@@ -2063,36 +2069,34 @@ fn admits_receipt_over_unread_record(
 }
 
 /// Whether the switch's answer `code` to a receipt's claim read refuses it for good, so the
-/// receipt settles nothing: only an answer the same read never passes, by the Retry column
-/// of Switch spec 6.4, such as `403 permission_missing` without `claims.read`. Any other
-/// answer, after a re-read, new keys, a new timestamp or a wait, says nothing of the claim,
-/// and the read is made again later: settling nothing on it would leave a paid attempt
-/// unsettled, its late-receipt notice unraised and its journal entry not updated.
-pub(crate) fn claim_read_refused(code: pubky_switch_core::http::ErrorCode) -> bool {
+/// receipt settles nothing: whether no later read by this app passes after anything that
+/// can happen without its user. Any other answer says nothing of the claim, and the read is
+/// made again later, within the receipt's 30 days: settling nothing on it would leave a paid
+/// attempt unsettled, its late-receipt notice unraised and its journal entry not updated.
+pub(crate) fn claim_read_refused_for_good(code: pubky_switch_core::http::ErrorCode) -> bool {
     use pubky_switch_core::http::ErrorCode as E;
     // No wildcard: a code the switch adds fails to build here until it is classified.
     match code {
-        E::BadRequest
-        | E::BadSignature
-        | E::NotAdmitted
-        | E::PermissionMissing
-        | E::NotCurrent
-        | E::CertExpired
-        | E::NotFound
-        | E::StaleIdentity
-        | E::TooLarge => true,
+        // A read this app makes that the service can't take, whatever happens later.
+        E::BadRequest | E::BadSignature | E::TooLarge => true,
+        // The read needs `claims.read`, or the service holds no such account: only the user
+        // (a renewal with another scope, a new account) changes that.
+        E::NotAdmitted | E::PermissionMissing | E::NotFound => true,
+        // A renewal of the certificate, a newer identity.json or a provider move, which come
+        // without the user, lets a later read pass.
+        E::NotCurrent | E::CertExpired | E::StaleIdentity | E::Moved => false,
+        // A new timestamp, a re-read, new keys, re-signing or re-sealing, which the client
+        // does by itself.
         E::StaleTimestamp
         | E::Conflict
         | E::StaleEpoch
         | E::StaleGeneration
         | E::StaleKey
-        | E::IdentityNeeded
-        | E::Moved
-        | E::RateLimited
-        | E::QuotaExceeded
-        | E::Staged
-        | E::Unavailable
-        | E::RecoveryRequired => false,
+        | E::IdentityNeeded => false,
+        // A wait.
+        E::RateLimited | E::QuotaExceeded | E::Staged | E::Unavailable | E::RecoveryRequired => {
+            false
+        }
     }
 }
 
@@ -2110,15 +2114,17 @@ pub(crate) enum ClaimReadAfter {
 }
 
 /// What `error`, a failed read of a receipt's claim at a stored receipt's later write, comes
-/// to, by the rule of the first read ([`claim_read_refused`]): a switch that doesn't answer and
-/// a failure that isn't the switch's answer are the error.
+/// to, by the rule of the first read ([`claim_read_refused_for_good`]): a switch that doesn't
+/// answer, a wallet-wide stop and a failure that isn't the switch's answer are the error.
 pub(crate) fn claim_read_after(error: &pubky_switch_client::app::AppError) -> ClaimReadAfter {
-    if crate::pay::switch_unavailable(error) {
+    if crate::pay::switch_unavailable(error)
+        || crate::pay::stops_resume(&crate::error::PaykitError::Client(error.clone()))
+    {
         return ClaimReadAfter::Error;
     }
-    match error.unkept().code() {
+    match error.code() {
         Some(code) => {
-            if claim_read_refused(code) {
+            if claim_read_refused_for_good(code) {
                 ClaimReadAfter::Refused
             } else {
                 ClaimReadAfter::ReadAgain
@@ -4593,42 +4599,41 @@ mod tests {
     /// Every answer of the switch to a receipt's claim read, by the Switch's own table
     /// (Switch spec 6.4): refused for good only where the same read never passes.
     #[test]
-    fn test_receive_claim_read_refused_only_when_never_unchanged() {
+    fn test_receive_claim_read_refused_only_when_no_later_read_passes() {
+        use super::ClaimReadAfter as After;
         use pubky_switch_core::http::ErrorCode;
         for code in ErrorCode::ALL {
             // No wildcard: a code the switch adds fails to build here until it is classified.
-            let refused = match code {
+            // The first read's answer, and the stored receipt's later read's, by name.
+            let (refused, later) = match code {
                 ErrorCode::BadRequest
                 | ErrorCode::BadSignature
+                | ErrorCode::TooLarge
                 | ErrorCode::NotAdmitted
                 | ErrorCode::PermissionMissing
-                | ErrorCode::NotCurrent
-                | ErrorCode::CertExpired
-                | ErrorCode::NotFound
-                | ErrorCode::StaleIdentity
-                | ErrorCode::TooLarge => true,
-                ErrorCode::StaleTimestamp
+                | ErrorCode::NotFound => (true, After::Refused),
+                // Wallet-wide stops: the later write's read returns them.
+                ErrorCode::NotCurrent | ErrorCode::CertExpired | ErrorCode::RecoveryRequired => {
+                    (false, After::Error)
+                }
+                // A switch that doesn't answer: returned.
+                ErrorCode::Unavailable | ErrorCode::Staged => (false, After::Error),
+                ErrorCode::StaleIdentity
+                | ErrorCode::Moved
+                | ErrorCode::StaleTimestamp
                 | ErrorCode::Conflict
                 | ErrorCode::StaleEpoch
                 | ErrorCode::StaleGeneration
                 | ErrorCode::StaleKey
                 | ErrorCode::IdentityNeeded
-                | ErrorCode::Moved
                 | ErrorCode::RateLimited
-                | ErrorCode::QuotaExceeded
-                | ErrorCode::Staged
-                | ErrorCode::Unavailable
-                | ErrorCode::RecoveryRequired => false,
+                | ErrorCode::QuotaExceeded => (false, After::ReadAgain),
             };
-            assert_eq!(super::claim_read_refused(code), refused, "{code:?}");
-            // The Switch's own table agrees: refused only where the read never passes
-            // unchanged (Switch spec 6.4).
             assert_eq!(
-                code.retry() == pubky_switch_core::http::Retry::No,
+                super::claim_read_refused_for_good(code),
                 refused,
                 "{code:?}"
             );
-            // The stored receipt's later read follows the same rule.
             let answer = pubky_switch_client::app::AppError::Switch(
                 pubky_switch_client::error::ClientError::Switch {
                     status: code.status(),
@@ -4639,21 +4644,14 @@ mod tests {
                     retry_after: None,
                 },
             );
-            let expected = if crate::pay::switch_unavailable(&answer) {
-                super::ClaimReadAfter::Error
-            } else if refused {
-                super::ClaimReadAfter::Refused
-            } else {
-                super::ClaimReadAfter::ReadAgain
-            };
-            assert_eq!(super::claim_read_after(&answer), expected, "{code:?}");
+            assert_eq!(super::claim_read_after(&answer), later, "{code:?}");
         }
         // A failure that isn't the switch's answer decides nothing.
         assert_eq!(
             super::claim_read_after(&pubky_switch_client::app::AppError::Transport(
                 pubky_switch_client::error::TransportError::Timeout
             )),
-            super::ClaimReadAfter::Error
+            After::Error
         );
     }
 

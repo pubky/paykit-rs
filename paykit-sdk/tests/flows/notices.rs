@@ -309,6 +309,12 @@ async fn test_notices_late_receipt_written_later_raised_by_an_own_app_from_its_k
 /// claim, so bob's receipt makes it read the claim at the switch. The read is answered `code`.
 /// Returns the second wallet and the payment's claim, the receipt not read yet.
 async fn receipt_read_answered(w: &World, code: ErrorCode) -> (Paykit, [u8; 32]) {
+    let (other, obligation, _) = receipt_read_answered_by(w, code).await;
+    (other, obligation)
+}
+
+/// [`receipt_read_answered`], with bob's shop.
+async fn receipt_read_answered_by(w: &World, code: ErrorCode) -> (Paykit, [u8; 32], Paykit) {
     let (wallet, mut shop, _) = paid_after_failed(w).await;
     let obligation = wallet.payments().await.unwrap()[0].obligation;
     drop(wallet);
@@ -320,7 +326,7 @@ async fn receipt_read_answered(w: &World, code: ErrorCode) -> (Paykit, [u8; 32])
         code,
         current: serde_json::Value::Null,
     });
-    (other, obligation)
+    (other, obligation, shop)
 }
 
 #[tokio::test]
@@ -329,7 +335,15 @@ async fn test_notices_receipt_claim_read_to_try_again_settles_it_once_read() {
     // claim reads, it settles it. Settled as refused instead, the claim would stay unsettled.
     let w = World::new();
     let (mut other, obligation) = receipt_read_answered(&w, ErrorCode::Conflict).await;
-    let _ = other.receive(None).await;
+    other.receive(None).await.unwrap();
+    // Held, the claim not settled yet.
+    let held = other
+        .app_mut()
+        .read_claim(&obligation)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_ne!(held.view.status, ClaimStatus::Settled);
     other.receive(None).await.unwrap();
     let claim = other
         .app_mut()
@@ -338,6 +352,51 @@ async fn test_notices_receipt_claim_read_to_try_again_settles_it_once_read() {
         .unwrap()
         .unwrap();
     assert_eq!(claim.view.status, ClaimStatus::Settled);
+}
+
+#[tokio::test]
+async fn test_notices_receipt_claim_read_never_passing_given_up_at_its_window() {
+    // The claim read keeps answering `409 conflict`: the receipt is held, while a request bob
+    // sends after it is taken meanwhile. Past the receipt's 30 days it is given up, the host
+    // told, nothing written (Paykit spec 8.1).
+    let w = World::new();
+    let (mut other, _, mut shop) = receipt_read_answered_by(&w, ErrorCode::Conflict).await;
+    other.receive(None).await.unwrap();
+    let later = crate::common::request_from(
+        &mut shop,
+        w.alice_id(),
+        crate::common::draft("2", w.clock.now_ms()),
+    )
+    .await;
+    for _ in 0..4 {
+        w.alice.switch().fail_next(Fault::Error {
+            path: "claims".into(),
+            code: ErrorCode::Conflict,
+            current: serde_json::Value::Null,
+        });
+    }
+    other.receive(None).await.unwrap();
+    assert_eq!(
+        other.request(&later).await.unwrap().status,
+        paykit_sdk::RequestStatus::Open
+    );
+    assert!(other.notices().await.unwrap().is_empty());
+    w.clock.advance_ms(paykit_sdk::KEPT_MESSAGE_MS);
+    let mut notices = Vec::new();
+    for _ in 0..3 {
+        w.alice.switch().fail_next(Fault::Error {
+            path: "claims".into(),
+            code: ErrorCode::Conflict,
+            current: serde_json::Value::Null,
+        });
+        other.receive(None).await.unwrap();
+        notices = other.notices().await.unwrap();
+        if !notices.is_empty() {
+            break;
+        }
+    }
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert_eq!(notices[0].kind, NoticeKind::MessageGivenUp);
 }
 
 #[tokio::test]

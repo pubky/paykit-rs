@@ -414,6 +414,9 @@ pub(crate) enum GivenUpOrigin {
     /// A received message whose entry was held unprocessed while the record it goes into
     /// couldn't be read, past its 30 days.
     HeldUnread,
+    /// A receipt whose claim read kept answering with a code a later read may pass was held
+    /// past its window, and passed, processed, nothing written.
+    ClaimUnread,
 }
 
 impl GivenUpOrigin {
