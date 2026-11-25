@@ -574,7 +574,10 @@ async fn test_own_record_restore_tells_a_withdrawal_over_another_devices_change(
     .unwrap();
     restored.receive(None).await.unwrap();
     let notice = told(&restored).await.unwrap();
-    assert_eq!(ids(&notice.endpoints_withdrawn), vec![a().as_str().to_owned()]);
+    assert_eq!(
+        ids(&notice.endpoints_withdrawn),
+        vec![a().as_str().to_owned()]
+    );
     assert!(notice.endpoints_offered.is_empty() && notice.endpoints_changed.is_empty());
     withdraw_again(&mut restored).await;
     let want = vec![(b().as_str().to_owned(), "bc1qnew".to_owned())];
