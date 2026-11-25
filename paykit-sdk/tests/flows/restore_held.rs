@@ -10,7 +10,7 @@ use paykit_lib::AttemptId;
 use paykit_sdk::{
     AllowanceStatus, AppScopes, HeldMessages, NoticeKind, PayOptions, PayOutcome, PayeeStatus,
     Paykit, PaykitBackup, PaykitConfig, Rail, RailOutcome, ReceiptsOf, Refusal, RequestRef,
-    RequestStatus,
+    RequestStatus, StopSubject,
 };
 use pubky_dispatch_client::app::{AppError, AppEvent, OutgoingMessage, SENT_RETENTION_MS};
 use pubky_dispatch_client::clock::Clock;
@@ -1897,6 +1897,144 @@ async fn test_restore_held_lost_to_delete_withdraws_the_receipted_proof() {
     );
     assert!(!held(&wallet, &proof).await);
     assert_eq!(w.rail.pay_calls(&attempt), 1);
+}
+
+/// The subject of the one stop notice of the held stop `id`.
+async fn stop_subject(app: &Paykit, id: &str) -> paykit_sdk::Notice {
+    let mut notices: Vec<_> = app
+        .notices()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|n| n.kind == NoticeKind::StopNotRecorded && n.msg_id.as_deref() == Some(id))
+        .collect();
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    notices.remove(0)
+}
+
+/// Of `n` Allowances open with one counterparty, the shop's held end of the one at `which`,
+/// absent from its record, is withdrawn with a notice naming that Allowance, which the shop
+/// then ends again (Paykit spec 7.2, 8.3).
+async fn stop_notice_names_its_allowance(n: usize, which: usize) {
+    let w = World::new();
+    let (mut shop, _wallet, records) = Box::pin(allowances::several_accepted(&w, n)).await;
+    let record = allowance_record(&shop, &records[which]).await;
+    assert!(record.end.is_none());
+    // An end queued through the client and never recorded, as a crash between the two
+    // leaves it.
+    let mut end = OutgoingMessage::new(
+        w.alice_id(),
+        "paykit.allowance_end",
+        serde_json::json!({ "allowance_id": record.allowance_id.as_str() })
+            .as_object()
+            .cloned()
+            .unwrap(),
+    );
+    end.refs = vec![record.proposal.hash(), record.response.unwrap().hash()];
+    shop.app_mut().hold_queued(&w.alice_id()).await.unwrap();
+    let end = shop.app_mut().queue(end).await.unwrap();
+    shop.app_mut().release_queued(&w.alice_id()).await.unwrap();
+    let backup = shop.backup().await.unwrap();
+    drop(shop);
+
+    let mut shop = Box::pin(restore(&w, &w.bob, store(), &backup)).await;
+    assert!(held(&shop, &end).await);
+    let counts = Box::pin(decisions_through_listing(&mut shop)).await;
+    assert_eq!((counts.released, counts.withdrawn), (0, 1), "{counts:?}");
+    assert!(!held(&shop, &end).await);
+    let notice = stop_subject(&shop, &end).await;
+    assert_eq!(
+        notice.stop,
+        Some(StopSubject::Allowance {
+            record: records[which]
+        })
+    );
+    assert_eq!(notice.request_hash, None);
+    // The named one ends again; every other stays accepted.
+    shop.end_allowance(&records[which]).await.unwrap();
+    for (at, key) in records.iter().enumerate() {
+        let status = shop.allowance(key).await.unwrap().status;
+        if at == which {
+            assert_eq!(status, AllowanceStatus::Ended);
+        } else {
+            assert_eq!(status, AllowanceStatus::Accepted);
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_restore_held_stop_notice_names_its_allowance_of_two_with_one_peer() {
+    Box::pin(stop_notice_names_its_allowance(2, 1)).await;
+}
+
+#[tokio::test]
+async fn test_restore_held_stop_notice_names_its_allowance_of_eight_with_one_peer() {
+    Box::pin(stop_notice_names_its_allowance(8, 5)).await;
+}
+
+// A payer's stop names the request it was for, among two open with one payee, by the
+// reference `cancel_request` and `reject_request` take.
+#[tokio::test]
+async fn test_restore_held_payer_stop_notice_names_its_request() {
+    for kind in [
+        paykit_lib::Kind::PaymentRequestRejection,
+        paykit_lib::Kind::PaymentRequestCancellation,
+    ] {
+        let w = World::new();
+        let mut wallet = w.wallet("wallet").await;
+        let mut shop = w.shop().await;
+        let first = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+        let second = request_from(&mut shop, w.alice_id(), draft("2", w.clock.now_ms())).await;
+        wallet.receive(None).await.unwrap();
+        let stop = queue_unrecorded_stop(&mut wallet, &second, kind).await;
+        let backup = wallet.backup().await.unwrap();
+        drop(wallet);
+        let mut wallet = Box::pin(restore(&w, &w.alice, store(), &backup)).await;
+        withdrawn(&mut wallet).await;
+        let notice = stop_subject(&wallet, &stop).await;
+        assert_eq!(notice.stop, Some(StopSubject::Request(second)), "{kind:?}");
+        assert_eq!(notice.request_hash, Some(second.request_hash));
+        assert_eq!(
+            wallet.request(&first).await.unwrap().status,
+            RequestStatus::Open
+        );
+        wallet.reject_request(&second, None).await.unwrap();
+    }
+}
+
+// A payee's cancellation names the record of the request it sent, among two to one payer,
+// by the key `cancel_sent_request` takes.
+#[tokio::test]
+async fn test_restore_held_payee_stop_notice_names_its_sent_request() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    let second = request_from(&mut shop, w.alice_id(), draft("2", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    let sales = shop.payee_activity().await.unwrap();
+    assert_eq!(sales.len(), 2);
+    let sale = sales
+        .iter()
+        .find(|s| s.request_hash == Some(second.request_hash))
+        .unwrap()
+        .record;
+    let mut stop = OutgoingMessage::new(
+        w.alice_id(),
+        paykit_lib::Kind::PaymentRequestCancellation.as_str(),
+        Default::default(),
+    );
+    stop.refs.push(second.request_hash);
+    let stop = shop.app_mut().queue(stop).await.unwrap();
+    let backup = shop.backup().await.unwrap();
+    drop(shop);
+    let mut shop = Box::pin(restore(&w, &w.bob, store(), &backup)).await;
+    let counts = Box::pin(decisions_through_listing(&mut shop)).await;
+    assert_eq!((counts.released, counts.withdrawn), (0, 1), "{counts:?}");
+    let notice = stop_subject(&shop, &stop).await;
+    assert_eq!(notice.stop, Some(StopSubject::SentRequest { record: sale }));
+    assert_eq!(notice.request_hash, Some(second.request_hash));
+    shop.cancel_sent_request(&sale, None).await.unwrap();
 }
 
 async fn stop_notice_ids(app: &Paykit, id: &str) -> Vec<String> {

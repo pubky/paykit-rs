@@ -1560,6 +1560,42 @@ pub(super) async fn consent_entry(app: &Paykit, record: &[u8; 32]) -> Option<Val
 
 /// Bob's Allowance accepted by alice's wallet, with her `exec` app as its executor, and
 /// her `phone`, another executor-capable app. Returns the apps and alice's record key.
+/// `n` Allowances bob's shop proposed to alice as allowee and her wallet accepted, at most the
+/// eight pending proposals one counterparty may have. Returns the shop, the wallet and the
+/// shop's record keys, in the order proposed.
+pub(super) async fn several_accepted(w: &World, n: usize) -> (Paykit, Paykit, Vec<[u8; 32]>) {
+    let mut shop = Box::pin(shop(w)).await;
+    let mut wallet = Box::pin(wallet(w)).await;
+    let mut sent = Vec::new();
+    for _ in 0..n {
+        sent.push(
+            shop.propose_allowance(w.alice_id(), AllowanceRole::Allowee, terms())
+                .await
+                .unwrap(),
+        );
+    }
+    wallet.receive(None).await.unwrap();
+    let views = wallet.allowances().await.unwrap();
+    assert_eq!(views.len(), n);
+    for proposal in &sent {
+        let mine = views
+            .iter()
+            .find(|view| view.allowance_id == proposal.allowance_id)
+            .unwrap()
+            .record;
+        Box::pin(accepted(w, &mut wallet, &mine, &mut shop, &proposal.record)).await;
+    }
+    shop.receive(None).await.unwrap();
+    let records: Vec<[u8; 32]> = sent.into_iter().map(|proposal| proposal.record).collect();
+    for record in &records {
+        assert_eq!(
+            shop.allowance(record).await.unwrap().status,
+            AllowanceStatus::Accepted
+        );
+    }
+    (shop, wallet, records)
+}
+
 pub(super) async fn executed(w: &World) -> (Paykit, Paykit, Paykit, Paykit, [u8; 32], [u8; 32]) {
     let mut shop = Box::pin(shop(w)).await;
     let mut wallet = Box::pin(wallet(w)).await;
