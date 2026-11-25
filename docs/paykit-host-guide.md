@@ -2,7 +2,7 @@
 
 A wallet owns one `Paykit` handle for each approved App ID. Supply the same
 durable Dispatch store, transport, clock and Homeserver access when reopening it.
-Use the [Dispatch app host guide](https://github.com/pubky/pubky-dispatch/blob/d4f33242e2771a773e004b7fd2be0ebb09505c86/docs/app-host-guide.md)
+Use the [Dispatch app host guide](https://github.com/pubky/pubky-dispatch/blob/c2b19c95f5f60937df3995efda13e477e9b1ff47/docs/app-host-guide.md)
 for store guarantees, approval and client outcomes. Keep app keys and backups in
 host-protected storage and serialize operations on the handle. A memory store
 cannot preserve unanswered writes or payments across a restart.
