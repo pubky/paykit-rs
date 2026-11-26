@@ -223,8 +223,8 @@ pub struct HeldMessages {
     /// Messages released in this receive, with their original signed bytes.
     pub released: u32,
     /// Held messages and carried lists withdrawn in this receive, each told to the host as
-    /// `DeliveryUnknown`, or as `MessageUndelivered` for a re-send of a message the
-    /// counterparty already accepted.
+    /// `DeliveryUnknown`, or as `MessageUndelivered` for one never tried or for a re-send of
+    /// a message the counterparty already accepted.
     pub withdrawn: u32,
     /// Messages still held after this receive, to decide at a later one; `None` when the
     /// client couldn't list them now. Then the host does nothing: the next receive reports.

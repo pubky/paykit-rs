@@ -62,7 +62,8 @@ pub struct WalletHeldMessages {
     /// Messages released in this receive.
     pub released: u32,
     /// Held messages and carried lists withdrawn in this receive, each told as an unknown
-    /// delivery, or as undelivered for a re-send of a message already accepted.
+    /// delivery, or as undelivered for one never tried or for a re-send of a message already
+    /// accepted.
     pub withdrawn: u32,
     /// Messages still held after this receive; null when the wallet couldn't list them.
     pub still_held: Option<u32>,
