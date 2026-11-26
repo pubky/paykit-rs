@@ -40,11 +40,10 @@ updates:
       - dependency-name: "@react-native-community/cli*"
         update-types:
           - version-update:semver-major
-      # Hold every Babel 8 package, because the React Native Babel preset is
-      # built for Babel 7. For example, @babel/runtime 8 drops the regenerator
-      # entry that the preset still imports, so development bundles fail to
-      # build. Lift this rule with the React Native release that moves to
-      # Babel 8.
+      # Hold Babel 8: the React Native Babel preset is built for Babel 7.
+      # Only this app has direct @babel/* dependencies, so the library entry
+      # needs no hold. The example README asks every React Native upgrade to
+      # check this hold and the CLI hold above.
       - dependency-name: "@babel/*"
         update-types:
           - version-update:semver-major

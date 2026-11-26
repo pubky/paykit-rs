@@ -5,6 +5,11 @@ smoke test of `@synonymdev/react-native-paykit` against a real Pubky
 homeserver. It is the package's test harness and a reference for
 integrators.
 
+`.github/dependabot.yml` holds back major updates of this app's `@babel/*`
+and `@react-native-community/cli*` packages, because they follow the React
+Native release. When you upgrade React Native, check both holds and move
+those packages in the same change.
+
 The app installs the package from an `npm pack` tarball, not a symlink, so it
 tests what npm users get: the published files, the prebuilt native
 libraries, the podspec and Gradle autolinking.
