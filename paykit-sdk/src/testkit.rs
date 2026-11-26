@@ -166,7 +166,7 @@ impl Party {
         let mut body = IdentityBody::first(
             self.id(),
             [1; 16],
-            Inbox::new("https://switch.example", [2; 32]),
+            Inbox::new("https://dispatch.example", [2; 32]),
             IdentityPolicy::default(),
         );
         for app in apps {
@@ -184,7 +184,7 @@ pub(crate) fn object(value: Value) -> Map<String, Value> {
     value.as_object().cloned().unwrap_or_default()
 }
 
-/// Two identities' switches, alice's and bob's, on one clock and Homeserver, for the unit
+/// Two identities' Dispatch services, alice's and bob's, on one clock and Homeserver, for the unit
 /// tests that drive a whole app: the setup of the flow tests' world, cut to what they use.
 pub(crate) struct Dispatches {
     pub(crate) clock: std::sync::Arc<pubky_dispatch_client::clock::TestClock>,
@@ -236,11 +236,11 @@ impl Dispatches {
                 spec.clone(),
             )
         };
-        let alice = signer("alice", "https://alice-switch.example");
-        let bob = signer("bob", "https://bob-switch.example");
+        let alice = signer("alice", "https://alice-dispatch.example");
+        let bob = signer("bob", "https://bob-dispatch.example");
         let router = Arc::new(Router::new());
-        router.add_switch(alice.origin(), alice.switch());
-        router.add_switch(bob.origin(), bob.switch());
+        router.add_dispatch(alice.origin(), alice.dispatch());
+        router.add_dispatch(bob.origin(), bob.dispatch());
         Self {
             clock,
             alice,
@@ -292,7 +292,7 @@ impl Dispatches {
         stored: &paykit_lib::records::StoredMessage,
     ) -> [u8; 16] {
         self.alice
-            .switch()
+            .dispatch()
             .fail_next(pubky_dispatch_client::testing::Fault::Error {
                 path: "/ops".into(),
                 code: pubky_dispatch_core::http::ErrorCode::RateLimited,

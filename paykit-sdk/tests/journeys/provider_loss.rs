@@ -73,9 +73,9 @@ async fn held_after_loss(world: &World) -> TestResult {
     }
 
     // The payer's service is lost, and its signer recovers the account at another.
-    world.lose_switch("https://payer.journey.test");
+    world.lose_dispatch("https://payer.journey.test");
     let identity = world.identity("payer")?;
-    Box::pin(world.add_switch(RECOVERY_ORIGIN, &[&identity])).await?;
+    Box::pin(world.add_dispatch(RECOVERY_ORIGIN, &[&identity])).await?;
     let doc = Box::pin(payer.signer.declare_provider_loss(
         RECOVERY_ORIGIN,
         pubky_dispatch_signer::UserConfirmed::shown_and_confirmed(),

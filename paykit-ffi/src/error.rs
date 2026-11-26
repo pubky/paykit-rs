@@ -396,6 +396,7 @@ fn not_now_code(reason: &crate::NotNowKind) -> &'static str {
         R::ScopeKeysAwaited => "scope_keys_awaited",
         R::ValueAwaitsKey => "value_awaits_key",
         R::FloorUnreadable => "floor_unreadable",
+        R::EndpointChangeUntold => "endpoint_change_untold",
         R::FloorRaiseWaiting => "floor_raise_waiting",
         R::NoServiceTime => "no_service_time",
         R::ReadAgain => "read_again",
@@ -422,7 +423,7 @@ fn held_for_user_code(reason: &crate::HeldForUserKind) -> &'static str {
         R::AllowanceExecutionHeld => "allowance_execution_held",
         R::AttemptCheck => "attempt_check",
         R::ReloadRequired => "reload_required",
-        R::SwitchClient => "dispatch_client_hold",
+        R::DispatchClient => "dispatch_client_hold",
         R::Unresolved => "held_unresolved",
         R::PendingProposalsFull => "pending_proposals_full",
         R::AllowanceLedgerFull => "allowance_ledger_full",
@@ -443,6 +444,9 @@ fn recovery_code(reason: &crate::RecoveryNeededKind) -> &'static str {
 /// The action a Dispatch service's error answer calls for, by the Retry column of Dispatch spec
 /// 6.4. The code is `dispatch_` and the wire's error code (Dispatch wire 7.6). Every code carries
 /// its retry rule on the wire, so a code these bindings don't name takes the case of its rule.
+/// An error answer applied nothing: it is `RetryLater` only where the SDK's table counts the
+/// same request a wait (`PaykitError::is_wait`, Paykit spec 7.2), and `NotSent` where the
+/// app does something first.
 fn service_category(code: pubky_dispatch_core::http::ErrorCode) -> (Category, String) {
     use pubky_dispatch_core::http::{ErrorCode as E, Retry as R};
     use Category::*;
@@ -451,27 +455,26 @@ fn service_category(code: pubky_dispatch_core::http::ErrorCode) -> (Category, St
         (E::NotCurrent | E::CertExpired, _) | (_, R::HeldForNextGeneration) => Recovery,
         // The certificate lacks the permission: the user approves a wider one.
         (E::PermissionMissing, _) => NeedsUser,
-        // The identity.json delivered isn't the newest: a receive reads the current one.
-        (E::StaleIdentity, _) => RetryLater,
         // Nothing applied: the recipient may admit the sender later, or a smaller request
-        // fits.
-        (E::NotAdmitted | E::TooLarge, _) => NotSent,
+        // fits. The `identity.json` delivered isn't the newest the service holds: the same
+        // delivery is refused again, and one after a `receive` reads the current one.
+        (E::NotAdmitted | E::TooLarge | E::StaleIdentity, _) => NotSent,
         (_, R::No) => Permanent,
-        // The state the call was computed from changed: nothing applied, decide again.
-        (_, R::AfterReread) => NotSent,
-        // The same call can succeed once time passes or the client has caught up.
+        // The same request passes later as it is: once time passes, with a new timestamp, or
+        // after a fresh read of the state it was computed from.
+        (_, R::Yes | R::AfterRetryAfter | R::WithNewTimestamp | R::AfterReread) => RetryLater,
+        // The app does something first: fetch a key bundle, sign or seal again, deliver or
+        // read the newest `identity.json`, go to another service, or wait for a limit to
+        // free. Nothing applied.
         (
             _,
-            R::WithNewTimestamp
-            | R::AfterKeyBundle
+            R::AfterKeyBundle
             | R::AfterResigning
             | R::AfterResealing
             | R::AfterDeliveringIdentity
             | R::AtNextService
-            | R::AfterRetryAfter
-            | R::WhenLimitFrees
-            | R::Yes,
-        ) => RetryLater,
+            | R::WhenLimitFrees,
+        ) => NotSent,
     };
     (category, format!("dispatch_{}", code.as_str()))
 }
@@ -503,10 +506,10 @@ fn known_quota_limit(limit: &str) -> Option<&'static str> {
 fn quota_category(limit: Option<&str>) -> (Category, String) {
     use Category::*;
     let (category, code) = match limit {
-        // Frees with time: the recipient's apps reading their feed, or the service deleting
-        // old claims.
+        // Frees as the recipient's apps read their feed, or as the service deletes old claims;
+        // no later call by itself frees it, and nothing applied.
         Some("inbox" | "sender_share" | "claims" | "claim_share") => {
-            (RetryLater, "dispatch_quota_wait")
+            (NotSent, "dispatch_quota_wait")
         }
         // Frees as this app's open attempts resolve, some only by the user's answer.
         Some("open_attempts") => (NeedsUser, "dispatch_quota_open_attempts"),
@@ -530,16 +533,17 @@ fn dispatch_client_category(e: &pubky_dispatch_client::error::ClientError) -> (C
     use pubky_dispatch_client::error::ClientError as C;
     use Category::*;
     let (category, code) = match e {
-        C::Switch {
+        C::Dispatch {
             code: pubky_dispatch_core::http::ErrorCode::QuotaExceeded,
             current,
             ..
         } => return quota_category(current.get("limit").and_then(|limit| limit.as_str())),
-        C::Switch { code, .. } => return service_category(*code),
+        C::Dispatch { code, .. } => return service_category(*code),
         C::OwnRecoveryRequired { .. } => (Recovery, "own_recovery_required"),
         // Signed by the service and not verifying: evidence handled as a rollback.
         C::Chain(_) => CHAIN,
-        C::DisplayReadPending => (RetryLater, "display_read_pending"),
+        // A display read is owed first, and nothing was sent.
+        C::DisplayReadPending => (NotSent, "display_read_pending"),
         C::Transport(transport) => transport_category(transport),
         // No answer of the service: the request went out and may have taken effect.
         C::BadServiceSignature { .. } => SENT_UNVERIFIED,
@@ -640,7 +644,8 @@ fn client_failure(e: &AppError) -> (Category, WalletFailure) {
     use pubky_dispatch_client::error::ClientError;
     use Category::*;
     let (mut category, mut failure) = match e.unkept() {
-        AppError::ExpiredUnsent => failure(NotSent, "expired_unsent"),
+        // Retired before its first handoff, nothing of it applied: the same call passes later.
+        AppError::ExpiredUnsent => failure(RetryLater, "expired_unsent"),
         // Reached only behind a kept batch: the commit failed after the batch was kept.
         AppError::Store(_) => failure(OutcomeUnknown, "store_after_kept"),
         AppError::Protocol(_) => failure(OutcomeUnknown, "protocol_store"),
@@ -657,15 +662,15 @@ fn client_failure(e: &AppError) -> (Category, WalletFailure) {
             let (category, code) = app_refusal_category(refusal);
             failure(category, code)
         }
-        AppError::Switch(dispatch) => {
+        AppError::Dispatch(dispatch) => {
             let (category, code) = dispatch_client_category(dispatch);
             let (category, mut failure) = failure(category, &code);
-            if let ClientError::Switch { retry_after, .. }
+            if let ClientError::Dispatch { retry_after, .. }
             | ClientError::BodyUnread { retry_after, .. } = dispatch
             {
                 failure.retry_after_ms = retry_after.map(|s| s.saturating_mul(1000));
             }
-            if let ClientError::Switch {
+            if let ClientError::Dispatch {
                 code: pubky_dispatch_core::http::ErrorCode::QuotaExceeded,
                 current,
                 ..

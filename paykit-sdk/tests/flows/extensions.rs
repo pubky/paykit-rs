@@ -89,7 +89,7 @@ fn accepts(app: &Paykit, identity: [u8; 32]) -> Vec<String> {
 fn fail_list_reads(signer: &pubky_dispatch_client::testing::TestSigner, n: usize) {
     for _ in 0..n {
         signer
-            .switch()
+            .dispatch()
             .fail_next(pubky_dispatch_client::testing::Fault::Error {
                 path: "/allow".into(),
                 code: pubky_dispatch_core::http::ErrorCode::Unavailable,
@@ -551,7 +551,7 @@ async fn test_extensions_restored_sender_waits_for_its_first_feed_read() {
     .await
     .unwrap();
     w.alice
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::Error {
             path: "/feed".into(),
             code: pubky_dispatch_core::http::ErrorCode::Unavailable,
@@ -746,7 +746,7 @@ async fn test_extensions_queued_delivery_checks_the_block_and_the_current_certif
     let mut shop = shop_on(&w, handling(), store()).await;
     let mut wallet = sender(&w).await;
     w.bob
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::Error {
             path: "/inbox".into(),
             code: pubky_dispatch_core::http::ErrorCode::Unavailable,
@@ -900,4 +900,47 @@ async fn test_extensions_unverifiable_mailbox_entry_refused_on_read_and_restore(
     ))
     .await;
     assert!(matches!(restored, Err(error) if error.to_string().contains("kept extension message")));
+}
+
+#[tokio::test]
+async fn test_extensions_registration_undone_before_it_is_signed_is_never_accepted() {
+    // A registration change the client saves while it can't read the service time stays
+    // unsigned. Undone before the app reads again, it is never advertised (Dispatch spec 3.4).
+    let w = World::new();
+    let kept = store();
+    let shop = shop_on(&w, PaykitConfig::default(), Arc::clone(&kept)).await;
+    let app_id = shop.app_id();
+    drop(shop);
+    let mut shop = w
+        .load_with(
+            &w.bob,
+            Arc::clone(&kept),
+            app_id,
+            Arc::clone(&w.clock),
+            handling(),
+        )
+        .await;
+    w.clock.advance_ms(11 * 60 * 1000);
+    for _ in 0..2 {
+        w.bob
+            .dispatch()
+            .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
+                path: "/feed".into(),
+                after: 0,
+            });
+    }
+    assert!(shop.receive(None).await.is_err());
+    assert!(!accepts(&shop, w.bob_id()).contains(&"paykit-cap.offer".to_owned()));
+    drop(shop);
+    let mut shop = w
+        .load_with(
+            &w.bob,
+            kept,
+            app_id,
+            Arc::clone(&w.clock),
+            PaykitConfig::default(),
+        )
+        .await;
+    shop.receive(None).await.unwrap();
+    assert!(!accepts(&shop, w.bob_id()).contains(&"paykit-cap.offer".to_owned()));
 }

@@ -81,7 +81,7 @@ async fn admits_the_seller_and_its_waiting_request_is_paid(world: &World) -> Tes
     assert!(
         matches!(
             asked,
-            Err(AppError::Switch(ClientError::Switch {
+            Err(AppError::Dispatch(ClientError::Dispatch {
                 code: ErrorCode::NotAdmitted,
                 ..
             }))

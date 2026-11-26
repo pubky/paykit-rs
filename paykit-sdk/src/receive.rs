@@ -1949,10 +1949,9 @@ fn receipt_effect(
     );
     // And through what the method said of it, as every read of an entry lays it over
     // ([`JournalEntry::with_facts`]).
-    let facts =
-        state::cx_get::<crate::journal::AttemptFacts>(cx, &key::attempt_facts(&attempt_id))?;
+    let facts = state::cx_get::<state::StoredFacts>(cx, &key::attempt_facts(&attempt_id))?;
     let journaled = JournalEntry::on_claim(
-        state::cx_get::<crate::journal::StoredEntry>(cx, &key::journal(&attempt_id))?
+        state::cx_get::<state::StoredEntry>(cx, &key::journal(&attempt_id))?
             .map(|entry| entry.with_facts(facts.as_ref())),
         &claim,
     )
@@ -1966,7 +1965,7 @@ fn receipt_effect(
     // A claim the app keeps no view of is read from the Dispatch first, so the receipt
     // settles it in the cursor's batch (Dispatch spec 10.2 row 3).
     let fetched = if claims_write {
-        cx.switch_claim(&obligation)
+        cx.dispatch_claim(&obligation)
     } else {
         None
     };
@@ -2771,7 +2770,7 @@ fn placement_retryable(error: &crate::error::PaykitError) -> bool {
     match error {
         crate::error::PaykitError::Client(error) => matches!(
             error.unkept(),
-            AppError::Switch(_) | AppError::Transport(_) | AppError::Refused(_)
+            AppError::Dispatch(_) | AppError::Transport(_) | AppError::Refused(_)
         ),
         crate::error::PaykitError::Refused(_) => true,
         _ => false,
@@ -4265,7 +4264,7 @@ impl Paykit {
                 Err(error)
                     if !matches!(
                         error,
-                        AppError::Refused(_) | AppError::Switch(_) | AppError::Transport(_)
+                        AppError::Refused(_) | AppError::Dispatch(_) | AppError::Transport(_)
                     ) =>
                 {
                     return Err(error.into());
@@ -4685,8 +4684,8 @@ mod tests {
                 refused,
                 "{code:?}"
             );
-            let answer = pubky_dispatch_client::app::AppError::Switch(
-                pubky_dispatch_client::error::ClientError::Switch {
+            let answer = pubky_dispatch_client::app::AppError::Dispatch(
+                pubky_dispatch_client::error::ClientError::Dispatch {
                     status: code.status(),
                     code,
                     message: String::new(),

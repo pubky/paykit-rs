@@ -271,7 +271,7 @@ async fn refuse_read(family: Family, how: Damage) {
     let bad = damage(&held.bytes, how);
     held.put(bad.clone()).await;
     held.reload(&w).await;
-    let sends = w.bob.switch().entries_from(&w.alice_id());
+    let sends = w.bob.dispatch().entries_from(&w.alice_id());
     let error = held
         .read(&w)
         .await
@@ -288,7 +288,7 @@ async fn refuse_read(family: Family, how: Damage) {
             .unwrap(),
         Some(bad)
     );
-    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), sends);
+    assert_eq!(w.bob.dispatch().entries_from(&w.alice_id()), sends);
     assert!(w.rail.all_executions().is_empty());
 }
 
@@ -355,7 +355,7 @@ async fn preserves(family: Family) {
     let w = World::new();
     let mut held = Box::pin(produced(&w, family)).await;
     held.reload(&w).await;
-    let sends = w.bob.switch().entries_from(&w.alice_id());
+    let sends = w.bob.dispatch().entries_from(&w.alice_id());
     match family {
         Family::Records => held.read(&w).await.unwrap(),
         _ => {
@@ -374,7 +374,7 @@ async fn preserves(family: Family) {
             .unwrap(),
         Some(held.bytes.clone())
     );
-    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), sends);
+    assert_eq!(w.bob.dispatch().entries_from(&w.alice_id()), sends);
     let backup = held.wallet.backup().await.unwrap();
     let mut restored = Paykit::restore(
         w.env(&w.alice, store()),
@@ -396,7 +396,7 @@ async fn preserves(family: Family) {
     restored.reconcile().await.unwrap();
     restored.end_reconcile(UserConfirmed::new()).await.unwrap();
     held.wallet = restored;
-    let sends = w.bob.switch().entries_from(&w.alice_id());
+    let sends = w.bob.dispatch().entries_from(&w.alice_id());
     match family {
         Family::Records => held.read(&w).await.unwrap(),
         _ => {
@@ -415,7 +415,7 @@ async fn preserves(family: Family) {
             .unwrap(),
         Some(held.bytes)
     );
-    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), sends);
+    assert_eq!(w.bob.dispatch().entries_from(&w.alice_id()), sends);
     assert!(w.rail.all_executions().is_empty());
 }
 

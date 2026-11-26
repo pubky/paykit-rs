@@ -59,7 +59,7 @@ async fn stage(wallet: &Paykit, attempt: &AttemptId) -> Stage {
 /// The Dispatch answers nothing for the next `n` requests.
 fn dispatch_down(w: &World, n: usize) {
     for _ in 0..n {
-        w.alice.switch().fail_next(Fault::Unreachable {
+        w.alice.dispatch().fail_next(Fault::Unreachable {
             path: String::new(),
             after: 0,
         });
@@ -132,7 +132,7 @@ async fn test_resume_reports_a_refused_outcome_write_as_the_journal_holds_it() {
     w.rail.settle(&first, true);
     w.rail.settle(&second, true);
     // The first outcome's write is refused for now; the second's goes.
-    w.alice.switch().fail_next(Fault::Error {
+    w.alice.dispatch().fail_next(Fault::Error {
         path: "/ops".into(),
         code: pubky_dispatch_core::http::ErrorCode::Unavailable,
         current: serde_json::Value::Null,
@@ -250,7 +250,7 @@ async fn test_resume_on_a_failing_store_journals_nothing() {
     assert_eq!(stage(&wallet, &second).await, Stage::Paying);
 }
 
-/// The world's switches, where the next operation batch (`/ops`), once armed, fails at the
+/// The world's Dispatch services, where the next operation batch (`/ops`), once armed, fails at the
 /// host's transport with the error armed, nothing sent; later ones go through.
 struct RefusingOps {
     inner: Arc<pubky_dispatch_client::testing::Router>,
@@ -330,7 +330,7 @@ async fn test_resume_returns_a_host_transport_failure_behind_a_kept_outcome_writ
             settled_with_transport_error(&w, [true, true], error.clone()).await;
         // The first submit fails at the transport. The Dispatch refuses the same batch on
         // retry, leaving the first outcome unwritten (Paykit spec 7.2 step 3).
-        w.alice.switch().fail_next(Fault::Error {
+        w.alice.dispatch().fail_next(Fault::Error {
             path: "/ops".into(),
             code: pubky_dispatch_core::http::ErrorCode::Conflict,
             current: serde_json::Value::Null,
@@ -604,7 +604,7 @@ async fn test_resume_reports_a_method_refusal_whose_write_was_lost_as_failed() {
     wallet.receive(None).await.unwrap();
     w.rail.next(Behaviour::Refuse);
     // The attempt's write goes through; the outcome's is never answered.
-    w.alice.switch().fail_next(Fault::Unanswered {
+    w.alice.dispatch().fail_next(Fault::Unanswered {
         path: "/ops".into(),
         after: 1,
     });
@@ -789,7 +789,7 @@ async fn test_resume_reports_a_payment_whose_outcome_another_entrys_write_sent()
     }
     let unanswered = |n: usize| {
         for _ in 0..n {
-            w.alice.switch().fail_next(Fault::Unanswered {
+            w.alice.dispatch().fail_next(Fault::Unanswered {
                 path: "/ops".into(),
                 after: 0,
             });
@@ -847,7 +847,7 @@ async fn test_resume_reports_a_restored_failure_written_after_the_methods_histor
     w.rail.settle(&first, false);
     // The failure's write and its retry on the last flush.
     for _ in 0..2 {
-        w.alice.switch().fail_next(Fault::Unanswered {
+        w.alice.dispatch().fail_next(Fault::Unanswered {
             path: "/ops".into(),
             after: 0,
         });
@@ -941,7 +941,7 @@ async fn resumed_under(
     let mut told = Vec::new();
     let ops_time_out = |n: usize| {
         for _ in 0..n {
-            w.alice.switch().fail_next(Fault::Unanswered {
+            w.alice.dispatch().fail_next(Fault::Unanswered {
                 path: "/ops".into(),
                 after: 0,
             });
@@ -958,7 +958,7 @@ async fn resumed_under(
             .obligation;
         match sent {
             Sent::Unsent => ops_time_out(1),
-            Sent::AnswerLost => w.alice.switch().fail_next(Fault::LoseAnswer {
+            Sent::AnswerLost => w.alice.dispatch().fail_next(Fault::LoseAnswer {
                 path: "/ops".into(),
             }),
             Sent::Applied => {}
@@ -984,7 +984,7 @@ async fn resumed_under(
     }
     ops_time_out(timeouts);
     if claim_unavailable {
-        w.alice.switch().fail_next(Fault::Error {
+        w.alice.dispatch().fail_next(Fault::Error {
             path: "claims".into(),
             code: pubky_dispatch_core::http::ErrorCode::Unavailable,
             current: serde_json::Value::Null,
@@ -1094,7 +1094,15 @@ async fn failed_then_retried(
     w: &World,
     storage: Arc<dyn pubky_dispatch_client::store::StateStore>,
 ) -> (Paykit, paykit_sdk::RequestRef, AttemptId, AttemptId) {
-    let mut wallet = w.wallet_on("wallet", storage).await;
+    let wallet = w.wallet_on("wallet", storage).await;
+    failed_then_retried_by(w, wallet).await
+}
+
+/// [`failed_then_retried`], by `wallet`.
+async fn failed_then_retried_by(
+    w: &World,
+    mut wallet: Paykit,
+) -> (Paykit, paykit_sdk::RequestRef, AttemptId, AttemptId) {
     let mut shop = w.shop().await;
     let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
     wallet.receive(None).await.unwrap();
@@ -1178,11 +1186,9 @@ async fn test_resume_no_payment_of_an_obligation_found_paid_goes_again() {
         .pay_request(&request, PayOptions::default())
         .await
         .outcome;
-    assert!(
-        !matches!(
-            again,
-            Ok(PayOutcome::Paid { .. } | PayOutcome::Pending { .. })
-        ),
+    assert_eq!(
+        again.as_ref().err().and_then(|e| e.refusal()),
+        Some(&paykit_sdk::Refusal::AlreadyPaid),
         "{again:?}"
     );
     // The first and the failed retry executed once each, and nothing else ever.
@@ -1231,24 +1237,42 @@ async fn test_resume_late_success_after_the_users_done_finds_no_failed_claim() {
 #[tokio::test]
 async fn test_resume_keeps_the_message_a_proof_was_sent_under() {
     // Once the outcome sends the proof, the record keeps its message: an older copy of the
-    // entry is then read finished, and its proof is never signed again.
+    // entry, from while the payment was in flight, put back is then read finished, and
+    // nothing about the payment is done again.
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
     let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
     wallet.receive(None).await.unwrap();
-    let PayOutcome::Paid {
-        attempt_id,
-        proof_msg_id: Some(sent),
-        ..
-    } = wallet
+    w.rail.next(Behaviour::Hang);
+    let PayOutcome::Pending { attempt_id, .. } = wallet
         .pay_request(&request, PayOptions::default())
         .await
         .outcome
         .unwrap()
     else {
-        panic!("paid, its proof sent");
+        panic!("the payment is in flight");
     };
+    let entry_key = format!("j/{}", attempt_id.to_text());
+    let older = wallet
+        .app()
+        .protocol_get("paykit", entry_key.as_bytes())
+        .await
+        .unwrap()
+        .unwrap();
+    w.rail.settle(&attempt_id, true);
+    let outcomes = wallet.resume_payments().await.unwrap();
+    let sent = outcomes
+        .iter()
+        .find_map(|o| match o {
+            PayOutcome::Paid {
+                attempt_id: paid,
+                proof_msg_id: Some(sent),
+                ..
+            } if *paid == attempt_id => Some(sent.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("paid, its proof sent: {outcomes:?}"));
     let key = format!("jf/{}", attempt_id.to_text());
     let facts: serde_json::Value = serde_json::from_slice(
         &wallet
@@ -1268,4 +1292,204 @@ async fn test_resume_keeps_the_message_a_proof_was_sent_under() {
         facts["d"]["attempt_id"],
         serde_json::json!(attempt_id.to_text())
     );
+    // The copy from while it was in flight, written back as a kept batch would.
+    wallet
+        .app_mut()
+        .protocol_commit(
+            "paykit",
+            &[pubky_dispatch_client::app::LocalWrite::Put {
+                key: entry_key.into_bytes(),
+                value: older,
+            }],
+        )
+        .await
+        .unwrap();
+    let read = wallet.payments().await.unwrap();
+    let paid = read.iter().find(|p| p.attempt_id == attempt_id).unwrap();
+    assert_eq!(paid.stage, Stage::Finished, "{read:?}");
+    assert!(paid.paid_by_method, "{read:?}");
+    let outcomes = wallet.resume_payments().await.unwrap();
+    assert!(outcomes.is_empty(), "{outcomes:?}");
+    assert_eq!(w.rail.executions(&attempt_id), 1);
+}
+
+#[tokio::test]
+async fn test_resume_never_repeats_a_retry_once_another_attempt_holds_a_proof() {
+    // The first attempt was reported failed and its retry handed off. A resume finds the
+    // first made after all, while the retry's history still shows it running. Later the
+    // method keeps no history of the retry any more, but would still take a repeat under
+    // its key: once an attempt of the obligation holds a proof, no other attempt of it is
+    // handed to the method again (Paykit spec 7.2, "no second execution"; 8.3).
+    const DAY_MS: u64 = 24 * crate::common::HOUR_MS;
+    let w = World::new();
+    w.rail.set_declaration(
+        paykit_sdk::RailDeclaration::new(
+            paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
+            paykit_sdk::rail::FAKE_PAYMENT_TIME_TOLERANCE_MS,
+        )
+        .with_history(true)
+        .with_history_retention_ms(10 * 60_000)
+        .with_idempotent(true)
+        .with_idempotency_retention_ms(10 * DAY_MS),
+    );
+    // A slow method's host keeps attempts open long enough for a repeat to complete.
+    let wallet = w
+        .wallet_with(
+            "wallet",
+            store(),
+            PaykitConfig::default().with_orphan_after_s(10 * DAY_MS / 1000),
+        )
+        .await;
+    let (mut wallet, _, first, retry) = failed_then_retried_by(&w, wallet).await;
+    w.rail.complete_after_failure(&first);
+    let outcomes = wallet.resume_payments().await.unwrap();
+    assert!(
+        outcomes
+            .iter()
+            .any(|o| matches!(o, PayOutcome::Paid { attempt_id, .. } if *attempt_id == first)),
+        "{outcomes:?}"
+    );
+    w.rail.forget_history(&retry);
+    w.clock.advance_ms(20 * 60_000);
+    wallet.receive(None).await.unwrap();
+    wallet.resume_payments().await.unwrap();
+    assert_eq!(w.rail.pay_calls(&retry), 1);
+    assert_eq!(w.rail.executions(&first), 1);
+}
+
+#[tokio::test]
+async fn test_resume_restore_admits_a_paid_attempt_owing_its_outcome_beside_its_retry() {
+    // The first attempt was reported failed, its retry handed off, then the first found
+    // made after all while its outcome's write goes unanswered: the backup holds it paid and
+    // owing that write beside the retry. A paid attempt is no second payment in progress, so
+    // a restore of that backup is admitted, and the retry is never handed off again
+    // (Paykit spec 7.2).
+    let w = World::new();
+    let (mut wallet, _, first, retry) = failed_then_retried(&w, store()).await;
+    w.rail.complete_after_failure(&first);
+    for _ in 0..4 {
+        w.alice.dispatch().fail_next(Fault::Unanswered {
+            path: "/ops".into(),
+            after: 0,
+        });
+    }
+    let _ = wallet.resume_payments().await;
+    let before = wallet.payments().await.unwrap();
+    let paid = before.iter().find(|p| p.attempt_id == first).unwrap();
+    assert_eq!(paid.stage, Stage::RailPaid, "{before:?}");
+    let open = before.iter().find(|p| p.attempt_id == retry).unwrap();
+    assert!(!open.paid_by_method, "{before:?}");
+    let backup = wallet.backup().await.unwrap();
+    drop(wallet);
+    let mut restored = Paykit::restore(
+        w.env(&w.alice, store()),
+        PaykitConfig::default(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+    )
+    .await
+    .expect("a paid attempt owing its outcome is no second payment in progress");
+    crate::common::finish_listing(&mut restored).await;
+    restored.resume_payments().await.unwrap();
+    let after = restored.payments().await.unwrap();
+    let paid = after.iter().find(|p| p.attempt_id == first).unwrap();
+    assert!(paid.paid_by_method, "{after:?}");
+    assert_eq!(w.rail.pay_calls(&retry), 1);
+    assert_eq!(w.rail.executions(&first), 1);
+}
+
+/// The declaration of a method that keeps ten minutes of history and takes a repeat under
+/// an attempt's key for ten days, and alice's wallet on `storage` keeping its attempts open
+/// that long: a retry whose history is gone is one the method would execute again.
+async fn slow_repeating_wallet(
+    w: &World,
+    storage: Arc<dyn pubky_dispatch_client::store::StateStore>,
+) -> Paykit {
+    const DAY_MS: u64 = 24 * crate::common::HOUR_MS;
+    w.rail.set_declaration(
+        paykit_sdk::RailDeclaration::new(
+            paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
+            paykit_sdk::rail::FAKE_PAYMENT_TIME_TOLERANCE_MS,
+        )
+        .with_history(true)
+        .with_history_retention_ms(10 * 60_000)
+        .with_idempotent(true)
+        .with_idempotency_retention_ms(10 * DAY_MS),
+    );
+    w.wallet_with(
+        "wallet",
+        storage,
+        PaykitConfig::default().with_orphan_after_s(10 * DAY_MS / 1000),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn test_resume_never_repeats_a_retry_beside_a_proof_whose_outcome_is_unwritten() {
+    // The first attempt is found made after all, but its outcome's write goes unanswered,
+    // again and again: the record does not show the obligation paid, only the first
+    // attempt's proof does. The retry, whose history is gone, is still never handed to the
+    // method again (Paykit spec 7.2, "no second execution").
+    let w = World::new();
+    let wallet = slow_repeating_wallet(&w, store()).await;
+    let (mut wallet, _, first, retry) = failed_then_retried_by(&w, wallet).await;
+    w.rail.complete_after_failure(&first);
+    let unanswered = || {
+        for _ in 0..4 {
+            w.alice.dispatch().fail_next(Fault::Unanswered {
+                path: "/ops".into(),
+                after: 0,
+            });
+        }
+    };
+    unanswered();
+    let _ = wallet.resume_payments().await;
+    let read = wallet.payments().await.unwrap();
+    let paid = read.iter().find(|p| p.attempt_id == first).unwrap();
+    assert_eq!(paid.stage, Stage::RailPaid, "{read:?}");
+    w.rail.forget_history(&retry);
+    w.clock.advance_ms(20 * 60_000);
+    unanswered();
+    let _ = wallet.resume_payments().await;
+    assert_eq!(w.rail.pay_calls(&retry), 1);
+    assert_eq!(w.rail.executions(&first), 1);
+}
+
+#[tokio::test]
+async fn test_resume_never_repeats_a_retry_once_the_record_shows_the_obligation_paid() {
+    // The wallet's backup is restored into a second installation, which finds the first
+    // attempt made after all and writes its outcome. The first installation, still running,
+    // holds no proof of it, and the method keeps no history of either attempt any more: only
+    // the record shows the obligation paid, and the retry is never handed to the method
+    // again (Paykit spec 7.2, 8.3).
+    let w = World::new();
+    let wallet = slow_repeating_wallet(&w, store()).await;
+    let (mut wallet, _, first, retry) = failed_then_retried_by(&w, wallet).await;
+    let backup = wallet.backup().await.unwrap();
+    let mut second = Paykit::restore(
+        w.env(&w.alice, store()),
+        PaykitConfig::default(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    crate::common::finish_listing(&mut second).await;
+    w.rail.complete_after_failure(&first);
+    second.resume_payments().await.unwrap();
+    let read = second.payments().await.unwrap();
+    let paid = read.iter().find(|p| p.attempt_id == first).unwrap();
+    assert_eq!(paid.stage, Stage::Finished, "{read:?}");
+    w.rail.forget_history(&first);
+    w.rail.forget_history(&retry);
+    w.clock.advance_ms(20 * 60_000);
+    let _ = wallet.receive(None).await;
+    let _ = wallet.resume_payments().await;
+    let read = wallet.payments().await.unwrap();
+    let first_read = read.iter().find(|p| p.attempt_id == first).unwrap();
+    assert!(!first_read.paid_by_method, "{read:?}");
+    assert_eq!(w.rail.pay_calls(&retry), 1);
+    assert_eq!(w.rail.executions(&first), 1);
 }

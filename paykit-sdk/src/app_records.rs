@@ -60,7 +60,7 @@ use paykit_lib::{PaymentEndpointIdentifier, PaymentEndpointPayload};
 use std::ops::Range;
 use std::sync::Arc;
 
-use pubky_dispatch_client::app::{Initiator, PeerIdentity, SwitchCopy, UserConfirmed};
+use pubky_dispatch_client::app::{DispatchCopy, Initiator, PeerIdentity, UserConfirmed};
 use pubky_dispatch_client::error::TransportError;
 use pubky_dispatch_client::transport::BoxFuture;
 use pubky_dispatch_core::enc::zbase32_encode;
@@ -303,9 +303,9 @@ impl PublicRead {
         if self.doc_hash != identity.doc.hash() {
             return false;
         }
-        let (original, current) = match identity.switch_copy {
-            SwitchCopy::Read => (&self.lookup, public_read_window(identity)),
-            SwitchCopy::Unavailable | SwitchCopy::Pending | SwitchCopy::Stale => {
+        let (original, current) = match identity.dispatch_copy {
+            DispatchCopy::Read => (&self.lookup, public_read_window(identity)),
+            DispatchCopy::Unavailable | DispatchCopy::Pending | DispatchCopy::Stale => {
                 (&self.homeserver, homeserver_window(identity))
             }
             _ => return false,
@@ -672,7 +672,7 @@ impl Paykit {
             })
         };
         let (identity, reads) = self
-            .payee_identity_with(payee, Need::SwitchCopy, by, confirmed, |identity| {
+            .payee_identity_with(payee, Need::DispatchCopy, by, confirmed, |identity| {
                 Some(read_records(identity))
             })
             .await?;
@@ -698,7 +698,7 @@ impl Paykit {
             }
             let now = self.now();
             if fetched.observed.current(&identity, now)
-                && payee_copy_usable(now, &identity, Need::SwitchCopy, by, confirmed)
+                && payee_copy_usable(now, &identity, Need::DispatchCopy, by, confirmed)
             {
                 let start = failures.len();
                 let records = self
@@ -713,7 +713,7 @@ impl Paykit {
                 }
                 let used_at = self.now();
                 if observed.current(&identity, used_at)
-                    && payee_copy_usable(used_at, &identity, Need::SwitchCopy, by, confirmed)
+                    && payee_copy_usable(used_at, &identity, Need::DispatchCopy, by, confirmed)
                 {
                     observed.offered = records
                         .iter()
@@ -732,7 +732,7 @@ impl Paykit {
             }
             refreshes += 1;
             identity = match self
-                .payee_identity(payee, Need::SwitchCopy, by, confirmed)
+                .payee_identity(payee, Need::DispatchCopy, by, confirmed)
                 .await?
             {
                 Ok(identity) => identity,

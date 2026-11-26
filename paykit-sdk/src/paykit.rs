@@ -27,6 +27,7 @@ use pubky_dispatch_core::scopes::owns_root;
 
 use crate::destination::KeptLookup;
 use crate::error::{Refusal, Result};
+use crate::heap::on_heap;
 use crate::hold::OwnResendOwed;
 use crate::own_record::{capabilities_for, check_join_capabilities, holds_capabilities};
 use crate::protocol::PaykitProtocol;
@@ -215,6 +216,21 @@ impl PaykitBackup {
     }
 }
 
+/// The Paykit messages a restore held for Paykit to decide (Paykit spec 7.2, Dispatch spec
+/// 12.4).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct HeldMessages {
+    /// Messages released in this receive, with their original signed bytes.
+    pub released: u32,
+    /// Held messages and carried lists withdrawn in this receive, each told to the host as
+    /// `DeliveryUnknown`, or as `MessageUndelivered` for a re-send of a message the
+    /// counterparty already accepted.
+    pub withdrawn: u32,
+    /// Messages still held after this receive, to decide at a later one; `None` when the
+    /// client couldn't list them now. Then the host does nothing: the next receive reports.
+    pub still_held: Option<u32>,
+}
+
 /// What a [`Paykit::receive`] did.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
@@ -237,6 +253,8 @@ pub struct ReceiveSummary {
     /// The `msg_id`s of the messages received, each with its effect committed with the
     /// cursor move (Dispatch spec 8.2).
     pub applied: Vec<String>,
+    /// Disposition of messages held at restore (Paykit spec 7.2).
+    pub held_messages: HeldMessages,
     /// The `resend_request`s answered and asked.
     pub resends: u64,
     /// A recovery ask waits because its sender certificate lacks `paykit_contacts`.
@@ -321,6 +339,15 @@ impl ReceiveSummary {
             (earlier, later) => later.or(earlier),
         };
         self.applied.splice(0..0, earlier.applied);
+        // Counts of this receive add up; `still_held` is the later one's.
+        self.held_messages.released = self
+            .held_messages
+            .released
+            .saturating_add(earlier.held_messages.released);
+        self.held_messages.withdrawn = self
+            .held_messages
+            .withdrawn
+            .saturating_add(earlier.held_messages.withdrawn);
         self.resends = self.resends.saturating_add(earlier.resends);
         self.divergent.splice(0..0, earlier.divergent);
         self.key_epochs_awaited.extend(earlier.key_epochs_awaited);
@@ -400,6 +427,10 @@ pub struct Paykit {
     /// public endpoint edit builds on it until the app is loaded again
     /// (`crate::own_record`).
     pub(crate) own_record_unknown: bool,
+    /// Whether a change of Paykit's member the client holds aside may still be untold: the
+    /// gate of every signing of the app's record stays shut until it is told and cleared
+    /// (`crate::own_record`, `Paykit::held_change_settled`). Shut at every construction.
+    pub(crate) held_change_untold: bool,
     /// The capabilities the join checked, which its first update signs as they are
     /// (`crate::own_record`); `None` otherwise.
     pub(crate) capability_snapshot: Option<Vec<paykit_lib::PaymentEndpointIdentifier>>,
@@ -495,6 +526,7 @@ impl Paykit {
             first_read_done: false,
             first_read_summary: None,
             own_record_unknown: false,
+            held_change_untold: true,
             capability_snapshot: None,
             identity_told: Vec::new(),
             raise_unwritten: false,
@@ -789,15 +821,17 @@ impl Paykit {
     async fn finish_load(mut self) -> Result<Self> {
         // A divergent record pauses even when a crash came before the receive's events
         // were taken: look at each held record once (`divergent.rs`).
-        Box::pin(self.sweep_divergent()).await?;
+        on_heap(|| self.sweep_divergent()).await?;
         // The host hears again, at each load, of what holds the identity for good.
-        self.tell_identity_notices().await?;
+        on_heap(|| self.tell_identity_notices()).await?;
+        // A change the client held aside at this load is told before anything can sign.
+        on_heap(|| self.settle_held_change_at_open()).await;
         // A crash between the restore's commit and clock clamp leaves the clamp for the
         // next load. Nothing is written under a certificate Paykit refuses.
         if self.certificate_refused().is_none() {
             self.bound_restored_cursor_time().await?;
-            Box::pin(self.recover_original_approvals()).await?;
-            Box::pin(self.take_restore_verdict()).await?;
+            on_heap(|| self.recover_original_approvals()).await?;
+            on_heap(|| self.take_restore_verdict()).await?;
         }
         // Records are unlisted here until the next list read (`hold::side_unlisted`).
         Ok(self)
@@ -869,6 +903,7 @@ impl Paykit {
             paykit.stamp_restore_time().await?;
             // An app restored opens as one loaded does.
             paykit.tell_identity_notices().await?;
+            paykit.settle_held_change_at_open().await;
             Ok(paykit)
         })
         .await
@@ -886,10 +921,10 @@ impl Paykit {
         // A divergence of the block floor the client holds or reported goes into the backup
         // as the hold (`crate::floor`), whatever the receive that met it got to, under a
         // refused certificate too: it is this app's own state.
-        Box::pin(self.keep_held_floor()).await?;
+        on_heap(|| self.keep_held_floor()).await?;
         // So does the loss marker of a list record the client holds, read before the receive
         // that would keep it (`Paykit::place_held_lists`).
-        Box::pin(self.keep_list_loss_markers()).await?;
+        on_heap(|| self.keep_list_loss_markers()).await?;
         Ok(PaykitBackup {
             app: self.app.backup_layered().await?,
         })
@@ -911,7 +946,12 @@ impl Paykit {
     /// as a hold only once the next [`Paykit::receive`] or [`Paykit::backup`] has run
     /// (Paykit spec 6). After a
     /// restore, the host must run [`Paykit::receive`] before such calls; Paykit's outgoing
-    /// methods make that first read themselves (Dispatch spec 12.4).
+    /// methods make that first read themselves (Dispatch spec 12.4). Calls through it bypass
+    /// Paykit's gates, the telling of a held endpoint change and the decisions on messages
+    /// held at a restore included: sign or clear Paykit's member, and release or withdraw
+    /// Paykit's held messages, only through Paykit. After a restore, Paykit decides every held
+    /// message of its own kinds, a hold of one message included, by Paykit spec 7.2: a host
+    /// holds a counterparty (`hold_queued`), never one of Paykit's messages (`hold_message`).
     pub fn app_mut(&mut self) -> &mut App {
         &mut self.app
     }
@@ -1072,7 +1112,7 @@ impl Paykit {
         let _delivery = self.delivery_operation();
         // The read's future goes on the heap: the client's read nests deep, and a host
         // polling it on a small stack, such as a test thread's 2 MiB, keeps room for it.
-        let summary = Box::pin(self.receive_inner(wait)).await?;
+        let summary = on_heap(|| self.receive_inner(wait)).await?;
         Ok(match self.first_read_summary.take() {
             Some(earlier) => summary.after(*earlier),
             None => summary,
@@ -1081,13 +1121,21 @@ impl Paykit {
 
     async fn receive_inner(&mut self, wait: Option<u32>) -> Result<ReceiveSummary> {
         self.lists_read_this_pass = false;
-        let read = Box::pin(self.read_before_effects(wait)).await?;
-        Box::pin(self.after_read(read)).await
+        let read = on_heap(|| self.read_before_effects(wait)).await?;
+        on_heap(|| self.after_read(read)).await
     }
 
     /// Complete the client's read before a caller's already-recorded block is sent.
     /// That block must precede the outgoing recovery work in `after_read`.
     pub(crate) async fn read_before_effects(&mut self, wait: Option<u32>) -> Result<ReadResult> {
+        // A held message's deadline waits for nothing Paykit reads: one too old is given up
+        // and told before the read, whatever it finds (Paykit spec 7.2, Dispatch spec 12.4). A
+        // stop of the wallet is left for the read, which returns it typed.
+        if let Err(error) = on_heap(|| self.give_up_expired_held()).await {
+            if !crate::pay::stops_resume(&error) {
+                return Err(error);
+            }
+        }
         // Each step's future goes on the heap: built in this future's poll, every one of them
         // would otherwise take its size of the stack there, beside the client's read, and a
         // host thread of 2 MiB would not hold a deep read in a debug build.
@@ -1115,23 +1163,23 @@ impl Paykit {
         // first, so the lists are read again below, before the copy this app judges by is
         // used. The steps never count an unblock: the client's copy decides there.
         if self.certificate_refused().is_none() {
-            Box::pin(self.drop_unblocks_not_kept()).await?;
+            on_heap(|| self.drop_unblocks_not_kept()).await?;
         }
         // The record accepts the kinds this app handles now, extension kinds included
         // (`crate::extensions`), before the feed is read.
         if self.certificate_refused().is_none() {
-            Box::pin(self.align_accepts()).await?;
+            on_heap(|| self.align_accepts()).await?;
         }
         // An app holding `paykit_contacts` reads the flagged senders again first, at most every 10
         // minutes, for the spam rule (Paykit wire 4.1).
-        Box::pin(self.refresh_lists_when_due()).await?;
+        on_heap(|| self.refresh_lists_when_due()).await?;
         // This app's blocks that may not reach the Dispatch otherwise are written again: one
         // whose batch the client neither keeps nor applied, a restored one among them.
         if self.certificate_refused().is_none() && !first_read {
-            Box::pin(self.send_own_blocks_again()).await?;
+            on_heap(|| self.send_own_blocks_again()).await?;
         }
         // The records paused before this read, for the summary's new ones.
-        let paused_before = Box::pin(self.paused_records()).await?;
+        let paused_before = on_heap(|| self.paused_records()).await?;
         // Whether the client may list at this read's start ([`Paykit::records_listed`]).
         let keys_held_before = self.holds_scope_keys();
         let received = Box::pin(self.app.receive(wait)).await;
@@ -1154,7 +1202,7 @@ impl Paykit {
             Err(error) => return Err(error.into()),
         };
         // A deny change or gap the read told takes effect before the sends that follow it.
-        Box::pin(self.take_learned_lists()).await?;
+        on_heap(|| self.take_learned_lists()).await?;
         // A successful call can stop while keys or a listing wait, before any page.
         // Only a page's verdict under the confirmed current identity opens outgoing work.
         if report.held_cursor.is_some() && self.app.identity_confirmed_at().is_some() {
@@ -1170,7 +1218,7 @@ impl Paykit {
 
     /// Finish a first read made for an explicit block, keeping its report for the host.
     pub(crate) async fn finish_first_read(&mut self, read: ReadResult) -> Result<()> {
-        let summary = Box::pin(self.after_read(read)).await?;
+        let summary = on_heap(|| self.after_read(read)).await?;
         self.remember_read(summary);
         Ok(())
     }
@@ -1201,7 +1249,7 @@ impl Paykit {
 
     /// Run the SDK's recovery work after the client's read and any explicit block.
     async fn after_read(&mut self, read: ReadResult) -> Result<ReceiveSummary> {
-        let summary = Box::pin(self.after_read_steps(read)).await?;
+        let summary = on_heap(|| self.after_read_steps(read)).await?;
         Ok(summary.with_record_latch(self.own_record_unknown))
     }
 
@@ -1226,13 +1274,21 @@ impl Paykit {
         // anything returns, so that once the host acknowledges what this report showed none
         // is lost: only the SDK's own marks and notes are kept here, and nothing is written at
         // the Dispatch (`stored.rs`, `divergent.rs`).
-        Box::pin(self.take_stored_events(&duties)).await?;
+        on_heap(|| self.take_stored_events(&duties)).await?;
+        // Again after the read, at the service time it verified, before anything decides a
+        // held message and before any return below, so every receive that read gives up
+        // what is past its deadline (`Paykit::give_up_expired_held`). A stopped wallet gives
+        // up nothing: its stop is in the report.
+        if !report.stopped {
+            on_heap(|| self.give_up_expired_held()).await?;
+        }
         if account_gone {
             // Nothing more is read or written there: the summary tells the host.
-            let divergent = Box::pin(self.newly_paused(&paused_before)).await?;
+            let divergent = on_heap(|| self.newly_paused(&paused_before)).await?;
             return Ok(ReceiveSummary {
                 report,
                 account_gone,
+                held_messages: on_heap(|| self.held_messages_now((0, 0))).await,
                 divergent,
                 ..ReceiveSummary::default()
             });
@@ -1241,16 +1297,17 @@ impl Paykit {
         // its events and cursor; the Paykit steps below act under the certificate, so none
         // runs.
         if let Some(refused) = self.certificate_refused() {
-            let divergent = Box::pin(self.newly_paused(&paused_before)).await?;
+            let divergent = on_heap(|| self.newly_paused(&paused_before)).await?;
             return Ok(ReceiveSummary {
                 report,
                 certificate_refused: Some(refused),
+                held_messages: on_heap(|| self.held_messages_now((0, 0))).await,
                 divergent,
                 ..ReceiveSummary::default()
             });
         }
         self.refresh_own()?;
-        Box::pin(self.note_service_time()).await?;
+        on_heap(|| self.note_service_time()).await?;
         // A recovery notice holds own writes. Return the client's report before upkeep
         // can try a held write. A restore or a kept floor batch also defers that work.
         if self.app.recovery_required().is_some()
@@ -1268,6 +1325,7 @@ impl Paykit {
             return Ok(ReceiveSummary {
                 report,
                 applied,
+                held_messages: on_heap(|| self.held_messages_now((0, 0))).await,
                 records_unlisted: self
                     .unlisted()
                     .await?
@@ -1279,58 +1337,58 @@ impl Paykit {
                 ..ReceiveSummary::default()
             });
         }
-        if Box::pin(self.take_restore_verdict()).await? {
-            Box::pin(self.refresh_lists_when_due()).await?;
+        if on_heap(|| self.take_restore_verdict()).await? {
+            on_heap(|| self.refresh_lists_when_due()).await?;
         }
         // Restore-held blocks go before the other outgoing work, after the first page.
         if blocks_after_read {
-            Box::pin(self.send_own_blocks_again()).await?;
+            on_heap(|| self.send_own_blocks_again()).await?;
         }
         // A restore's listing may need several reads. Clear its mark only when the client
         // finishes the listing with the required scope keys.
         let mut app_record_owed = None;
         let upkeep_tried = !report.stopped;
         if upkeep_tried {
-            Box::pin(self.records_listed(keys_held_before)).await?;
+            on_heap(|| self.records_listed(keys_held_before)).await?;
             // A `missed` item whose end isn't known holds every open request until a read
             // completes: this one did, so the hold is bounded by the service time verified
             // (`hold.rs`).
-            Box::pin(self.bound_missed_hold()).await?;
+            on_heap(|| self.bound_missed_hold()).await?;
             // The app record's upkeep: none of the steps below depends on it, so a failure
             // that is the publisher's own leaves the record owed and is told in the summary
             // once they have run; a wallet-wide stop still ends the receive here (Paykit
             // spec 4, `Paykit::tend_own_record_at_receive`).
-            app_record_owed = Box::pin(self.tend_own_record_at_receive()).await?;
+            app_record_owed = on_heap(|| self.tend_own_record_at_receive()).await?;
         }
         // A certificate the read took, any other than the one the records were listed under,
         // a narrower one included: they are listed now, or stay unlisted for the next
         // receive or write (`Paykit::list_under_new_cert`).
-        let records_unlisted = Box::pin(self.list_under_new_cert()).await?;
+        let records_unlisted = on_heap(|| self.list_under_new_cert()).await?;
         // A `missed` item this read took waits for its read of the lists, with or without the
         // divergence hold and whatever the app's scopes: it is made now, its records listed,
         // before any ask (Paykit wire 5.6, Raising).
-        if Box::pin(self.missed_widening_unread()).await? {
-            Box::pin(self.refresh_lists_when_due()).await?;
+        if on_heap(|| self.missed_widening_unread()).await? {
+            on_heap(|| self.refresh_lists_when_due()).await?;
         }
         let pending_read = records_unlisted.is_none().then_some(&report);
-        let keys = Box::pin(self.scope_keys_awaited()).await?;
+        let keys = on_heap(|| self.scope_keys_awaited()).await?;
         // The entries the client stored for good: their messages, kept above, written into
         // their records as room frees (`stored.rs`), unless the payer's side waits for its
         // scope keys or its listing, as for the payees' cancellations below.
-        if !Box::pin(self.payer_waits(keys)).await? {
-            Box::pin(self.place_stored(pending_read)).await?;
+        if !on_heap(|| self.payer_waits(keys)).await? {
+            on_heap(|| self.place_stored(pending_read)).await?;
         }
         // The Allowance answers the read kept go into their records next, in the order their
         // inbox accepted them, after the stored entries noted above, so an earlier answer
         // whose write the Dispatch refused is seen first (`allowances.rs`).
-        Box::pin(self.recover_pending_replies()).await?;
-        Box::pin(self.place_kept_allowance_responses(pending_read)).await?;
+        on_heap(|| self.recover_pending_replies()).await?;
+        on_heap(|| self.place_kept_allowance_responses(pending_read)).await?;
         // The payees' cancellations the read kept go into their records, as later writes of
         // this app's own (Paykit spec 8.1), unless the payer's side waits for its scope keys:
         // they build on request records the copy may lack, and stay kept meanwhile.
-        if !Box::pin(self.payer_waits(keys)).await? {
-            Box::pin(self.place_kept_cancellations()).await?;
-            Box::pin(self.record_ledger_outcomes()).await?;
+        if !on_heap(|| self.payer_waits(keys)).await? {
+            on_heap(|| self.place_kept_cancellations()).await?;
+            on_heap(|| self.record_ledger_outcomes()).await?;
         }
         // Ask for replies dropped for a bound and entries dropped unverified as soon as
         // the sender's holds and mark cadence allow. Forget the pairs a block's marks
@@ -1338,42 +1396,42 @@ impl Paykit {
         // (`marks.rs`). Before them, the notices of lost messages owed on block marks the
         // receive steps dropped for the bound are settled from the outbox's answer, which
         // only this side of the read can make (`marks::LostOwed`).
-        Box::pin(self.settle_lost_owed()).await?;
-        Box::pin(self.forget_blocked_pairs()).await?;
+        on_heap(|| self.settle_lost_owed()).await?;
+        on_heap(|| self.forget_blocked_pairs()).await?;
         let mut resend_refused = None;
-        let marked = Box::pin(self.ask_on_marks(&mut resend_refused)).await?;
+        let marked = on_heap(|| self.ask_on_marks(&mut resend_refused)).await?;
         // A higher floor or a divergence the reads showed is kept (`crate::floor`). The
         // payer's records opened before this app held the block floor they fall under carry
         // `manual_only` from now on, unless the payer's side waits.
-        Box::pin(self.keep_held_floor()).await?;
+        on_heap(|| self.keep_held_floor()).await?;
         // A loss followed in this read is told as at a load (`crate::loss`).
-        self.tell_identity_notices().await?;
-        if !Box::pin(self.payer_waits(keys)).await? {
-            Box::pin(self.sweep_floor()).await?;
+        on_heap(|| self.tell_identity_notices()).await?;
+        if !on_heap(|| self.payer_waits(keys)).await? {
+            on_heap(|| self.sweep_floor()).await?;
         }
         // The replies and period details kept for requests whose record wasn't held yet,
         // unless the payer's side waits (`Paykit::payer_waits`), as above; each record they
         // go into that is absent while its side isn't listed waits on its own. The messages
         // kept over divergent records whose user has confirmed them, a list to its held list,
         // are placed next (`divergent.rs`).
-        if !Box::pin(self.payer_waits(keys)).await? {
-            Box::pin(self.place_kept_replies()).await?;
-            Box::pin(self.place_divergent_writes()).await?;
+        if !on_heap(|| self.payer_waits(keys)).await? {
+            on_heap(|| self.place_kept_replies()).await?;
+            on_heap(|| self.place_divergent_writes()).await?;
         }
         // Lists held over a `payment_lists` record that didn't read, once it reads.
-        Box::pin(self.place_held_lists()).await?;
+        on_heap(|| self.place_held_lists()).await?;
         // The counterparties' Allowance ends kept as stops go into their records, with their
         // executor notices, and the consent list drops every Allowance seen ended, rejected or
         // conflicted (Paykit spec 8.3). After a `missed` item, every Allowance on it is to be confirmed
         // again, as after a restore. An executor notice's target goes once its notice has.
-        Box::pin(self.place_allowance_stops()).await?;
-        Box::pin(self.send_owed_ends()).await?;
-        Box::pin(self.confirm_consents_again()).await?;
-        Box::pin(self.sweep_consents()).await?;
-        Box::pin(self.sweep_notice_targets()).await?;
+        on_heap(|| self.place_allowance_stops()).await?;
+        on_heap(|| self.send_owed_ends()).await?;
+        on_heap(|| self.confirm_consents_again()).await?;
+        on_heap(|| self.sweep_consents()).await?;
+        on_heap(|| self.sweep_notice_targets()).await?;
         // The markers of batches of kept messages' writes the client no longer keeps
         // (`stored.rs`).
-        Box::pin(self.sweep_held_writes()).await?;
+        on_heap(|| self.sweep_held_writes()).await?;
         let applied = report
             .events
             .iter()
@@ -1382,31 +1440,39 @@ impl Paykit {
                 _ => None,
             })
             .collect();
-        Box::pin(self.repair_settlement_buckets()).await?;
-        let answered = Box::pin(self.answer_kept_resends()).await?;
+        on_heap(|| self.repair_settlement_buckets()).await?;
+        let answered = on_heap(|| self.answer_kept_resends()).await?;
+        // Held messages are decided once Paykit's own first read is complete, after this
+        // read's stops are placed, so a counterparty's stop it brought counts (Paykit spec
+        // 7.2). The gate is the one predicate every decision goes through.
+        let mut decided = (0, 0);
+        if on_heap(|| self.held_decisions_open(&report)).await? {
+            decided = on_heap(|| self.decide_held_messages(&report)).await?;
+        }
         // Open records resolve re-send requests and locally held answers. After a restore,
         // signed records also identify outgoing messages whose outcome the host must check.
-        if Box::pin(self.unlisted()).await?.is_none()
-            && Box::pin(self.scope_keys_awaited()).await?.is_none()
+        if on_heap(|| self.unlisted()).await?.is_none()
+            && on_heap(|| self.scope_keys_awaited()).await?.is_none()
         {
-            Box::pin(self.queue_restore_asks()).await?;
+            on_heap(|| self.queue_restore_asks()).await?;
             // A stop held in the outbox past its 30 days is never sent (Paykit spec 8.1).
-            Box::pin(self.give_up_expired_stops()).await?;
-            Box::pin(self.queue_own_again()).await?;
-            Box::pin(self.note_imported_receipt_batches()).await?;
+            on_heap(|| self.give_up_expired_stops()).await?;
+            on_heap(|| self.queue_own_again()).await?;
+            on_heap(|| self.note_imported_receipt_batches()).await?;
         }
-        let asked = Box::pin(self.send_asks(&mut resend_refused)).await?;
+        let asked = on_heap(|| self.send_asks(&mut resend_refused)).await?;
         // After every read of this receive, the last of which may have written the raise.
-        Box::pin(self.settle_raise_waiting()).await?;
-        Box::pin(self.retire_end_origins()).await?;
+        on_heap(|| self.settle_raise_waiting()).await?;
+        on_heap(|| self.retire_end_origins()).await?;
         // A confirmed mark goes once its record's view isn't divergent any more, after this
         // read's events were taken.
-        Box::pin(self.end_confirmed_marks()).await?;
-        let divergent = Box::pin(self.newly_paused(&paused_before)).await?;
-        Box::pin(self.tend_private_lists(Some(&report))).await?;
+        on_heap(|| self.end_confirmed_marks()).await?;
+        let divergent = on_heap(|| self.newly_paused(&paused_before)).await?;
+        on_heap(|| self.tend_private_lists(Some(&report))).await?;
         Ok(ReceiveSummary {
             report,
             applied,
+            held_messages: on_heap(|| self.held_messages_now(decided)).await,
             resends: answered.saturating_add(asked).saturating_add(marked),
             resend_refused,
             certificate_refused: None,
@@ -1420,6 +1486,17 @@ impl Paykit {
         })
     }
 
+    /// The held messages for the summary a receive returns: what this receive released
+    /// and withdrawn, best effort, and those still held now, `None` when the client can't
+    /// list them (Paykit spec 7.2).
+    async fn held_messages_now(&self, (released, withdrawn): (u32, u32)) -> HeldMessages {
+        HeldMessages {
+            released,
+            withdrawn,
+            still_held: self.still_held().await.ok().flatten(),
+        }
+    }
+
     /// Try every queued message once (Dispatch spec 11).
     ///
     /// # Errors
@@ -1429,14 +1506,21 @@ impl Paykit {
         let _delivery = self.delivery_operation();
         self.lists_read_this_pass = false;
         self.refresh_own()?;
-        Box::pin(self.first_read_before_writing()).await?;
+        on_heap(|| self.first_read_before_writing()).await?;
         self.refresh_own()?;
-        Box::pin(self.refresh_lists_when_due()).await?;
-        Box::pin(self.note_service_time()).await?;
+        on_heap(|| self.refresh_lists_when_due()).await?;
+        on_heap(|| self.note_service_time()).await?;
+        // A flush whose first read leaves held messages makes one more receive, so they are
+        // decided as every receive decides them: through the one gate, after the read's
+        // stops are placed (Paykit spec 7.2). Its summary is kept for the next receive.
+        if self.first_read_summary.is_some() && self.still_held().await? != Some(0) {
+            let summary = on_heap(|| self.receive(None)).await?;
+            self.remember_read(summary);
+        }
         self.send_outbox().await?;
         // Flushing can settle a kept deletion. Its signed reply can leave only
         // once Paykit has verified the applied operation and its service result.
-        Box::pin(self.recover_pending_replies()).await?;
+        on_heap(|| self.recover_pending_replies()).await?;
         Ok(())
     }
 }

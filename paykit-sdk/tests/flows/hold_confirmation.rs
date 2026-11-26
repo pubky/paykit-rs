@@ -22,7 +22,7 @@ async fn shown(app: &Paykit, request: &RequestRef) -> paykit_sdk::HeldRequest {
 
 async fn missed(w: &World, app: &mut Paykit) {
     let now = w.clock.now_ms();
-    w.alice.switch().push_missed(1, now - 1_000, now);
+    w.alice.dispatch().push_missed(1, now - 1_000, now);
     app.receive(None).await.unwrap();
 }
 
@@ -702,7 +702,7 @@ async fn missed_commit(after: bool) {
         .fault
         .store(if after { 2 } else { 1 }, Ordering::SeqCst);
     let now = w.clock.now_ms();
-    w.alice.switch().push_missed(1, now - 1_000, now);
+    w.alice.dispatch().push_missed(1, now - 1_000, now);
     wallet
         .receive(None)
         .await
@@ -847,7 +847,7 @@ async fn kept_confirmation_lands(w: &World, confirm_newer: bool) -> (Paykit, Req
     wallet.receive(None).await.unwrap();
     missed(w, &mut wallet).await;
     let confirmed = shown(&wallet, &request).await;
-    w.alice.switch().fail_next(Fault::Unanswered {
+    w.alice.dispatch().fail_next(Fault::Unanswered {
         path: "/ops".into(),
         after: 0,
     });
@@ -861,7 +861,7 @@ async fn kept_confirmation_lands(w: &World, confirm_newer: bool) -> (Paykit, Req
         .expect_err("the attempt's batch is unanswered");
     assert!(w.rail.all_executions().is_empty());
     w.clock.advance_ms(1_000);
-    w.alice.switch().fail_next(Fault::Unreachable {
+    w.alice.dispatch().fail_next(Fault::Unreachable {
         path: "/ops".into(),
         after: 0,
     });
@@ -1012,7 +1012,7 @@ async fn test_hold_confirmation_kept_subscription_acceptance_confirms_no_newer_h
     wallet.receive(None).await.unwrap();
     missed(&w, &mut wallet).await;
     let confirmed = shown(&wallet, &request).await;
-    w.alice.switch().fail_next(Fault::Unanswered {
+    w.alice.dispatch().fail_next(Fault::Unanswered {
         path: "/ops".into(),
         after: 0,
     });
@@ -1028,7 +1028,7 @@ async fn test_hold_confirmation_kept_subscription_acceptance_confirms_no_newer_h
         "the acceptance's batch is unanswered and kept: {sent:?}"
     );
     w.clock.advance_ms(1_000);
-    w.alice.switch().fail_next(Fault::Unreachable {
+    w.alice.dispatch().fail_next(Fault::Unreachable {
         path: "/ops".into(),
         after: 0,
     });

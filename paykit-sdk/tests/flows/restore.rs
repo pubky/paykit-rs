@@ -245,7 +245,7 @@ async fn test_restore_paid_attempt_whose_outcome_write_fails_is_written_at_a_res
     let mut app = restored(&w, &backup).await;
     // The rebuilt payment's outcome batch can't connect.
     w.alice
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
             path: "/ops".into(),
             after: 0,
@@ -1178,7 +1178,7 @@ pub(crate) fn kept_message(
         body.as_object().cloned().unwrap(),
     );
     let keys = w.bob.identity().app_keys(cert_app);
-    let cert = w.bob.switch().app(&keys.app_id_bytes()).cert.unwrap();
+    let cert = w.bob.dispatch().app(&keys.app_id_bytes()).cert.unwrap();
     serde_json::json!({
         "sender": pubky_dispatch_core::enc::b64(&w.bob_id()),
         "cert": serde_json::to_value(cert.signed()).unwrap(),
@@ -1441,7 +1441,7 @@ async fn test_restore_layer_state_that_doesnt_verify_or_read_writes_nothing() {
     // A payee app's records seen: a certificate, not a record, and a record of bob's
     // under the key of another of his apps.
     let shop1 = w.bob.identity().app_keys("shop1");
-    let shop1_cert = w.bob.switch().app(&shop1.app_id_bytes()).cert.unwrap();
+    let shop1_cert = w.bob.dispatch().app(&shop1.app_id_bytes()).cert.unwrap();
     let record = pubky_dispatch_core::records::AppRecord::sign(
         &shop1,
         pubky_dispatch_core::records::AppRecordBody::new(&shop1_cert, vec![], w.clock.now_ms()),
@@ -1732,7 +1732,7 @@ async fn restored_with_a_released_acceptance(
     if !delivered {
         // Bob's Dispatch doesn't answer the delivery: the acceptance stays in the outbox.
         w.bob
-            .switch()
+            .dispatch()
             .fail_next(pubky_dispatch_client::testing::Fault::Error {
                 path: "/inbox".into(),
                 code: pubky_dispatch_core::http::ErrorCode::Unavailable,
@@ -1758,16 +1758,53 @@ async fn restored_with_a_released_acceptance(
     (w, app, shop, request)
 }
 
+// pay.rs keeps reconciliation and later resumes from replacing a withdrawn acceptance.
 #[tokio::test]
-async fn test_restore_released_acceptance_never_delivered_is_sent_once() {
-    let (w, mut app, mut shop, request) = restored_with_a_released_acceptance(false).await;
-    // The restored client didn't know it, and the record holds none: a new one went.
-    assert_eq!(acceptances_taken(&mut shop).await, 1);
-    let record = value_of(&mut shop, &payee_record(&request)).await;
-    assert!(!record["response"].is_null(), "{record}");
-    // A second resume finds the new one known to the client and sends nothing.
-    app.resume_payments().await.unwrap();
+async fn test_restore_released_acceptance_never_delivered_is_withdrawn_not_replaced() {
+    use pubky_dispatch_client::app::{AppEvent, Delivery};
+    use pubky_dispatch_client::testing::Fault;
+    use pubky_dispatch_core::http::ErrorCode;
+
+    let w = World::new();
+    let (mut wallet, mut shop, _, original) =
+        Box::pin(crate::restore_held::queued_acceptance(&w)).await;
+    w.bob.dispatch().fail_next(Fault::Error {
+        path: "/inbox".into(),
+        code: ErrorCode::Unavailable,
+        current: serde_json::Value::Null,
+    });
+    assert!(matches!(
+        wallet.flush_message_in_delivery(&original).await.unwrap(),
+        Some(Delivery::Queued { tries, .. }) if tries > 0
+    ));
     assert_eq!(acceptances_taken(&mut shop).await, 0);
+    let backup = wallet.backup().await.unwrap();
+    drop(wallet);
+
+    let mut app = Box::pin(crate::restore_held::restore(&w, &w.alice, store(), &backup)).await;
+    assert!(app
+        .app()
+        .held_messages("paykit")
+        .await
+        .unwrap()
+        .contains(&original));
+    Box::pin(crate::common::finish_listing(&mut app)).await;
+    Box::pin(app.reconcile()).await.unwrap();
+    assert_eq!(acceptances_taken(&mut shop).await, 0);
+    let duties = app.app_mut().pending_duty_events().await.unwrap();
+    assert!(duties.iter().any(|d| {
+        matches!(&d.event, AppEvent::DeliveryUnknown { msg_id, .. } if msg_id == &original)
+    }));
+    Box::pin(app.resume_payments()).await.unwrap();
+    Box::pin(app.flush()).await.unwrap();
+    assert_eq!(acceptances_taken(&mut shop).await, 0);
+    assert!(!app
+        .app()
+        .queued_messages("paykit")
+        .await
+        .unwrap()
+        .iter()
+        .any(|m| m.kind == "paykit.payment_request_acceptance"));
     assert_eq!(w.rail.all_executions().len(), 1);
 }
 
@@ -2020,7 +2057,7 @@ async fn test_restore_asks_start_bounded_where_they_are_queued() {
     // Queued, not yet sent: bob's Dispatch doesn't answer.
     for _ in 0..4 {
         w.bob
-            .switch()
+            .dispatch()
             .fail_next(pubky_dispatch_client::testing::Fault::Error {
                 path: "/inbox".into(),
                 code: pubky_dispatch_core::http::ErrorCode::Unavailable,
@@ -2623,7 +2660,7 @@ async fn shop_restored_with_its_request_unqueued(w: &World, wallet: &mut Paykit)
     let mut unexpiring = crate::common::draft("1", w.clock.now_ms());
     unexpiring.proposal_expires_at_ms = None;
     w.bob
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::LoseAnswer {
             path: "/ops".into(),
         });
@@ -2716,7 +2753,7 @@ async fn test_restore_late_first_read_keeps_an_original_delivery_with_its_wallet
     wallet.receive(None).await.unwrap();
     assert_eq!(wallet.requests().await.unwrap().len(), 1);
 
-    let before = w.alice.switch().entries_from(&w.bob_id());
+    let before = w.alice.dispatch().entries_from(&w.bob_id());
     restored.receive(None).await.unwrap();
     let notices = restored.notices().await.unwrap();
     assert_eq!(notices.len(), 1);
@@ -2745,7 +2782,7 @@ async fn test_restore_late_first_read_keeps_an_original_delivery_with_its_wallet
         .await
         .unwrap()
         .is_none());
-    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), before);
+    assert_eq!(w.alice.dispatch().entries_from(&w.bob_id()), before);
 }
 
 #[tokio::test]
@@ -2755,7 +2792,7 @@ async fn test_restore_request_past_its_replay_window_stays_uncertain() {
     let mut shop = shop_restored_with_its_request_unqueued(&w, &mut wallet).await;
     w.clock
         .advance_ms(31 * pubky_dispatch_core::records::DAY_MS);
-    let before = w.alice.switch().entries_from(&w.bob_id());
+    let before = w.alice.dispatch().entries_from(&w.bob_id());
     let summary = shop.receive(None).await.unwrap();
     assert!(
         !summary.report.events.iter().any(|e| matches!(
@@ -2774,7 +2811,7 @@ async fn test_restore_request_past_its_replay_window_stays_uncertain() {
     let notices = shop.notices().await.unwrap();
     assert_eq!(notices.len(), 1);
     assert_eq!(notices[0].kind, paykit_sdk::NoticeKind::PossiblyDelivered);
-    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), before);
+    assert_eq!(w.alice.dispatch().entries_from(&w.bob_id()), before);
     wallet.receive(None).await.unwrap();
     assert!(wallet.requests().await.unwrap().is_empty());
 }
@@ -2826,7 +2863,7 @@ async fn test_restore_live_store_delivers_the_original_kept_receipt_once() {
     shop.receive(None).await.unwrap();
     let record = shop.payee_activity().await.unwrap()[0].record;
     w.bob
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::LoseAnswer {
             path: "/ops".into(),
         });
@@ -2863,10 +2900,10 @@ async fn test_restore_live_store_delivers_the_original_kept_receipt_once() {
     let received = wallet.request(&request).await.unwrap().receipt.unwrap();
     assert_eq!(received.msg_id, msg_id);
     assert_eq!(received.attempt_id, attempt_id);
-    let count = w.alice.switch().entries_from(&w.bob_id());
+    let count = w.alice.dispatch().entries_from(&w.bob_id());
     assert_eq!(shop.confirm_payment(&record).await.unwrap(), Some(msg_id));
     shop.flush().await.unwrap();
-    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), count);
+    assert_eq!(w.alice.dispatch().entries_from(&w.bob_id()), count);
     assert_eq!(w.rail.pay_calls(&attempt_id), 1);
 }
 
@@ -2887,7 +2924,7 @@ async fn test_restore_fresh_store_keeps_an_issued_receipt_without_assuming_deliv
     shop.receive(None).await.unwrap();
     let record = shop.payee_activity().await.unwrap()[0].record;
     w.bob
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::LoseAnswer {
             path: "/ops".into(),
         });
@@ -3000,7 +3037,7 @@ async fn test_an_unanswered_receipt_keeps_its_batch_id_when_saving_the_applicati
     // The native first keep fits. The write preserving its signed application does not.
     store.refuse_puts_as_too_large_over(Some(b"p/paykit/ri/"), 16);
     w.bob
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::LoseAnswer {
             path: "/ops".into(),
         });
@@ -3053,7 +3090,7 @@ async fn test_restore_shared_receipt_alone_does_not_create_a_delivery() {
     let record = shop.payee_activity().await.unwrap()[0].record;
     let backup = shop.backup().await.unwrap();
     w.bob
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::LoseAnswer {
             path: "/ops".into(),
         });
@@ -3080,9 +3117,9 @@ async fn test_restore_shared_receipt_alone_does_not_create_a_delivery() {
         .unwrap()
         .iter()
         .all(|notice| { notice.msg_id.as_deref() != Some(issued.as_str()) }));
-    let before = w.alice.switch().entries_from(&w.bob_id());
+    let before = w.alice.dispatch().entries_from(&w.bob_id());
     shop.receive(None).await.unwrap();
-    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), before);
+    assert_eq!(w.alice.dispatch().entries_from(&w.bob_id()), before);
 }
 
 /// Bob's shop sends alice a request, and her wallet rejects it: the rejection's batch is
@@ -3098,7 +3135,7 @@ async fn wallet_backed_up_with_its_rejection_unqueued(
     let request = request_from(shop, w.alice_id(), unexpiring).await;
     wallet.receive(None).await.unwrap();
     w.alice
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::LoseAnswer {
             path: "/ops".into(),
         });
@@ -3129,11 +3166,11 @@ async fn test_restore_rejection_stays_uncertain_after_unblocking() {
     let (_, backup) = wallet_backed_up_with_its_rejection_unqueued(&w, wallet, &mut shop).await;
     let mut wallet = restored_unreceived(&w, &w.alice, &backup).await;
     wallet.block(&w.bob_id()).await.unwrap();
-    let before = w.bob.switch().entries_from(&w.alice_id());
+    let before = w.bob.dispatch().entries_from(&w.alice_id());
     for _ in 0..2 {
         wallet.receive(None).await.unwrap();
     }
-    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), before);
+    assert_eq!(w.bob.dispatch().entries_from(&w.alice_id()), before);
     assert!(wallet
         .app()
         .protocol_get("paykit", b"ro")
@@ -3143,7 +3180,7 @@ async fn test_restore_rejection_stays_uncertain_after_unblocking() {
     wallet.unblock(&w.bob_id()).await.unwrap();
     wallet.receive(None).await.unwrap();
     assert!(crate::common::asked(&wallet, &w.bob_id()).await.is_empty());
-    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), before);
+    assert_eq!(w.bob.dispatch().entries_from(&w.alice_id()), before);
     assert!(wallet
         .app()
         .protocol_get("paykit", b"ro")
@@ -3151,7 +3188,7 @@ async fn test_restore_rejection_stays_uncertain_after_unblocking() {
         .unwrap()
         .is_none());
     wallet.receive(None).await.unwrap();
-    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), before);
+    assert_eq!(w.bob.dispatch().entries_from(&w.alice_id()), before);
     assert!(wallet
         .notices()
         .await
@@ -3183,15 +3220,15 @@ async fn test_restore_reading_the_deny_list_does_not_release_a_rejection() {
     let (_, backup) = wallet_backed_up_with_its_rejection_unqueued(&w, wallet, &mut shop).await;
     let mut wallet = restored_unreceived(&w, &w.alice, &backup).await;
     w.alice
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::Error {
             path: "/allow".into(),
             code: pubky_dispatch_core::http::ErrorCode::Unavailable,
             current: serde_json::Value::Null,
         });
-    let before = w.bob.switch().entries_from(&w.alice_id());
+    let before = w.bob.dispatch().entries_from(&w.alice_id());
     wallet.receive(None).await.unwrap();
-    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), before);
+    assert_eq!(w.bob.dispatch().entries_from(&w.alice_id()), before);
     assert!(wallet
         .app()
         .protocol_get("paykit", b"ro")
@@ -3199,7 +3236,7 @@ async fn test_restore_reading_the_deny_list_does_not_release_a_rejection() {
         .unwrap()
         .is_none());
     wallet.receive(None).await.unwrap();
-    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), before);
+    assert_eq!(w.bob.dispatch().entries_from(&w.alice_id()), before);
     assert!(wallet
         .app()
         .protocol_get("paykit", b"ro")
@@ -3207,7 +3244,7 @@ async fn test_restore_reading_the_deny_list_does_not_release_a_rejection() {
         .unwrap()
         .is_none());
     wallet.receive(None).await.unwrap();
-    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), before);
+    assert_eq!(w.bob.dispatch().entries_from(&w.alice_id()), before);
     assert!(wallet
         .notices()
         .await
@@ -3248,10 +3285,10 @@ async fn test_restore_opening_the_record_reports_an_uncertain_rejection() {
     )
     .await;
     w.alice.next_doc(|body| body.data_epoch += 1).unwrap();
-    let newest = w.alice.switch().identity_doc().unwrap().data_epoch();
+    let newest = w.alice.dispatch().identity_doc().unwrap().data_epoch();
     crate::unrequested::store_bundle_from(&w, wallet_app, &cert, newest);
     let mut wallet = restored_unreceived(&w, &w.alice, &backup).await;
-    let before = w.bob.switch().entries_from(&w.alice_id());
+    let before = w.bob.dispatch().entries_from(&w.alice_id());
     for _ in 0..2 {
         wallet.receive(None).await.unwrap();
     }
@@ -3270,7 +3307,7 @@ async fn test_restore_opening_the_record_reports_an_uncertain_rejection() {
         "{:?}",
         held.content
     );
-    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), before);
+    assert_eq!(w.bob.dispatch().entries_from(&w.alice_id()), before);
     assert!(wallet
         .app()
         .protocol_get("paykit", b"ro")
@@ -3281,7 +3318,7 @@ async fn test_restore_opening_the_record_reports_an_uncertain_rejection() {
     for _ in 0..3 {
         wallet.receive(None).await.unwrap();
     }
-    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), before);
+    assert_eq!(w.bob.dispatch().entries_from(&w.alice_id()), before);
     assert!(wallet
         .app()
         .protocol_get("paykit", b"ro")
@@ -3419,7 +3456,7 @@ async fn test_restore_own_cancellation_in_a_record_left_unreadable_waits_until_i
         cancellation_over_a_record_left_unreadable(&w, &mut shop).await;
     drop(shop);
     let mut shop = restored_unreceived(&w, &w.bob, &backup).await;
-    let before = w.alice.switch().entries_from(&w.bob_id());
+    let before = w.alice.dispatch().entries_from(&w.bob_id());
     for _ in 0..2 {
         shop.receive(None).await.unwrap();
     }
@@ -3430,7 +3467,7 @@ async fn test_restore_own_cancellation_in_a_record_left_unreadable_waits_until_i
         .unwrap()
         .is_some());
     assert!(!crate::periods::queued(&shop, &cancellation).await);
-    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), before);
+    assert_eq!(w.alice.dispatch().entries_from(&w.bob_id()), before);
     crate::periods::writes_value(
         &mut seller_wallet,
         &crate::periods::payee_request_at(&request),
@@ -3445,9 +3482,9 @@ async fn test_restore_own_cancellation_in_a_record_left_unreadable_waits_until_i
         .await
         .unwrap()
         .is_none());
-    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), before);
+    assert_eq!(w.alice.dispatch().entries_from(&w.bob_id()), before);
     shop.receive(None).await.unwrap();
-    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), before);
+    assert_eq!(w.alice.dispatch().entries_from(&w.bob_id()), before);
 }
 
 #[tokio::test]
@@ -3461,7 +3498,7 @@ async fn test_restore_own_cancellation_in_a_record_unreadable_for_31_days_never_
         cancellation_over_a_record_left_unreadable(&w, &mut shop).await;
     drop(shop);
     let mut shop = restored_unreceived(&w, &w.bob, &backup).await;
-    let before = w.alice.switch().entries_from(&w.bob_id());
+    let before = w.alice.dispatch().entries_from(&w.bob_id());
     shop.receive(None).await.unwrap();
     assert!(shop
         .app()
@@ -3479,7 +3516,7 @@ async fn test_restore_own_cancellation_in_a_record_unreadable_for_31_days_never_
         .unwrap()
         .is_none());
     assert!(!crate::periods::queued(&shop, &cancellation).await);
-    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), before);
+    assert_eq!(w.alice.dispatch().entries_from(&w.bob_id()), before);
     assert!(shop.notices().await.unwrap().is_empty());
 }
 
@@ -3511,8 +3548,8 @@ async fn test_restore_own_unread_record_and_a_blocked_counterparty_both_wait() {
     drop(shop);
     let mut shop = restored_unreceived(&w, &w.bob, &backup).await;
     shop.block(&w.carol_id()).await.unwrap();
-    let alices = w.alice.switch().entries_from(&w.bob_id());
-    let carol_before = w.carol.switch().entries_from(&w.bob_id());
+    let alices = w.alice.dispatch().entries_from(&w.bob_id());
+    let carol_before = w.carol.dispatch().entries_from(&w.bob_id());
     for _ in 0..2 {
         shop.receive(None).await.unwrap();
     }
@@ -3522,8 +3559,8 @@ async fn test_restore_own_unread_record_and_a_blocked_counterparty_both_wait() {
         .await
         .unwrap()
         .is_some());
-    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), alices);
-    assert_eq!(w.carol.switch().entries_from(&w.bob_id()), carol_before);
+    assert_eq!(w.alice.dispatch().entries_from(&w.bob_id()), alices);
+    assert_eq!(w.carol.dispatch().entries_from(&w.bob_id()), carol_before);
     crate::periods::writes_value(
         &mut seller_wallet,
         &crate::periods::payee_request_at(&request),
@@ -3532,9 +3569,9 @@ async fn test_restore_own_unread_record_and_a_blocked_counterparty_both_wait() {
     .await;
     shop.receive(None).await.unwrap();
     assert!(crate::common::possibly_delivered(&shop, &cancellation).await);
-    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), alices);
+    assert_eq!(w.alice.dispatch().entries_from(&w.bob_id()), alices);
     assert!(!crate::periods::queued(&shop, &to_carol.msg_id).await);
-    assert_eq!(w.carol.switch().entries_from(&w.bob_id()), carol_before);
+    assert_eq!(w.carol.dispatch().entries_from(&w.bob_id()), carol_before);
     assert!(shop
         .app()
         .protocol_get("paykit", b"ro")
@@ -3547,7 +3584,7 @@ async fn test_restore_own_unread_record_and_a_blocked_counterparty_both_wait() {
     // The restore's block mark of carol asks too, once, when its read shows her unblocked.
     let asks = crate::common::asked(&shop, &w.carol_id()).await.len();
     assert_eq!(
-        w.carol.switch().entries_from(&w.bob_id()),
+        w.carol.dispatch().entries_from(&w.bob_id()),
         carol_before + asks
     );
     assert!(shop
@@ -3557,9 +3594,9 @@ async fn test_restore_own_unread_record_and_a_blocked_counterparty_both_wait() {
         .unwrap()
         .is_none());
     shop.receive(None).await.unwrap();
-    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), alices);
+    assert_eq!(w.alice.dispatch().entries_from(&w.bob_id()), alices);
     assert_eq!(
-        w.carol.switch().entries_from(&w.bob_id()),
+        w.carol.dispatch().entries_from(&w.bob_id()),
         carol_before + asks
     );
 }
@@ -3605,7 +3642,7 @@ async fn test_restore_own_record_found_unreadable_25_days_after_the_restore_wait
         .await
         .unwrap()
         .is_none());
-    let before = w.carol.switch().entries_from(&w.bob_id());
+    let before = w.carol.dispatch().entries_from(&w.bob_id());
     w.clock
         .advance_ms(25 * pubky_dispatch_core::records::DAY_MS);
     seller_wallet.receive(None).await.unwrap();
@@ -3625,7 +3662,7 @@ async fn test_restore_own_record_found_unreadable_25_days_after_the_restore_wait
     assert!(crate::common::possibly_delivered(&shop, &to_carol.msg_id).await);
     // The restore's block mark of carol asks too, once, when its read shows her unblocked.
     let asks = crate::common::asked(&shop, &w.carol_id()).await.len();
-    assert_eq!(w.carol.switch().entries_from(&w.bob_id()), before + asks);
+    assert_eq!(w.carol.dispatch().entries_from(&w.bob_id()), before + asks);
     assert!(shop
         .app()
         .protocol_get("paykit", b"ro")
@@ -3650,7 +3687,7 @@ async fn test_restore_own_record_found_unreadable_25_days_after_the_restore_wait
         .is_none());
     // The block mark asks again at most once a day while it lives.
     let asks = crate::common::asked(&shop, &w.carol_id()).await.len();
-    assert_eq!(w.carol.switch().entries_from(&w.bob_id()), before + asks);
+    assert_eq!(w.carol.dispatch().entries_from(&w.bob_id()), before + asks);
 }
 
 /// `good` with its keys at `prefix` replaced by `count` others, the `i`th as `entry(i)` builds
@@ -3840,7 +3877,7 @@ async fn test_restore_attempt_whose_batch_never_reached_the_claim_is_judged_by_t
         let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
         wallet.receive(None).await.unwrap();
         w.alice
-            .switch()
+            .dispatch()
             .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
                 path: "/ops".into(),
                 after: 0,
@@ -3900,7 +3937,7 @@ async fn test_restore_attempt_no_claim_shows_resolved_paid_by_the_user_is_never_
     let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
     wallet.receive(None).await.unwrap();
     w.alice
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
             path: "/ops".into(),
             after: 0,
@@ -3968,7 +4005,7 @@ async fn restored_unrecorded(
     wallet.receive(None).await.unwrap();
     phone.receive(None).await.unwrap();
     w.alice
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
             path: "/ops".into(),
             after: 0,
@@ -4210,7 +4247,7 @@ async fn test_restore_older_in_place_keeps_a_kept_payee_cancellation() {
     let backup = wallet.backup().await.unwrap();
     let app_id = wallet.app_id();
     for _ in 0..4 {
-        w.alice.switch().fail_next(Fault::Unreachable {
+        w.alice.dispatch().fail_next(Fault::Unreachable {
             path: "/ops".into(),
             after: 0,
         });

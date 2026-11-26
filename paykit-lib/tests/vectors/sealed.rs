@@ -436,7 +436,7 @@ fn check_labelled(keys: &Keys, l: &Value) {
         RecordValue::Json(plaintext.to_vec())
     );
     // The request key and another label's key don't open it.
-    let root = identity.switch_root();
+    let root = identity.dispatch_root();
     for other in [
         key_of_scope(&root, epoch, "paykit_request"),
         key_of_scope(&root, epoch, "paykit_request:shop2"),
@@ -819,8 +819,8 @@ fn side_collection(side: ActivitySide) -> &'static str {
 
 /// The top-level description, which names every member.
 const DESCRIPTION: &str =
-    "Paykit's sealed record values (wire 5), sealed as the Switch's sealed values are (the \
-Switch set's sealed.json) under alice's scope_key(2, \"paykit_pay\") from this set's \
+    "Paykit's sealed record values (wire 5), sealed as the Dispatch's sealed values are (the \
+Dispatch set's sealed.json) under alice's scope_key(2, \"paykit_pay\") from this set's \
 keys.json, with record keys blinded with alice's naming key. binding_accepted holds record \
 values, as they are sealed, that a reader binds to their record keys, recomputed with \
 alice's naming key (wire 5.4, 5.5): a payment_lists record, an allowances record and its \
@@ -5199,14 +5199,14 @@ proof, except kind 3 which uses identifiers.json's settlement_id. The occurrence
 uses the February period starting at 1772236800. Bucket, record key and mark tags follow \
 wire 1.5 under bob's naming key. The fixed policy reads and writes paykit_settlements. \
 Values are sealed at data epoch 1 with its key from keys.json, the nonce seed \
-sealed/settlement_marks/<kind>/nonce cut to 24 bytes, and the Switch sealed AAD. Neither \
+sealed/settlement_marks/<kind>/nonce cut to 24 bytes, and the Dispatch sealed AAD. Neither \
 paykit_request nor its shop1 key opens them. example reproduces wire 5.7. refused contains \
 malformed marks and the wrong collection policy, with the library's exact error. merges \
 merges a seen copy into a current write: the lower mark where two name one settlement, the \
 union of different marks, and over 9,000 marks the current write's settlements then the \
 seen marks in ascending byte order while places remain, with no write when that equals the \
 current write. These are format and merge vectors; they decide no credit and test no \
-read at the switch, rollback alarm or provider-loss rule.";
+read at the Dispatch, rollback alarm or provider-loss rule.";
 
 /// The data epoch of bob's `paykit_settlements` key the buckets are sealed at.
 const SETTLEMENTS_EPOCH: u64 = 1;
@@ -5635,7 +5635,7 @@ fn check_settlement_marks(keys: &Keys, m: &Value) {
     let policy = Collection::Settlements.fixed_policy();
     assert_eq!(policy.read_scope, st(m, "read_scope"));
     assert_eq!(b64(&policy.hash().unwrap()), st(m, "policy_hash"));
-    let root = identity.switch_root();
+    let root = identity.dispatch_root();
     let accepted = arr(m, "accepted");
     let kinds: Vec<u64> = accepted
         .iter()

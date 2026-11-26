@@ -10,7 +10,7 @@ use pubky_dispatch_core::http::ErrorCode;
 use crate::common::{draft, request_from, store, ScriptedIdentityReads, World};
 
 async fn queued_request(w: &World, shop: &mut Paykit) -> String {
-    w.alice.switch().fail_next(Fault::Error {
+    w.alice.dispatch().fail_next(Fault::Error {
         path: "/inbox".into(),
         code: ErrorCode::Unavailable,
         current: serde_json::Value::Null,
@@ -102,7 +102,7 @@ async fn test_restore_first_read_holds_a_new_request() {
 }
 
 #[tokio::test]
-async fn test_restore_first_read_allows_the_original_request_after_confirmation() {
+async fn test_restore_first_read_withdraws_the_original_request_after_confirmation() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
@@ -119,17 +119,18 @@ async fn test_restore_first_read_allows_the_original_request_after_confirmation(
         .unwrap()
         .confirmed_at()
         .is_some());
-    restored.receive(None).await.unwrap();
+    let checked = restored.receive(None).await.unwrap().held_messages;
+    assert_eq!(checked.withdrawn, 1);
     assert!(restored.app().restore_held_cursor().is_some());
     restored.flush().await.unwrap();
-    let received = wallet.receive(None).await.unwrap();
-    let requests = wallet.requests().await.unwrap();
-    assert_eq!(requests.len(), 1);
-    assert!(received.applied.contains(&msg_id));
-    assert!(matches!(
-        restored.message_delivery(&msg_id).await.unwrap(),
-        Some(MessageDelivery::Accepted { .. })
-    ));
+    assert!(!wallet
+        .receive(None)
+        .await
+        .unwrap()
+        .applied
+        .contains(&msg_id));
+    assert!(wallet.requests().await.unwrap().is_empty());
+    assert!(restored.message_delivery(&msg_id).await.unwrap().is_none());
 }
 
 #[tokio::test]
@@ -139,12 +140,12 @@ async fn test_restore_first_read_retries_a_queued_reply_after_reload() {
     let mut shop = w.shop().await;
     let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
     wallet.receive(None).await.unwrap();
-    w.bob.switch().fail_next(Fault::Error {
+    w.bob.dispatch().fail_next(Fault::Error {
         path: "/inbox".into(),
         code: ErrorCode::Unavailable,
         current: serde_json::Value::Null,
     });
-    w.bob.switch().fail_next(Fault::Error {
+    w.bob.dispatch().fail_next(Fault::Error {
         path: "/inbox".into(),
         code: ErrorCode::Unavailable,
         current: serde_json::Value::Null,
@@ -227,7 +228,7 @@ async fn test_restore_first_read_retries_after_feed_failure() {
         Arc::clone(&w.clock),
     ));
     let mut restored = restore_shop(&w, &mut shop, &reads).await;
-    w.bob.switch().fail_next(Fault::Error {
+    w.bob.dispatch().fail_next(Fault::Error {
         path: "/feed".into(),
         code: ErrorCode::Unavailable,
         current: serde_json::Value::Null,
@@ -240,9 +241,14 @@ async fn test_restore_first_read_retries_after_feed_failure() {
         Some(MessageDelivery::Queued { .. })
     ));
     restored.flush().await.unwrap();
-    let summary = wallet.receive(None).await.unwrap();
-    assert!(summary.applied.contains(&msg_id));
-    assert_eq!(wallet.requests().await.unwrap().len(), 1);
+    assert!(restored.message_delivery(&msg_id).await.unwrap().is_none());
+    assert!(!wallet
+        .receive(None)
+        .await
+        .unwrap()
+        .applied
+        .contains(&msg_id));
+    assert!(wallet.requests().await.unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -288,7 +294,7 @@ async fn test_restore_first_read_preserves_the_implicit_report_through_an_error(
         "{:?}",
         sent.delivery
     );
-    w.alice.switch().fail_next(Fault::Error {
+    w.alice.dispatch().fail_next(Fault::Error {
         path: "/feed".into(),
         code: ErrorCode::Unavailable,
         current: serde_json::Value::Null,
@@ -683,7 +689,7 @@ async fn test_restore_first_read_newer_directory_identity_requires_confirmation(
 }
 
 #[tokio::test]
-async fn test_restore_first_read_newer_directory_identity_confirmed_sends() {
+async fn test_restore_first_read_newer_directory_identity_confirmed_withdraws() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
@@ -707,16 +713,15 @@ async fn test_restore_first_read_newer_directory_identity_confirmed_sends() {
     .unwrap();
     assert_eq!(restored.app().restore_held_cursor(), None);
     assert_eq!(restored.app().identity_confirmed_at(), None);
-    let result = restored.flush().await;
+    restored.flush().await.unwrap();
     assert!(restored.app().identity_confirmed_at().is_some());
-    let delivery = restored.message_delivery(&msg_id).await.unwrap();
-    let summary = wallet.receive(None).await.unwrap();
-    assert!(summary.applied.contains(&msg_id), "request delivered while newest own identity is unconfirmed; flush={result:?}; verdict={:?}; delivery={delivery:?}", restored.app().restore_held_cursor());
-    assert!(
-        matches!(delivery, Some(MessageDelivery::Accepted { .. })),
-        "delivery={delivery:?}; flush={result:?}; verdict={:?}",
-        restored.app().restore_held_cursor()
-    );
+    assert!(restored.message_delivery(&msg_id).await.unwrap().is_none());
+    assert!(!wallet
+        .receive(None)
+        .await
+        .unwrap()
+        .applied
+        .contains(&msg_id));
 }
 
 #[derive(Clone, Copy)]

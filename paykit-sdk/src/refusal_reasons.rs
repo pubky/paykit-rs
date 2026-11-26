@@ -44,6 +44,15 @@ pub enum NotNowReason {
     /// the rollback alarm.
     #[error("Paykit wire 5.6: the block floor can't be read now")]
     FloorUnreadable,
+    /// A change of the app's public endpoints saved earlier and not signed couldn't be told
+    /// to the host yet: nothing of the app's record is signed until it is, which a receive
+    /// or the next call that signs tries again (Paykit spec 4, "Changes saved and not yet
+    /// signed").
+    #[error(
+        "Paykit spec 4: a change of the public endpoints saved earlier and not signed is told \
+         to the host before the app record is signed again"
+    )]
+    EndpointChangeUntold,
     /// A raise of the block floor left unwritten waits before it is tried again; the same
     /// call once the wait has passed clears this (Paykit wire 5.6).
     #[error("Paykit wire 5.6: a block floor raise left unwritten waits before it is tried again")]
@@ -185,7 +194,7 @@ pub enum HeldForUserReason {
     /// user ends, the clocks apart, which the user may have to correct, or a display read the
     /// host owes (Dispatch spec 10.1, 12.4). The text alone tells them apart, so it is shown.
     #[error("{0}")]
-    SwitchClient(String),
+    DispatchClient(String),
     /// A hold on one request, publication or delivery that no wait clears as far as this
     /// wallet can tell: the text names it, and the host shows it (Paykit spec 8.1, 8.4).
     #[error("{0}")]

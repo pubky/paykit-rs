@@ -55,12 +55,12 @@ async fn upkeep_due_over_pending_work(w: &World, failure: UpkeepFailure) -> (Pay
         UpkeepFailure::DispatchUnavailable => {
             w.rail
                 .set_endpoint_identifiers(vec![endpoint("btc-onchain-address")]);
-            w.alice.switch().fail_next(fault(ErrorCode::Unavailable));
+            w.alice.dispatch().fail_next(fault(ErrorCode::Unavailable));
         }
         UpkeepFailure::Unreachable => {
             w.rail
                 .set_endpoint_identifiers(vec![endpoint("btc-onchain-address")]);
-            w.alice.switch().fail_next(Fault::Unreachable {
+            w.alice.dispatch().fail_next(Fault::Unreachable {
                 path: "/ops".into(),
                 after: 0,
             });
@@ -68,7 +68,7 @@ async fn upkeep_due_over_pending_work(w: &World, failure: UpkeepFailure) -> (Pay
         UpkeepFailure::Refused(code) => {
             w.rail
                 .set_endpoint_identifiers(vec![endpoint("btc-onchain-address")]);
-            w.alice.switch().fail_next(fault(code));
+            w.alice.dispatch().fail_next(fault(code));
         }
     }
     (wallet, request)
@@ -82,7 +82,7 @@ async fn work_done_past_failed_upkeep(failure: UpkeepFailure) {
     let (mut wallet, request) = upkeep_due_over_pending_work(&w, failure).await;
     let signed = wallet.app().record().clone();
     let app_id = wallet.app_id();
-    let at_dispatch = || w.alice.switch().app(&app_id).record.unwrap();
+    let at_dispatch = || w.alice.dispatch().app(&app_id).record.unwrap();
     let delivered = at_dispatch();
     let summary = wallet.receive(None).await.unwrap();
     assert!(summary.app_record_owed.is_some(), "{summary:?}");

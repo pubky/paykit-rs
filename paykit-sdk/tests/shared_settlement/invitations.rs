@@ -3,7 +3,7 @@
 use super::*;
 use paykit_sdk::{MessageDelivery, Refusal, RequestStatus, SentRequest};
 use pubky_dispatch_client::app::AppEvent;
-use pubky_dispatch_client::client::{Credentials, SwitchClient};
+use pubky_dispatch_client::client::{Credentials, DispatchClient};
 use pubky_dispatch_client::transport::{Request, Response};
 use pubky_dispatch_core::enc::unb64_array;
 use std::sync::Mutex;
@@ -140,7 +140,7 @@ async fn delivered_requests(world: &World, restore_creator: bool) -> TestResult 
     assert_eq!(world.faults_left(), 0);
     let (sent, answer) = appends.lock().unwrap()[0].clone();
     assert_eq!(
-        sent.header("Switch-Invite-Code"),
+        sent.header("Dispatch-Invite-Code"),
         Some(first_code.code.as_str())
     );
     assert!((200..300).contains(&answer.status));
@@ -151,7 +151,7 @@ async fn delivered_requests(world: &World, restore_creator: bool) -> TestResult 
         .ok_or("append has no directory version")?
         .parse()?;
     let inbox = receiver.app().own_identity().inbox();
-    let retrying_sender = SwitchClient::new(
+    let retrying_sender = DispatchClient::new(
         &inbox.url,
         receiver.identity(),
         Credentials::App {
@@ -190,7 +190,7 @@ async fn delivered_requests(world: &World, restore_creator: bool) -> TestResult 
         assert_eq!(observed.len(), 2);
         assert_eq!(observed[1].0.body, sent.body);
         assert_eq!(
-            observed[1].0.header("Switch-Invite-Code"),
+            observed[1].0.header("Dispatch-Invite-Code"),
             Some(second_code.code.as_str())
         );
         assert_eq!(observed[1].1.body, answer.body);

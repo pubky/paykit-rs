@@ -253,3 +253,105 @@ pub(crate) fn judge_append(
     }
     Ok(Send)
 }
+
+impl crate::Paykit {
+    pub(crate) async fn held_allowance_end(
+        &mut self,
+        q: &pubky_dispatch_client::app::QueuedMessage,
+        msg: &Message,
+        id: &AllowanceId,
+    ) -> crate::Result<crate::restore_held::StopEvidence> {
+        use crate::restore_held::{exact_stop, StopEvidence::*};
+
+        let target = allowance_target(&q.to, id);
+        let key = self.app.record_key(&target)?;
+        // A counterparty's end, answer or conflict kept and not placed yet, for the
+        // Allowance or its proposal, waits for its placing (Paykit spec 8.3, "Ends reach the
+        // executor", "Conflicted"): before any read decides, an Allowance record not written
+        // yet included.
+        let pending = self.app.record_key(&allowance_record_target(
+            Collection::AllowanceProposals,
+            &q.to,
+            id,
+        ))?;
+        if self
+            .unplaced_for(
+                &[key, pending],
+                &q.to,
+                crate::restore_held::Records::Allowance,
+            )
+            .await?
+        {
+            return Ok(Unreadable);
+        }
+        let read = self.app.read_record_fresh(&target).await?;
+        if let RecordRead::Kept { reason, record } = &read {
+            if let Some(error) = crate::pay::kept_read_stop(reason) {
+                return Err(error);
+            }
+            // An authenticated absence with nothing retained holds no end: withdrawn.
+            // Anything else kept waits (Paykit spec 7.2).
+            return Ok(
+                if matches!(reason, KeptReason::NotFound) && record.is_none() {
+                    Absent
+                } else {
+                    Unreadable
+                },
+            );
+        }
+        // The one order of every held decision: paused waits; a confirmed view is decided
+        // on, divergent or not (`Paykit::held_record_paused`).
+        if self.held_record_paused(&key).await? {
+            return Ok(Unreadable);
+        }
+        let value = match &read {
+            RecordRead::Fresh(r) if super::replies::qualified_confirmed(r, &target, &key) => {
+                match &r.content {
+                    RecordContent::Value(v) => v.as_slice(),
+                    RecordContent::Deleted => return Ok(Absent),
+                    // Sealed under a key not held yet, or not read for another reason: the
+                    // next read may verify it, so it waits.
+                    RecordContent::Unreadable(_) => return Ok(Unreadable),
+                }
+            }
+            _ => return Ok(Unreadable),
+        };
+        let Some(record) = bind_at(value, &self.identity(), &q.to, id) else {
+            return Ok(Unreadable);
+        };
+        // "An app sends no acceptance, rejection or end for a conflicted Allowance" and "the
+        // counterparty is told nothing" (Paykit spec 8.3, Conflicted): withdrawn, no notice.
+        if record.conflicted.is_some() {
+            return Ok(Absent);
+        }
+        let accepted = super::acceptance(&record);
+        if let Some(end) = &record.end {
+            if !exact_stop(end, q, self) {
+                return Ok(Absent);
+            }
+            // Without a durable user origin the original goes under the generated end's
+            // counterparty and window checks (Paykit spec 7.2, 8.3).
+            let at = key::end_origin(&q.msg_id);
+            if self.local_get::<super::EndOrigin>(&at).await?.is_none() {
+                let origin = super::EndOrigin::of(
+                    key,
+                    &record.proposal,
+                    accepted,
+                    end,
+                    super::EndCause::Automatic,
+                )?;
+                self.local_put(&at, &origin).await?;
+            }
+            return Ok(Recorded);
+        }
+        let open = record.conflicted.is_none()
+            && accepted.is_some_and(|a| msg.refs.as_slice() == [record.proposal.hash(), a.hash()]);
+        Ok(if open {
+            // Named by its record, which `end_allowance` takes: one counterparty can have
+            // several Allowances open.
+            Open(crate::StopSubject::Allowance { record: key })
+        } else {
+            Absent
+        })
+    }
+}

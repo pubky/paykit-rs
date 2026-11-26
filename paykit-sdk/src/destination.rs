@@ -58,7 +58,7 @@ use paykit_lib::records::{DestinationSource, StoredMessage};
 use paykit_lib::scopes::{acts_as_payee, check_certificate, holds, PaykitScope};
 use paykit_lib::Body;
 use pubky_dispatch_client::app::{
-    Initiator, MayAct, PeerIdentity, SwitchAnswer, SwitchCopy, UserConfirmed, DOC_CACHE_MS,
+    DispatchAnswer, DispatchCopy, Initiator, MayAct, PeerIdentity, UserConfirmed, DOC_CACHE_MS,
 };
 use pubky_dispatch_client::transport::BoxFuture;
 use pubky_dispatch_core::records::{AppCert, AppRecord, IdentityDoc, Standing};
@@ -77,7 +77,7 @@ pub const IDENTITY_GRACE_MS: u64 = 2_000;
 /// (Dispatch spec 4.3). A directory-only version has no qualifying observation.
 pub(crate) fn public_read_window(identity: &PeerIdentity) -> Option<std::ops::Range<u64>> {
     let read = identity.read_at_ms?;
-    Some(read.max(identity.switch_lookup_ms)..identity.fresh_until_ms())
+    Some(read.max(identity.dispatch_lookup_ms)..identity.fresh_until_ms())
 }
 
 /// The exact Homeserver observation available to a user when the lookup cannot confirm it.
@@ -87,13 +87,23 @@ pub(crate) fn homeserver_window(identity: &PeerIdentity) -> Option<std::ops::Ran
 }
 
 fn public_action(identity: &PeerIdentity, now: u64, by: Initiator) -> MayAct {
-    match (identity.switch_copy, by) {
-        (SwitchCopy::Pending, Initiator::User)
-            if now < identity.switch_lookup_ms.saturating_add(IDENTITY_GRACE_MS) =>
+    match (identity.dispatch_copy, by) {
+        (DispatchCopy::Pending, Initiator::User)
+            if now
+                < identity
+                    .dispatch_lookup_ms
+                    .saturating_add(IDENTITY_GRACE_MS) =>
         {
-            MayAct::WaitUntil(identity.switch_lookup_ms.saturating_add(IDENTITY_GRACE_MS))
+            MayAct::WaitUntil(
+                identity
+                    .dispatch_lookup_ms
+                    .saturating_add(IDENTITY_GRACE_MS),
+            )
         }
-        (SwitchCopy::Unavailable | SwitchCopy::Stale | SwitchCopy::Pending, Initiator::User) => {
+        (
+            DispatchCopy::Unavailable | DispatchCopy::Stale | DispatchCopy::Pending,
+            Initiator::User,
+        ) => {
             if homeserver_window(identity).is_some_and(|window| window.contains(&now)) {
                 MayAct::IfUserConfirms
             } else {
@@ -120,7 +130,7 @@ pub(crate) fn payee_copy_usable(
             .read_at_ms
             .and_then(|at| now.checked_sub(at))
             .is_some_and(|age| age < DOC_CACHE_MS),
-        Need::SwitchCopy => match public_action(identity, now, by) {
+        Need::DispatchCopy => match public_action(identity, now, by) {
             MayAct::Now => true,
             MayAct::IfUserConfirms => confirmed.is_some(),
             _ => false,
@@ -182,7 +192,7 @@ impl Paykit {
             let (identity, dispatch) = match kept {
                 Some(kept) => (kept.identity, Some(kept.dispatch)),
                 None => match self.app.begin_identity_lookup(payee, refresh).await {
-                    Ok(lookup) => (lookup.identity, lookup.switch.map(PendingLookup::new)),
+                    Ok(lookup) => (lookup.identity, lookup.dispatch.map(PendingLookup::new)),
                     Err(error) => {
                         let why = format!(
                             "Dispatch spec 4.3: the payee's identity.json can't be read now: {error}"
@@ -204,10 +214,10 @@ impl Paykit {
                     // A destination a verified message carries doesn't wait on the dispatch:
                     // its answer is taken only if it is there already.
                     let sleep: BoxFuture<'static, ()> = match (need, by) {
-                        (Need::SwitchCopy, Initiator::Automatic) => {
+                        (Need::DispatchCopy, Initiator::Automatic) => {
                             Box::pin(std::future::pending())
                         }
-                        (Need::SwitchCopy, _) => self.timer.sleep(IDENTITY_GRACE_MS),
+                        (Need::DispatchCopy, _) => self.timer.sleep(IDENTITY_GRACE_MS),
                         (Need::FreshCopy, _) => Box::pin(async {}),
                     };
                     let (lookup, done) = race(dispatch, started, sleep).await;
@@ -413,7 +423,7 @@ impl Paykit {
     pub(crate) fn inspect_ready_lookup<T>(
         &mut self,
         payee: &[u8; 32],
-        inspect: impl FnOnce(&SwitchAnswer) -> T,
+        inspect: impl FnOnce(&DispatchAnswer) -> T,
     ) -> Option<T> {
         use std::task::Waker;
         let kept = self.lookups.get_mut(payee)?;
@@ -467,7 +477,7 @@ fn not_taken(error: &pubky_dispatch_client::app::AppError) -> Refusal {
 pub(crate) enum Need {
     /// A public endpoint: the copy the payee's Dispatch confirmed, waited on through a grace,
     /// or the user's explicit confirmation without it.
-    SwitchCopy,
+    DispatchCopy,
     /// A destination a verified message carries: a copy read in the last 10 minutes.
     FreshCopy,
 }
@@ -477,7 +487,7 @@ impl Need {
     pub(crate) fn of(carrier: &Carrier) -> Self {
         match carrier {
             Carrier::Message(_) => Self::FreshCopy,
-            Carrier::Record(_) => Self::SwitchCopy,
+            Carrier::Record(_) => Self::DispatchCopy,
         }
     }
 }
@@ -495,18 +505,18 @@ pub(crate) struct KeptLookup {
 /// `Mutex`: `Paykit` is then `Sync`, and the future of a call awaiting a `&self` method is
 /// `Send`, for a host to spawn on a multi-threaded runtime. The `Mutex` is never locked: the
 /// future is polled only through `&mut`.
-pub(crate) struct PendingLookup(Mutex<BoxFuture<'static, SwitchAnswer>>);
+pub(crate) struct PendingLookup(Mutex<BoxFuture<'static, DispatchAnswer>>);
 
 impl PendingLookup {
-    fn new(future: impl Future<Output = SwitchAnswer> + Send + 'static) -> Self {
+    fn new(future: impl Future<Output = DispatchAnswer> + Send + 'static) -> Self {
         Self(Mutex::new(Box::pin(future)))
     }
 }
 
 impl Future for PendingLookup {
-    type Output = SwitchAnswer;
+    type Output = DispatchAnswer;
 
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<SwitchAnswer> {
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<DispatchAnswer> {
         // Never locked, so never poisoned; a poisoned `Mutex` would still hold the future.
         let future = self
             .get_mut()
@@ -519,7 +529,7 @@ impl Future for PendingLookup {
 
 /// Where a Dispatch lookup stands after [`race`].
 enum Lookup {
-    Answered(SwitchAnswer),
+    Answered(DispatchAnswer),
     Running(PendingLookup),
 }
 

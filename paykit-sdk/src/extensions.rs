@@ -39,7 +39,7 @@ use pubky_dispatch_core::message::Message;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use crate::error::{Refusal, Result};
+use crate::error::{PaykitError, Refusal, Result};
 use crate::paykit::Paykit;
 use crate::receive::Fail;
 use crate::records::KeptMessage;
@@ -282,7 +282,18 @@ impl Paykit {
         if wanted == held {
             return Ok(());
         }
-        match self.app.update_accepts().await {
+        // A held change still untold shuts the gate of every signing: the kinds wait for it.
+        // An alarm or a store failure of the gate ends the receive, as at every other step.
+        let app = match Box::pin(self.signing_app()).await {
+            Ok(app) => app,
+            Err(error @ PaykitError::Client(AppError::Alarm(_) | AppError::Store(_))) => {
+                return Err(error);
+            }
+            Err(_) => return Ok(()),
+        };
+        let updated = app.update_accepts().await;
+        self.note_own_record_write(&updated);
+        match updated {
             Ok(_) => Ok(()),
             Err(error @ (AppError::Store(_) | AppError::Alarm(_))) => Err(error.into()),
             Err(_) => Ok(()),
