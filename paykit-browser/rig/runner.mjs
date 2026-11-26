@@ -27,8 +27,8 @@
 //                                dialog that stops the test until someone answers it. Each test
 //                                left out is printed as "[runner] NOT RUN <target>::<test>:
 //                                needs Keychain access ...", and test.sh counts them. CI never
-//                                sets it. It is separate from NO_OPFS below, which leaves out
-//                                whole targets on Linux and is reported on its own.
+//                                sets it. It is separate from NO_OPFS (engines.mjs), which
+//                                leaves out whole targets on Linux and is reported on its own.
 //
 // wasm-bindgen-test-runner runs with NO_HEADLESS=1, so it only generates the bindings and
 // serves the test page on a free loopback port. This script opens that page in the engine,
@@ -69,12 +69,12 @@
 //               both results pass and the tests printed RELOAD_MARKERS[0] before the reload and
 //               RELOAD_MARKERS[1] after it (on the console or in the report), so tests that skip
 //               either step fail. The tests pick their step from what they stored.
-//   Where NO_OPFS below names the engine and platform, an engine build known to have no Origin
-//   Private File System, a persistent target is not run: before the tests load, this script
-//   checks from a page of the test origin that the engine still has no `navigator.storage`,
-//   prints "[runner] EXCLUDED <target>: <reason>" and exits 0, printing no PASS line; test.sh
-//   lists these at the end, as a warning. If the engine has it after all, the run fails, so the
-//   entry is removed and the target runs again.
+//   Where NO_OPFS in engines.mjs names the engine and platform, an engine build known to have
+//   no Origin Private File System, a persistent target is not run: before the tests load, this
+//   script checks from a page of the test origin that the engine still has no
+//   `navigator.storage`, prints "[runner] EXCLUDED <target>: <reason>" and exits 0, printing no
+//   PASS line; test.sh lists these at the end, as a warning. If the engine has it after all, the
+//   run fails, so the entry is removed and the target runs again.
 // A table entry whose test target does not exist under tests/ stops every run at startup, and
 // a target whose name starts with "store" but has no entry stops its run, so a renamed or new
 // store target never runs without its mode.
@@ -84,14 +84,8 @@ import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { chromium, firefox, webkit } from "playwright";
+import { ENGINES, errorText, noOpfsReason, sleep, staleNoOpfs } from "./engines.mjs";
 
-const ENGINES = {
-  chromium: { type: chromium, options: {} },
-  firefox: { type: firefox, options: {} },
-  webkit: { type: webkit, options: {} },
-  chrome: { type: chromium, options: { channel: "chrome" } },
-};
 // The wasm-bindgen-test-runner variable that selects each context.
 const CONTEXTS = {
   page: "WASM_BINDGEN_USE_BROWSER",
@@ -121,14 +115,6 @@ const TARGET_MODES = {
   store_page: { context: "page", persistent: true },
 };
 const DEFAULT_MODE = { context: undefined, persistent: false, reload: false };
-// Engine builds with no Origin Private File System, by engine and Node's process.platform, and
-// why. Playwright's WebKit for Linux exposes no `navigator.storage` in a page and no
-// `FileSystemSyncAccessHandle` in a dedicated worker, also in a persistent context.
-const NO_OPFS = {
-  webkit: {
-    linux: "Playwright's WebKit for Linux has no navigator.storage, so no Origin Private File System",
-  },
-};
 // The tests that store a wrapping CryptoKey in IndexedDB, by test target and test name: every
 // test that opens a store with `WrappingKey::Origin`, which is all of `store_flow` and
 // `store_reload`. In `store`, the host-key tests, the in-memory tests and the invalid-name test
@@ -241,17 +227,6 @@ async function finish(code, why) {
     }
   }
   process.exit(code);
-}
-
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-// Some engines leave the message out of the stack, so print both.
-function errorText(error) {
-  const message = error?.message ?? String(error);
-  const stack = error?.stack ?? "";
-  return stack.includes(message) ? stack : `${message}\n${stack}`.trimEnd();
 }
 
 process.on("SIGINT", () => finish(130, "interrupted"));
@@ -529,7 +504,7 @@ async function main() {
     log(`[runner] ${target} runs only in ${CONTEXT_WORDS[mode.context]}: running it there`);
     contextName = mode.context;
   }
-  const noOpfs = mode.persistent ? NO_OPFS[engineName]?.[process.platform] : undefined;
+  const noOpfs = mode.persistent ? noOpfsReason(engineName) : undefined;
   // A target that NO_OPFS excludes runs no test at all, so none is reported as not run for the
   // Keychain: its EXCLUDED line below is the reason.
   const leaveOutKeychainTests =
@@ -541,7 +516,7 @@ async function main() {
   const { browser, page } = await openPage(engine, mode.persistent);
   if (noOpfs !== undefined) {
     if (!(await hasOpfs(closeable, url))) return finish(0, `EXCLUDED ${target}: ${noOpfs}`);
-    return finish(1, `${engineName} on ${process.platform} has the Origin Private File System: remove its NO_OPFS entry`);
+    return finish(1, staleNoOpfs(engineName));
   }
   if (mode.persistent) sweepUrl = url;
   const version = browser?.version() ?? "(version unknown)";
