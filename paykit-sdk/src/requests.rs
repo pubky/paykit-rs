@@ -38,6 +38,7 @@ use serde_json::{Map, Value};
 
 use crate::activity::{self, ActivityTarget, KeptSide, Role, SideTag};
 use crate::error::{PaykitError, Refusal, Result};
+use crate::heap::on_heap;
 use crate::pay::{BlockedPayment, WriteStamp};
 use crate::paykit::Paykit;
 use crate::periods::PeriodView;
@@ -724,7 +725,7 @@ impl Paykit {
         // A delivery operation for the whole call (Paykit spec 8.1).
         let _delivery = self.delivery_operation();
         // The call's future goes on the heap, as `receive`'s does: it nests deep.
-        Box::pin(self.send_request_inner(to, draft)).await
+        on_heap(|| self.send_request_inner(to, draft)).await
     }
 
     async fn send_request_inner(
@@ -733,7 +734,7 @@ impl Paykit {
         draft: RequestDraft,
     ) -> Result<SentRequest> {
         self.refresh_own()?;
-        Box::pin(self.first_read_before_writing()).await?;
+        on_heap(|| self.first_read_before_writing()).await?;
         self.refresh_own()?;
         self.require_payee()?;
         // Nothing new starts with a counterparty whose sends are held (Paykit spec 8.1,
@@ -945,8 +946,8 @@ impl Paykit {
             let mut divergent = false;
             for key in std::iter::once(held.key).chain(view.periods.iter().map(|p| p.record)) {
                 let pause = match shared.get(&key) {
-                    Some(shared) => Box::pin(self.pause_seen_held(shared)).await?,
-                    None => Box::pin(self.pause_seen(&key)).await?,
+                    Some(shared) => on_heap(|| self.pause_seen_held(shared)).await?,
+                    None => on_heap(|| self.pause_seen(&key)).await?,
                 };
                 divergent |= pause.paused || pause.divergent;
             }
@@ -991,16 +992,16 @@ impl Paykit {
         // A delivery operation for the whole call (Paykit spec 8.1).
         let _delivery = self.delivery_operation();
         // The call's future goes on the heap, as `receive`'s does: it nests deep.
-        Box::pin(self.verify_payment_inner(record)).await
+        on_heap(|| self.verify_payment_inner(record)).await
     }
 
     async fn verify_payment_inner(&mut self, record: &[u8; 32]) -> Result<Option<u64>> {
         self.refresh_own()?;
-        Box::pin(self.first_read_before_writing()).await?;
+        on_heap(|| self.first_read_before_writing()).await?;
         self.refresh_own()?;
         self.records_known().await?;
         // The check goes on the heap, as `receive`'s steps do: it nests deep.
-        Ok(Box::pin(self.verified(record, false, false))
+        Ok(on_heap(|| self.verified(record, false, false))
             .await?
             .map(|credit| credit.paid_at))
     }
@@ -1230,16 +1231,14 @@ impl Paykit {
             .settlement_id(&proof.payment_endpoint_identifier, &proof.proof);
         let mut other_uncertain = false;
         if let Some(settlement) = settlement_id.as_ref().filter(|_| bound.receipt.is_none()) {
-            if self
-                .retained_credit(bound.receipt.as_ref().map(|r| r.hash()), settlement)
-                .await?
+            if on_heap(|| {
+                self.retained_credit(bound.receipt.as_ref().map(|r| r.hash()), settlement)
+            })
+            .await?
             {
                 return Ok(None);
             }
-            match self
-                .other_credit(record, &bound.counterparty, settlement)
-                .await?
-            {
+            match on_heap(|| self.other_credit(record, &bound.counterparty, settlement)).await? {
                 OtherCredit::Credited => return Ok(None),
                 OtherCredit::CantTell => other_uncertain = true,
                 _ => {}
@@ -1286,18 +1285,20 @@ impl Paykit {
             let loss = self.settlement_loss().await?;
             let uncertain = loss.is_some_and(|loss| loss.settlement_uncertain(paid_at));
             let decision = if let Some(id) = &settlement_id {
-                match Box::pin(self.settlement_credit(
-                    id,
-                    &target,
-                    bound.counterparty,
-                    binding,
-                    crate::settlements::CreditConsent {
-                        loss,
-                        uncertain,
-                        maybe_credited: maybe_credited_confirmed,
-                        unmarked: unmarked_credit_confirmed,
-                    },
-                ))
+                match on_heap(|| {
+                    self.settlement_credit(
+                        id,
+                        &target,
+                        bound.counterparty,
+                        binding,
+                        crate::settlements::CreditConsent {
+                            loss,
+                            uncertain,
+                            maybe_credited: maybe_credited_confirmed,
+                            unmarked: unmarked_credit_confirmed,
+                        },
+                    )
+                })
                 .await?
                 {
                     SettlementCredit::SameOccurrence => {
@@ -1308,11 +1309,13 @@ impl Paykit {
                             return Ok(None);
                         };
                         if self.bound_payee_record(&current)?.1.receipt.is_some() {
-                            return Box::pin(self.verified(
-                                record,
-                                maybe_credited_confirmed,
-                                unmarked_credit_confirmed,
-                            ))
+                            return on_heap(|| {
+                                self.verified(
+                                    record,
+                                    maybe_credited_confirmed,
+                                    unmarked_credit_confirmed,
+                                )
+                            })
                             .await;
                         }
                         return Ok(None);
@@ -1499,7 +1502,7 @@ impl Paykit {
         // A delivery operation for the whole call (Paykit spec 8.1).
         let _delivery = self.delivery_operation();
         // The call's future goes on the heap, as `receive`'s does: it nests deep.
-        Box::pin(self.confirm_payment_with_inner(record, details)).await
+        on_heap(|| self.confirm_payment_with_inner(record, details)).await
     }
 
     async fn confirm_payment_with_inner(
@@ -1508,18 +1511,20 @@ impl Paykit {
         details: ReceiptDetails,
     ) -> Result<Option<String>> {
         self.refresh_own()?;
-        Box::pin(self.first_read_before_writing()).await?;
+        on_heap(|| self.first_read_before_writing()).await?;
         self.refresh_own()?;
         self.records_known().await?;
         let confirmed = details.maybe_credited_confirmed.is_some();
         let mut tries = 0;
         let msg_id = loop {
             // A failed conditional write can reveal a deletion or a changed proof.
-            let Some(credit) = Box::pin(self.verified(
-                record,
-                confirmed,
-                details.unmarked_credit_confirmed.is_some(),
-            ))
+            let Some(credit) = on_heap(|| {
+                self.verified(
+                    record,
+                    confirmed,
+                    details.unmarked_credit_confirmed.is_some(),
+                )
+            })
             .await?
             else {
                 return Ok(None);
@@ -1539,7 +1544,7 @@ impl Paykit {
             // A credit waits for the user while this record, or another of the same
             // counterparty, is divergent or was seen so: its upload may hold a receipt of the
             // same settlement (Paykit spec 6, 8.1 step 4).
-            Box::pin(self.refuse_credit_while_paused(record, &bound.counterparty)).await?;
+            on_heap(|| self.refuse_credit_while_paused(record, &bound.counterparty)).await?;
             let proof_stored = bound.proof.as_ref().ok_or(Refusal::NotFound)?;
             let Body::PaymentProof(proof) = proof_stored.body() else {
                 return Err(Refusal::NotFound.into());
@@ -1592,12 +1597,14 @@ impl Paykit {
             }
             let submitted = match settlement {
                 Some(write) => {
-                    Box::pin(self.submit_settlement_credit(
-                        batch,
-                        write,
-                        details.unmarked_credit_confirmed.is_some(),
-                        delivery_marker.as_deref(),
-                    ))
+                    on_heap(|| {
+                        self.submit_settlement_credit(
+                            batch,
+                            write,
+                            details.unmarked_credit_confirmed.is_some(),
+                            delivery_marker.as_deref(),
+                        )
+                    })
                     .await
                 }
                 None => self.submit(batch).await.map_err(PaykitError::from),
@@ -1606,7 +1613,7 @@ impl Paykit {
                 if let Some(batch) = error.kept_batch() {
                     // Preserve the original submission's ID even if saving its evidence fails.
                     let _ =
-                        Box::pin(self.remember_receipt_application(&target, marker, batch)).await;
+                        on_heap(|| self.remember_receipt_application(&target, marker, batch)).await;
                 } else {
                     self.retire_refused_receipt_batch(Some(marker)).await?;
                 }
@@ -1647,7 +1654,7 @@ impl Paykit {
         // A delivery operation for the whole call (Paykit spec 8.1).
         let _delivery = self.delivery_operation();
         // The call's future goes on the heap, as `receive`'s does: it nests deep.
-        Box::pin(self.cancel_sent_request_inner(record, reason)).await
+        on_heap(|| self.cancel_sent_request_inner(record, reason)).await
     }
 
     async fn cancel_sent_request_inner(
@@ -1656,7 +1663,7 @@ impl Paykit {
         reason: Option<String>,
     ) -> Result<String> {
         self.refresh_own()?;
-        Box::pin(self.first_read_before_writing()).await?;
+        on_heap(|| self.first_read_before_writing()).await?;
         self.refresh_own()?;
         self.records_known().await?;
         self.require_payee()?;
@@ -1690,15 +1697,16 @@ impl Paykit {
                     label: target.label().map(|label| label.as_str().to_owned()),
                 },
             )?;
-            match self
-                .send_with_record(
+            match on_heap(|| {
+                self.send_with_record(
                     signed,
                     &target,
                     Role::Cancellation,
                     Vec::new(),
                     tx.into_writes(),
                 )
-                .await
+            })
+            .await
             {
                 Ok(msg_id) => break msg_id,
                 Err(error) if error.code() == Some(ErrorCode::Conflict) => {
@@ -1780,7 +1788,10 @@ impl Paykit {
     ) -> Result<(ActivityTarget, ActivityRecord)> {
         let (target, record) = self.read_payer_request(request).await?;
         // The kept stop refuses whatever this placement does; it is tried again later.
-        if self.place_kept_cancellation(&target).await.unwrap_or(false) {
+        if on_heap(|| self.place_kept_cancellation(&target))
+            .await
+            .unwrap_or(false)
+        {
             let record = self.activity(&target).await?.ok_or(Refusal::NotFound)?;
             return Ok((target, record));
         }
@@ -1820,15 +1831,16 @@ impl Paykit {
             self.local_commit(tx).await?;
             return Ok(false);
         };
-        let write = self
-            .placed_write(
+        let write = on_heap(|| {
+            self.placed_write(
                 target,
                 cancellation.sender(),
                 Role::Cancellation,
                 cancellation,
                 Vec::new(),
             )
-            .await?;
+        })
+        .await?;
         match write {
             Some(entry) => {
                 let batch = OpBatch::for_protocol(crate::protocol::BACKUP_NAME)
@@ -1932,7 +1944,7 @@ impl Paykit {
                 // A placement that fails now is tried again at the next run; the kept stop
                 // stands meanwhile, so it can't let a payment through.
                 placed.insert((cancellation.sender(), request));
-                if let Err(error) = self.place_kept_cancellation(&target).await {
+                if let Err(error) = on_heap(|| self.place_kept_cancellation(&target)).await {
                     crate::pay::unless_stop(error)?;
                 }
                 continue;
@@ -1987,7 +1999,7 @@ impl Paykit {
     /// A store failure.
     pub async fn requests(&self) -> Result<Vec<RequestView>> {
         // The call's future goes on the heap, as `receive`'s does: it nests deep.
-        Box::pin(self.requests_inner()).await
+        on_heap(|| self.requests_inner()).await
     }
 
     async fn requests_inner(&self) -> Result<Vec<RequestView>> {
@@ -2022,7 +2034,7 @@ impl Paykit {
             .iter()
             .map(|view| (view.request.payee, view.request.request_hash))
             .collect();
-        for view in self.unrecorded_requests().await? {
+        for view in on_heap(|| self.unrecorded_requests()).await? {
             if shown.insert((view.request.payee, view.request.request_hash)) {
                 out.push(view);
             }
@@ -2037,7 +2049,7 @@ impl Paykit {
     /// [`Refusal::NotFound`]; a store failure.
     pub async fn request(&self, request: &RequestRef) -> Result<RequestView> {
         // The call's future goes on the heap, as `receive`'s does: it nests deep.
-        Box::pin(self.request_inner(request)).await
+        on_heap(|| self.request_inner(request)).await
     }
 
     async fn request_inner(&self, request: &RequestRef) -> Result<RequestView> {
@@ -2049,8 +2061,7 @@ impl Paykit {
         let key = self.activity_key(&target)?;
         let held = self.app.shared_record(&key).await?;
         let Some(record) = self.read_activity(&target, held.as_ref()) else {
-            return self
-                .unrecorded_requests()
+            return on_heap(|| self.unrecorded_requests())
                 .await?
                 .into_iter()
                 .find(|view| view.request == *request)
@@ -2133,8 +2144,8 @@ impl Paykit {
         // restore or blocked shows that too; the status says so only when nothing else holds
         // the request.
         let pause = match shared {
-            Some(shared) => Box::pin(self.pause_seen_held(shared)).await?,
-            None => Box::pin(self.pause_seen(&record_key)).await?,
+            Some(shared) => on_heap(|| self.pause_seen_held(shared)).await?,
+            None => on_heap(|| self.pause_seen(&record_key)).await?,
         };
         let divergent = pause.paused || pause.divergent;
         if status == RequestStatus::Open && pause.paused {
@@ -2430,17 +2441,19 @@ impl Paykit {
         // A delivery operation for the whole call (Paykit spec 8.1).
         let _delivery = self.delivery_operation();
         self.refresh_own()?;
-        Box::pin(self.first_read_before_writing()).await?;
+        on_heap(|| self.first_read_before_writing()).await?;
         self.refresh_own()?;
         self.records_known().await?;
         // The answer's future goes on the heap, as `receive`'s does: it nests deep.
-        let (msg_id, _) = Box::pin(self.answer_request(
-            request,
-            Answer::Reject,
-            reason,
-            AcceptOptions::default(),
-            None,
-        ))
+        let (msg_id, _) = on_heap(|| {
+            self.answer_request(
+                request,
+                Answer::Reject,
+                reason,
+                AcceptOptions::default(),
+                None,
+            )
+        })
         .await?;
         Ok(msg_id)
     }
@@ -2467,17 +2480,19 @@ impl Paykit {
         // A delivery operation for the whole call (Paykit spec 8.1).
         let _delivery = self.delivery_operation();
         self.refresh_own()?;
-        Box::pin(self.first_read_before_writing()).await?;
+        on_heap(|| self.first_read_before_writing()).await?;
         self.refresh_own()?;
         self.records_known().await?;
         // The answer's future goes on the heap, as `receive`'s does: it nests deep.
-        let (msg_id, _) = Box::pin(self.answer_request(
-            request,
-            Answer::Cancel,
-            reason,
-            AcceptOptions::default(),
-            None,
-        ))
+        let (msg_id, _) = on_heap(|| {
+            self.answer_request(
+                request,
+                Answer::Cancel,
+                reason,
+                AcceptOptions::default(),
+                None,
+            )
+        })
         .await?;
         Ok(msg_id)
     }
@@ -2559,12 +2574,12 @@ impl Paykit {
         allowance: Option<&[u8; 32]>,
     ) -> Result<SentMessage> {
         self.refresh_own()?;
-        Box::pin(self.first_read_before_writing()).await?;
+        on_heap(|| self.first_read_before_writing()).await?;
         self.refresh_own()?;
         self.records_known().await?;
         // The answer's future goes on the heap, as `receive`'s does: it nests deep.
         let (msg_id, delivery) =
-            Box::pin(self.answer_request(request, Answer::Accept, None, options, allowance))
+            on_heap(|| self.answer_request(request, Answer::Accept, None, options, allowance))
                 .await?;
         // An acceptance is never held: it is recorded and queued, or refused.
         let delivery = delivery.ok_or_else(PaykitError::corrupt)?;
@@ -2601,7 +2616,7 @@ impl Paykit {
             self.refresh_lists_when_due().await?;
             (false, self.delivery_held(&request.payee).await?)
         };
-        let (target, mut record) = self.payer_request(request).await?;
+        let (target, mut record) = on_heap(|| self.payer_request(request)).await?;
         let (_, body) = request_of(&record).ok_or(Refusal::NotFound)?;
         let recurring = body.is_recurring();
         let label = body.label.clone();
@@ -2642,7 +2657,7 @@ impl Paykit {
             return Err(self.expired_answer(&target, answer, None).await?);
         }
         let funding = if let Some(key) = allowance {
-            let fresh = self.current_period_activity(&target, None).await?;
+            let fresh = on_heap(|| self.current_period_activity(&target, None)).await?;
             let request_key = self.activity_key(&target)?;
             let held = self.app.shared_record(&request_key).await?;
             // A copy older than the fresh one: the request stays bound to its signed hash, and
@@ -2664,7 +2679,7 @@ impl Paykit {
                 return Err(crate::pay::AutomaticHold::Paused.refusal().into());
             }
             let conditions = self.app.record_condition(&request_key).await?;
-            let reservation = Box::pin(self.allowance_reservation(key, &request.payee)).await?;
+            let reservation = on_heap(|| self.allowance_reservation(key, &request.payee)).await?;
             Box::pin(reservation.subscription(self, request, &record)).await?;
             Some((reservation, conditions))
         } else {
@@ -2784,17 +2799,19 @@ impl Paykit {
             self.queue_activity_write(signed, &target, Some(write), tx.into_writes())
                 .await
         } else if held {
-            self.record_held(
-                signed,
-                &target,
-                role,
-                conditions,
-                tx.into_writes(),
-                request.request_hash,
-            )
+            on_heap(|| {
+                self.record_held(
+                    signed,
+                    &target,
+                    role,
+                    conditions,
+                    tx.into_writes(),
+                    request.request_hash,
+                )
+            })
             .await
         } else {
-            self.send_with_record(signed, &target, role, conditions, tx.into_writes())
+            on_heap(|| self.send_with_record(signed, &target, role, conditions, tx.into_writes()))
                 .await
         };
         match written {
