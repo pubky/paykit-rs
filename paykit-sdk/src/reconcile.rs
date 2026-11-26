@@ -45,6 +45,7 @@ use pubky_dispatch_core::ops::{Condition, OpKind};
 use crate::activity::ActivityTarget;
 use crate::destination::Carrier;
 use crate::error::{PaykitError, Refusal, Result};
+use crate::heap::on_heap;
 use crate::hold::RestoreHold;
 use crate::journal::{Destination, JournalEntry, KeptAmount, KeptPeriod, Stage};
 use crate::pay::{own_deadline, PayOutcome, Written};
@@ -298,20 +299,20 @@ impl Paykit {
         // A delivery operation for the whole call (Paykit spec 8.1).
         let _delivery = self.delivery_operation();
         // The call's future goes on the heap, as `receive`'s does: it nests deep.
-        Box::pin(self.reconcile_inner()).await
+        on_heap(|| self.reconcile_inner()).await
     }
 
     async fn reconcile_inner(&mut self) -> Result<ReconcileReport> {
         self.refresh_own()?;
-        Box::pin(self.first_read_before_writing()).await?;
+        on_heap(|| self.first_read_before_writing()).await?;
         self.refresh_own()?;
         self.list_records(crate::ListingRetry::Reconcile).await?;
-        Box::pin(self.repair_settlement_buckets()).await?;
+        on_heap(|| self.repair_settlement_buckets()).await?;
         // After a restore, the counterparties of the open requests the records now show are
         // asked to re-send from the backup's cursor time, once (`hold.rs`, Paykit spec 7.2);
         // what isn't sent now goes at the next receive.
-        self.queue_restore_asks().await?;
-        let _ = self.send_asks(&mut None).await;
+        on_heap(|| self.queue_restore_asks()).await?;
+        let _ = Box::pin(self.send_asks(&mut None)).await;
         let payer_pass = self.holds("paykit_pay");
         let mut report = ReconcileReport {
             resolved: self.resume_payments().await?,
@@ -579,12 +580,14 @@ impl Paykit {
             return Ok(None);
         }
         let allowance = if let Some(id) = &obligation.record.allowance_id {
-            let Some(under) = Box::pin(self.restored_payment_allowance(
-                &obligation.payee,
-                id,
-                &obligation.claim_key,
-                attempt,
-            ))
+            let Some(under) = on_heap(|| {
+                self.restored_payment_allowance(
+                    &obligation.payee,
+                    id,
+                    &obligation.claim_key,
+                    attempt,
+                )
+            })
             .await?
             else {
                 return Ok(None);
@@ -617,6 +620,7 @@ impl Paykit {
             acceptance_plaintext: None,
             acceptance_cert: None,
             acceptance_released: false,
+            acceptance_withdrawn: false,
             rail_proof: None,
             paid_at_ms: None,
             proof_msg_id: None,
@@ -687,7 +691,7 @@ impl Paykit {
         // A delivery operation for the whole call (Paykit spec 8.1).
         let _delivery = self.delivery_operation();
         // The call's future goes on the heap, as `receive`'s does: it nests deep.
-        Box::pin(self.resolve_attempt_inner(obligation, attempt, resolution, _confirmed)).await
+        on_heap(|| self.resolve_attempt_inner(obligation, attempt, resolution, _confirmed)).await
     }
 
     async fn resolve_attempt_inner(
@@ -698,7 +702,7 @@ impl Paykit {
         _confirmed: UserConfirmed,
     ) -> Result<()> {
         self.refresh_own()?;
-        Box::pin(self.first_read_before_writing()).await?;
+        on_heap(|| self.first_read_before_writing()).await?;
         self.refresh_own()?;
         self.records_known().await?;
         // The journal entry of an own attempt is finished with the resolution, in its batch:
@@ -767,14 +771,14 @@ impl Paykit {
                 .clone()
                 .filter(|e| basis == Basis::Owner && e.stage == Stage::RailPaid)
             {
-                return match self.write_outcome(&mut paid, true, false).await? {
+                return match on_heap(|| self.write_outcome(&mut paid, true, false)).await? {
                     Written::Done => Ok(()),
                     Written::Held => Err(Refusal::RecordHeld(
                         "the payment waits for an activity record it can update".into(),
                     )
                     .into()),
                     Written::Divergent(record) => {
-                        Err(Box::pin(self.divergent_refusal(record)).await?)
+                        Err(on_heap(|| self.divergent_refusal(record)).await?)
                     }
                 };
             }
@@ -807,7 +811,9 @@ impl Paykit {
             .as_ref()
             .map_or(ObligationDeadline::NotKnown, |e| own_deadline(e.deadline));
         let record_write = match &done_target {
-            Some(target) => Some(self.done_record(target, &attempt, entry.as_ref()).await?),
+            Some(target) => {
+                Some(on_heap(|| self.done_record(target, &attempt, entry.as_ref())).await?)
+            }
             None => None,
         };
         let on_claim = op.is_some();
@@ -827,8 +833,8 @@ impl Paykit {
             .as_ref()
             .filter(|_| on_claim && basis == Basis::Owner && resolution != Resolution::Unknown)
         {
-            batch =
-                Box::pin(self.executor_outcome(own, resolution == Resolution::Done, batch)).await?;
+            batch = on_heap(|| self.executor_outcome(own, resolution == Resolution::Done, batch))
+                .await?;
         }
         // With no claim entry, the journal keeps the user's `done` on the entry itself: no
         // payment of its obligation goes again while it is journaled (Paykit spec 8.4).
@@ -867,7 +873,7 @@ impl Paykit {
             .as_ref()
             .filter(|_| on_claim && basis == Basis::Owner && resolution != Resolution::Unknown)
         {
-            Box::pin(self.keep_executor_reply(own, &applied.proofs)).await?;
+            on_heap(|| self.keep_executor_reply(own, &applied.proofs)).await?;
         }
         Ok(())
     }
@@ -1011,21 +1017,21 @@ impl Paykit {
         // A delivery operation for the whole call (Paykit spec 8.1).
         let _delivery = self.delivery_operation();
         self.refresh_own()?;
-        Box::pin(self.first_read_before_writing()).await?;
+        on_heap(|| self.first_read_before_writing()).await?;
         self.refresh_own()?;
         if self.floor_write_is_kept().await? {
             return Err(crate::floor::unreadable_floor());
         }
-        Box::pin(self.restore_verdict_not_known_holds()).await?;
+        on_heap(|| self.restore_verdict_not_known_holds()).await?;
         let asks_owed = self
             .local_get::<RestoreHold>(key::RESTORE_HOLD)
             .await?
             .is_some_and(|hold| hold.asks_due());
         if asks_owed {
             self.list_records(crate::ListingRetry::EndReconcile).await?;
-            self.queue_restore_asks().await?;
+            on_heap(|| self.queue_restore_asks()).await?;
             // Queued: what isn't sent now goes at the next receive.
-            let _ = self.send_asks(&mut None).await;
+            let _ = Box::pin(self.send_asks(&mut None)).await;
         }
         self.app
             .end_reconcile_for(crate::protocol::BACKUP_NAME, confirmed)

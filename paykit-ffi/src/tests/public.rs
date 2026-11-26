@@ -123,6 +123,97 @@ fn test_public_endpoint_publishes_lists_and_removes() {
     run(Backend::Service, publish_endpoint);
 }
 
+/// Whether `notice` tells of a change of public endpoints that wasn't published.
+fn endpoint_change(notice: &crate::WalletNotice) -> bool {
+    matches!(
+        notice.kind,
+        crate::WalletNoticeKind::PublicEndpointChangeNotPublished
+    )
+}
+
+/// `wallet` reads its feed to the end.
+async fn read_through(wallet: &NativeWallet) -> TestResult {
+    for _ in 0..8 {
+        if !Box::pin(wallet.receive()).await?.more {
+            return Ok(());
+        }
+    }
+    Err("wallet did not finish its pages".into())
+}
+
+async fn held_endpoint_change(world: &World) -> TestResult {
+    let root = tempfile::tempdir()?;
+    let account = Arc::new(Account::open(root.path(), world.clock().clone()));
+    let scopes = crate::WalletScopes {
+        request: true,
+        ..Default::default()
+    };
+    let config = crate::WalletConfig {
+        publishes_record: Some(true),
+        ..Default::default()
+    };
+    let (host, wallet, app, _) = Box::pin(super::wallet::enrolled_wallet(
+        world,
+        root.path(),
+        account,
+        scopes,
+        Some(config),
+    ))
+    .await?;
+    let signed = vec![
+        endpoint("dropped", "lnbc1dropped"),
+        endpoint("kept", "lnbc1kept"),
+        endpoint("moved", "lnbc1old"),
+    ];
+    assert_eq!(
+        wallet.set_public_endpoints(signed.clone(), None).await?,
+        PublicationState::Published
+    );
+    // A change that was signed is never told, across a restart.
+    wallet.shutdown().await?;
+    let wallet = host.load(app.clone()).await?;
+    Box::pin(read_through(&wallet)).await?;
+    assert!(!wallet.notices().await?.iter().any(endpoint_change));
+    // The next change is saved while the service time can't be read, and isn't signed
+    // (Paykit spec 4, "Changes saved and not yet signed").
+    world.advance_ms(11 * 60 * 1000);
+    world.unreachable("GET", "/feed");
+    let asked = vec![
+        endpoint("added", "lnbc1added"),
+        endpoint("kept", "lnbc1kept"),
+        endpoint("moved", "lnbc1new"),
+    ];
+    assert!(wallet.set_public_endpoints(asked, None).await.is_err());
+    wallet.shutdown().await?;
+    let wallet = host.load(app).await?;
+    Box::pin(read_through(&wallet)).await?;
+    // The host is told each endpoint by class, and the signed record stays as it was.
+    let notices = wallet.notices().await?;
+    let mut told = notices.iter().filter(|notice| endpoint_change(notice));
+    let notice = told.next().ok_or("the held change was not told")?;
+    assert!(told.next().is_none());
+    assert_eq!(notice.endpoints_withdrawn, ["dropped"]);
+    assert_eq!(notice.endpoints_offered, ["added"]);
+    assert_eq!(notice.endpoints_changed, ["moved"]);
+    assert!(notices
+        .iter()
+        .filter(|notice| !endpoint_change(notice))
+        .all(|notice| notice.endpoints_withdrawn.is_empty()
+            && notice.endpoints_offered.is_empty()
+            && notice.endpoints_changed.is_empty()));
+    assert_eq!(wallet.own_public_endpoints().await?, signed);
+    wallet.acknowledge_notice(notice.id.clone()).await?;
+    assert!(!wallet.notices().await?.iter().any(endpoint_change));
+    wallet.shutdown().await?;
+    Ok(())
+}
+
+#[test]
+fn test_public_endpoint_change_held_unsigned_is_told_by_class() {
+    run(Backend::Scripted, held_endpoint_change);
+    run(Backend::Service, held_endpoint_change);
+}
+
 async fn invalid_endpoints(world: &World) -> TestResult {
     let root = tempfile::tempdir()?;
     let account = Arc::new(Account::open(root.path(), world.clock().clone()));
@@ -408,27 +499,77 @@ fn test_delivery_and_transport_codes_name_each_known_answer() {
         ),
         ("403 not_admitted", "not_admitted"),
         (
-            "429 rate_limited: not_found before the body was read (status 404)",
+            "429 rate_limited: 404 not_found before the body was read (status 404)",
             "rate_limited",
         ),
         ("500 not_admitted", "unknown"),
         (
-            "rate_limited before the body was read (status 429)",
+            "429 rate_limited before the body was read (status 429)",
             "rate_limited",
         ),
         (
-            "too_large before the body was read (status 413)",
+            "413 too_large before the body was read (status 413)",
             "too_large",
         ),
         (
-            "not_found before the body was read (status 404)",
+            "404 not_found before the body was read (status 404)",
             "not_found",
         ),
-        ("not_found before the body was read (status 503)", "unknown"),
+        // The two statuses disagree, or the name is bare: not the client's text.
+        (
+            "404 not_found before the body was read (status 503)",
+            "unknown",
+        ),
+        ("not_found before the body was read (status 404)", "unknown"),
     ] {
         let delivery = MessageDelivery::from(D::Queued {
             tries: 1,
             last_error: Some(text.into()),
+        });
+        assert_eq!(
+            delivery,
+            MessageDelivery::Queued {
+                tries: 1,
+                last_error: Some(code.into()),
+            },
+            "{text}"
+        );
+    }
+    // The texts the client writes from its own errors, as the outbox keeps them: a rewording
+    // of one fails here rather than turning its code into `unknown`. The two sentences of a
+    // dropped or refused kept batch are the client's own words, as above.
+    use pubky_dispatch_client::error::ClientError;
+    use pubky_dispatch_core::http::ErrorCode;
+    let answer = |code: ErrorCode| ClientError::Dispatch {
+        status: code.status(),
+        code,
+        message: "private details".into(),
+        current: serde_json::Value::Null,
+        known_version: None,
+        retry_after: None,
+    };
+    let unread = |status, code| ClientError::BodyUnread {
+        status,
+        code,
+        retry_after: None,
+    };
+    for (text, code) in [
+        (TransportError::Timeout.to_string(), "timeout"),
+        (answer(ErrorCode::NotAdmitted).to_string(), "not_admitted"),
+        (answer(ErrorCode::RateLimited).to_string(), "rate_limited"),
+        (
+            unread(429, ErrorCode::RateLimited).to_string(),
+            "rate_limited",
+        ),
+        (unread(413, ErrorCode::TooLarge).to_string(), "too_large"),
+        (
+            format!("the batch carrying it was refused: {}", ErrorCode::TooLarge),
+            "too_large",
+        ),
+    ] {
+        let delivery = MessageDelivery::from(D::Queued {
+            tries: 1,
+            last_error: Some(text.clone()),
         });
         assert_eq!(
             delivery,
@@ -464,5 +605,37 @@ fn test_delivery_and_transport_codes_name_each_known_answer() {
             PublicationState::from(Publication::Owed { error }),
             PublicationState::Owed { error: code.into() }
         );
+    }
+}
+
+/// After a restore, Paykit decides every held message of its own kinds, a hold of one message
+/// included (Paykit spec 7.2; the host guide, "Messages held at restore"). The bindings offer a
+/// host no hold of one message: a binding that adds one needs that rule settled first.
+#[test]
+fn test_bindings_expose_no_hold_of_one_message() {
+    fn sources(dir: &std::path::Path, out: &mut Vec<(String, String)>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                // This test's own module names what it looks for.
+                if !path.ends_with("tests") {
+                    sources(&path, out);
+                }
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                let text = std::fs::read_to_string(&path).unwrap();
+                out.push((path.display().to_string(), text));
+            }
+        }
+    }
+    let mut files = Vec::new();
+    sources(
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+        &mut files,
+    );
+    assert!(!files.is_empty());
+    for (path, text) in files {
+        for call in ["hold_message(", "release_message("] {
+            assert!(!text.contains(call), "{path}: the bindings call `{call}`");
+        }
     }
 }

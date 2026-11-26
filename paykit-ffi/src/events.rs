@@ -194,6 +194,9 @@ pub struct ProviderLoss {
     /// Until when an attempt could have been authorized at the old service: the declaration plus
     /// the residual window and the offset between the services' clocks.
     pub uncertain_until_ms: u64,
+    /// Items the new service counted as unverified in the app's signed evidence upload, a
+    /// total across the upload (Dispatch wire 7.4.14).
+    pub unverified: u64,
 }
 impl From<app::ProviderLoss> for ProviderLoss {
     fn from(v: app::ProviderLoss) -> Self {
@@ -203,6 +206,7 @@ impl From<app::ProviderLoss> for ProviderLoss {
             declared_at_ms: v.declared_at_ms,
             accepted_from_ms: v.accepted_from_ms,
             uncertain_until_ms: v.uncertain_until_ms,
+            unverified: v.unverified,
         }
     }
 }
@@ -1018,6 +1022,20 @@ WalletEventData from app::AppEvent {
         duty_events: u64,
         /// The owed protocol calls left behind.
         owed_calls: u64,
+        /// The held record changes left behind.
+        record_edits: u64,
+    },
+    /// A restore holds messages until their protocol releases or withdraws each.
+    MessagesHeldAtRestore {
+        /// How many it holds.
+        held: u64,
+    },
+    /// Unsigned record changes held aside for their protocols; Paykit decides its own.
+    RecordEditsHeld {
+        /// The protocols whose change is held.
+        protocols: Vec<String>,
+        /// Whether accepted kinds are held.
+        accepts_changed: bool,
     },
     /// The authenticated account is unavailable.
     AccountGone as (Source::AccountGone { .. }),

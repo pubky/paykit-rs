@@ -57,7 +57,7 @@ async fn join(
 async fn start_signer(world: &World, name: &str) -> TestResult<Signer> {
     let identity = world.identity(name)?;
     let origin = format!("https://{name}.allowance.test");
-    Box::pin(world.add_switch(&origin, &[&identity])).await?;
+    Box::pin(world.add_dispatch(&origin, &[&identity])).await?;
     let mut env = world.signer_env(&identity, Arc::new(MemoryStore::new()))?;
     env.protocols = Protocols::new(vec![Arc::new(paykit_lib::signer::PaykitProtocol)])?;
     if matches!(world.backend(), Backend::Service) {
@@ -149,7 +149,16 @@ async fn grant(
         rail.clone(),
     ))
     .await?;
-    let (key, allowance_id) = Box::pin(accept(&mut payer, &mut seller, proposer)).await?;
+    // The acceptance runs as a task of its own on the local set and hands the wallets back:
+    // the send path it drives starts from the runtime, not under this harness's frames,
+    // which are large in a debug build; the stack the acceptance itself needs is unchanged.
+    let (payer_back, seller_back, accepted) = tokio::task::spawn_local(async move {
+        let accepted = Box::pin(accept(&mut payer, &mut seller, proposer)).await;
+        (payer, seller, accepted)
+    })
+    .await?;
+    let (mut payer, seller) = (payer_back, seller_back);
+    let (key, allowance_id) = accepted?;
     let permanent = payer
         .app()
         .shared_record(&key)

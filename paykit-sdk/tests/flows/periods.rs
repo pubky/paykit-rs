@@ -694,7 +694,7 @@ async fn test_periods_details_refused_for_good_written_at_a_later_receive() {
     .await
     .unwrap();
     w.alice
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::Error {
             path: "/ops".into(),
             code: pubky_dispatch_core::http::ErrorCode::PermissionMissing,
@@ -1571,7 +1571,7 @@ fn store_bob_bundle_from(
     first: u64,
 ) {
     use pubky_dispatch_client::app::Protocol as _;
-    let epoch = w.bob.switch().identity_doc().unwrap().data_epoch();
+    let epoch = w.bob.dispatch().identity_doc().unwrap().data_epoch();
     let protocol = paykit_sdk::PaykitProtocol::new();
     let parts = pubky_dispatch_core::records::seal_bundle_parts(
         w.bob.identity().key(),
@@ -1583,7 +1583,7 @@ fn store_bob_bundle_from(
     .unwrap();
     for part in parts {
         w.bob
-            .switch()
+            .dispatch()
             .signer_op(pubky_dispatch_core::ops::OpKind::KeyBundlePut(
                 pubky_dispatch_core::ops::KeyBundlePut {
                     target_app_id: app,
@@ -2027,7 +2027,7 @@ async fn test_periods_accept_and_details_kept_reported_sent() {
         code: pubky_dispatch_core::http::ErrorCode::Unavailable,
         current: serde_json::Value::Null,
     };
-    w.alice.switch().fail_next(unavailable());
+    w.alice.dispatch().fail_next(unavailable());
     let accepted = wallet.accept_subscription(&request).await.unwrap();
     assert!(
         matches!(accepted.delivery, paykit_sdk::MessageDelivery::Kept { .. }),
@@ -2041,7 +2041,7 @@ async fn test_periods_accept_and_details_kept_reported_sent() {
         shop.payee_activity().await.unwrap()[0].status,
         PayeeStatus::Accepted
     );
-    w.bob.switch().fail_next(unavailable());
+    w.bob.dispatch().fail_next(unavailable());
     let sent = shop
         .send_period_details(
             &sale,
@@ -2104,7 +2104,7 @@ async fn test_periods_details_refused_for_good_dropped_once_the_payee_cancelled(
     .unwrap();
     shop.cancel_sent_request(&sale, None).await.unwrap();
     w.alice
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::Error {
             path: "/ops".into(),
             code: pubky_dispatch_core::http::ErrorCode::PermissionMissing,
@@ -2177,7 +2177,7 @@ async fn with_a_sealed_record(w: &World) -> (Paykit, [u8; 32]) {
     rewrites(&mut seller_wallet, &payee_period_at(&request, month(0))).await;
     // The shop gets the newest epoch's key only: it writes there, and can't open January.
     w.bob.next_doc(|body| body.data_epoch += 1).unwrap();
-    let newest = w.bob.switch().identity_doc().unwrap().data_epoch();
+    let newest = w.bob.dispatch().identity_doc().unwrap().data_epoch();
     store_bob_bundle_from(w, shop.app_id(), &shop.app().cert().clone(), newest);
     shop.receive(None).await.unwrap();
     let body = proof_to(w, shop.app_id(), month(1), "lnbc1invoice", 7).await;
@@ -2273,7 +2273,7 @@ async fn test_periods_credit_not_given_while_the_records_cant_be_listed_then_giv
     .await
     .unwrap();
     w.bob
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::Error {
             path: "/records".into(),
             code: pubky_dispatch_core::http::ErrorCode::Unavailable,
@@ -2303,7 +2303,7 @@ async fn test_periods_kept_details_wait_over_a_record_sealed_at_an_older_key() {
     phone.receive(None).await.unwrap();
     rewrites(&mut phone, &payer_period(&request)).await;
     w.alice.next_doc(|body| body.data_epoch += 1).unwrap();
-    let newest = w.alice.switch().identity_doc().unwrap().data_epoch();
+    let newest = w.alice.dispatch().identity_doc().unwrap().data_epoch();
     let cert = wallet.app().cert().clone();
     crate::unrequested::store_bundle_from(&w, wallet.app_id(), &cert, newest);
     wallet.receive(None).await.unwrap();
@@ -2325,7 +2325,7 @@ async fn test_periods_details_after_a_kept_payee_cancellation_never_stored() {
     let (request, sale) = subscribed(&w, &mut shop, &mut wallet).await;
     shop.cancel_sent_request(&sale, None).await.unwrap();
     w.alice
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::Error {
             path: "/ops".into(),
             code: pubky_dispatch_core::http::ErrorCode::PermissionMissing,
@@ -2363,7 +2363,7 @@ async fn test_periods_kept_details_after_a_kept_payee_cancellation_never_placed(
         serde_json::Map::new(),
     );
     w.alice
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::Error {
             path: "/ops".into(),
             code: pubky_dispatch_core::http::ErrorCode::PermissionMissing,
@@ -2385,7 +2385,7 @@ async fn test_periods_accept_whose_delivery_fails_now_reported_queued() {
     let mut wallet = w.wallet("wallet").await;
     let request = requested(&w, &mut shop, &mut wallet).await;
     w.bob
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::Error {
             path: "/inbox".into(),
             code: pubky_dispatch_core::http::ErrorCode::Unavailable,
@@ -2586,7 +2586,7 @@ async fn test_periods_no_response_while_the_request_record_is_sealed() {
     phone.receive(None).await.unwrap();
     rewrites(&mut phone, &crate::outcome_record::payer_record(&request)).await;
     w.alice.next_doc(|body| body.data_epoch += 1).unwrap();
-    let newest = w.alice.switch().identity_doc().unwrap().data_epoch();
+    let newest = w.alice.dispatch().identity_doc().unwrap().data_epoch();
     let cert = wallet.app().cert().clone();
     crate::unrequested::store_bundle_from(&w, wallet.app_id(), &cert, newest);
     wallet.receive(None).await.unwrap();
@@ -3055,7 +3055,7 @@ async fn test_periods_restore_reports_each_own_details_once() {
     for msg_id in &sent {
         assert!(!queued(&shop, msg_id).await);
     }
-    let before = w.alice.switch().entries_from(&w.bob_id());
+    let before = w.alice.dispatch().entries_from(&w.bob_id());
     shop.receive(None).await.unwrap();
     assert!(shop
         .app()
@@ -3069,10 +3069,10 @@ async fn test_periods_restore_reports_each_own_details_once() {
             "{msg_id}"
         );
     }
-    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), before);
+    assert_eq!(w.alice.dispatch().entries_from(&w.bob_id()), before);
     // Once: a later receive queues nothing more.
     shop.receive(None).await.unwrap();
-    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), before);
+    assert_eq!(w.alice.dispatch().entries_from(&w.bob_id()), before);
     // The wallet takes the copies as the details it holds.
     wallet.receive(None).await.unwrap();
     let view = &wallet.requests().await.unwrap()[0];
@@ -3108,9 +3108,9 @@ async fn test_periods_restore_reports_the_original_acceptance() {
         .unwrap()
         .is_none());
     assert!(crate::common::possibly_delivered(&wallet, &accepted.msg_id).await);
-    let after = w.bob.switch().entries_from(&w.alice_id());
+    let after = w.bob.dispatch().entries_from(&w.alice_id());
     wallet.receive(None).await.unwrap();
-    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), after);
+    assert_eq!(w.bob.dispatch().entries_from(&w.alice_id()), after);
     shop.receive(None).await.unwrap();
     assert_eq!(
         shop.payee_activity().await.unwrap()[0].status,
@@ -3139,11 +3139,11 @@ async fn test_periods_restore_releasing_a_block_keeps_earlier_details_uncertain(
     drop(seller_wallet);
     let mut seller_wallet = bob_restored(&w, &backup).await;
     seller_wallet.block(&w.alice_id()).await.unwrap();
-    let before = w.alice.switch().entries_from(&w.bob_id());
+    let before = w.alice.dispatch().entries_from(&w.bob_id());
     for _ in 0..2 {
         seller_wallet.receive(None).await.unwrap();
     }
-    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), before);
+    assert_eq!(w.alice.dispatch().entries_from(&w.bob_id()), before);
     assert!(seller_wallet
         .app()
         .protocol_get("paykit", b"ro")
@@ -3171,9 +3171,9 @@ async fn test_periods_restore_releasing_a_block_keeps_earlier_details_uncertain(
     let asks = crate::common::asked(&seller_wallet, &w.alice_id())
         .await
         .len();
-    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), before + asks);
+    assert_eq!(w.alice.dispatch().entries_from(&w.bob_id()), before + asks);
     seller_wallet.receive(None).await.unwrap();
-    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), before + asks);
+    assert_eq!(w.alice.dispatch().entries_from(&w.bob_id()), before + asks);
 }
 
 #[tokio::test]
@@ -3187,7 +3187,7 @@ async fn test_periods_restore_reports_earlier_details_without_a_replay() {
     drop(shop);
     let mut shop = bob_restored(&w, &backup).await;
     w.clock.advance_ms(11 * DAY_MS);
-    let before = w.alice.switch().entries_from(&w.bob_id());
+    let before = w.alice.dispatch().entries_from(&w.bob_id());
     let summary = shop.receive(None).await.unwrap();
     assert!(
         !summary
@@ -3207,9 +3207,9 @@ async fn test_periods_restore_reports_earlier_details_without_a_replay() {
         .is_none());
     assert!(!queued(&shop, &sent[0]).await);
     assert!(crate::common::possibly_delivered(&shop, &sent[1]).await);
-    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), before);
+    assert_eq!(w.alice.dispatch().entries_from(&w.bob_id()), before);
     shop.receive(None).await.unwrap();
-    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), before);
+    assert_eq!(w.alice.dispatch().entries_from(&w.bob_id()), before);
 }
 
 /// Bob's payee request record of `request`.
@@ -3245,7 +3245,7 @@ async fn test_periods_restore_cancellation_closes_earlier_details() {
     let backup = shop.backup().await.unwrap();
     drop(shop);
     let mut shop = bob_restored(&w, &backup).await;
-    let before = w.alice.switch().entries_from(&w.bob_id());
+    let before = w.alice.dispatch().entries_from(&w.bob_id());
     shop.receive(None).await.unwrap();
     assert!(shop
         .app()
@@ -3257,7 +3257,7 @@ async fn test_periods_restore_cancellation_closes_earlier_details() {
     for msg_id in &sent {
         assert!(!queued(&shop, msg_id).await, "{msg_id}");
     }
-    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), before);
+    assert_eq!(w.alice.dispatch().entries_from(&w.bob_id()), before);
 }
 
 #[tokio::test]
@@ -3285,7 +3285,7 @@ async fn test_periods_restore_after_the_period_is_credited_queues_no_details() {
     let backup = shop.backup().await.unwrap();
     drop(shop);
     let mut shop = bob_restored(&w, &backup).await;
-    let before = w.alice.switch().entries_from(&w.bob_id());
+    let before = w.alice.dispatch().entries_from(&w.bob_id());
     shop.receive(None).await.unwrap();
     assert!(shop
         .app()
@@ -3297,7 +3297,7 @@ async fn test_periods_restore_after_the_period_is_credited_queues_no_details() {
     for msg_id in &sent {
         assert!(!queued(&shop, msg_id).await, "{msg_id}");
     }
-    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), before);
+    assert_eq!(w.alice.dispatch().entries_from(&w.bob_id()), before);
 }
 
 #[tokio::test]
@@ -3334,7 +3334,7 @@ async fn test_periods_restore_checks_the_request_before_reporting_its_details() 
     )
     .await;
     let mut shop = bob_restored(&w, &backup).await;
-    let before = w.alice.switch().entries_from(&w.bob_id());
+    let before = w.alice.dispatch().entries_from(&w.bob_id());
     for _ in 0..2 {
         shop.receive(None).await.unwrap();
     }
@@ -3347,7 +3347,7 @@ async fn test_periods_restore_checks_the_request_before_reporting_its_details() 
     for msg_id in &sent {
         assert!(!queued(&shop, msg_id).await, "{msg_id}");
     }
-    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), before);
+    assert_eq!(w.alice.dispatch().entries_from(&w.bob_id()), before);
     writes_value(&mut seller_wallet, &target, &good).await;
     shop.receive(None).await.unwrap();
     assert!(shop
@@ -3362,9 +3362,9 @@ async fn test_periods_restore_checks_the_request_before_reporting_its_details() 
             "{msg_id}"
         );
     }
-    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), before);
+    assert_eq!(w.alice.dispatch().entries_from(&w.bob_id()), before);
     shop.receive(None).await.unwrap();
-    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), before);
+    assert_eq!(w.alice.dispatch().entries_from(&w.bob_id()), before);
 }
 
 #[tokio::test]
@@ -3394,7 +3394,7 @@ async fn test_periods_restore_own_details_waiting_on_their_request_record_end_pa
     )
     .await;
     let mut shop = bob_restored(&w, &backup).await;
-    let before = w.alice.switch().entries_from(&w.bob_id());
+    let before = w.alice.dispatch().entries_from(&w.bob_id());
     shop.receive(None).await.unwrap();
     assert!(shop
         .app()
@@ -3413,7 +3413,7 @@ async fn test_periods_restore_own_details_waiting_on_their_request_record_end_pa
     for msg_id in &sent {
         assert!(!queued(&shop, msg_id).await, "{msg_id}");
     }
-    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), before);
+    assert_eq!(w.alice.dispatch().entries_from(&w.bob_id()), before);
     assert!(shop.notices().await.unwrap().is_empty());
 }
 
@@ -3586,7 +3586,7 @@ async fn test_periods_restore_reports_an_unrelated_request_while_details_wait() 
     )
     .await;
     let mut shop = bob_restored(&w, &backup).await;
-    let before = w.alice.switch().entries_from(&w.bob_id());
+    let before = w.alice.dispatch().entries_from(&w.bob_id());
     for _ in 0..3 {
         shop.receive(None).await.unwrap();
     }
@@ -3600,7 +3600,7 @@ async fn test_periods_restore_reports_an_unrelated_request_while_details_wait() 
         .await
         .unwrap()
         .is_some());
-    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), before);
+    assert_eq!(w.alice.dispatch().entries_from(&w.bob_id()), before);
 }
 
 #[tokio::test]
@@ -3788,7 +3788,7 @@ async fn test_periods_details_for_a_period_the_payer_shows_paid_taken_at_the_lat
     inject_later_details(&w, &[wallet.app_id()], request.request_hash);
     for _ in 0..2 {
         w.alice
-            .switch()
+            .dispatch()
             .fail_next(pubky_dispatch_client::testing::Fault::Error {
                 path: "/ops".into(),
                 code: pubky_dispatch_core::http::ErrorCode::PermissionMissing,
@@ -3978,7 +3978,7 @@ async fn test_periods_stored_proof_waits_for_its_details_after_the_record_is_del
     let body = period_proof(&w, shop.app_id(), january()).await;
     for _ in 0..2 {
         w.bob
-            .switch()
+            .dispatch()
             .fail_next(pubky_dispatch_client::testing::Fault::Error {
                 path: "/ops".into(),
                 code: pubky_dispatch_core::http::ErrorCode::PermissionMissing,
@@ -4325,9 +4325,9 @@ async fn test_periods_proof_from_a_flagged_payer_over_a_payee_period_record_that
 /// client's listing right after the item, of the wallet's three collections, goes through.
 fn missed_with_paykits_listing_failing(w: &World) {
     let now = w.clock.now_ms();
-    w.alice.switch().push_missed(1, now - 1_000, now);
+    w.alice.dispatch().push_missed(1, now - 1_000, now);
     w.alice
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
             path: "records?collection".into(),
             after: 3,
@@ -4549,7 +4549,7 @@ async fn test_periods_proof_over_a_payee_request_record_that_never_opens_kept_th
     let pubky_dispatch_core::ops::OpKind::RecordPut(mut put) = kind else {
         panic!("a record op");
     };
-    let epoch = w.bob.switch().identity_doc().unwrap().data_epoch();
+    let epoch = w.bob.dispatch().identity_doc().unwrap().data_epoch();
     put.value_sealed = pubky_dispatch_core::sealed::SealedValue::seal(
         &[3; 32],
         &w.bob_id(),
@@ -4772,13 +4772,13 @@ async fn details_dropped_for_the_bounds(
             writes_value(&mut phone, &target, &good).await;
         }
     }
-    let entries = w.bob.switch().entries_from(&w.alice_id());
+    let entries = w.bob.dispatch().entries_from(&w.alice_id());
     let mut summary = wallet.receive(None).await.unwrap();
     if blocked {
         assert_eq!(summary.resends, 0, "{record_while:?}");
         summary = wallet.receive(None).await.unwrap();
         assert_eq!(summary.resends, 0, "{record_while:?}");
-        assert_eq!(w.bob.switch().entries_from(&w.alice_id()), entries);
+        assert_eq!(w.bob.dispatch().entries_from(&w.alice_id()), entries);
         wallet.unblock(&w.bob_id()).await.unwrap();
         summary = wallet.receive(None).await.unwrap();
     }
@@ -4934,7 +4934,7 @@ async fn test_periods_details_sent_only_once_a_paused_record_is_confirmed() {
     let (_, sale) = subscribed(&w, &mut shop, &mut wallet).await;
     // Divergent at the Dispatch, as a conflicting upload leaves it: a fresh read shows it so.
     w.bob
-        .switch()
+        .dispatch()
         .make_divergent([0x5a; 16], sale, [1; 32])
         .unwrap();
     shop.receive(None).await.unwrap();
@@ -6029,12 +6029,12 @@ async fn shared_period_payment() {
 
     let checks = w.rail.proof_checks().len();
     let writes = w.record_writes(&w.bob, &key);
-    let entries = w.alice.switch().entries_from(&w.bob_id());
+    let entries = w.alice.dispatch().entries_from(&w.bob_id());
     assert!(shop.payee_activity().await.unwrap()[0].periods.is_empty());
     assert_eq!(shop.verify_payment(&key).await.unwrap(), None);
     assert_eq!(shop.confirm_payment(&key).await.unwrap(), None);
     assert_eq!(w.record_writes(&w.bob, &key), writes);
-    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), entries);
+    assert_eq!(w.alice.dispatch().entries_from(&w.bob_id()), entries);
     assert_eq!(w.rail.proof_checks().len(), checks);
 
     record.receipt = receipt;
@@ -6126,11 +6126,11 @@ async fn confirm_current_period() {
 
     let checks = w.rail.proof_checks().len();
     let writes = w.record_writes(&w.bob, &key);
-    let entries = w.alice.switch().entries_from(&w.bob_id());
+    let entries = w.alice.dispatch().entries_from(&w.bob_id());
     let id = shop.confirm_payment(&key).await.unwrap().unwrap();
     assert_eq!(w.rail.proof_checks().len(), checks + 2);
     assert_eq!(w.record_writes(&w.bob, &key), writes + 1);
-    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), entries + 1);
+    assert_eq!(w.alice.dispatch().entries_from(&w.bob_id()), entries + 1);
     let held = shop.app().shared_record(&key).await.unwrap().unwrap();
     let value = held.content.value().unwrap();
     assert_eq!(

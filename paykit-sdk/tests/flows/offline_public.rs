@@ -113,7 +113,7 @@ async fn pay_public(disconnect: bool) {
         world.clock.advance_ms(30 * 60_000);
         world
             .router
-            .add_switch(world.alice.origin(), world.alice.switch());
+            .add_dispatch(world.alice.origin(), world.alice.dispatch());
     }
     wallet.resume_payments().await.unwrap();
     wallet.resume_payments().await.unwrap();
@@ -162,7 +162,7 @@ async fn test_offline_public_paid_journal_after_restore_waits_on_silent_claim() 
     drop(wallet);
     world
         .router
-        .add_switch(world.alice.origin(), world.alice.switch());
+        .add_dispatch(world.alice.origin(), world.alice.dispatch());
     let mut restored = Paykit::restore(
         world.env(&world.alice, store()),
         PaykitConfig::default(),
@@ -204,7 +204,7 @@ async fn test_offline_public_late_success_records_original_attempt() {
     let id = outcome.attempt_id();
     world
         .router
-        .add_switch(world.alice.origin(), world.alice.switch());
+        .add_dispatch(world.alice.origin(), world.alice.dispatch());
     let obligation = wallet.payments().await.unwrap()[0].obligation;
     // The claim the payment would have written through the dispatch: its attempt ID blinded
     // with the payer's naming key (Paykit wire 1.5).
@@ -253,7 +253,7 @@ async fn test_offline_public_existing_claim_keeps_its_original_deadline() {
     let key = wallet.payments().await.unwrap()[0].obligation;
     world
         .router
-        .add_switch(world.alice.origin(), world.alice.switch());
+        .add_dispatch(world.alice.origin(), world.alice.dispatch());
     let op = ClaimOp::attempt(key, 0, id.to_bytes(), 300, None);
     wallet
         .app_mut()
@@ -296,13 +296,13 @@ async fn test_offline_public_lost_provider_does_not_release_an_unanswered_record
     let key = wallet.payments().await.unwrap()[0].obligation;
     world
         .router
-        .add_switch(world.alice.origin(), world.alice.switch());
-    world.alice.switch().fail_next(Fault::Unanswered {
+        .add_dispatch(world.alice.origin(), world.alice.dispatch());
+    world.alice.dispatch().fail_next(Fault::Unanswered {
         path: "/ops".into(),
         after: 0,
     });
     // A second unanswered send also covers the ordinary outbox pass at the end of resume.
-    world.alice.switch().fail_next(Fault::Unanswered {
+    world.alice.dispatch().fail_next(Fault::Unanswered {
         path: "/ops".into(),
         after: 0,
     });
@@ -341,13 +341,13 @@ async fn test_offline_public_applied_recording_with_lost_answer_finishes_after_e
     let key = wallet.payments().await.unwrap()[0].obligation;
     world
         .router
-        .add_switch(world.alice.origin(), world.alice.switch());
-    world.alice.switch().fail_next(Fault::LoseAnswer {
+        .add_dispatch(world.alice.origin(), world.alice.dispatch());
+    world.alice.dispatch().fail_next(Fault::LoseAnswer {
         path: "/ops".into(),
     });
     // The final ordinary flush also misses the answer. The service has already applied
     // the original attempt and payer record in one transaction.
-    world.alice.switch().fail_next(Fault::LoseAnswer {
+    world.alice.dispatch().fail_next(Fault::LoseAnswer {
         path: "/ops".into(),
     });
     wallet.resume_payments().await.unwrap();

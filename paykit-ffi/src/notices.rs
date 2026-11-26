@@ -62,6 +62,13 @@ pub enum WalletNoticeKind {
     /// still be paid by hand, and Billing Periods and payments without a request go on.
     /// Shown once, and again after each reopen.
     AutomaticPaymentsHeld,
+    /// The record no longer shows this stop, and the request or Allowance is still open
+    /// (Paykit spec 7.2).
+    StopNotRecorded,
+    /// A change of the app's public endpoints saved and not signed wasn't published after a
+    /// restart or a restore (Paykit spec 4): withdraw again the endpoints it names to withdraw;
+    /// ask the user before making its offers and payload changes again.
+    PublicEndpointChangeNotPublished,
     /// A native case that this binding does not recognize.
     Other,
 }
@@ -75,6 +82,7 @@ impl From<paykit_sdk::NoticeKind> for WalletNoticeKind {
             K::AllowancePlacementExpired => Self::AllowancePlacementExpired,
             K::AllowanceAcceptanceBeforeLoss => Self::AllowanceAcceptanceBeforeLoss,
             K::AllowanceWithdrawalConfirmed => Self::AllowanceWithdrawalConfirmed,
+            K::StopNotRecorded => Self::StopNotRecorded,
             K::PossiblyDelivered => Self::PossiblyDelivered,
             K::ListDeliveryUnknown => Self::ListDeliveryUnknown,
             K::BlockedMessagesLost => Self::BlockedMessagesLost,
@@ -86,6 +94,7 @@ impl From<paykit_sdk::NoticeKind> for WalletNoticeKind {
             K::BlockFloorHeld => Self::BlockFloorHeld,
             K::FloorRaiseWaiting => Self::FloorRaiseWaiting,
             K::AutomaticPaymentsHeld => Self::AutomaticPaymentsHeld,
+            K::PublicEndpointChangeNotPublished => Self::PublicEndpointChangeNotPublished,
             _ => Self::Other,
         }
     }
@@ -165,6 +174,45 @@ impl From<paykit_sdk::SettlementSubject> for NoticeSubject {
         }
     }
 }
+/// What a `StopNotRecorded` notice asks the user to stop again, as the call that stops it
+/// takes it (Paykit spec 7.2). One counterparty can have several requests or Allowances open
+/// at once, so the notice names the one its held stop was for.
+#[derive(uniffi::Enum)]
+pub enum StopSubject {
+    /// A request this identity was asked to pay: `cancel_request` or `reject_request` stops it
+    /// again.
+    Request {
+        /// The request, by its payee and request hash.
+        id: crate::payments::RequestId,
+    },
+    /// A request this identity sent: `cancel_sent_request` stops it again.
+    SentRequest {
+        /// The record key of its payee activity record.
+        record: Vec<u8>,
+    },
+    /// An Allowance: `end_allowance` ends it again.
+    Allowance {
+        /// The record key of its `allowances` record.
+        record: Vec<u8>,
+    },
+    /// A native case that this binding does not recognize.
+    Other,
+}
+impl From<paykit_sdk::StopSubject> for StopSubject {
+    fn from(s: paykit_sdk::StopSubject) -> Self {
+        use paykit_sdk::StopSubject as S;
+        match s {
+            S::Request(id) => Self::Request { id: id.into() },
+            S::SentRequest { record } => Self::SentRequest {
+                record: record.into(),
+            },
+            S::Allowance { record } => Self::Allowance {
+                record: record.into(),
+            },
+            _ => Self::Other,
+        }
+    }
+}
 /// One settlement mark of a `settlements` bucket (Paykit wire 5.7): a settlement the identity
 /// has credited, and the occurrence it was credited to.
 #[derive(uniffi::Record)]
@@ -207,6 +255,17 @@ pub struct WalletNotice {
     /// For `NoticeKind::BlockedMessagesLost` or `NoticeKind::DroppedMessagesLost`: the latest
     /// such time.
     pub lost_until_ms: Option<u64>,
+    /// For `NoticeKind::PublicEndpointChangeNotPublished`: the endpoints to withdraw again.
+    pub endpoints_withdrawn: Vec<String>,
+    /// For `NoticeKind::PublicEndpointChangeNotPublished`: the endpoints to offer again, when
+    /// the user asks.
+    pub endpoints_offered: Vec<String>,
+    /// For `NoticeKind::PublicEndpointChangeNotPublished`: the endpoints whose new payload to
+    /// set again, when the user asks.
+    pub endpoints_changed: Vec<String>,
+    /// For `NoticeKind::StopNotRecorded`: the request or Allowance to stop again, always given
+    /// for that kind and never for another.
+    pub stop: Option<StopSubject>,
 }
 /// The original retained deletion notice that the host can acknowledge.
 #[derive(uniffi::Object)]
@@ -273,6 +332,22 @@ impl NativeWallet {
                         raised_at_ms: n.raised_at_ms,
                         lost_from_ms: n.lost_from_ms,
                         lost_until_ms: n.lost_until_ms,
+                        endpoints_withdrawn: n
+                            .endpoints_withdrawn
+                            .iter()
+                            .map(|id| id.as_str().to_owned())
+                            .collect(),
+                        endpoints_offered: n
+                            .endpoints_offered
+                            .iter()
+                            .map(|id| id.as_str().to_owned())
+                            .collect(),
+                        endpoints_changed: n
+                            .endpoints_changed
+                            .iter()
+                            .map(|id| id.as_str().to_owned())
+                            .collect(),
+                        stop: n.stop.map(Into::into),
                     })
                     .collect())
             })

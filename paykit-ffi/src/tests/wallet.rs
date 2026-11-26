@@ -229,7 +229,7 @@ async fn connect_after_earlier_batch(
     let service_reply = pubky_dispatch_client::app::AppError::Ahead {
         ahead: *ahead,
         error: Box::new(
-            pubky_dispatch_client::error::ClientError::Switch {
+            pubky_dispatch_client::error::ClientError::Dispatch {
                 status: 503,
                 code: pubky_dispatch_core::http::ErrorCode::Unavailable,
                 message: "unavailable".into(),
@@ -887,10 +887,11 @@ async fn journey(world: &World) -> TestResult {
     assert_eq!(account.count(), 0);
     Box::pin(payment(world, root.path(), &env, reopened, &account, id)).await
 }
-/// Run `journey` on a fresh `backend` world, on a thread with the wallet's stack size.
+/// Run `journey` on a fresh `backend` world, on a thread of the journeys' stack budget
+/// ([`super::JOURNEY_STACK_BYTES`]).
 pub(super) fn run(backend: Backend, journey: impl AsyncFn(&World) -> TestResult + Send + 'static) {
     let thread = std::thread::Builder::new()
-        .stack_size(1_835_008)
+        .stack_size(super::JOURNEY_STACK_BYTES)
         .spawn(move || {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()

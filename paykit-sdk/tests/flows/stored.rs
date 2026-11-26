@@ -318,7 +318,7 @@ async fn wallet_with_kept_mark(
     assert!(wallet.requests().await.unwrap().is_empty());
     wallet.unblock(&w.bob_id()).await.unwrap();
     w.clock.advance_ms(11 * 60_000);
-    w.bob.switch().fail_next(Fault::Unreachable {
+    w.bob.dispatch().fail_next(Fault::Unreachable {
         path: "/inbox".into(),
         after: 0,
     });
@@ -548,7 +548,7 @@ async fn wallet_with_queued_ask(
             ))
             .await
             .unwrap();
-        let seq = w.alice.switch().push_unreadable(w.bob_id(), now);
+        let seq = w.alice.dispatch().push_unreadable(w.bob_id(), now);
         // Stop after the client has durably called the protocol, before Paykit sends its ask.
         let report = wallet.app_mut().receive(None).await.unwrap();
         assert!(
@@ -559,7 +559,7 @@ async fn wallet_with_queued_ask(
         wallet.block(&w.bob_id()).await.unwrap();
     } else {
         wallet.block(&w.bob_id()).await.unwrap();
-        w.alice.switch().push_missed(1, now - 1_000, now);
+        w.alice.dispatch().push_missed(1, now - 1_000, now);
         wallet.receive(None).await.unwrap();
     }
     let asks = wallet.app().protocol_scan("paykit", b"ask/").await.unwrap();
@@ -1055,7 +1055,7 @@ async fn uncertain_request(
     let mut unexpiring = draft("1", w.clock.now_ms());
     unexpiring.proposal_expires_at_ms = None;
     let request = request_from(shop, w.alice_id(), unexpiring).await;
-    w.alice.switch().fail_next(Fault::LoseAnswer {
+    w.alice.dispatch().fail_next(Fault::LoseAnswer {
         path: "/ops".into(),
     });
     assert!(wallet.receive(None).await.is_err());
@@ -1382,7 +1382,7 @@ async fn stored_receipt_aged(w: &World, past: u64) -> (Paykit, paykit_sdk::Reque
 
 /// The next batch at `signer`'s Dispatch is answered `code`, applying nothing.
 fn answer_next_write(signer: &pubky_dispatch_client::testing::TestSigner, code: ErrorCode) {
-    signer.switch().fail_next(Fault::Error {
+    signer.dispatch().fail_next(Fault::Error {
         path: "/ops".into(),
         code,
         current: serde_json::Value::Null,
@@ -1723,7 +1723,7 @@ async fn test_stored_write_kept_after_a_preflight_failure_waits_and_lands() {
     // Right after the receive's own read, the held service time ages past a day, so the
     // write's first send reads it again, and that read is refused.
     let clock = std::sync::Arc::clone(&w.clock);
-    let dispatch = std::sync::Arc::clone(w.alice.switch());
+    let dispatch = std::sync::Arc::clone(w.alice.dispatch());
     reads.after_read("feed", move || {
         clock.advance_ms(24 * 60 * 60 * 1000 + 1);
         dispatch.fail_next(Fault::Error {
@@ -1932,7 +1932,7 @@ async fn test_stored_note_past_its_window_kept_when_the_dispatch_doesnt_answer()
     wallet.receive(None).await.unwrap();
     w.clock.advance_ms(paykit_sdk::KEPT_MESSAGE_MS);
     wallet.app_mut().receive(None).await.unwrap();
-    w.alice.switch().fail_next(Fault::Unreachable {
+    w.alice.dispatch().fail_next(Fault::Unreachable {
         path: "/ops".into(),
         after: 0,
     });
@@ -1965,7 +1965,7 @@ async fn batch_refused(
     wallet: &mut paykit_sdk::Paykit,
     request: &paykit_sdk::RequestRef,
 ) {
-    w.alice.switch().fail_next(Fault::Unreachable {
+    w.alice.dispatch().fail_next(Fault::Unreachable {
         path: "/ops".into(),
         after: 0,
     });
@@ -2150,7 +2150,7 @@ async fn test_stored_refused_request_never_written_over_a_value_awaiting_its_key
     // The epoch rotates again, and the wallet gets the newest key alone: it could write the
     // record, but can't open what the phone wrote.
     w.alice.next_doc(|body| body.data_epoch += 1).unwrap();
-    let newest = w.alice.switch().identity_doc().unwrap().data_epoch();
+    let newest = w.alice.dispatch().identity_doc().unwrap().data_epoch();
     crate::unrequested::store_bundle_from(
         &w,
         wallet.app_id(),
@@ -2315,7 +2315,7 @@ async fn test_stored_refused_receipt_waiting_for_its_records_key_given_up_after_
     )
     .await;
     w.alice.next_doc(|body| body.data_epoch += 1).unwrap();
-    let newest = w.alice.switch().identity_doc().unwrap().data_epoch();
+    let newest = w.alice.dispatch().identity_doc().unwrap().data_epoch();
     let cert = wallet.app().cert().clone();
     crate::unrequested::store_bundle_from(&w, wallet.app_id(), &cert, newest);
     wallet.receive(None).await.unwrap();
@@ -2669,7 +2669,7 @@ async fn waiting_for_the_current_key(
     shop: &mut Paykit,
 ) -> (paykit_sdk::RequestRef, u64, u64) {
     w.alice.next_doc(|body| body.data_epoch += 1).unwrap();
-    let epoch = w.alice.switch().identity_doc().unwrap().data_epoch();
+    let epoch = w.alice.dispatch().identity_doc().unwrap().data_epoch();
     wallet.receive(None).await.unwrap();
     let mut unexpiring = draft("1", w.clock.now_ms());
     unexpiring.proposal_expires_at_ms = None;
@@ -2985,7 +2985,7 @@ async fn receipt_over_unread_record(unread: Unread, reads: bool) {
             )
             .unwrap();
             w.alice
-                .switch()
+                .dispatch()
                 .app_op(
                     &w.alice.identity().app_keys("phone"),
                     pubky_dispatch_core::ops::OpKind::RecordPut(put),
@@ -3585,7 +3585,7 @@ async fn test_stored_receipt_dropped_mark_asks_over_a_billing_period_record() {
         receipt,
     );
     let keys = w.bob.identity().app_keys("shop");
-    let cert = w.bob.switch().app(&keys.app_id_bytes()).cert.unwrap();
+    let cert = w.bob.dispatch().app(&keys.app_id_bytes()).cert.unwrap();
     let stored = paykit_lib::records::StoredMessage::new(
         bob,
         cert.signed(),

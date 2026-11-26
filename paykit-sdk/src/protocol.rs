@@ -141,6 +141,7 @@ pub struct PaykitProtocol {
     rail: Option<Arc<dyn Rail>>,
     /// The extension kinds the host's extension handles (Paykit spec 3.3).
     extensions: Vec<ExtensionKind>,
+    pub(crate) held_inventory: crate::restore_held::HeldInventory,
     /// The service time the current Paykit delivery operation observed (Paykit spec 8.1).
     pub(crate) delivery: crate::send_holds::DeliveryClock,
 }
@@ -172,6 +173,7 @@ impl PaykitProtocol {
             publishes_record: std::sync::atomic::AtomicU8::new(PUBLISHES_UNKNOWN),
             rail: None,
             extensions: Vec::new(),
+            held_inventory: Default::default(),
             delivery: crate::send_holds::DeliveryClock::default(),
         }
     }
@@ -641,6 +643,32 @@ pub(crate) fn restore_paykit_layer(
     }
     // A repeated import on this installation preserves notices the host has already seen,
     // and unresolved ones first observed since the backup (Paykit spec 7.2).
+    // The notices of endpoint changes not published, each at its own change's key, and what
+    // the user's last call asked: both stores' notices are kept, the installation's where
+    // both have one change's, and the installation's ask over the backup's, as the client keeps
+    // the installation's held change over the backup's (Paykit spec 4, "Changes saved and not
+    // yet signed"). Each is read whole and bound to its key, as the backup's are.
+    let mut endpoint_rows = std::collections::BTreeMap::new();
+    for prefix in [key::ENDPOINT_CHANGE_NOTICES, key::ENDPOINT_CHANGE] {
+        for (key, value) in restoring
+            .previous_local_scan(prefix.as_bytes())
+            .map_err(|_| "the endpoint change cannot be read")?
+        {
+            if prefix == key::ENDPOINT_CHANGE {
+                // An ask that doesn't read names nothing, as the settling reads it: left out,
+                // so the backup's goes in its place, if any.
+                if state::restored::<crate::own_record::EndpointChange>(&key, &value, &binder)
+                    .is_err()
+                {
+                    continue;
+                }
+            } else {
+                state::restored::<KeptNotice>(&key, &value, &binder)
+                    .map_err(|_| "invalid retained endpoint change notice")?;
+            }
+            endpoint_rows.insert(key, value);
+        }
+    }
     let mut delivery_notices = std::collections::BTreeMap::new();
     let mut unresolved = std::collections::BTreeMap::new();
     let mut pending_conflicts = std::collections::BTreeMap::new();
@@ -837,6 +865,22 @@ pub(crate) fn restore_paykit_layer(
         }
         stop_notices.insert(at.into_bytes(), held);
     }
+    // The installation's notices of stops the restore pass withdrew, shown or pending, win
+    // over the backup's: a restore in place neither brings back one the host acknowledged
+    // nor strands a pending one (Paykit spec 7.2). One that doesn't read is left out.
+    let mut installation_stop_notices = std::collections::BTreeMap::new();
+    for (name, value) in restoring
+        .previous_local_scan(key::unrecorded_stop_prefix().as_bytes())
+        .map_err(|_| "the installation's notices cannot be read")?
+    {
+        if matches!(
+            StateKey::parse(&name),
+            Some(StateKey::UnrecordedStop { .. })
+        ) && state::restored::<KeptNotice>(&name, &value, &binder).is_ok()
+        {
+            installation_stop_notices.insert(name, value);
+        }
+    }
     // And its notices of payments, keyed by their attempt and kind: a restore keeps each one
     // either side holds, the installation's where both do, so a notice the installation
     // raised after the backup isn't lost (Paykit spec 7.2, "What a restore loses"). A
@@ -860,6 +904,33 @@ pub(crate) fn restore_paykit_layer(
     }
     let mut cursor_time_ms = 0;
     let mut bounded = BoundedFamilies::default();
+    // An in-place restore can retain a stop signed after the backup (Dispatch spec 12.4).
+    for prefix in [key::SIDES, key::END_ORIGINS] {
+        for (name, value) in restoring
+            .previous_local_scan(prefix.as_bytes())
+            .map_err(|_| "the installation's held messages cannot be read")?
+        {
+            if keys.contains(&name) {
+                continue;
+            }
+            // An entry that doesn't read is left out, not the restore: without a side the
+            // cancellation's records are both read, and without an origin an end is judged
+            // as generated, the stricter rule (Paykit spec 7.2, 8.1).
+            let reads = match StateKey::parse(&name) {
+                Some(StateKey::Side(_)) => {
+                    state::restored::<KeptSide>(&name, &value, &binder).is_ok()
+                }
+                Some(StateKey::EndOrigin(_)) => {
+                    state::restored::<crate::allowances::EndOrigin>(&name, &value, &binder).is_ok()
+                }
+                // Only the two prefixes scanned above reach here; any other key is left out.
+                Some(_) | None => false,
+            };
+            if reads {
+                writes.push(LocalWrite::Put { key: name, value });
+            }
+        }
+    }
     for (key, value) in state {
         // The schema is closed: a key no builder of the SDK writes is refused, and every
         // value is read as its family's, bound to what its key names (`state::StateKey`).
@@ -1220,6 +1291,11 @@ pub(crate) fn restore_paykit_layer(
                 original_approvals.insert(record, original);
                 continue;
             }
+            StateKey::HeldMessagesOwed => {
+                state::restored::<crate::restore_held::HeldPass>(&key, &value, &binder)
+                    .map_err(|_| unread())?;
+                continue;
+            }
             StateKey::AppliedReply(_) => {
                 state::restored::<crate::allowances::AppliedReply>(&key, &value, &binder)
                     .map_err(|_| unread())?;
@@ -1311,6 +1387,17 @@ pub(crate) fn restore_paykit_layer(
             StateKey::ListAsk { .. } => {
                 state::restored::<ListAsk>(&key, &value, &binder).map_err(|_| unread())?;
                 writes.push(LocalWrite::Put { key, value });
+                continue;
+            }
+            StateKey::EndpointChangeNotice(_) => {
+                state::restored::<KeptNotice>(&key, &value, &binder).map_err(|_| unread())?;
+                endpoint_rows.entry(key).or_insert(value);
+                continue;
+            }
+            StateKey::EndpointChange => {
+                state::restored::<crate::own_record::EndpointChange>(&key, &value, &binder)
+                    .map_err(|_| unread())?;
+                endpoint_rows.entry(key).or_insert(value);
                 continue;
             }
             // Not restored: the restored app tells its host again at its load.
@@ -1455,13 +1542,15 @@ pub(crate) fn restore_paykit_layer(
                 }
                 continue;
             }
-            StateKey::MessageNotice { .. }
+            StateKey::UnrecordedStop { .. }
+            | StateKey::MessageNotice { .. }
             | StateKey::Notice { .. }
             | StateKey::BlockedLost { .. } => {
                 let notice =
                     state::restored::<KeptNotice>(&key, &value, &binder).map_err(|_| unread())?;
-                // The installation's notice of a stop it told wins (`stop_notices`).
-                if stop_notices.contains_key(&key) {
+                // The installation's notice of a stop it told wins (`stop_notices`), and so
+                // does its notice of a stop the restore pass withdrew.
+                if stop_notices.contains_key(&key) || installation_stop_notices.contains_key(&key) {
                     continue;
                 }
                 // An acknowledged notice of an attempt is kept only while the journal holds
@@ -1503,6 +1592,28 @@ pub(crate) fn restore_paykit_layer(
             awaiting_recording.insert(attempt);
         }
         journaled.insert(attempt);
+        // A restore in place keeps the installation's mark that its held acceptance was
+        // withdrawn: the client keeps that give-up through the restore, so the backup's entry
+        // must not open the acceptance to a replacement (Paykit spec 7.2;
+        // `Paykit::acceptance_withdrawn_at_restore`).
+        if let Some(acceptance) = entry.acceptance_msg_id.clone() {
+            for (name, installed) in restoring
+                .previous_local_scan(&key)
+                .map_err(|_| "the installation's journal cannot be read")?
+            {
+                let withdrawn = name == key
+                    && state::restored::<JournalEntry>(&name, &installed, &binder).is_ok_and(
+                        |installed| {
+                            installed.acceptance_withdrawn
+                                && installed.acceptance_msg_id.as_deref() == Some(&acceptance)
+                        },
+                    );
+                if withdrawn {
+                    entry.acceptance_released = true;
+                    entry.acceptance_withdrawn = true;
+                }
+            }
+        }
         entry.restored = true;
         entry.never_dispatched = false;
         let value = state::encode(&entry).map_err(|_| bad())?;
@@ -1548,6 +1659,9 @@ pub(crate) fn restore_paykit_layer(
         let value = state::encode(&notice).map_err(|_| "a delivery notice cannot be written")?;
         writes.push(LocalWrite::Put { key, value });
     }
+    for (key, value) in endpoint_rows {
+        writes.push(LocalWrite::Put { key, value });
+    }
     for (key, stop) in previous_stops {
         let value = state::encode(&stop).map_err(|_| "a queued stop cannot be written")?;
         writes.push(LocalWrite::Put { key, value });
@@ -1556,6 +1670,9 @@ pub(crate) fn restore_paykit_layer(
         if let Some(value) = value {
             writes.push(LocalWrite::Put { key, value });
         }
+    }
+    for (key, value) in installation_stop_notices {
+        writes.push(LocalWrite::Put { key, value });
     }
     for (key, notice) in notices {
         // An acknowledged one of a payment the restored journal doesn't hold has nothing left
@@ -1686,6 +1803,15 @@ pub(crate) fn restore_paykit_layer(
             state::encode(&history).map_err(|_| "the executor history cannot be retained")?;
         writes.push(LocalWrite::Put { key, value });
     }
+    // Lists need a fresh empty version even when backup and installation both owe
+    // the original and the Dispatch raises no held-message duty (Paykit spec 7.2).
+    writes.push(
+        state::local_put(
+            key::HELD_MESSAGES_OWED,
+            &crate::restore_held::HeldPass::CarriedLists,
+        )
+        .map_err(|e| e.to_string())?,
+    );
     // A previous publication can outlive both the backup and a narrowed certificate.
     // Discovery waits until this app holds plain paykit_request (Paykit spec 8.4.1).
     writes.push(state::local_put(key::LIST_DISCOVERY, &true).map_err(|e| e.to_string())?);
@@ -1961,6 +2087,7 @@ impl Protocol for PaykitProtocol {
         &self,
         delivery: &pubky_dispatch_client::app::DeliveryView<'_>,
     ) -> Result<bool, StoreFailure> {
+        self.held_inventory.observe(delivery);
         // Nothing goes under a certificate Paykit refuses, or one that no longer sends the
         // kind, before any rule of the kind's own (Paykit spec 3.1 to 3.3, 7.2, 9).
         let cert = delivery.cert();
@@ -2083,6 +2210,15 @@ impl Protocol for PaykitProtocol {
     /// (`crate::own_record::member_under`): signed once with the certificate, so a record
     /// under it never lists a public endpoint or a capability it doesn't cover (Paykit spec,
     /// "What this pin adopts", "Renewing a certificate").
+    ///
+    /// Security: the one path that signs Paykit's member outside the gate that tells a held
+    /// change first (`Paykit::held_change_settled`). The client calls it to take a renewal or
+    /// adopt a certificate, which it must take (Dispatch spec 3.2), and the trait gives it no
+    /// way to refuse: it is pure and synchronous. It is safe only because `member` is the
+    /// member of the record the client holds as signed, with this run's own changes, and
+    /// never a change held aside (Dispatch spec 4.2): a held change, a withdrawal included,
+    /// has no effect on what it signs, and stays held until it is told. It reads nothing
+    /// else, so nothing of a held change can reach it.
     fn member_for(
         &self,
         member: Option<&Map<String, Value>>,

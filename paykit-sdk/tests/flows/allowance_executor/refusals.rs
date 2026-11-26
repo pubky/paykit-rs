@@ -126,7 +126,7 @@ async fn conflict(w: &World, payer: &mut Paykit, key: &[u8; 32]) {
 /// waits for the user's confirmation again.
 async fn missed(w: &World, payer: &mut Paykit) {
     let now = w.clock.now_ms();
-    w.alice.switch().push_missed(1, now - 1_000, now);
+    w.alice.dispatch().push_missed(1, now - 1_000, now);
     Box::pin(crate::common::finish_listing(payer)).await;
 }
 
@@ -559,7 +559,7 @@ async fn test_allowance_refusals_lifetime_limit_waits_for_a_reservation_before_t
     // 10 more reserved, by an attempt whose answer was lost before the method was called.
     let second = Box::pin(one_time(&w, &mut shop, &mut payer, "10")).await;
     w.alice
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::LoseAnswer {
             path: "/ops".into(),
         });
@@ -697,7 +697,7 @@ async fn test_allowance_refusals_view_flag_matches_the_payment_refusal() {
     // After a `missed` item every Allowance on the list waits for the user: the flag, and
     // the refusal naming it.
     let now = w.clock.now_ms();
-    w.alice.switch().push_missed(1, now - 1_000, now);
+    w.alice.dispatch().push_missed(1, now - 1_000, now);
     Box::pin(crate::common::finish_listing(&mut payer)).await;
     let (shown, _) = Box::pin(view_agrees_with_payment(&w, &mut shop, &mut payer, &key)).await;
     assert!(shown);
@@ -1103,7 +1103,7 @@ async fn test_allowance_refusals_kept_grant_write_is_not_now_until_it_lands() {
         path: "/ops".into(),
         after: 0,
     };
-    w.alice.switch().fail_next(unreachable());
+    w.alice.dispatch().fail_next(unreachable());
     Box::pin(payer.resume_allowance_executor(&key))
         .await
         .expect_err("the grant's batch is kept");
@@ -1112,13 +1112,13 @@ async fn test_allowance_refusals_kept_grant_write_is_not_now_until_it_lands() {
     let kept = paykit_sdk::Refusal::NotNow(paykit_sdk::NotNowReason::EarlierWriteUnresolved(
         "the executor grant's write waits to be sent again",
     ));
-    w.alice.switch().fail_next(unreachable());
+    w.alice.dispatch().fail_next(unreachable());
     assert_eq!(
         refusal_of(Box::pin(payer.resume_allowance_executor(&key)).await),
         kept
     );
     assert!(!payer.allowance(&key).await.unwrap().confirmation_needed);
-    w.alice.switch().fail_next(unreachable());
+    w.alice.dispatch().fail_next(unreachable());
     let request = Box::pin(one_time(&w, &mut shop, &mut payer, "1")).await;
     // Refused before anything is sent.
     assert_eq!(
@@ -1140,7 +1140,7 @@ async fn test_allowance_refusals_grant_applied_under_an_older_hold_asks_the_user
     // made on is the earlier hold's, so the user confirms it, and confirming lifts it.
     use pubky_dispatch_client::testing::Fault;
     let (w, mut payer, _shop, key) = Box::pin(super::accepted_not_granted(store())).await;
-    w.alice.switch().fail_next(Fault::Unanswered {
+    w.alice.dispatch().fail_next(Fault::Unanswered {
         path: "/ops".into(),
         after: 0,
     });
@@ -1148,12 +1148,12 @@ async fn test_allowance_refusals_grant_applied_under_an_older_hold_asks_the_user
         .await
         .expect_err("the grant's batch is unanswered");
     w.clock.advance_ms(1_000);
-    w.alice.switch().fail_next(Fault::Unreachable {
+    w.alice.dispatch().fail_next(Fault::Unreachable {
         path: "/ops".into(),
         after: 0,
     });
     let now = w.clock.now_ms();
-    w.alice.switch().push_missed(1, now - 1_000, now);
+    w.alice.dispatch().push_missed(1, now - 1_000, now);
     for _ in 0..3 {
         Box::pin(payer.receive(None)).await.unwrap();
     }
@@ -1190,7 +1190,7 @@ async fn test_allowance_refusals_removal_before_the_consent_is_final() {
         AppScopes::new().allowance().build().unwrap(),
     ))
     .await;
-    w.alice.switch().fail_next(Fault::Unanswered {
+    w.alice.dispatch().fail_next(Fault::Unanswered {
         path: "/ops".into(),
         after: 0,
     });
@@ -1433,7 +1433,7 @@ async fn test_allowance_refusals_hold_set_while_landing_the_grant_asks_again() {
     let (w, mut payer, _shop, key) =
         Box::pin(super::accepted_not_granted(Arc::clone(&disk) as Arc<_>)).await;
     let shown = payer.allowance(&key).await.unwrap().hold;
-    w.alice.switch().fail_next(Fault::Unanswered {
+    w.alice.dispatch().fail_next(Fault::Unanswered {
         path: "/ops".into(),
         after: 0,
     });
@@ -1466,7 +1466,7 @@ async fn test_allowance_refusals_known_end_comes_before_a_kept_grant() {
         AppScopes::new().allowance().build().unwrap(),
     ))
     .await;
-    w.alice.switch().fail_next(Fault::LoseAnswer {
+    w.alice.dispatch().fail_next(Fault::LoseAnswer {
         path: "/ops".into(),
     });
     Box::pin(payer.resume_allowance_executor(&key))
@@ -1477,16 +1477,16 @@ async fn test_allowance_refusals_known_end_comes_before_a_kept_grant() {
         path: "/ops".into(),
         after: 0,
     };
-    w.alice.switch().fail_next(unreachable());
+    w.alice.dispatch().fail_next(unreachable());
     Box::pin(payer.receive(None)).await.unwrap();
     let hold = payer.allowance(&key).await.unwrap().hold;
     for _ in 0..2 {
-        w.alice.switch().fail_next(unreachable());
+        w.alice.dispatch().fail_next(unreachable());
         assert_eq!(
             refusal_of(Box::pin(payer.resume_allowance_executor(&key)).await),
             Refusal::AllowanceEnded
         );
-        w.alice.switch().fail_next(unreachable());
+        w.alice.dispatch().fail_next(unreachable());
         assert_eq!(
             refusal_of(
                 Box::pin(payer.confirm_allowance_executor(&hold, UserConfirmed::new())).await

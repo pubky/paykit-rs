@@ -198,8 +198,8 @@ async fn test_publication_restore_lists_former_and_current_recipients() {
     assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
     let former = target(&shop, &w.alice_id(), 1);
     let former_key = shop.app().record_key(&former).unwrap();
-    let changed = w.bob.switch().change_key_into([74; 32]);
-    w.router.add_switch(BOB_ORIGIN, &changed);
+    let changed = w.bob.dispatch().change_key_into([74; 32]);
+    w.router.add_dispatch(BOB_ORIGIN, &changed);
     let current = w
         .bob
         .sign_next(|body| {
@@ -444,7 +444,7 @@ async fn test_publication_lost_answer_settles_the_original_before_replacing_its_
     shop.set_list_endpoints(offered("lno1original"))
         .await
         .unwrap();
-    w.bob.switch().fail_next(Fault::LoseAnswer {
+    w.bob.dispatch().fail_next(Fault::LoseAnswer {
         path: "/ops".into(),
     });
     let first = shop.publish_list_to(w.alice_id()).await.unwrap_err();
@@ -518,7 +518,7 @@ async fn test_publication_expired_original_batch_still_waits_at_the_same_counter
         .unwrap();
     let target = target(&shop, &recipient, 1);
     let key = shop.app().record_key(&target).unwrap();
-    w.bob.switch().fail_next(Fault::LoseAnswer {
+    w.bob.dispatch().fail_next(Fault::LoseAnswer {
         path: "/ops".into(),
     });
     let lost = shop.publish_list_to(recipient).await.unwrap_err();
@@ -579,7 +579,7 @@ async fn test_publication_imported_original_settles_before_a_new_generation_list
         .record_key(&target(&shop, &recipient, 1))
         .unwrap();
     shop.set_list_endpoints(offered("lno1old")).await.unwrap();
-    w.bob.switch().fail_next(Fault::LoseAnswer {
+    w.bob.dispatch().fail_next(Fault::LoseAnswer {
         path: "/ops".into(),
     });
     let lost = shop.publish_list_to(recipient).await.unwrap_err();
@@ -588,8 +588,8 @@ async fn test_publication_imported_original_settles_before_a_new_generation_list
     shop.set_list_endpoints(offered("lno1afterimport"))
         .await
         .unwrap();
-    let next = w.bob.switch().import_into_at([85; 32], NEXT);
-    w.router.add_switch(NEXT, &next);
+    let next = w.bob.dispatch().import_into_at([85; 32], NEXT);
+    w.router.add_dispatch(NEXT, &next);
     let changed = w
         .bob
         .sign_next(|body| {
@@ -751,7 +751,7 @@ async fn interrupted_keep(after_commit: bool) {
     .await
     .unwrap();
     let publisher = shop.app_id();
-    let before = w.bob.switch().applied().len();
+    let before = w.bob.dispatch().applied().len();
     if after_commit {
         disk.lose_keep_answer();
     } else {
@@ -759,7 +759,7 @@ async fn interrupted_keep(after_commit: bool) {
     }
     let err = shop.publish_list_to(w.alice_id()).await.unwrap_err();
     assert_eq!(err.kept_batch().is_some(), after_commit, "{err}");
-    assert_eq!(w.bob.switch().applied().len(), before);
+    assert_eq!(w.bob.dispatch().applied().len(), before);
     drop(shop);
     let mut shop = w
         .load_on_clock(&w.bob, storage, publisher, w.clock.clone())
@@ -809,7 +809,7 @@ async fn test_publication_reloads_the_original_after_its_first_keep_answer_is_lo
 #[tokio::test]
 async fn test_publication_later_provider_refusal_does_not_release_the_lost_original() {
     use pubky_dispatch_client::app::{KeptBatchDrop, KeptBatchStatus};
-    use pubky_dispatch_client::testing::{Fault, ScriptedSwitch};
+    use pubky_dispatch_client::testing::{Fault, ScriptedDispatch};
     use pubky_dispatch_core::records::Inbox;
     const NEXT: &str = "https://recovered-merchant.example";
     let w = World::new();
@@ -822,7 +822,7 @@ async fn test_publication_later_provider_refusal_does_not_release_the_lost_origi
         .record_key(&target(&shop, &recipient, 1))
         .unwrap();
     shop.set_list_endpoints(offered("lno1first")).await.unwrap();
-    w.bob.switch().fail_next(Fault::LoseAnswer {
+    w.bob.dispatch().fail_next(Fault::LoseAnswer {
         path: "/ops".into(),
     });
     let original = shop
@@ -839,8 +839,9 @@ async fn test_publication_later_provider_refusal_does_not_release_the_lost_origi
             ..
         })
     ));
-    let next = ScriptedSwitch::recovering(w.bob.identity().key(), [93; 32], w.clock.clone(), 2, 1)
-        .unwrap();
+    let next =
+        ScriptedDispatch::recovering(w.bob.identity().key(), [93; 32], w.clock.clone(), 2, 1)
+            .unwrap();
     let doc = w
         .bob
         .sign_next(|b| {
@@ -851,7 +852,7 @@ async fn test_publication_later_provider_refusal_does_not_release_the_lost_origi
         .unwrap();
     next.deliver_identity(&doc).unwrap();
     w.router.remove(crate::common::BOB_ORIGIN);
-    w.router.add_switch(NEXT, &next);
+    w.router.add_dispatch(NEXT, &next);
     shop.app_mut().refresh_identity().await.unwrap();
     shop.app_mut().follow_provider().await.unwrap();
     assert!(matches!(shop.app().kept_batch(original).await.unwrap(),
@@ -918,7 +919,7 @@ async fn test_publication_older_in_place_restore_retains_the_later_unresolved_re
         .record_key(&target(&shop, &recipient, 1))
         .unwrap();
     shop.set_list_endpoints(offered("lno1first")).await.unwrap();
-    w.bob.switch().fail_next(Fault::LoseAnswer {
+    w.bob.dispatch().fail_next(Fault::LoseAnswer {
         path: "/ops".into(),
     });
     let original = shop
@@ -1049,7 +1050,7 @@ async fn test_publication_restored_pending_batch_needs_its_matching_applied_writ
     shop.set_list_endpoints(offered("lno1original"))
         .await
         .unwrap();
-    w.bob.switch().fail_next(Fault::LoseAnswer {
+    w.bob.dispatch().fail_next(Fault::LoseAnswer {
         path: "/ops".into(),
     });
     let batch = shop
@@ -1875,8 +1876,8 @@ async fn test_publication_request_for_an_unchanged_offer_uses_the_active_generat
             assert_eq!(published(&shop, &wallet).await[0].version, first);
 
             if moved {
-                let service = w.bob.switch().change_key_into([74; 32]);
-                w.router.add_switch(BOB_ORIGIN, &service);
+                let service = w.bob.dispatch().change_key_into([74; 32]);
+                w.router.add_dispatch(BOB_ORIGIN, &service);
                 let current = w
                     .bob
                     .sign_next(|body| {
@@ -2081,8 +2082,8 @@ async fn repeat_across_generations(second_installation_withdraws: bool) {
     assert_eq!(original[1].version, first.next().unwrap());
 
     let backup = shop.backup().await.unwrap();
-    let service = w.bob.switch().change_key_into([74; 32]);
-    w.router.add_switch(BOB_ORIGIN, &service);
+    let service = w.bob.dispatch().change_key_into([74; 32]);
+    w.router.add_dispatch(BOB_ORIGIN, &service);
     let current = w
         .bob
         .sign_next(|body| {
@@ -2141,7 +2142,7 @@ async fn repeat_across_generations(second_installation_withdraws: bool) {
         assert_eq!(published(&shop, &wallet).await, expected);
     }
     let last = service.change_key_into([75; 32]);
-    w.router.add_switch(BOB_ORIGIN, &last);
+    w.router.add_dispatch(BOB_ORIGIN, &last);
     let moved = w
         .bob
         .sign_next(|body| {
@@ -2176,7 +2177,7 @@ async fn test_publication_waits_for_an_unknown_counter_key_before_repeating_an_o
     use crate::unrequested::store_bundle_at;
     use paykit_sdk::AppScopes;
     use pubky_dispatch_client::app::{RecordContent, Unopened};
-    use pubky_dispatch_client::testing::ScriptedSwitch;
+    use pubky_dispatch_client::testing::ScriptedDispatch;
     use pubky_dispatch_core::records::Inbox;
 
     let w = World::new();
@@ -2199,9 +2200,9 @@ async fn test_publication_waits_for_an_unknown_counter_key_before_repeating_an_o
     let mut expected = published(&shop, &wallet).await;
     assert_eq!(expected.len(), 2);
 
-    let move_to = |previous: &ScriptedSwitch, generation, secret| {
+    let move_to = |previous: &ScriptedDispatch, generation, secret| {
         let service = previous.change_key_into(secret);
-        w.router.add_switch(ALICE_ORIGIN, &service);
+        w.router.add_dispatch(ALICE_ORIGIN, &service);
         let doc = w
             .alice
             .sign_next(|body| {
@@ -2212,11 +2213,11 @@ async fn test_publication_waits_for_an_unknown_counter_key_before_repeating_an_o
         service.deliver_identity(&doc).unwrap();
         service
     };
-    let rotate = |service: &ScriptedSwitch, epoch| {
+    let rotate = |service: &ScriptedDispatch, epoch| {
         let doc = w.alice.sign_next(|body| body.data_epoch = epoch).unwrap();
         service.deliver_identity(&doc).unwrap();
     };
-    let middle = move_to(w.alice.switch(), 2, [74; 32]);
+    let middle = move_to(w.alice.dispatch(), 2, [74; 32]);
     for seller in [&mut shop, &mut other] {
         seller.app_mut().refresh_identity().await.unwrap();
         seller.app_mut().follow_provider().await.unwrap();
@@ -2319,8 +2320,8 @@ async fn test_publication_restored_answers_use_the_retained_request_and_current_
         let answered = published(&shop, &wallet).await.last().unwrap().version;
         assert_eq!(answered.counter(), 3);
         if moved {
-            let changed = w.bob.switch().change_key_into([74; 32]);
-            w.router.add_switch(BOB_ORIGIN, &changed);
+            let changed = w.bob.dispatch().change_key_into([74; 32]);
+            w.router.add_dispatch(BOB_ORIGIN, &changed);
             let current = w
                 .bob
                 .sign_next(|body| {
@@ -2655,8 +2656,8 @@ async fn test_publication_retry_after_a_move_requires_the_original_application()
     let original = give_up_withdrawal(&mut shop, payer).await;
     shop.receive(None).await.unwrap();
 
-    let next = w.bob.switch().change_key_into([74; 32]);
-    w.router.add_switch(BOB_ORIGIN, &next);
+    let next = w.bob.dispatch().change_key_into([74; 32]);
+    w.router.add_dispatch(BOB_ORIGIN, &next);
     let moved = w
         .bob
         .sign_next(|doc| {
@@ -2720,10 +2721,10 @@ async fn retry_after_two_moves(restored_withdraws: bool) {
     shop.receive(None).await.unwrap();
     let saved = shop.backup().await.unwrap();
 
-    let mut service = w.bob.switch().clone();
+    let mut service = w.bob.dispatch().clone();
     for generation in 2..=3 {
         let next = service.change_key_into([70 + generation as u8; 32]);
-        w.router.add_switch(BOB_ORIGIN, &next);
+        w.router.add_dispatch(BOB_ORIGIN, &next);
         let moved = w
             .bob
             .sign_next(|body| {
@@ -2827,7 +2828,7 @@ async fn test_publication_keeps_an_unknown_withdrawal_and_a_failed_resend_from_a
         shop.set_list_endpoints(offered("lno1first")).await.unwrap();
         shop.publish_list_to(payer).await.unwrap();
         if !accepted {
-            w.alice.switch().fail_next(Fault::LoseAnswer {
+            w.alice.dispatch().fail_next(Fault::LoseAnswer {
                 path: "/inbox".into(),
             });
         }
@@ -2879,7 +2880,7 @@ async fn unknown_list(
     send: impl AsyncFnOnce(&mut Paykit),
 ) -> (ListPublicationRecord, [u8; 32]) {
     use pubky_dispatch_client::testing::Fault;
-    w.alice.switch().fail_next(Fault::Unanswered {
+    w.alice.dispatch().fail_next(Fault::Unanswered {
         path: "/inbox".into(),
         after: 0,
     });
@@ -3371,7 +3372,7 @@ async fn test_publication_notice_of_a_version_superseded_while_its_batch_waited_
     let mut shop = w.shop().await;
     shop.app_mut().invite(&payer).await.unwrap();
     shop.set_list_endpoints(offered("lno1first")).await.unwrap();
-    w.alice.switch().fail_next(Fault::Unanswered {
+    w.alice.dispatch().fail_next(Fault::Unanswered {
         path: "/inbox".into(),
         after: 0,
     });
@@ -3380,7 +3381,7 @@ async fn test_publication_notice_of_a_version_superseded_while_its_batch_waited_
     let held = shop.app().shared_record(&key).await.unwrap().unwrap();
     let first = ListPublicationRecord::read(held.content.value().unwrap()).unwrap();
     // The change's batch waits unanswered while the first version is given up.
-    w.bob.switch().fail_next(Fault::Unanswered {
+    w.bob.dispatch().fail_next(Fault::Unanswered {
         path: "/ops".into(),
         after: 0,
     });
@@ -3487,10 +3488,10 @@ async fn test_publication_confirmed_withdrawal_after_two_moves_starts_the_curren
     .await;
     shop.receive(None).await.unwrap();
     let shown = unknown_shown(shop.withdraw_list_from(payer).await.unwrap_err());
-    let mut service = w.bob.switch().clone();
+    let mut service = w.bob.dispatch().clone();
     for generation in 2..=3 {
         let next = service.change_key_into([80 + generation as u8; 32]);
-        w.router.add_switch(BOB_ORIGIN, &next);
+        w.router.add_dispatch(BOB_ORIGIN, &next);
         let moved = w
             .bob
             .sign_next(|body| {
@@ -3562,7 +3563,7 @@ async fn test_publication_takes_only_a_proof_naming_its_own_unknown_list_as_its_
     shop.app_mut().invite(&payer).await.unwrap();
     shop.receive(None).await.unwrap();
     shop.set_list_endpoints(offered("lno1first")).await.unwrap();
-    w.alice.switch().fail_next(Fault::LoseAnswer {
+    w.alice.dispatch().fail_next(Fault::LoseAnswer {
         path: "/inbox".into(),
     });
     shop.publish_list_to(payer).await.unwrap();
@@ -3657,7 +3658,7 @@ async fn test_publication_takes_a_proof_paid_from_the_unknown_list_as_its_arriva
     shop.set_list_endpoints(offered("lno1first")).await.unwrap();
     // The inbox takes the list but its answer is lost: the payer holds it, and the shop
     // can't tell.
-    w.alice.switch().fail_next(Fault::LoseAnswer {
+    w.alice.dispatch().fail_next(Fault::LoseAnswer {
         path: "/inbox".into(),
     });
     shop.publish_list_to(payer).await.unwrap();
@@ -3695,7 +3696,7 @@ async fn test_publication_takes_a_list_request_naming_the_unknown_withdrawal_as_
     shop.set_list_endpoints(offered("lno1first")).await.unwrap();
     shop.publish_list_to(payer).await.unwrap();
     // The inbox takes the withdrawal but its answer is lost: the payer holds it.
-    w.alice.switch().fail_next(Fault::LoseAnswer {
+    w.alice.dispatch().fail_next(Fault::LoseAnswer {
         path: "/inbox".into(),
     });
     shop.withdraw_list_from(payer).await.unwrap();
@@ -4048,7 +4049,7 @@ async fn test_publication_proof_of_a_held_settlement_while_the_lists_are_unknown
     // proof updating the held record shows nothing of the list (Paykit spec 8.1, 9).
     w.clock.advance_ms(paykit_sdk::LISTS_REFRESH_MS);
     w.bob
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::Error {
             path: "/allow".into(),
             code: pubky_dispatch_core::http::ErrorCode::Unavailable,

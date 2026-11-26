@@ -2303,7 +2303,7 @@ mod tests {
     }
 
     fn dispatch(code: ErrorCode) -> PaykitError {
-        PaykitError::Client(AppError::Switch(ClientError::Switch {
+        PaykitError::Client(AppError::Dispatch(ClientError::Dispatch {
             status: code.status(),
             code,
             message: "scripted".into(),
@@ -2388,7 +2388,7 @@ mod tests {
         assert!(unanswered(&PaykitError::Client(
             AppError::NotAnsweringAsAccount { since_ms: 1 }
         )));
-        assert!(unanswered(&PaykitError::Client(AppError::Switch(
+        assert!(unanswered(&PaykitError::Client(AppError::Dispatch(
             ClientError::BadServiceSignature { status: 502 }
         ))));
         assert!(unanswered(&dispatch(ErrorCode::RateLimited)));

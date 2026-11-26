@@ -111,7 +111,7 @@ async fn lost_reply(mode: Mode) {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let _shop = shop_for(&w, mode, &mut wallet).await;
-    w.alice.switch().fail_next(Fault::LoseAnswer {
+    w.alice.dispatch().fail_next(Fault::LoseAnswer {
         path: "/ops".into(),
     });
     let unsent = wallet.pay_without_request(to_bob(&w, mode)).await.outcome;
@@ -508,9 +508,9 @@ async fn test_unrequested_claim_offline_public_payment_never_takes_the_unblinded
     let app_id = wallet.app_id();
     let backup = wallet.backup().await.unwrap();
     drop(wallet);
-    w.router.add_switch(w.alice.origin(), w.alice.switch());
+    w.router.add_dispatch(w.alice.origin(), w.alice.dispatch());
     w.alice
-        .switch()
+        .dispatch()
         .open_attempt(unblinded, attempt_id.to_bytes(), app_id)
         .unwrap();
     let from = w.router.log().len();
@@ -534,7 +534,7 @@ async fn test_unrequested_claim_offline_public_payment_never_takes_the_unblinded
     assert_eq!(journaled_on(&restored, &attempt_id).await, key);
     assert_eq!(restored.payments().await.unwrap()[0].stage, Stage::RailPaid);
     assert!(restored.app_mut().read_claim(&key).await.unwrap().is_none());
-    let planted = w.alice.switch().claim(&unblinded).unwrap();
+    let planted = w.alice.dispatch().claim(&unblinded).unwrap();
     assert_eq!(planted.attempts.len(), 1);
     assert_eq!(planted.attempts[0].outcome, Outcome::Open);
     assert_eq!(w.rail.pay_calls(&attempt_id), 1);

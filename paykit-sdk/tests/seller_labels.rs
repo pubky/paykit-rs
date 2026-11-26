@@ -21,7 +21,7 @@ use paykit_sdk::{
 use pubky_dispatch_client::app::{AppConfig, Publication};
 use pubky_dispatch_client::store::MemoryStore;
 use pubky_dispatch_client::transport::BoxFuture;
-use pubky_dispatch_client::{Credentials, SwitchClient};
+use pubky_dispatch_client::{Credentials, DispatchClient};
 use pubky_dispatch_core::records::{app_record_path, AppRecord};
 use pubky_dispatch_core::sig::SignedDoc;
 use pubky_dispatch_harness::{parties::Asking, Backend, World};
@@ -58,7 +58,7 @@ struct AppSpec {
 
 async fn signer(world: &World, name: &str, origin: &str) -> TestResult<Signer> {
     let identity = world.identity(name)?;
-    world.add_switch(origin, &[&identity]).await?;
+    world.add_dispatch(origin, &[&identity]).await?;
     let mut env = world.signer_env(&identity, Arc::new(MemoryStore::new()))?;
     env.protocols = Protocols::new(vec![Arc::new(paykit_lib::signer::PaykitProtocol)])?;
     let mut signer = Box::pin(Signer::create(env, world.keyring(&identity)?, origin)).await?;
@@ -133,9 +133,9 @@ fn seller(app: &'static str, display_name: &'static str, label: &str) -> TestRes
     })
 }
 
-fn directory_reader(world: &World, reader: &Host, writer: &Host) -> TestResult<SwitchClient> {
+fn directory_reader(world: &World, reader: &Host, writer: &Host) -> TestResult<DispatchClient> {
     let identity = world.identity(reader.identity)?;
-    Ok(SwitchClient::new(
+    Ok(DispatchClient::new(
         SELLER_ORIGIN,
         writer.wallet.identity(),
         Credentials::App {
@@ -151,7 +151,7 @@ fn directory_reader(world: &World, reader: &Host, writer: &Host) -> TestResult<S
 
 async fn published_record(
     world: &World,
-    reader: &SwitchClient,
+    reader: &DispatchClient,
     writer: &Host,
 ) -> TestResult<AppRecord> {
     let app = writer.wallet.app();
@@ -181,7 +181,7 @@ async fn published_record(
     Ok(made)
 }
 
-async fn update_record(world: &World, reader: &SwitchClient, writer: &mut Host) -> TestResult {
+async fn update_record(world: &World, reader: &DispatchClient, writer: &mut Host) -> TestResult {
     let before = published_record(world, reader, writer).await?;
     assert_eq!(before.expires_at(), None);
     let app_id = writer.wallet.app_id();
@@ -208,7 +208,7 @@ async fn update_record(world: &World, reader: &SwitchClient, writer: &mut Host) 
 
 async fn update_public_endpoints(
     world: &World,
-    reader: &SwitchClient,
+    reader: &DispatchClient,
     writer: &mut Host,
 ) -> TestResult {
     assert!(writer

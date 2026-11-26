@@ -63,7 +63,7 @@ async fn test_restore_hold_cancellation_resent_after_the_restore_stops_for_good(
     cancel(&mut shop, &request).await;
     for _ in 0..1 {
         w.alice
-            .switch()
+            .dispatch()
             .fail_next(pubky_dispatch_client::testing::Fault::Error {
                 path: "/ops".into(),
                 code: pubky_dispatch_core::http::ErrorCode::PermissionMissing,
@@ -341,7 +341,7 @@ async fn test_restore_hold_keeps_a_request_created_before_and_resent_after() {
 fn refuse_writes(w: &World, n: usize) {
     for _ in 0..n {
         w.alice
-            .switch()
+            .dispatch()
             .fail_next(pubky_dispatch_client::testing::Fault::Error {
                 path: "/ops".into(),
                 code: pubky_dispatch_core::http::ErrorCode::PermissionMissing,
@@ -530,7 +530,7 @@ async fn test_restore_hold_confirmation_is_asked_again_after_another_restore() {
 /// the wallet read them (Dispatch spec 8.2).
 fn missed(w: &World) {
     let now = w.clock.now_ms();
-    w.alice.switch().push_missed(1, now - 1_000, now);
+    w.alice.dispatch().push_missed(1, now - 1_000, now);
 }
 
 /// Fail Paykit's own listing at the end of the next receive, after a `missed` item: the
@@ -538,7 +538,7 @@ fn missed(w: &World) {
 /// listing that fails inside the client's read fails the read.
 fn fail_paykit_listing(w: &World) {
     w.alice
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
             path: "records?collection".into(),
             after: 3,
@@ -1017,7 +1017,7 @@ async fn test_restore_hold_missed_item_at_the_payee_asks_the_payer_of_an_open_re
         .unwrap();
     shop.receive(None).await.unwrap();
     let now = w.clock.now_ms();
-    w.bob.switch().push_missed(1, now - 1_000, now);
+    w.bob.dispatch().push_missed(1, now - 1_000, now);
     shop.receive(None).await.unwrap();
     assert_eq!(asks_to(&shop, &w.alice_id()).await, 1);
 }
@@ -1219,7 +1219,7 @@ async fn test_restore_hold_missed_item_listing_failing_in_the_read_fails_the_rec
     missed(&w);
     let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
     w.alice
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::Error {
             path: "records?collection".into(),
             code: pubky_dispatch_core::http::ErrorCode::Unavailable,
@@ -1258,7 +1258,7 @@ async fn test_restore_hold_missed_item_bounded_by_its_last_acceptance_time() {
     let _shop = w.shop().await;
     let now = w.clock.now_ms();
     w.alice
-        .switch()
+        .dispatch()
         .push_missed(1, now - 2 * HOUR_MS, now - HOUR_MS);
     wallet.receive(None).await.unwrap();
     let after = signed_request(&w, "order-1");
@@ -1326,10 +1326,10 @@ async fn test_restore_hold_held_cursor_gap_bounded_by_the_verified_service_time(
     for _ in 0..4 {
         ahead = w
             .alice
-            .switch()
+            .dispatch()
             .push_missed(1, w.clock.now_ms(), w.clock.now_ms());
     }
-    w.alice.switch().set_held_cursor(&wallet.app_id(), ahead);
+    w.alice.dispatch().set_held_cursor(&wallet.app_id(), ahead);
     let read_ms = w.clock.now_ms();
     let report = wallet.receive(None).await.unwrap();
     assert!(
@@ -1401,12 +1401,12 @@ async fn test_restore_hold_held_cursor_gap_and_a_bounded_item_hold_to_the_later_
     for _ in 0..4 {
         ahead = w
             .alice
-            .switch()
+            .dispatch()
             .push_missed(1, w.clock.now_ms(), w.clock.now_ms());
     }
-    w.alice.switch().set_held_cursor(&wallet.app_id(), ahead);
+    w.alice.dispatch().set_held_cursor(&wallet.app_id(), ahead);
     w.alice
-        .switch()
+        .dispatch()
         .push_missed(1, now - 2 * HOUR_MS, now - HOUR_MS);
     wallet.receive(None).await.unwrap();
     let verified = wallet.app().highest_service_time().unwrap();
@@ -1721,7 +1721,7 @@ async fn test_restore_clean_verdict_ended_by_a_later_report_holds_again() {
     assert!(!view.manual_only, "{view:?}");
     assert_eq!(shop.receive(None).await.unwrap().resends, 0);
     let position = app.app().cursor().seq;
-    w.alice.switch().set_held_cursor(&id, position + 3);
+    w.alice.dispatch().set_held_cursor(&id, position + 3);
     app.receive(None).await.unwrap();
     assert!(matches!(
         app.app().restore_held_cursor(),

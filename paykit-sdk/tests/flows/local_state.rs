@@ -600,7 +600,7 @@ async fn test_local_state_users_resolution_beside_a_proof_the_recheck_found_read
     // The outcome's write and its retry on the last flush go unanswered.
     for _ in 0..2 {
         w.alice
-            .switch()
+            .dispatch()
             .fail_next(pubky_dispatch_client::testing::Fault::Unanswered {
                 path: "/ops".into(),
                 after: 0,
@@ -803,7 +803,7 @@ async fn test_local_state_queued_answer_under_another_key_answers_nothing() {
     let mut wallet = w.wallet("wallet").await;
     let _shop = w.shop().await;
     let shop = w.bob.identity().app_keys("shop");
-    let cert = w.bob.switch().app(&shop.app_id_bytes()).cert.unwrap();
+    let cert = w.bob.dispatch().app(&shop.app_id_bytes()).cert.unwrap();
     let key = format!("ans/{:020}/{OTHER_MSG_ID}", 1);
     let answer = json!({
         "seq": 2,
@@ -1233,7 +1233,7 @@ async fn test_local_state_late_held_list_placement_keeps_a_newer_held_list() {
         .put_record(&target, &readable, Vec::new())
         .await
         .unwrap();
-    w.alice.switch().fail_next(Fault::Unanswered {
+    w.alice.dispatch().fail_next(Fault::Unanswered {
         path: "/ops".into(),
         after: 0,
     });

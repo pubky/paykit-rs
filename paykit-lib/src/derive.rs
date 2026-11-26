@@ -3,7 +3,7 @@
 //!
 //! They use the Dispatch's `hash()`, `derive()`, `lp()` and blinding (Dispatch wire 1.4, 1.5).
 //! Paykit's own derivations, the obligation ID and the settlement and occurrence tags, use the
-//! labels `paykit/v1/obligation` and `paykit/v1/settlement`, never a `pubky-switch/v1/` one
+//! labels `paykit/v1/obligation` and `paykit/v1/settlement`, never a `pubky-dispatch/v1/` one
 //! (Dispatch spec 1).
 //!
 //! Security: obligation IDs, record keys and settlement and occurrence tags are blinded with

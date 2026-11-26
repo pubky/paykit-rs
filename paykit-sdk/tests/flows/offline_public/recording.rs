@@ -196,7 +196,7 @@ async fn test_offline_public_renews_after_only_candidate_is_retired_unsent() {
     let obligation = payment_obligation(wallet.app().naming_key(), &id);
     world
         .router
-        .add_switch(world.alice.origin(), world.alice.switch());
+        .add_dispatch(world.alice.origin(), world.alice.dispatch());
 
     let old_cutoff = world.clock.now_ms() + 600_000;
     store.advance.store(600_000, Ordering::SeqCst);
@@ -255,7 +255,7 @@ async fn test_offline_public_reload_on_either_side_of_recording_custody() {
         let obligation = payment_obligation(wallet.app().naming_key(), &id);
         world
             .router
-            .add_switch(world.alice.origin(), world.alice.switch());
+            .add_dispatch(world.alice.origin(), world.alice.dispatch());
         *store.stop.lock().unwrap() = Some(stop);
         let result = wallet.resume_payments().await;
         assert!(

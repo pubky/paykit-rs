@@ -578,7 +578,7 @@ async fn regrant_lost(world: &World) -> TestResult {
     world
         .set_account_missing("https://buyer.payments.test", &buyer, true)
         .await?;
-    world.add_switch(successor, &[&buyer]).await?;
+    world.add_dispatch(successor, &[&buyer]).await?;
     let opening = Box::pin(p.signer.declare_provider_loss(
         successor,
         pubky_dispatch_signer::UserConfirmed::shown_and_confirmed(),

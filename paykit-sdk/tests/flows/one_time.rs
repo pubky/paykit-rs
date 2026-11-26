@@ -619,7 +619,7 @@ async fn test_one_time_receipt_naming_another_proof_leaves_the_proof_recordable(
 fn refuse_batches(w: &World, n: usize) {
     for _ in 0..n {
         w.alice
-            .switch()
+            .dispatch()
             .fail_next(pubky_dispatch_client::testing::Fault::Error {
                 path: "/ops".into(),
                 code: pubky_dispatch_core::http::ErrorCode::PermissionMissing,
@@ -796,11 +796,11 @@ async fn test_one_time_request_kept_is_sent_once_by_the_next_write() {
     // sent and kept, not a failure a host would answer with a second request; the next
     // flush sends the kept batch, and alice gets one request.
     let w = World::new();
-    w.alice.switch().keep_passed_entries();
+    w.alice.dispatch().keep_passed_entries();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
     w.bob
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
             path: "/ops".into(),
             after: 0,
@@ -831,7 +831,7 @@ async fn test_one_time_request_kept_is_sent_once_by_the_next_write() {
     let requests = wallet.requests().await.unwrap();
     assert_eq!(requests.len(), 1);
     assert_eq!(Some(requests[0].request), sent.request);
-    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), 1);
+    assert_eq!(w.alice.dispatch().entries_from(&w.bob_id()), 1);
 }
 
 fn unreachable_ops() -> pubky_dispatch_client::testing::Fault {
@@ -852,7 +852,7 @@ async fn test_one_time_attempt_kept_unsent_stays_recorded_through_a_resume() {
     let mut shop = w.shop().await;
     let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
     wallet.receive(None).await.unwrap();
-    w.alice.switch().fail_next(unreachable_ops());
+    w.alice.dispatch().fail_next(unreachable_ops());
     let kept = wallet
         .pay_request(&request, PayOptions::default())
         .await
@@ -864,8 +864,8 @@ async fn test_one_time_attempt_kept_unsent_stays_recorded_through_a_resume() {
         stage(wallet.payments().await.unwrap()),
         paykit_sdk::Stage::Recorded
     );
-    w.alice.switch().fail_next(unreachable_ops());
-    w.alice.switch().fail_next(unreachable_ops());
+    w.alice.dispatch().fail_next(unreachable_ops());
+    w.alice.dispatch().fail_next(unreachable_ops());
     wallet.resume_payments().await.unwrap();
     assert_eq!(
         stage(wallet.payments().await.unwrap()),
@@ -892,7 +892,7 @@ async fn test_one_time_request_kept_then_refused_reads_as_failed() {
     // request never went out, and reads as failed, not as one delivered and forgotten.
     let w = World::new();
     let mut shop = w.shop().await;
-    w.bob.switch().fail_next(unreachable_ops());
+    w.bob.dispatch().fail_next(unreachable_ops());
     let sent = shop
         .send_request(w.alice_id(), draft("1", w.clock.now_ms()))
         .await
@@ -905,7 +905,7 @@ async fn test_one_time_request_kept_then_refused_reads_as_failed() {
         Some(MessageDelivery::Kept { batch_id })
     );
     w.bob
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::Error {
             path: "/ops".into(),
             code: pubky_dispatch_core::http::ErrorCode::PermissionMissing,
@@ -930,13 +930,13 @@ async fn test_one_time_request_kept_then_refused_at_a_read_reads_as_failed_once_
     // acknowledged that event.
     let w = World::new();
     let mut shop = w.shop().await;
-    w.bob.switch().fail_next(unreachable_ops());
+    w.bob.dispatch().fail_next(unreachable_ops());
     let sent = shop
         .send_request(w.alice_id(), draft("1", w.clock.now_ms()))
         .await
         .unwrap();
     w.bob
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::Error {
             path: "/ops".into(),
             code: pubky_dispatch_core::http::ErrorCode::PermissionMissing,
@@ -967,7 +967,7 @@ async fn test_one_time_request_kept_then_refused_at_a_read_reads_as_failed_once_
 /// A request bob's shop sends to alice while his Dispatch can't be reached: the client keeps
 /// its batch. Returns the request's `msg_id` and the kept batch's ID.
 async fn kept_request(w: &World, shop: &mut paykit_sdk::Paykit) -> (String, [u8; 16]) {
-    w.bob.switch().fail_next(unreachable_ops());
+    w.bob.dispatch().fail_next(unreachable_ops());
     let sent = shop
         .send_request(w.alice_id(), draft("1", w.clock.now_ms()))
         .await
@@ -1048,7 +1048,7 @@ async fn test_one_time_request_kept_past_the_retention_then_refused_reads_as_fai
     w.clock
         .advance_ms(pubky_dispatch_client::app::SENT_RETENTION_MS + HOUR_MS);
     w.bob
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::Error {
             path: "/ops".into(),
             code: pubky_dispatch_core::http::ErrorCode::PermissionMissing,
@@ -1090,7 +1090,7 @@ async fn test_one_time_attempt_kept_then_forgotten_reads_the_claim_and_pays_once
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
     let request = long_request(&w, &mut wallet, &mut shop).await;
-    w.alice.switch().fail_next(unreachable_ops());
+    w.alice.dispatch().fail_next(unreachable_ops());
     let kept = wallet
         .pay_request(&request, PayOptions::default())
         .await
@@ -1098,7 +1098,7 @@ async fn test_one_time_attempt_kept_then_forgotten_reads_the_claim_and_pays_once
         .unwrap_err();
     let batch_id = kept.kept_batch().expect("the attempt's batch is kept");
     w.alice
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::Error {
             path: "/ops".into(),
             code: pubky_dispatch_core::http::ErrorCode::PermissionMissing,
@@ -1145,7 +1145,7 @@ async fn test_one_time_attempt_kept_at_the_backup_restored_never_pays_again() {
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
     let request = long_request(&w, &mut wallet, &mut shop).await;
-    w.alice.switch().fail_next(unreachable_ops());
+    w.alice.dispatch().fail_next(unreachable_ops());
     let kept = wallet
         .pay_request(&request, PayOptions::default())
         .await
@@ -1214,7 +1214,7 @@ async fn test_one_time_expired_request_not_found_at_the_dispatch_is_not_found() 
     w.clock.advance_ms(2 * HOUR_MS);
     wallet.receive(None).await.unwrap();
     w.alice
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::Error {
             path: "/records/".into(),
             code: pubky_dispatch_core::http::ErrorCode::NotFound,
@@ -1239,7 +1239,7 @@ async fn test_one_time_attempt_kept_then_refused_reads_the_claim_while_its_end_i
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
     let request = long_request(&w, &mut wallet, &mut shop).await;
-    w.alice.switch().fail_next(unreachable_ops());
+    w.alice.dispatch().fail_next(unreachable_ops());
     let batch_id = wallet
         .pay_request(&request, PayOptions::default())
         .await
@@ -1248,7 +1248,7 @@ async fn test_one_time_attempt_kept_then_refused_reads_the_claim_while_its_end_i
         .kept_batch()
         .expect("the attempt's batch is kept");
     w.alice
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::Error {
             path: "/ops".into(),
             code: pubky_dispatch_core::http::ErrorCode::PermissionMissing,
@@ -1285,7 +1285,7 @@ async fn test_one_time_attempt_kept_then_applied_writes_failed_and_pays_once() {
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
     let request = long_request(&w, &mut wallet, &mut shop).await;
-    w.alice.switch().fail_next(unreachable_ops());
+    w.alice.dispatch().fail_next(unreachable_ops());
     let batch_id = wallet
         .pay_request(&request, PayOptions::default())
         .await
@@ -1340,7 +1340,7 @@ async fn test_one_time_expired_request_read_refused_by_the_dispatch_keeps_its_co
     w.clock.advance_ms(2 * HOUR_MS);
     wallet.receive(None).await.unwrap();
     w.alice
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::Error {
             path: "/records/".into(),
             code: pubky_dispatch_core::http::ErrorCode::PermissionMissing,
@@ -1400,7 +1400,7 @@ async fn sealed_requests(
         .await;
     }
     w.alice.next_doc(|body| body.data_epoch += 1).unwrap();
-    let newest = w.alice.switch().identity_doc().unwrap().data_epoch();
+    let newest = w.alice.dispatch().identity_doc().unwrap().data_epoch();
     let cert = wallet.app().cert().clone();
     crate::unrequested::store_bundle_from(w, wallet.app_id(), &cert, newest);
     wallet.receive(None).await.unwrap();
@@ -1611,15 +1611,15 @@ async fn test_one_time_stop_dropped_for_the_bounds_kept_again_when_sent_again() 
     );
     w.clock.advance_ms(1);
     cancel_to(&w, &[wallet.app_id()], unknown(all));
-    let asked = w.bob.switch().entries_from(&w.alice_id());
+    let asked = w.bob.dispatch().entries_from(&w.alice_id());
     let got = wallet.receive(None).await.unwrap();
     assert!(!keeps_stop(&w, &wallet, unknown(0)).await);
     assert!(keeps_stop(&w, &wallet, unknown(all)).await);
     assert_eq!(got.resends, 1, "{got:?}");
-    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), asked + 1);
+    assert_eq!(w.bob.dispatch().entries_from(&w.alice_id()), asked + 1);
     let again = wallet.receive(None).await.unwrap();
     assert_eq!(again.resends, 0, "{again:?}");
-    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), asked + 1);
+    assert_eq!(w.bob.dispatch().entries_from(&w.alice_id()), asked + 1);
     assert_eq!(
         crate::common::asked(&wallet, &w.bob_id()).await,
         vec![(Some(first_at), None)]
@@ -1996,7 +1996,7 @@ async fn test_one_time_rejection_while_the_records_are_not_listed_refused_as_not
     let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
     wallet.receive(None).await.unwrap();
     let now = w.clock.now_ms();
-    w.alice.switch().push_missed(1, now - 1_000, now);
+    w.alice.dispatch().push_missed(1, now - 1_000, now);
     let unlisted = || pubky_dispatch_client::testing::Fault::Error {
         path: "records?collection".into(),
         code: pubky_dispatch_core::http::ErrorCode::Unavailable,
@@ -2005,7 +2005,7 @@ async fn test_one_time_rejection_while_the_records_are_not_listed_refused_as_not
     // The client lists right after the item, the wallet's three collections, before Paykit's
     // own listing at the end of the receive, which fails.
     w.alice
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
             path: "records?collection".into(),
             after: 3,
@@ -2016,7 +2016,7 @@ async fn test_one_time_rejection_while_the_records_are_not_listed_refused_as_not
         .unwrap()
         .records_unlisted
         .is_some());
-    w.alice.switch().fail_next(unlisted());
+    w.alice.dispatch().fail_next(unlisted());
     let refused = wallet.reject_request(&request, None).await.unwrap_err();
     assert!(
         matches!(refused.refusal(), Some(Refusal::NotNow(_))),
@@ -2035,7 +2035,7 @@ async fn test_one_time_missed_item_asks_wait_for_a_sealed_records_key() {
     let mut shop = w.shop().await;
     let (_, cert) = sealed_requests(&w, &mut wallet, &mut phone, &mut shop, 1).await;
     let now = w.clock.now_ms();
-    w.alice.switch().push_missed(1, now - 1_000, now);
+    w.alice.dispatch().push_missed(1, now - 1_000, now);
     wallet.receive(None).await.unwrap();
     assert!(crate::common::asked(&wallet, &w.bob_id()).await.is_empty());
     assert_eq!(
@@ -2113,7 +2113,7 @@ pub(crate) fn stop_key(w: &World, wallet: &paykit_sdk::Paykit, hash: [u8; 32]) -
     format!(
         "kc/{}/{}/{:020}",
         pubky_dispatch_core::enc::b64(&key),
-        pubky_dispatch_core::enc::b64(&w.bob.switch().app(&shop).cert.unwrap().hash()),
+        pubky_dispatch_core::enc::b64(&w.bob.dispatch().app(&shop).cert.unwrap().hash()),
         wallet.app().own_identity().generation(),
     )
     .into_bytes()
@@ -2346,7 +2346,7 @@ async fn test_one_time_missed_item_asks_the_readable_now_and_the_sealed_once_ope
     let _carol = carols_request(&w, &mut wallet).await;
     let (_, cert) = sealed_requests(&w, &mut wallet, &mut phone, &mut shop, 1).await;
     let now = w.clock.now_ms();
-    w.alice.switch().push_missed(1, now - 1_000, now);
+    w.alice.dispatch().push_missed(1, now - 1_000, now);
     wallet.receive(None).await.unwrap();
     wallet.receive(None).await.unwrap();
     assert_eq!(crate::common::asked(&wallet, &w.carol_id()).await.len(), 1);
@@ -2435,7 +2435,7 @@ async fn test_one_time_confirming_a_request_over_a_sealed_record_refused_as_not_
     wallet.receive(None).await.unwrap();
     phone.receive(None).await.unwrap();
     let now = w.clock.now_ms();
-    w.alice.switch().push_missed(1, now - 1_000, now);
+    w.alice.dispatch().push_missed(1, now - 1_000, now);
     wallet.receive(None).await.unwrap();
     let held = crate::common::held(&wallet, &request).await;
     // A later key rotation makes this same request unreadable to the wallet.
@@ -2453,7 +2453,7 @@ async fn test_one_time_confirming_a_request_over_a_sealed_record_refused_as_not_
     )
     .await;
     w.alice.next_doc(|body| body.data_epoch += 1).unwrap();
-    let newest = w.alice.switch().identity_doc().unwrap().data_epoch();
+    let newest = w.alice.dispatch().identity_doc().unwrap().data_epoch();
     let cert = wallet.app().cert().clone();
     crate::unrequested::store_bundle_from(&w, wallet.app_id(), &cert, newest);
     wallet.receive(None).await.unwrap();
@@ -2499,13 +2499,13 @@ async fn test_one_time_cancellation_of_a_request_missing_from_a_copy_not_listed_
     let _shop = w.shop().await;
     wallet.receive(None).await.unwrap();
     let now = w.clock.now_ms();
-    w.alice.switch().push_missed(1, now - 1_000, now);
+    w.alice.dispatch().push_missed(1, now - 1_000, now);
     let hash = [7; 32];
     let cancellation = cancel_to(&w, &[wallet.app_id()], hash);
     // The client lists right after the item, the wallet's three collections, before Paykit's
     // own listing at the end of the receive, which fails.
     w.alice
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
             path: "records?collection".into(),
             after: 3,

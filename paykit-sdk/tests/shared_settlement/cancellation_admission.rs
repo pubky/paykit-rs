@@ -99,8 +99,8 @@ async fn follow_wallet(
     next: &str,
 ) -> TestResult {
     let owner = world.identity("customer")?;
-    world.lose_switch(old);
-    world.add_switch(next, &[&owner]).await?;
+    world.lose_dispatch(old);
+    world.add_dispatch(next, &[&owner]).await?;
     Box::pin(signer.declare_provider_loss(
         next,
         pubky_dispatch_signer::UserConfirmed::shown_and_confirmed(),

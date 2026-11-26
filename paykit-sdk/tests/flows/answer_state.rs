@@ -129,9 +129,9 @@ impl Held {
 
     fn entries(&self, w: &World) -> usize {
         if self.alice {
-            w.bob.switch().entries_from(&w.alice_id())
+            w.bob.dispatch().entries_from(&w.alice_id())
         } else {
-            w.alice.switch().entries_from(&w.bob_id())
+            w.alice.dispatch().entries_from(&w.bob_id())
         }
     }
 }
@@ -575,7 +575,7 @@ async fn test_answer_state_unknown_deny_preserves_queued_answer() {
     let before = value.entries(&w);
     w.clock.advance_ms(paykit_sdk::LISTS_REFRESH_MS);
     w.bob
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::Error {
             path: "/allow".into(),
             code: pubky_dispatch_core::http::ErrorCode::Unavailable,

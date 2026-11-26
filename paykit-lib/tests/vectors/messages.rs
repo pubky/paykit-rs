@@ -416,9 +416,9 @@ fn check_label_rejections(keys: &Keys, file: &serde_json::Value) {
 }
 
 /// The top-level description, which names every member.
-const DESCRIPTION: &str = "Every message kind as sent in v0.2 (Switch wire 4.5, wire 4): the \
+const DESCRIPTION: &str = "Every message kind as sent in v0.2 (Dispatch wire 4.5, wire 4): the \
 exact JSON bytes, their BLAKE3 hash (refs, request hash), the sender app's signature over \
-lp(\"pubky-switch/v1/msg\", recipient identity, JSON), and the signed plaintext layout \
+lp(\"pubky-dispatch/v1/msg\", recipient identity, JSON), and the signed plaintext layout \
 sender app ID (16) | signature (64) | u32_be(JSON length) | JSON, before zero padding. \
 payment_request_labelled is sent by bob's hosted app under its label, and alice's acceptance \
 of it copies the label; label_rejections holds requests a payer drops for their label; \
@@ -433,13 +433,13 @@ with an extra or missing member, which a payee drops; receipt_members holds bob'
 with the payee's metadata and reference, which a payer takes or drops; list_versions holds \
 the shop's Private Payment Lists with a malformed version, which a payer drops.";
 
-const MULTI_PROTOCOL_DESCRIPTION: &str = "Wire 4.1 check 8, spec 3.2, 3.3, Switch wire 3.1 \
+const MULTI_PROTOCOL_DESCRIPTION: &str = "Wire 4.1 check 8, spec 3.2, 3.3, Dispatch wire 3.1 \
 \"Several protocols\": messages.json's payment_request and resend_request_ids, as the shop \
 signs them, each presented with a certificate of the shop's keys that holds another \
 protocol's scope, chat (sender_cert, documents.json multi_protocol_certificates), at alice's \
 wallet (recipient_app), whose certificate is its certificate of documents.json \
 certificates. Another protocol's scopes, \
-and the switch permissions they bring, authorize no Paykit message: each kind still needs \
+and the Dispatch permissions they bring, authorize no Paykit message: each kind still needs \
 its Paykit scope, and a resend_request needs a Paykit App, one holding at least one Paykit \
 scope. accepted are messages the wallet takes at check 8, from the shop holding paykit_request, \
 with the paykit_settlements and paykit_contacts it requires, beside chat; refused are those it drops there, from the shop holding chat alone, a \

@@ -526,7 +526,7 @@ mod tests {
 
     #[test]
     fn test_error_carries_the_dispatch_code() {
-        let error = PaykitError::from(AppError::Switch(ClientError::Switch {
+        let error = PaykitError::from(AppError::Dispatch(ClientError::Dispatch {
             status: 409,
             code: ErrorCode::Conflict,
             message: "scripted".into(),
@@ -557,7 +557,7 @@ mod tests {
         assert!(PaykitError::from(kept).is_wait());
         // An answer that needs another step first, a refusal the user answers and data that
         // doesn't verify are no waits.
-        let moved = AppError::Switch(ClientError::Switch {
+        let moved = AppError::Dispatch(ClientError::Dispatch {
             status: 410,
             code: ErrorCode::Moved,
             message: "scripted".into(),

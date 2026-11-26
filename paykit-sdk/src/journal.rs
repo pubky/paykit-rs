@@ -363,6 +363,11 @@ pub(crate) struct JournalEntry {
     /// was made, or a resume found the payment in the method's history (Paykit spec 7.2
     /// step 2). Until then it is journaled only, never sent and never placed in a record.
     pub(crate) acceptance_released: bool,
+    /// A restore held this released acceptance and withdrew it, telling its delivery as
+    /// unknown: it is never signed again, and the payment finishes on its proof, which
+    /// carries what the payee needs (Paykit spec 7.2; conformance, "Restored delivery
+    /// origin"). Only on a restored entry whose acceptance went out.
+    pub(crate) acceptance_withdrawn: bool,
     /// The rail's proof, once paid.
     pub(crate) rail_proof: Option<Map<String, Value>>,
     pub(crate) paid_at_ms: Option<u64>,
@@ -809,6 +814,7 @@ impl JournalEntry {
         if self.acceptance_msg_id.is_some() != self.acceptance_plaintext.is_some()
             || (self.acceptance_msg_id.is_some() && !self.acceptance_owed)
             || (self.acceptance_released && self.acceptance_msg_id.is_none())
+            || (self.acceptance_withdrawn && !(self.acceptance_released && self.restored))
         {
             return bad();
         }

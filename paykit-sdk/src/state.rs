@@ -65,6 +65,7 @@
 //! | `lc` | the certificate the shared records were last listed under, signed: a certificate held now other than it means the copy may lack records until Paykit lists them, since one held between may have read less (`hold.rs`); written only by a Paykit listing, in its commit; absent from a join or a restore until that listing, which leaves the records unlisted; never restored | |
 //! | `ro` | records to check after a restore for possibly delivered messages, with the time limit for unreadable records and any counterparties waiting for their period's request | |
 //! | `ha/<payee>/<msg_id>` | the wallet's held answer and request. A backup marks it restored so it cannot authorize delivery | |
+//! | `hm` | carried lists or held messages still need attention after restore (Paykit spec 7.2, Dispatch spec 12.4) |  |
 //! | `pp` | set by a restore: a payer pass is owed, so no new attempt is made and nothing is handed off; cleared only after a reconcile under `paykit_pay` ran that pass (`hold.rs`); never restored | |
 //! | `lq/<payee>[/<app_id>]` | a `private_payment_list_request` asked of a payee's app, or of none: the version it named and when (Paykit spec 8.4) | |
 //! | `nt/outgoing/<recipient>/<msg_id>/<hash>` | the disposition of an exact original delivery is unknown: after restore, or a counterparty's current list given up with an unknown outcome. Acknowledgment is retained for repeated imports; a list's notice goes once a newer version supersedes it | |
@@ -618,6 +619,19 @@ impl Stored for crate::floor::FloorKept {
     }
 }
 
+impl sealed::Sealed for crate::own_record::EndpointChange {}
+
+impl Stored for crate::own_record::EndpointChange {
+    fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
+        // Each identifier reads (Paykit wire 1.4).
+        if matches!(family, StateKey::EndpointChange) && self.classes.reads() {
+            Ok(())
+        } else {
+            corrupt()
+        }
+    }
+}
+
 impl sealed::Sealed for crate::floor::RaiseRetry {}
 
 impl Stored for crate::floor::RaiseRetry {
@@ -869,6 +883,17 @@ impl Stored for LostListRecord {
         let valid = (1..=MAX_INT).contains(&seq) && (1..=MAX_INT).contains(&generation);
         match family {
             StateKey::ListRecordLost(_) if valid => Ok(()),
+            _ => corrupt(),
+        }
+    }
+}
+
+impl sealed::Sealed for crate::restore_held::HeldPass {}
+
+impl Stored for crate::restore_held::HeldPass {
+    fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
+        match family {
+            StateKey::HeldMessagesOwed => Ok(()),
             _ => corrupt(),
         }
     }
@@ -2034,6 +2059,9 @@ pub(crate) mod key {
     pub(crate) const LOSS_RECORDED: &str = "rl";
     /// A floor raise tried and left unwritten (`crate::floor::RaiseRetry`).
     pub(crate) const RAISE_RETRY: &str = "rr";
+    /// What the last change of Paykit's member asked of the public endpoints, while it may
+    /// not be signed yet (`crate::own_record::EndpointChange`).
+    pub(crate) const ENDPOINT_CHANGE: &str = "ec";
     pub(crate) const NOT_PAID_BEFORE_LOSS: &str = "pn/";
     /// A `missed` item's hold whose end isn't known yet (`Paykit::bound_missed_hold`).
     pub(crate) const MISSED_END_UNKNOWN: &str = "mu";
@@ -2061,6 +2089,7 @@ pub(crate) mod key {
     pub(crate) const RECORDS_UNLISTED: &str = "nl";
     pub(crate) const MISSED_UNLISTED: &str = "ml";
     pub(crate) const MISSED_CONSENTS: &str = "mc";
+    pub(crate) const HELD_MESSAGES_OWED: &str = "hm";
     pub(crate) const PAYER_PASS_OWED: &str = "pp";
     pub(crate) const OWN_RESEND_OWED: &str = "ro";
     pub(crate) const HELD_ANSWERS: &str = "ha/";
@@ -2340,6 +2369,16 @@ pub(crate) mod key {
         format!("{NOTICES}{}/{msg_id}", b64(sender))
     }
 
+    /// The notice of an outgoing stop absent from an open record (Paykit spec 7.2).
+    pub(crate) fn unrecorded_stop(to: &[u8; 32], id: &str) -> String {
+        format!("{NOTICES}stop/{}/{id}", b64(to))
+    }
+
+    /// The prefix of every [`unrecorded_stop`] notice.
+    pub(crate) fn unrecorded_stop_prefix() -> String {
+        format!("{NOTICES}stop/")
+    }
+
     /// A restored outgoing message, bound to its recipient, ID and signed JSON hash.
     pub(crate) fn restored_delivery(to: &[u8; 32], id: &str, hash: &[u8; 32]) -> String {
         format!("{RESTORED_DELIVERIES}{}/{id}/{}", b64(to), b64(hash))
@@ -2355,6 +2394,15 @@ pub(crate) mod key {
     pub(crate) fn identity_notice(kind: crate::notices::NoticeKind) -> String {
         format!("{NOTICES}{}", kind.tag())
     }
+
+    /// The notice of the endpoint change not published that `change` names
+    /// (`crate::own_record::endpoints_digest`).
+    pub(crate) fn endpoint_change_notice(change: &[u8; 32]) -> String {
+        format!("{ENDPOINT_CHANGE_NOTICES}{}", b64(change))
+    }
+
+    /// The prefix of the notices of endpoint changes not published.
+    pub(crate) const ENDPOINT_CHANGE_NOTICES: &str = "nt/endpoint_change_not_published/";
 
     pub(crate) fn notice(attempt: &AttemptId, kind: crate::notices::NoticeKind) -> String {
         format!("{NOTICES}{}", crate::notices::notice_id(attempt, kind))
@@ -2390,8 +2438,10 @@ pub(crate) mod key {
         format!("{HELD_ANSWERS}{}/{msg_id}", b64(payee))
     }
 
+    pub(crate) const SIDES: &str = "side/";
+
     pub(crate) fn side(msg_id: &str) -> String {
-        format!("side/{msg_id}")
+        format!("{SIDES}{msg_id}")
     }
 
     pub(crate) fn send_exemption(msg_id: &str) -> String {
@@ -2635,6 +2685,8 @@ pub(crate) enum StateKey {
     MissedUnlisted,
     /// `mc`: the consent list is to be confirmed again since a `missed` item.
     MissedConsents,
+    /// `hm`: the outbox still holds messages to check after restore.
+    HeldMessagesOwed,
     /// `pp`: no reconcile ran the payer pass since a restore.
     PayerPassOwed,
     /// `ro` marks a pending scan for this app's outgoing messages after restore.
@@ -2755,10 +2807,14 @@ pub(crate) enum StateKey {
     FloorKept,
     /// `nt/<tag>`: an identity-wide notice of the kind the tag names.
     IdentityNotice(crate::notices::NoticeKind),
+    /// `nt/endpoint_change_not_published/<change>`: the notice of an endpoint change not
+    /// published, by the digest that names the change.
+    EndpointChangeNotice([u8; 32]),
     /// `rl`: the newest provider loss this app recorded.
     LossRecorded,
     /// `rr`: a floor raise tried and left unwritten.
     RaiseRetry,
+    EndpointChange,
     /// The local identifier of an unanswered floor write.
     FloorBatch,
     /// `fo/<record key>`: a request record a read opened without `manual_only`, to check
@@ -2801,6 +2857,11 @@ pub(crate) enum StateKey {
         to: [u8; 32],
         msg_id: String,
         hash: [u8; 32],
+    },
+    /// An outgoing stop, separate from an incoming message with the same ID.
+    UnrecordedStop {
+        to: [u8; 32],
+        msg_id: String,
     },
     /// `nt/<sender>/<msg_id>`: a notice for the host about a message given up.
     MessageNotice {
@@ -2916,10 +2977,12 @@ impl StateKey {
             "pl" => Self::LossBoundary,
             "rl" => Self::LossRecorded,
             "rr" => Self::RaiseRetry,
+            "ec" => Self::EndpointChange,
             "mu" => Self::MissedEndUnknown,
             "nl" => Self::RecordsUnlisted,
             "ml" => Self::MissedUnlisted,
             "mc" => Self::MissedConsents,
+            "hm" => Self::HeldMessagesOwed,
             "pp" => Self::PayerPassOwed,
             "ro" => Self::OwnResendOwed,
             "lc" => Self::ListedCert,
@@ -3210,6 +3273,9 @@ impl StateKey {
                         }
                     }
                     "nt" => {
+                        if let Some(change) = rest.strip_prefix("endpoint_change_not_published/") {
+                            return b64_32(change).map(Self::EndpointChangeNotice);
+                        }
                         if let Some(kind) = crate::notices::NoticeKind::identity_from_tag(rest) {
                             return Some(Self::IdentityNotice(kind));
                         }
@@ -3218,6 +3284,13 @@ impl StateKey {
                                 .map(Self::SettlementNotice);
                         }
                         let (attempt, tag) = rest.split_once('/')?;
+                        if attempt == "stop" {
+                            let (to, id) = tag.split_once('/')?;
+                            return Some(Self::UnrecordedStop {
+                                to: b64_32(to)?,
+                                msg_id: msg_id(id)?,
+                            });
+                        }
                         if attempt == "outgoing" {
                             let (to, rest) = tag.split_once('/')?;
                             let (id, hash) = rest.split_once('/')?;
@@ -3921,6 +3994,14 @@ mod tests {
         assert!(!reads::<u64>(&key::missed(5), serde_json::json!(7)));
         assert!(!reads::<u64>(key::RECORDS_UNLISTED, serde_json::json!(1)));
         // Marks, set only `true`, at their families only.
+        assert!(reads::<crate::restore_held::HeldPass>(
+            key::HELD_MESSAGES_OWED,
+            serde_json::json!("held_only")
+        ));
+        assert!(!reads::<crate::restore_held::HeldPass>(
+            key::HELD_MESSAGES_OWED,
+            serde_json::json!(false)
+        ));
         assert!(reads::<bool>(key::PAYER_PASS_OWED, serde_json::json!(true)));
         assert!(!reads::<bool>(
             key::PAYER_PASS_OWED,
@@ -4223,6 +4304,7 @@ mod tests {
             (key::RECORDS_UNLISTED.into(), StateKey::RecordsUnlisted),
             (key::MISSED_UNLISTED.into(), StateKey::MissedUnlisted),
             (key::MISSED_CONSENTS.into(), StateKey::MissedConsents),
+            (key::HELD_MESSAGES_OWED.into(), StateKey::HeldMessagesOwed),
             (key::PAYER_PASS_OWED.into(), StateKey::PayerPassOwed),
             (key::OWN_RESEND_OWED.into(), StateKey::OwnResendOwed),
             (key::LISTED_CERT.into(), StateKey::ListedCert),
@@ -4385,6 +4467,11 @@ mod tests {
                 key::identity_notice(crate::notices::NoticeKind::AutomaticPaymentsHeld),
                 StateKey::IdentityNotice(crate::notices::NoticeKind::AutomaticPaymentsHeld),
             ),
+            (
+                key::endpoint_change_notice(&[6; 32]),
+                StateKey::EndpointChangeNotice([6; 32]),
+            ),
+            (key::ENDPOINT_CHANGE.into(), StateKey::EndpointChange),
             (key::LOSS_RECORDED.into(), StateKey::LossRecorded),
             (key::RAISE_RETRY.into(), StateKey::RaiseRetry),
             (key::BLOCK_FLOOR.into(), StateKey::BlockFloor),
@@ -4415,6 +4502,13 @@ mod tests {
                 key::message_notice(&pubky, id),
                 StateKey::MessageNotice {
                     sender: pubky,
+                    msg_id: id.into(),
+                },
+            ),
+            (
+                key::unrecorded_stop(&pubky, id),
+                StateKey::UnrecordedStop {
+                    to: pubky,
                     msg_id: id.into(),
                 },
             ),
