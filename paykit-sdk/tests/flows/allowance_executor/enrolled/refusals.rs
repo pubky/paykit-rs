@@ -73,14 +73,13 @@ async fn test_enrolled_allowance_end_is_final_at_every_retry() -> TestResult {
         .await
 }
 
-/// Also the stack-budget regression of the enrolled-restore path: it runs on a thread of
-/// the default test stack ([`crate::common::TEST_THREAD_STACK_BYTES`]) whatever the
-/// environment sets, and guards the SDK's own frames on the path from the acceptance to
-/// the receive after a restore. The Pubky Dispatch client's send path is part of the stack
-/// it measures.
+/// Also the stack-budget regression of the enrolled-restore path: it runs on a thread of the
+/// path's budget ([`crate::common::ENROLLED_RESTORE_STACK_BYTES`]) whatever the environment
+/// sets, and guards the SDK's own frames on the path from the acceptance to the receive after
+/// a restore. The Pubky Dispatch client's send path is part of the stack it measures.
 #[test]
 fn test_enrolled_allowance_confirmation_after_a_restore_that_isnt_clean() -> TestResult {
-    crate::common::on_stack(crate::common::TEST_THREAD_STACK_BYTES, || async {
+    crate::common::on_stack(crate::common::ENROLLED_RESTORE_STACK_BYTES, || async {
         for backend in [Backend::Scripted, Backend::Service] {
             let Some(world) = World::start(backend)? else {
                 continue;

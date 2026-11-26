@@ -1607,11 +1607,17 @@ pub async fn kept_key_of(app: &Paykit, prefix: &str, msg_id: &str) -> Vec<u8> {
         .expect("kept")
 }
 
-/// The stack a test thread gets by default, which the deepest flows ran on at v0.2: their
-/// stack-budget regressions run on it whatever `RUST_MIN_STACK` says. A flow that overflows
-/// here means a frame on its path grew (the deepest end in the Pubky Dispatch client's
-/// send); find it rather than raise this.
-pub const TEST_THREAD_STACK_BYTES: usize = 2 * 1024 * 1024;
+/// The enrolled-restore flow's stack budget: the stack its regression runs on, whatever
+/// `RUST_MIN_STACK` says, below the 2 MiB it ran on at v0.2.
+///
+/// Measured in a debug build on macOS arm64, the flow needs 1,648 KiB under rustc 1.98.1 and
+/// 1,536 KiB under rustc 1.100.0, a margin of 272 and 384 KiB under this budget. Before Paykit
+/// built its larger futures on the heap it needed 2,016 KiB under rustc 1.98.1, at least
+/// 80 KiB more than this budget, so the regression fails on that code; under rustc 1.100.0 it
+/// needed 1,776 KiB, which this budget doesn't catch. The Pubky Dispatch client's send path is
+/// part of the stack measured. A flow that overflows here means a frame on its path grew:
+/// find the frame that grew rather than raise this.
+pub const ENROLLED_RESTORE_STACK_BYTES: usize = 1_920 * 1024;
 
 /// Run `flow` on a thread of `stack_bytes`, on a current-thread runtime and a local set as
 /// `#[tokio::test]` gives the other flows. An overflow aborts the test binary.
