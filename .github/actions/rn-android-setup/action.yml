@@ -13,6 +13,10 @@ inputs:
     description: "'false' disables the Gradle cache, for jobs whose output is published."
     required: false
     default: 'true'
+  gradle-cache-read-only:
+    description: "'true' restores the Gradle cache but never saves it, for jobs that share a cache key with a job that builds more."
+    required: false
+    default: 'false'
 
 runs:
   using: composite
@@ -31,9 +35,13 @@ runs:
       uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
       with:
         cache-disabled: ${{ inputs.gradle-cache == 'false' }}
+        # The second half repeats the action's own default: read-only off
+        # the default branch.
+        cache-read-only: ${{ inputs.gradle-cache-read-only == 'true' || (github.event.repository != null && github.ref_name != github.event.repository.default_branch) }}
         # From v6 the default 'enhanced' cache provider is a closed-source
         # component under Gradle's terms of use. 'basic' is the open-source
-        # implementation built on the GitHub Actions cache.
+        # implementation built on the GitHub Actions cache. It has no effect
+        # when `gradle-cache` is 'false'.
         cache-provider: basic
 
     - name: Set up Android SDK

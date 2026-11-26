@@ -47,9 +47,9 @@ jobs:
       with:
         # Do not restore Gradle caches written by lower-privilege CI jobs.
         cache-disabled: true
-        # From v6 the default 'enhanced' cache provider is a closed-source
-        # component under Gradle's terms of use. 'basic' is the open-source
-        # implementation built on the GitHub Actions cache.
+        # No effect while `cache-disabled` is true. Kept so the open-source
+        # 'basic' provider, not the closed-source default, is used if
+        # caching is ever turned on here.
         cache-provider: basic
 
     - name: Install native build dependencies

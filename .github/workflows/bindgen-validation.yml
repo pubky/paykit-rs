@@ -35,6 +35,9 @@ jobs:
           # component under Gradle's terms of use. 'basic' is the open-source
           # implementation built on the GitHub Actions cache.
           cache-provider: basic
+          # The android-bindgen job uses the same cache key and builds far
+          # more, so it writes the entry and this job only reads it.
+          cache-read-only: true
 
       - name: Set up JDK 17
         uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0

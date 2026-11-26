@@ -139,7 +139,11 @@ jobs:
           cache-all-crates: true
           key: ${{ hashFiles('Cargo.lock') }}
 
+      # The Android smoke job uses the same Gradle cache key and builds the
+      # whole example app, so it writes the entry.
       - uses: ./.github/actions/rn-android-setup
+        with:
+          gradle-cache-read-only: 'true'
 
       - name: Build Rust libraries and bindings
         run: npm run build:android
