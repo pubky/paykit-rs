@@ -724,7 +724,10 @@ async fn later_checkout(
         recorded,
         "the late answer was not recorded by the next wallet"
     );
-    assert_eq!(account.lookups.load(Ordering::SeqCst), lookups);
+    // The payment asks the method's history once about the claim's earlier failed attempt,
+    // which must not still be pending (Paykit spec 7.1, No automatic payment of doubtful
+    // claims); nothing else looks up.
+    assert_eq!(account.lookups.load(Ordering::SeqCst), lookups + 1);
     assert_eq!(account.calls.load(Ordering::SeqCst), calls + 1);
     Box::pin(lost_answer_checkout(
         seller,

@@ -233,8 +233,25 @@ async fn test_recovery_attempt_resolved_failed_may_be_paid_again() {
         wallet.request(&request).await.unwrap().status,
         paykit_sdk::RequestStatus::Open
     );
-    let again = wallet
+    // The method still reports the first payment pending, so the user pays again only over
+    // that doubt, once shown it (Paykit spec 7.1, No automatic payment of doubtful claims).
+    let held = wallet
         .pay_request(&request, PayOptions::default())
+        .await
+        .outcome
+        .unwrap_err();
+    let Some(paykit_sdk::Refusal::MayBePaid {
+        doubt: Some(doubt), ..
+    }) = held.refusal()
+    else {
+        panic!("{held:?}");
+    };
+    assert_eq!(doubt.pending_at_method, vec![attempt_id]);
+    let again = wallet
+        .pay_request(
+            &request,
+            PayOptions::default().with_may_be_paid_confirmed((**doubt).clone()),
+        )
         .await
         .outcome
         .unwrap();

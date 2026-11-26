@@ -603,6 +603,8 @@ async fn test_local_state_users_resolution_beside_a_proof_the_recheck_found_read
         "proof_msg_id": null,
         "method_failed": true,
         "ask_again": true,
+        "paid_seen": null,
+        "ledger_dropped": false,
     });
     put(&mut wallet, &facts_key, &facts).await;
     w.rail.settle(&attempt_id, false);
