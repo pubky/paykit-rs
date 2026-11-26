@@ -187,6 +187,19 @@ mod memory {
                 file.resize(written.len(), 0);
             }
             file[..written.len()].copy_from_slice(written);
+            // A torn write leaves the old bytes after what it wrote. Where the first of them
+            // equals the byte the write would have put there, as a byte of a random tag does
+            // once in 256 writes, it is made to differ, so a torn write never completes the new
+            // slot by chance.
+            if result.is_err() {
+                if let (Some(old), Some(new)) =
+                    (file.get_mut(written.len()), bytes.get(written.len()))
+                {
+                    if old == new {
+                        *old = !*new;
+                    }
+                }
+            }
             result
         }
 

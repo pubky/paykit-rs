@@ -6,7 +6,7 @@
 
 #![cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 
-use paykit_browser::store::{OpenError, OpfsStore};
+use paykit_browser::store::{OpenError, OpfsStore, WrappingKey};
 use wasm_bindgen_test::{wasm_bindgen_test, wasm_bindgen_test_configure};
 
 wasm_bindgen_test_configure!(run_in_browser);
@@ -22,7 +22,7 @@ const STORE_NAME: &str = "page";
 /// of that name appears in the origin's OPFS root.
 #[wasm_bindgen_test]
 async fn test_store_page_open_is_refused() {
-    let result = OpfsStore::open(STORE_NAME).await;
+    let result = OpfsStore::open(STORE_NAME, WrappingKey::Origin).await;
     assert!(
         matches!(result, Err(OpenError::NotDedicatedWorker)),
         "{result:?}"
