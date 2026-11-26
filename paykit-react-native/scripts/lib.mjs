@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import yaml from 'js-yaml';
+import { load } from 'js-yaml';
 
 export const packageDir = path.dirname(
   path.dirname(fileURLToPath(import.meta.url))
@@ -18,9 +18,7 @@ export const XCFRAMEWORK = 'SynonymdevReactNativePaykitFramework.xcframework';
 
 /** ubrn.config.yaml, the one list of iOS targets and Android ABIs. */
 export function ubrnConfig() {
-  return yaml.load(
-    readFileSync(path.join(packageDir, 'ubrn.config.yaml'), 'utf8')
-  );
+  return load(readFileSync(path.join(packageDir, 'ubrn.config.yaml'), 'utf8'));
 }
 
 /**
