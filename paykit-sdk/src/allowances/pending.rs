@@ -6,6 +6,7 @@ use super::{
 };
 use crate::allowances::{AllowanceReply, AppliedReply, EndCause, EndOrigin};
 use crate::error::{PaykitError, Refusal, Result};
+use crate::heap::on_heap;
 use crate::records::KeptMessage;
 use crate::state::{self, key};
 use crate::stored::{submitted, BoundNote, Placed, StoredNote};
@@ -446,7 +447,7 @@ impl Paykit {
         let intents = self
             .local_scan::<PreparedPendingReply>(key::PENDING_REPLIES)
             .await?;
-        self.recover_pending_applications(intents, true).await
+        on_heap(|| self.recover_pending_applications(intents, true)).await
     }
 
     /// Reopen from the local store alone. An incoming acceptance has no outgoing
@@ -467,7 +468,7 @@ impl Paykit {
             .await?
         {
             if let Some(kept) = approval.received_loss_return().filter(|_| allow_delivery) {
-                Box::pin(self.resume_loss_return(kept)).await?;
+                on_heap(|| self.resume_loss_return(kept)).await?;
             } else if approval.awaiting_application()
                 || approval.awaiting_original_create(self.app.own_identity().generation())
             {
@@ -478,17 +479,16 @@ impl Paykit {
         }
         for (record, approval) in withdrawals {
             let at = format!("{}{record}", key::ORIGINAL_ALLOWANCES);
-            self.withdraw_rejected_proposal(&at, approval).await?;
+            on_heap(|| self.withdraw_rejected_proposal(&at, approval)).await?;
         }
         if intents.is_empty() && approvals.is_empty() {
             return Ok(());
         }
-        let confirmed = self.confirmed_pending_applications().await?;
+        let confirmed = on_heap(|| self.confirmed_pending_applications()).await?;
         for (record, mut approval) in approvals {
             let at = format!("{}{record}", key::ORIGINAL_ALLOWANCES);
             if approval.awaiting_original_create(self.app.own_identity().generation()) {
-                self.recover_original_create(&at, &mut approval, &confirmed)
-                    .await?;
+                on_heap(|| self.recover_original_create(&at, &mut approval, &confirmed)).await?;
             }
             if self
                 .capture_original_approval(&at, &mut approval, &confirmed)
@@ -496,7 +496,7 @@ impl Paykit {
                 && allow_delivery
                 && approval.withdrawal_owed()
             {
-                self.withdraw_rejected_proposal(&at, approval).await?;
+                on_heap(|| self.withdraw_rejected_proposal(&at, approval)).await?;
             }
         }
         for (at, intent) in intents {
@@ -540,7 +540,7 @@ impl Paykit {
                 if intent.fenced_acceptance.is_some() {
                     let record = self.app.record_key(&allowance_target(&intent.peer, id))?;
                     let Some(protected) =
-                        self.capture_loss_deletion(&record, &intent, batch).await?
+                        on_heap(|| self.capture_loss_deletion(&record, &intent, batch)).await?
                     else {
                         continue;
                     };
@@ -578,7 +578,7 @@ impl Paykit {
             let Some((msg_id, version)) = queued else {
                 let msg_id = &msg.message().msg_id;
                 let notice_key = key::message_notice(&intent.peer, msg_id);
-                if self.kept_notice(&notice_key).await?.is_none() {
+                if on_heap(|| self.kept_notice(&notice_key)).await?.is_none() {
                     let notice = crate::notices::KeptNotice::given_up(
                         intent.peer,
                         msg_id,
@@ -603,7 +603,7 @@ impl Paykit {
                 .protocol_commit(crate::protocol::BACKUP_NAME, &writes)
                 .await?;
             if allow_delivery {
-                Box::pin(self.delivered(&msg_id)).await?;
+                on_heap(|| self.delivered(&msg_id)).await?;
             }
         }
         Ok(())
@@ -886,7 +886,7 @@ impl Paykit {
     ) -> Result<String> {
         let own = self.identity();
         let (pending, permanent_key, mut delete) =
-            Box::pin(self.checked_pending_answer(selected, kind)).await?;
+            on_heap(|| self.checked_pending_answer(selected, kind)).await?;
         if let Some((_, original)) = &fenced {
             original.bind_deletion(&mut delete)?;
         }
@@ -913,16 +913,18 @@ impl Paykit {
         let reply = self.sign(*peer, kind, vec![p.hash()], body)?;
         let q = self.own_copy(&reply)?;
         let intent_key = key::pending_reply(&permanent_key, &q.hash());
-        let mut operations = self.answer_writes(&pending, &q, delete).await?;
+        let mut operations = on_heap(|| self.answer_writes(&pending, &q, delete)).await?;
         let mut prepare = state::Tx::default();
-        Box::pin(self.keep_original_selection(
-            selected,
-            p,
-            &q,
-            &mut operations,
-            Some(execution.is_some()),
-            &mut prepare,
-        ))
+        on_heap(|| {
+            self.keep_original_selection(
+                selected,
+                p,
+                &q,
+                &mut operations,
+                Some(execution.is_some()),
+                &mut prepare,
+            )
+        })
         .await?;
         let application = application::prepared_application(
             own,
@@ -950,14 +952,16 @@ impl Paykit {
         )?;
         let is_fenced = fenced.is_some();
         if let Some((acceptance, create)) = fenced {
-            Box::pin(self.prepare_loss_settlement(
-                &permanent_key,
-                create,
-                acceptance,
-                &q,
-                application,
-                &mut prepare,
-            ))
+            on_heap(|| {
+                self.prepare_loss_settlement(
+                    &permanent_key,
+                    create,
+                    acceptance,
+                    &q,
+                    application,
+                    &mut prepare,
+                )
+            })
             .await?;
         }
         if kind == Kind::AllowanceEnd {
@@ -978,7 +982,7 @@ impl Paykit {
         }
         self.local_commit(prepare).await?;
         let batch = if is_fenced { batch } else { batch.queue(reply) };
-        match Box::pin(self.submit(batch)).await {
+        match on_heap(|| self.submit(batch)).await {
             Ok(submitted) => {
                 if is_fenced {
                     let intent = self
@@ -993,7 +997,7 @@ impl Paykit {
                     )
                     .await?;
                 } else if kind == Kind::AllowanceAcceptance {
-                    Box::pin(self.recover_pending_replies()).await?;
+                    on_heap(|| self.recover_pending_replies()).await?;
                 } else {
                     let [proof] = submitted.proofs.as_slice() else {
                         return Err(PaykitError::corrupt());
@@ -1010,7 +1014,7 @@ impl Paykit {
                     self.local_commit(writes).await?;
                 }
                 if !is_fenced {
-                    self.delivered(&msg_id).await?;
+                    on_heap(|| self.delivered(&msg_id)).await?;
                 }
             }
             Err(error) if error.kept_batch().is_some() => (),

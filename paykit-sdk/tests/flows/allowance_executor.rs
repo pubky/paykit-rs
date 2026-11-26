@@ -246,7 +246,7 @@ async fn test_unanswered_owner_resolution_advances_the_reserved_ledger_once() {
     assert_eq!((entry.attempt_id, entry.outcome), (attempt_id, None));
     let writes = world.record_writes(&world.alice, &ledger.key);
     world.rail.settle(&attempt_id, false);
-    world.alice.switch().fail_next(Fault::LoseAnswer {
+    world.alice.dispatch().fail_next(Fault::LoseAnswer {
         path: "/ops".into(),
     });
     assert!(Box::pin(payer.resolve_attempt(
@@ -863,7 +863,7 @@ async fn restore_grant_proof_order(installed_verified: bool, evidence: RestoredG
         .unwrap();
     world
         .alice
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::LoseAnswer {
             path: "/ops".into(),
         });
@@ -2174,7 +2174,7 @@ async fn test_imported_pending_outcome_copy_accepts_a_separately_verified_next_c
     let app_id = payer.app_id();
 
     Box::pin(write_owner_failure(&world, &mut payer, entries[0])).await;
-    world.alice.switch().fail_next(Fault::LoseAnswer {
+    world.alice.dispatch().fail_next(Fault::LoseAnswer {
         path: "/ops".into(),
     });
     Box::pin(payer.receive(None)).await.unwrap();
@@ -2899,7 +2899,7 @@ async fn confirm_foreign_failure_under(
     } else {
         world
             .alice
-            .switch()
+            .dispatch()
             .fail_next(pubky_dispatch_client::testing::Fault::LoseAnswer {
                 path: "/ops".into(),
             });
@@ -3026,7 +3026,7 @@ async fn confirm_foreign_failure_under(
     if case == ForeignFailure::LostRelease {
         world
             .alice
-            .switch()
+            .dispatch()
             .fail_next(pubky_dispatch_client::testing::Fault::LoseAnswer {
                 path: "/ops".into(),
             });
@@ -3537,7 +3537,7 @@ async fn test_started_allowance_payment_requires_both_confirmations_after_an_inb
         panic!("the Allowance payment was not pending");
     };
     let now = world.clock.now_ms();
-    world.alice.switch().push_missed(1, now - 1_000, now);
+    world.alice.dispatch().push_missed(1, now - 1_000, now);
     Box::pin(crate::common::finish_listing(&mut payer)).await;
     let held = Box::pin(crate::common::held(&payer, &request)).await;
     Box::pin(payer.confirm_possibly_cancelled(&request, &held, UserConfirmed::new()))
@@ -3747,7 +3747,7 @@ async fn resume_seller_proposal(lose_answer: bool) {
     if lose_answer {
         world
             .alice
-            .switch()
+            .dispatch()
             .fail_next(pubky_dispatch_client::testing::Fault::LoseAnswer {
                 path: "/ops".into(),
             });
@@ -3834,7 +3834,7 @@ async fn granted(payer: &paykit_sdk::Paykit, record: &[u8; 32]) -> bool {
 
 async fn missed_item(world: &World, payer: &mut paykit_sdk::Paykit) {
     let now = world.clock.now_ms();
-    world.alice.switch().push_missed(1, now - 1_000, now);
+    world.alice.dispatch().push_missed(1, now - 1_000, now);
     Box::pin(payer.receive(None)).await.unwrap();
     // The copy of the shared records counts as listed again from the next receive's listing.
     Box::pin(payer.receive(None)).await.unwrap();
@@ -3868,7 +3868,7 @@ async fn test_executor_kept_first_grant_landing_after_a_missed_item_consents_not
     use pubky_dispatch_client::testing::Fault;
     let (world, mut payer, _shop, key) =
         Box::pin(accepted_not_granted(crate::common::store())).await;
-    world.alice.switch().fail_next(Fault::Unanswered {
+    world.alice.dispatch().fail_next(Fault::Unanswered {
         path: "/ops".into(),
         after: 0,
     });
@@ -3877,12 +3877,12 @@ async fn test_executor_kept_first_grant_landing_after_a_missed_item_consents_not
         .expect_err("the grant's batch is unanswered");
     world.clock.advance_ms(1_000);
     // The kept batch can't be sent while the item is read.
-    world.alice.switch().fail_next(Fault::Unreachable {
+    world.alice.dispatch().fail_next(Fault::Unreachable {
         path: "/ops".into(),
         after: 0,
     });
     let now = world.clock.now_ms();
-    world.alice.switch().push_missed(1, now - 1_000, now);
+    world.alice.dispatch().push_missed(1, now - 1_000, now);
     Box::pin(payer.receive(None)).await.unwrap();
     assert!(
         !Box::pin(granted(&payer, &key)).await,
@@ -3929,7 +3929,7 @@ async fn test_executor_notice_before_the_consent_step_is_kept_as_a_removal() {
         AppScopes::new().allowance().build().unwrap(),
     ))
     .await;
-    world.alice.switch().fail_next(Fault::Unanswered {
+    world.alice.dispatch().fail_next(Fault::Unanswered {
         path: "/ops".into(),
         after: 0,
     });
@@ -4022,7 +4022,7 @@ async fn test_executor_refused_resume_after_a_restore_consents_nothing() {
     ))
     .await;
     Box::pin(payer.receive(None)).await.unwrap();
-    world.alice.switch().fail_next(Fault::Unanswered {
+    world.alice.dispatch().fail_next(Fault::Unanswered {
         path: "/ops".into(),
         after: 0,
     });
@@ -4184,7 +4184,7 @@ async fn test_executor_resume_retried_without_a_read_lands_a_kept_grant() {
     for applied in [true, false] {
         let (world, mut payer, mut shop, key) =
             Box::pin(accepted_not_granted(crate::common::store())).await;
-        world.alice.switch().fail_next(if applied {
+        world.alice.dispatch().fail_next(if applied {
             Fault::LoseAnswer {
                 path: "/ops".into(),
             }
@@ -4235,14 +4235,14 @@ async fn test_executor_notice_while_the_grant_batch_is_kept_is_kept_as_a_removal
         AppScopes::new().allowance().build().unwrap(),
     ))
     .await;
-    world.alice.switch().fail_next(Fault::LoseAnswer {
+    world.alice.dispatch().fail_next(Fault::LoseAnswer {
         path: "/ops".into(),
     });
     Box::pin(payer.resume_allowance_executor(&key))
         .await
         .expect_err("the grant's answer is lost");
     crate::allowances::notice(&world, &world.alice, "phone", payer.app_id(), &key, "ended");
-    world.alice.switch().fail_next(Fault::Unreachable {
+    world.alice.dispatch().fail_next(Fault::Unreachable {
         path: "/ops".into(),
         after: 0,
     });
@@ -4275,7 +4275,7 @@ async fn test_executor_end_seen_before_the_consent_is_kept_as_a_removal() {
     use pubky_dispatch_client::testing::Fault;
     let (world, mut payer, mut shop, key) =
         Box::pin(accepted_not_granted(crate::common::store())).await;
-    world.alice.switch().fail_next(Fault::LoseAnswer {
+    world.alice.dispatch().fail_next(Fault::LoseAnswer {
         path: "/ops".into(),
     });
     Box::pin(payer.resume_allowance_executor(&key))
@@ -4661,7 +4661,7 @@ async fn test_executor_restored_handoff_resolved_with_no_claim_keeps_the_allowan
     Box::pin(payer.receive(None)).await.unwrap();
     world
         .alice
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::LoseAnswer {
             path: "/ops".into(),
         });
@@ -5028,7 +5028,7 @@ async fn test_executor_attempt_answered_by_the_earlier_generation_is_not_acted_o
     // taken, and no money moves (Pubky Dispatch spec, Section 12.5).
     let (world, mut payer, mut shop, key) = Box::pin(first_grant()).await;
     world.rail.set_history_payer(payer.identity());
-    let earlier = std::sync::Arc::clone(world.alice.switch());
+    let earlier = std::sync::Arc::clone(world.alice.dispatch());
     let service = Box::pin(crate::allowances::advance_allowance_generation(
         &world, &mut payer,
     ))
@@ -5042,7 +5042,7 @@ async fn test_executor_attempt_answered_by_the_earlier_generation_is_not_acted_o
     Box::pin(payer.receive(None)).await.unwrap();
     world
         .router
-        .add_switch(crate::common::ALICE_ORIGIN, &earlier);
+        .add_dispatch(crate::common::ALICE_ORIGIN, &earlier);
     let answered = Box::pin(payer.pay_under_allowance(&request, &key)).await;
     assert!(
         !matches!(answered.outcome, Ok(paykit_sdk::PayOutcome::Paid { .. })),
@@ -5051,7 +5051,7 @@ async fn test_executor_attempt_answered_by_the_earlier_generation_is_not_acted_o
     assert!(world.rail.all_executions().is_empty());
     world
         .router
-        .add_switch(crate::common::ALICE_ORIGIN, &service);
+        .add_dispatch(crate::common::ALICE_ORIGIN, &service);
 }
 
 #[tokio::test]
@@ -5070,7 +5070,7 @@ async fn test_executor_reservation_whose_answer_was_lost_counts_across_a_change(
     ))
     .await;
     Box::pin(payer.receive(None)).await.unwrap();
-    world.alice.switch().fail_next(Fault::LoseAnswer {
+    world.alice.dispatch().fail_next(Fault::LoseAnswer {
         path: "/ops".into(),
     });
     let lost = Box::pin(payer.pay_under_allowance(&request, &key)).await;
@@ -5233,7 +5233,7 @@ async fn test_executor_started_payment_repeats_after_a_conflict_across_a_change(
             .unwrap(),
     );
     let keys = world.bob.identity().app_keys("shop");
-    let cert = world.bob.switch().app(&keys.app_id_bytes()).cert.unwrap();
+    let cert = world.bob.dispatch().app(&keys.app_id_bytes()).cert.unwrap();
     service
         .send_plaintext(
             world.bob.identity().public(),
@@ -5267,7 +5267,7 @@ async fn test_executor_first_grant_kept_across_an_orderly_generation_change_land
     let (world, mut payer, mut shop, key) =
         Box::pin(accepted_not_granted(crate::common::store())).await;
     world.rail.set_history_payer(payer.identity());
-    world.alice.switch().fail_next(Fault::Unanswered {
+    world.alice.dispatch().fail_next(Fault::Unanswered {
         path: "/ops".into(),
         after: 0,
     });
@@ -5327,7 +5327,7 @@ async fn test_executor_acceptance_applied_before_an_orderly_generation_change_is
     Box::pin(shop.accept_allowance(&offer.record))
         .await
         .unwrap();
-    world.alice.switch().fail_next(Fault::LoseAnswer {
+    world.alice.dispatch().fail_next(Fault::LoseAnswer {
         path: "/ops".into(),
     });
     let _ = Box::pin(payer.receive(None)).await;
@@ -5383,7 +5383,7 @@ async fn test_executor_acceptance_kept_across_an_orderly_generation_change_is_ta
     Box::pin(shop.accept_allowance(&offer.record))
         .await
         .unwrap();
-    world.alice.switch().fail_next(Fault::Unanswered {
+    world.alice.dispatch().fail_next(Fault::Unanswered {
         path: "/ops".into(),
         after: 0,
     });
@@ -5412,11 +5412,11 @@ async fn test_executor_acceptance_kept_across_an_orderly_generation_change_is_ta
 async fn change_dropping_the_earlier_key(
     w: &World,
     payer: &mut paykit_sdk::Paykit,
-) -> std::sync::Arc<pubky_dispatch_client::testing::ScriptedSwitch> {
+) -> std::sync::Arc<pubky_dispatch_client::testing::ScriptedDispatch> {
     use crate::common::ALICE_ORIGIN;
     use pubky_dispatch_core::records::Inbox;
-    let service = w.alice.switch().change_key_into([75; 32]);
-    w.router.add_switch(ALICE_ORIGIN, &service);
+    let service = w.alice.dispatch().change_key_into([75; 32]);
+    w.router.add_dispatch(ALICE_ORIGIN, &service);
     let doc = w
         .alice
         .sign_next(|body| {
@@ -5619,7 +5619,7 @@ async fn test_executor_older_in_place_restore_keeps_a_kept_end_and_its_removal()
         .await
         .unwrap();
     for _ in 0..4 {
-        world.alice.switch().fail_next(Fault::Unreachable {
+        world.alice.dispatch().fail_next(Fault::Unreachable {
             path: "/ops".into(),
             after: 0,
         });
@@ -5812,16 +5812,16 @@ async fn test_executor_pays_nothing_under_the_shared_post_loss_hold() {
 /// live claim needs them (Pubky Dispatch spec, Section 4.3, `service_keys`).
 async fn change_dropping(
     w: &World,
-    from: &pubky_dispatch_client::testing::ScriptedSwitch,
+    from: &pubky_dispatch_client::testing::ScriptedDispatch,
     payer: &mut paykit_sdk::Paykit,
     dropped: &[u64],
     secret: [u8; 32],
-) -> std::sync::Arc<pubky_dispatch_client::testing::ScriptedSwitch> {
+) -> std::sync::Arc<pubky_dispatch_client::testing::ScriptedDispatch> {
     use crate::common::ALICE_ORIGIN;
     use pubky_dispatch_core::records::{Inbox, ServiceKeyEntry};
     let previous = payer.app().own_identity().clone();
     let service = from.change_key_into(secret);
-    w.router.add_switch(ALICE_ORIGIN, &service);
+    w.router.add_dispatch(ALICE_ORIGIN, &service);
     let doc = w
         .alice
         .sign_next(|body| {

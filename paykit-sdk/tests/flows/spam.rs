@@ -229,7 +229,7 @@ async fn test_spam_blocked_sender_list_cancellation_and_resend_only_counted() {
 fn keep_ops(w: &World, n: usize) {
     for _ in 0..n {
         w.alice
-            .switch()
+            .dispatch()
             .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
                 path: "/ops".into(),
                 after: 0,
@@ -241,7 +241,7 @@ fn keep_ops(w: &World, n: usize) {
 fn keep_unblock_ops(w: &World, n: usize) {
     assert!(n > 0);
     w.alice
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
             path: "/ops".into(),
             after: 1,
@@ -327,7 +327,7 @@ async fn test_spam_own_unblock_refused_before_the_feed_leaves_new_state_counted(
         1
     );
     w.alice
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::Error {
             path: "/ops".into(),
             code: pubky_dispatch_core::http::ErrorCode::Conflict,
@@ -373,7 +373,7 @@ async fn test_spam_own_unblock_applied_with_its_answer_lost_lets_new_state_throu
     wallet.receive(None).await.unwrap();
     wallet.block(&w.bob_id()).await.unwrap();
     w.alice
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::LoseAnswerAfter {
             path: "/ops".into(),
             after: 1,

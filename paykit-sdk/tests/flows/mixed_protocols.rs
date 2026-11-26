@@ -78,7 +78,7 @@ fn world() -> World {
         Arc::clone(&w.homeserver),
         spec,
     );
-    w.router.add_switch(w.alice.origin(), w.alice.switch());
+    w.router.add_dispatch(w.alice.origin(), w.alice.dispatch());
     w
 }
 
@@ -361,7 +361,7 @@ async fn test_mixed_protocols_join_counts_only_owned_kinds() {
     .expect("the record the client signs fits");
     let record = w
         .alice
-        .switch()
+        .dispatch()
         .app(&app.app_id())
         .record
         .expect("the joined app's record");
@@ -410,7 +410,7 @@ async fn withdraw_public_offer(
 
     let seller = world.identity("seller")?;
     let origin = "https://seller.public-endpoints.test";
-    world.add_switch(origin, &[&seller]).await?;
+    world.add_dispatch(origin, &[&seller]).await?;
     let mut signer_env = world.signer_env(&seller, store())?;
     signer_env.protocols = Protocols::new(vec![
         Arc::new(paykit_lib::signer::PaykitProtocol),
@@ -512,6 +512,24 @@ async fn withdraw_public_offer(
     ))
     .await?;
     let publication = if paykit_first {
+        // The reload held the withdrawal aside and never signs it; the receive tells it, and
+        // the host withdraws it again, which waits for the chat (Paykit spec 4, "Changes saved
+        // and not yet signed").
+        wallet.receive(None).await?;
+        let notice = wallet
+            .notices()
+            .await?
+            .into_iter()
+            .find(|n| n.kind == paykit_sdk::NoticeKind::PublicEndpointChangeNotPublished)
+            .ok_or("the withdrawal is told")?;
+        assert_eq!(notice.endpoints_withdrawn, vec![id.clone()]);
+        if let Err(waiting) = wallet.remove_public_endpoint(&id).await {
+            assert!(
+                matches!(waiting, PaykitError::PublicEndpointChangePending(_)),
+                "{waiting:?}"
+            );
+        }
+        wallet.acknowledge_notice(&notice.id).await?;
         assert!(wallet.app_mut().protocol_record("paykit").await?.pending);
         if withdraw_early {
             world.lose_answer("POST", "/ops");
@@ -536,7 +554,28 @@ async fn withdraw_public_offer(
             sent?
         }
     } else {
-        wallet.update_own_record().await?
+        // The reload held the chat's change aside, so the record's signed policies are both
+        // past: Paykit's upkeep saves the withdrawal of its endpoints at their cutoff, which
+        // waits for the chat. The chat then asks its change again, which signs both, and
+        // clears it; the publication follows once the held change is cleared (Dispatch spec
+        // 4.2).
+        let waiting = wallet.update_own_record().await.unwrap_err();
+        assert!(
+            matches!(waiting, PaykitError::PublicEndpointChangePending(_)),
+            "{waiting:?}"
+        );
+        let held = wallet
+            .app_mut()
+            .held_record_edit(CHAT)
+            .await?
+            .ok_or("the chat's change is held aside")?;
+        assert_eq!(held.member.as_ref(), Some(&chat));
+        wallet
+            .app_mut()
+            .set_protocol_member_with_expiry(CHAT, held.member, held.expiry)
+            .await?;
+        wallet.app_mut().clear_held_record_edit(CHAT).await?;
+        wallet.app_mut().publish_record().await?
     };
     assert_eq!(publication, Publication::Published);
     let current = AppRecord::verify(wallet.app().record(), &seller.public())?;
@@ -928,7 +967,7 @@ async fn test_mixed_protocols_join_requires_the_supplied_paykit() {
         let w = world();
         let fault = Arc::new(FaultStore::new(store(), Fault::None));
         let request = w.approve(&w.alice, "mixed", &scopes());
-        let tip = w.alice.switch().tip_seq();
+        let tip = w.alice.dispatch().tip_seq();
         usage(
             Paykit::join_with_protocols(
                 w.env(&w.alice, Arc::clone(&fault) as Arc<dyn StateStore>),
@@ -941,7 +980,7 @@ async fn test_mixed_protocols_join_requires_the_supplied_paykit() {
             .await,
         );
         assert_eq!(fault.commits(), 0);
-        assert_eq!(w.alice.switch().tip_seq(), tip);
+        assert_eq!(w.alice.dispatch().tip_seq(), tip);
     }
 }
 
@@ -1004,7 +1043,7 @@ async fn test_mixed_protocols_keyed_approval_checks_paykit_before_writes() {
     let mut requested = scopes();
     requested.permissions.clear();
     let request = w.approve(&w.alice, "mixed", &requested);
-    let tip = w.alice.switch().tip_seq();
+    let tip = w.alice.dispatch().tip_seq();
     let result = Paykit::join_with_protocols(
         w.env(&w.alice, Arc::clone(&fault) as Arc<dyn StateStore>),
         PaykitConfig::default(),
@@ -1021,7 +1060,7 @@ async fn test_mixed_protocols_keyed_approval_checks_paykit_before_writes() {
         ))
     ));
     assert_eq!(fault.commits(), 0);
-    assert_eq!(w.alice.switch().tip_seq(), tip);
+    assert_eq!(w.alice.dispatch().tip_seq(), tip);
 }
 
 #[tokio::test]

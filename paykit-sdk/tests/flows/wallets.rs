@@ -256,19 +256,19 @@ async fn attempt_answered_past_the_deadline(crossing: Crossing) -> paykit_sdk::P
         | Crossing::RecordNotFound
         | Crossing::RecordRefused => serde_json::Value::Null,
     };
-    w.alice.switch().fail_next(Fault::Error {
+    w.alice.dispatch().fail_next(Fault::Error {
         path: "/ops".into(),
         code: pubky_dispatch_core::http::ErrorCode::Conflict,
         current,
     });
     if let Crossing::RecordUnreadable = crossing {
-        w.alice.switch().fail_next(Fault::Unreachable {
+        w.alice.dispatch().fail_next(Fault::Unreachable {
             path: "/records/".into(),
             after: 0,
         });
     }
     if let Crossing::RecordNotFound = crossing {
-        w.alice.switch().fail_next(Fault::Error {
+        w.alice.dispatch().fail_next(Fault::Error {
             path: "/records/".into(),
             code: pubky_dispatch_core::http::ErrorCode::NotFound,
             current: serde_json::Value::Null,

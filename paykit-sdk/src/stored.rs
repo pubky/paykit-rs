@@ -64,6 +64,7 @@
 //! such as `AppEvent::ListsUnverified`, which the host shows the user, stays for the host,
 //! and never holds back the acknowledgement of a later one Paykit took.
 
+use paykit_lib::collections::Collection;
 use paykit_lib::derive::natural_key;
 use paykit_lib::records::{ActivityRecord, StoredMessage};
 use paykit_lib::Body;
@@ -526,7 +527,10 @@ impl Paykit {
     /// One acknowledged already, as by a commit whose outcome was unknown, is no longer owed
     /// to Paykit, and nothing is left to do; one still owed that the client refuses to
     /// acknowledge is the call's error.
-    async fn ack_taken(&mut self, id: pubky_dispatch_client::app::EventId) -> Result<()> {
+    pub(crate) async fn ack_taken(
+        &mut self,
+        id: pubky_dispatch_client::app::EventId,
+    ) -> Result<()> {
         match self
             .app
             .ack_event_with(crate::protocol::BACKUP_NAME, id, &[])
@@ -577,6 +581,14 @@ impl Paykit {
     async fn take_stored_event(&mut self, event: &AppEvent, mark: &str) -> Result<bool> {
         let mut tx = Tx::default();
         let taken = match event {
+            AppEvent::MessagesHeldAtRestore { .. } => {
+                let owed = self
+                    .local_get::<crate::restore_held::HeldPass>(key::HELD_MESSAGES_OWED)
+                    .await?
+                    .unwrap_or(crate::restore_held::HeldPass::HeldOnly);
+                tx.put(key::HELD_MESSAGES_OWED, &owed)?;
+                true
+            }
             AppEvent::Parked {
                 stored_id, reason, ..
             } if !matches!(reason, ParkReason::Released | ParkReason::AwaitingAdmission) => {
@@ -755,6 +767,55 @@ impl Paykit {
         };
         tx.put(&note_key, &note)?;
         Ok(true)
+    }
+
+    /// Whether the stored note `bound`, not placed yet, may go into one of `records`, of
+    /// `kind` (Paykit spec 7.2: a held decision waits for it). Its place is one of them; or
+    /// an Allowance's or its proposal's at one of them; or, for activity records, not
+    /// decided yet (`place_of` gives an undecided place only to a request's messages, so
+    /// never to an Allowance's record); or a payee's cancellation this app doesn't place
+    /// itself, matched by the request it names to the payer's record.
+    pub(crate) async fn unplaced_note_in(
+        &self,
+        bound: &BoundNote,
+        records: &[[u8; 32]],
+        kind: crate::restore_held::Records,
+    ) -> Result<bool> {
+        use crate::restore_held::Records;
+        if bound.note.placed {
+            return Ok(false);
+        }
+        let seq = bound.note.message.order()?.1;
+        let sender = bound.message.sender();
+        Ok(match self.place_of(&bound.message, seq).await? {
+            Some(Place::Record { target, .. }) => records.contains(&self.activity_key(&target)?),
+            Some(Place::Allowance | Place::Stop(_)) => {
+                let Some(id) = crate::allowances::named_allowance(bound.message.body()) else {
+                    return Ok(true);
+                };
+                let mut named = false;
+                for collection in [Collection::Allowances, Collection::AllowanceProposals] {
+                    let target =
+                        crate::allowances::allowance_record_target(collection, &sender, id);
+                    named |= records.contains(&self.app.record_key(&target)?);
+                }
+                named
+            }
+            Some(Place::AwaitsRequest(_) | Place::AwaitsWrite | Place::Undecided) => {
+                kind == Records::Activity
+            }
+            Some(Place::List(_) | Place::Taken) => false,
+            None => match (bound.message.body(), bound.message.message().refs.first()) {
+                (Body::PaymentRequestCancellation(_), Some(request))
+                    if kind == Records::Activity =>
+                {
+                    let payer =
+                        ActivityTarget::payer(natural_key::request_record(&sender, request));
+                    records.contains(&self.activity_key(&payer)?)
+                }
+                _ => false,
+            },
+        })
     }
 
     /// Where `stored` goes for this app: a request into the payer's request record; a
@@ -1874,8 +1935,8 @@ mod tests {
     fn test_stored_receipt_claim_read_decides_its_write() {
         use pubky_dispatch_core::http::ErrorCode;
         let answered = |code: ErrorCode| {
-            Err(AppError::Switch(
-                pubky_dispatch_client::error::ClientError::Switch {
+            Err(AppError::Dispatch(
+                pubky_dispatch_client::error::ClientError::Dispatch {
                     status: code.status(),
                     code,
                     message: String::new(),
@@ -1920,7 +1981,7 @@ mod tests {
         use pubky_dispatch_client::error::ClientError;
         use pubky_dispatch_core::http::ErrorCode;
         for code in ErrorCode::ALL {
-            let bare = AppError::Switch(ClientError::Switch {
+            let bare = AppError::Dispatch(ClientError::Dispatch {
                 status: code.status(),
                 code,
                 message: String::new(),

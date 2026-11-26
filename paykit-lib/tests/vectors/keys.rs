@@ -37,15 +37,15 @@ pub(crate) fn check() {
     }
 }
 
-const DESCRIPTION: &str = "The fixed keys every other file of this set uses (Switch wire \
+const DESCRIPTION: &str = "The fixed keys every other file of this set uses (Dispatch wire \
 1.3, 1.5, 3.1). Each secret is BLAKE3(\"paykit/v1/test-vectors/\" + seed label); X25519 \
 secrets (bundle keys) are then clamped as RFC 7748 requires, and Ed25519 secrets are 32-byte \
 seeds. identities holds alice, the payer, and bob, the payee, with their Pubky IDs, their \
-Switch roots, derive(\"pubky-switch/v1/scope-root\", identity secret), and their naming keys, \
-derive(\"pubky-switch/v1/naming\", root), which blind every record key and claim input of \
+Dispatch roots, derive(\"pubky-dispatch/v1/scope-root\", identity secret), and their naming keys, \
+derive(\"pubky-dispatch/v1/naming\", root), which blind every record key and claim input of \
 this set. apps holds each app with its signing and bundle keys, its App ID and the scopes and \
-switch permissions of its certificate in documents.json certificates: the executor's and \
-the phone's hold paykit_contacts. scope_keys are derive(\"pubky-switch/v1/scope-key\", root, \
+Dispatch permissions of its certificate in documents.json certificates: the executor's and \
+the phone's hold paykit_contacts. scope_keys are derive(\"pubky-dispatch/v1/scope-key\", root, \
 u64(data_epoch), scope), key_material_hex being the input after the label: alice's paykit_pay key \
 under which sealed.json's values are sealed, bob's paykit_request key and the key of his label \
 shop1, which seals sealed.json's labelled record, and bob's paykit_settlements key, which seals \
@@ -77,7 +77,7 @@ pub(crate) fn generate(keys: &Keys) {
                 "public_hex": hex(&key.public()),
                 "secret_hex": hex(&key.secret_bytes()),
                 "seed_label": label,
-                "switch_root_hex": hex(&key.switch_root()),
+                "dispatch_root_hex": hex(&key.dispatch_root()),
             })
         })
         .collect();
@@ -106,7 +106,7 @@ pub(crate) fn generate(keys: &Keys) {
         .iter()
         .map(|(name, epoch, scope)| {
             let identity = keys.identity_named(name);
-            let material = lp(&[&identity.switch_root(), &u64be(*epoch), scope.as_bytes()]);
+            let material = lp(&[&identity.dispatch_root(), &u64be(*epoch), scope.as_bytes()]);
             json!({
                 "data_epoch": epoch,
                 "identity": name,

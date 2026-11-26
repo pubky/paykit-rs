@@ -146,11 +146,19 @@ impl Paykit {
         Box::pin(self.app.flush_message(msg_id)).await
     }
 
-    pub(crate) async fn send_outbox(&mut self) -> std::result::Result<OutboxReport, AppError> {
+    /// Flush the outbox. Its error is Paykit's own: the list step before the flush can
+    /// fail outside the client, such as the random generator a fresh withdrawal needs, and
+    /// that failure is reported as itself, never as a corrupt store.
+    pub(crate) async fn send_outbox(&mut self) -> Result<OutboxReport> {
         self.require_first_read()?;
+        // The flush can expire a carried list: what it owes is recorded first, or nothing is
+        // flushed (Paykit spec 7.2, `Paykit::carried_lists_owed`); then what a restore holds
+        // past its deadline is given up, as at a receive.
+        Box::pin(self.carried_lists_owed()).await?;
+        Box::pin(self.give_up_expired_held()).await?;
         let _delivery = self.delivery_operation();
         self.service_time_for_delivery().await?;
-        Box::pin(self.app.flush_outbox()).await
+        Ok(Box::pin(self.app.flush_outbox()).await?)
     }
 
     /// Before the client delivers, keep the highest verified service time as `sv` and make

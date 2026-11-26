@@ -6,7 +6,7 @@ use paykit_lib::records::{ActivityRecord, ActivitySide};
 use paykit_sdk::{AppScopes, PayOptions, Paykit, Refusal};
 use pubky_dispatch_client::app::{Collection as DispatchCollection, RecordTarget};
 use pubky_dispatch_client::clock::Clock;
-use pubky_dispatch_client::testing::{Fault, ScriptedSwitch};
+use pubky_dispatch_client::testing::{Fault, ScriptedDispatch};
 use pubky_dispatch_client::transport::{BoxFuture, Request, Response, Transport};
 use pubky_dispatch_client::TransportError;
 use pubky_dispatch_core::ops::{Entry, OpsRequest};
@@ -16,7 +16,7 @@ use std::sync::Arc;
 /// Its service refuses signed writes for quota throughout this reader's journey.
 struct ReaderQuota {
     transport: Arc<dyn Transport>,
-    service: Arc<ScriptedSwitch>,
+    service: Arc<ScriptedDispatch>,
 }
 
 impl Transport for ReaderQuota {
@@ -165,7 +165,7 @@ async fn read_repaired_marker(case: ReadCase) {
         let mut env = w.env(&w.bob, store);
         env.transport = Arc::new(ReaderQuota {
             transport: env.transport,
-            service: w.bob.switch().clone(),
+            service: w.bob.dispatch().clone(),
         });
         env
     };
@@ -199,7 +199,7 @@ async fn read_repaired_marker(case: ReadCase) {
     let writes_at_delete = w.record_writes(&w.bob, &key);
     witness.receive(None).await.unwrap();
     witness.app_mut().flush_cursor().await.unwrap();
-    assert!(w.bob.switch().app(&witness.app_id()).cursor < deletion.version.version);
+    assert!(w.bob.dispatch().app(&witness.app_id()).cursor < deletion.version.version);
     assert_eq!(w.record_writes(&w.bob, &key), writes_at_delete);
     let notice = witness
         .payee_deletion_notices()
@@ -221,7 +221,7 @@ async fn read_repaired_marker(case: ReadCase) {
         assert!(read.authenticated && !read.flagged && !read.not_taken);
         assert_eq!(read.version, published.version);
         assert_eq!(read.content, published.content);
-        assert!(w.bob.switch().app(&witness.app_id()).cursor >= deletion.version.version);
+        assert!(w.bob.dispatch().app(&witness.app_id()).cursor >= deletion.version.version);
         assert_eq!(
             witness.retained_payee_receipts().await.unwrap()[0]
                 .receipt
@@ -264,7 +264,7 @@ async fn read_repaired_marker(case: ReadCase) {
     witness.app_mut().read_record_fresh(&target).await.unwrap();
     late.app_mut().read_record_fresh(&target).await.unwrap();
     witness.app_mut().flush_cursor().await.unwrap();
-    assert!(w.bob.switch().app(&witness.app_id()).cursor < deletion.version.version);
+    assert!(w.bob.dispatch().app(&witness.app_id()).cursor < deletion.version.version);
     for reader in [&witness, &late] {
         let held = reader.app().shared_record(&key).await.unwrap().unwrap();
         assert!(held.authenticated && !held.flagged);
@@ -288,7 +288,7 @@ async fn read_repaired_marker(case: ReadCase) {
     }
     let eager_hash = w
         .bob
-        .switch()
+        .dispatch()
         .applied()
         .into_iter()
         .rev()
@@ -347,7 +347,7 @@ async fn read_repaired_marker(case: ReadCase) {
     witness.app_mut().flush_cursor().await.unwrap();
     let read = witness.app().shared_record(&key).await.unwrap().unwrap();
     let covered = matches!(case, ReadCase::Live | ReadCase::Reload);
-    let cursor = w.bob.switch().app(&app_id).cursor;
+    let cursor = w.bob.dispatch().app(&app_id).cursor;
     println!(
         "receipt reader {}",
         serde_json::json!({
@@ -441,7 +441,7 @@ async fn read_repaired_marker(case: ReadCase) {
         assert_eq!(read.version, later.version);
         let taken = witness.app().shared_record(&other).await.unwrap().unwrap();
         assert!(taken.authenticated && !taken.flagged);
-        assert!(w.bob.switch().app(&witness.app_id()).cursor < deletion.version.version);
+        assert!(w.bob.dispatch().app(&witness.app_id()).cursor < deletion.version.version);
         assert!(witness
             .app_mut()
             .unacknowledged_events()
@@ -463,7 +463,7 @@ async fn keep_recovered_delete(
     let paykit_lib::Body::PaymentReceipt(payment) = receipt.body() else {
         panic!("expected signed receipt");
     };
-    let service = pubky_dispatch_client::testing::ScriptedSwitch::recovering(
+    let service = pubky_dispatch_client::testing::ScriptedDispatch::recovering(
         w.bob.identity().key(),
         [25; 32],
         w.clock.clone(),
@@ -472,7 +472,7 @@ async fn keep_recovered_delete(
     )
     .unwrap();
     let origin = "https://recovered-shop.example";
-    w.router.add_switch(origin, &service);
+    w.router.add_dispatch(origin, &service);
     let doc = w
         .bob
         .sign_next(|body| {
@@ -486,7 +486,7 @@ async fn keep_recovered_delete(
     seller_wallet.receive(None).await.unwrap();
     let deleted_op = w
         .bob
-        .switch()
+        .dispatch()
         .applied()
         .into_iter()
         .find(|op| {

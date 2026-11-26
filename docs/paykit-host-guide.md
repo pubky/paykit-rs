@@ -2,7 +2,7 @@
 
 A wallet owns one `Paykit` handle for each approved App ID. Supply the same
 durable Dispatch store, transport, clock and Homeserver access when reopening it.
-Use the [Dispatch app host guide](https://github.com/pubky/pubky-dispatch/blob/d4f33242e2771a773e004b7fd2be0ebb09505c86/docs/app-host-guide.md)
+Use the [Dispatch app host guide](https://github.com/pubky/pubky-dispatch/blob/c2b19c95f5f60937df3995efda13e477e9b1ff47/docs/app-host-guide.md)
 for store guarantees, approval and client outcomes. Keep app keys and backups in
 host-protected storage and serialize operations on the handle. A memory store
 cannot preserve unanswered writes or payments across a restart.
@@ -129,9 +129,58 @@ delays signing, `PaykitError::PublicEndpointChangePending` means that the
 client retained the requested edit. Show the withdrawal as pending until the
 client signs the updated record and reports its publication.
 
-After restoring a backup, drive the wallet's first receive. When publication
+The client saves an endpoint edit before it reads the service time to sign it.
+So an edit whose time read failed may already be saved, though the call returned
+that error and never `Publication::Published`, and the same run's next `receive`
+signs and publishes it. That read fails on a `transport` error, and on an error
+answer of the service such as `dispatch_unavailable`. Call `receive` and read
+`own_public_endpoints` before trying again: sending the same map again changes
+nothing, while a different map replaces the saved edit.
+
+A reload or a restore before that holds the saved edit aside, and the wallet
+never signs it, a withdrawal included (Paykit spec 4, "Changes saved and not yet
+signed"). The load or the restore itself, before it returns and before any read,
+raises `NoticeKind::PublicEndpointChangeNotPublished` and clears the held edit,
+so no later call can sign over it. The notice names each endpoint the change
+named by its class: to withdraw (`endpoints_withdrawn`), to offer
+(`endpoints_offered`) and to give a new payload (`endpoints_changed`). Each held
+change is a notice of its own, with its own `id`. If the notice can't be
+written at the open, the wallet still opens: the edit stays held, and every call
+that would sign the record is refused until the next `receive`, or the next such
+call, tells it: with the store's failure or the alarm itself, as any other call
+gets it, and a `receive` ends on it, or else with
+`NotNowReason::EndpointChangeUntold`. On that notice the
+host must:
+
+- once a `receive` has read since the load or the restore, withdraw again each
+  endpoint in `endpoints_withdrawn` with `remove_public_endpoint`, without asking
+  the user again: the user already asked. The read first brings the record other
+  devices had signed since, so the call removes under the current record and
+  doesn't sign this device's older copy of the other endpoints over theirs. After
+  a restore, the call is refused (`Refusal::NotNow`) until that read. If another
+  device offered that endpoint again since, the user offers it again;
+- show the user `endpoints_offered`, `endpoints_changed` and the current
+  `own_public_endpoints`, and make those offers and payload changes again only
+  when the user asks;
+- with all three lists empty, show the user that a change of the public
+  endpoints wasn't published, with the current endpoints;
+- acknowledge the notice. It can be told again for the same change, with the
+  same `id`, and acknowledging it again is no error.
+
+Until then a withdrawn endpoint stays published, and the upkeep keeps renewing
+the record that holds it.
+
+After restoring a backup, drive the wallet's first receive: until it has read,
+the record isn't changed or published. A change asked before it is refused with
+`Refusal::NotNow`, and the client's own publication reports
+`Publication::AwaitingRead`. When publication
 returns `Publication::AwaitingRecord`, the wallet still has a newer record
-choice to settle. Keep the change pending and continue normal receives.
+choice to settle. Keep the change pending and continue normal receives. A held
+record change of any protocol in the app makes publication wait until it is
+decided (Dispatch spec 4.2): while another protocol keeps a held change
+undecided, the Homeserver copy is not repaired, Paykit's public Payment
+Endpoints included. Have that protocol decide its change; Paykit never clears
+another protocol's held change.
 A restore carrying only the accepted offer can repair its missing public copy.
 
 Each receive also brings the app record up to date after its read. A receive
@@ -534,6 +583,12 @@ A selling app that publishes a Private Payment List keeps a counter for each rec
 
 These three are not kept after the call returns. A crash before the host handles them, or a Paykit error after the read, can lose them; `SeenMarksIncomplete` is held in memory from the restore until the first `receive`, so a crash before that first `receive` loses it too. Duty events are kept until acknowledged and can be read again with `unacknowledged_events`.
 
+`AppEvent::RecordEditsHeld` is a duty event the wallet takes for Paykit: it tells and clears Paykit's held record change at the open as above, works out the held accepted kinds again at the first `receive` that reads, and then acknowledges the event for `"paykit"`. A held change of another protocol named in it is that protocol's to read and clear.
+
+`AppEvent::MessagesHeldAtRestore` (`WalletEventData::MessagesHeldAtRestore { held }` in the bindings) is a duty event the wallet takes for Paykit: `held` counts the messages this restore newly held, and Paykit decides each as "Messages held at restore" says, acknowledging the event for `"paykit"`. The host acts on the receive summary's `held_messages` and on the deliveries it is told of, not on this event.
+
+`AppEvent::RestoreLeftBehind` counts, in `record_edits` (also in the bindings), the unsigned changes of the app's record the restore couldn't hand to a protocol: they didn't read, or belong to no protocol this app registers. They are gone and never signed. Show the user that a change of the app's record made before the restore wasn't kept, with the record as it stands, so the user can make it again, then acknowledge the event.
+
 ### Withdrawing public endpoints and paying offline
 
 To stop offering public endpoints, call `set_public_endpoints` with an empty set while publication is on, and check the result. `Published` means the Homeserver holds the record without them. For any other result, check that the withdrawal is visible before going further. Turn `publishes_record` off only if the app should stop publishing its record on the Homeserver altogether; it still gives its app record to the Dispatch. Until the withdrawal is visible, the old endpoints expire, or the app is revoked, a payer can still pay the endpoints it read before.
@@ -595,7 +650,9 @@ backup, keeps, kind by kind:
 
 A notice the host acknowledged after the backup, which acknowledging deleted, can be
 listed again after the restore: the same occurrence comes back with the same `id` and
-`raised_at_ms`, and the host may skip one it recorded acknowledging with both. A notice
+`raised_at_ms`, and the host may skip one it recorded acknowledging with both.
+`NoticeKind::PublicEndpointChangeNotPublished` can be told again for the same change, with the
+same `id`, and a restore keeps each one either store holds. A notice
 raised again is a new occurrence with the same `id` and a later `raised_at_ms`, such as a
 `HeldWithoutPay` whose hold started again, or an identity notice told again while its
 hold stands: show it as the table below says. Handle Dispatch
@@ -641,6 +698,7 @@ the new cursor to the service. Acknowledging the deletion notice leaves the cred
 | `NoticeKind::AllowancePlacementExpired` | Ordinary placement expired. The wallet still holds evidence of a possible Allowance conflict. Acknowledge the notice after showing it. The hold survives acknowledgment and restart. |
 | `NoticeKind::AllowanceAcceptanceBeforeLoss` | Show that the identified acceptance cannot open a budget after the payer’s declared provider loss. The proposing wallet withdraws only its verified original pending write. An uncertain read or a later lifetime keeps that record intact. The seller ends its matching accepted Allowance when the withdrawal arrives. |
 | `NoticeKind::AllowanceWithdrawalConfirmed` | The seller returned its signed end for the proposal and acceptance this wallet withdrew. The notice identifies that end. The original Allowance stays closed after acknowledgement and reopen. |
+| `NoticeKind::StopNotRecorded` | The record no longer shows the user's stop. `Notice::stop` names what it was for, as the call that stops it again takes it: `StopSubject::Request` for a request the user was asked to pay (`cancel_request` or `reject_request`), `StopSubject::SentRequest` for one the user sent (`cancel_sent_request` with its `record`), `StopSubject::Allowance` for an Allowance (`end_allowance` with its `record`). Show that request or Allowance as still open, and let the user stop it again with that call. A counterparty can have several open at once, so go by the subject, never by the counterparty alone (Paykit spec 7.2). |
 | `NoticeKind::PossiblyDelivered` | Reconcile the original message with its recipient using its ID and signed hash. Acknowledging the notice records that the host has seen it. It authorizes no send or replacement. |
 | `NoticeKind::ListDeliveryUnknown` | The counterparty may not have this list. For a withdrawal it may keep paying the earlier list; otherwise it may lack the list. Acknowledging the notice authorizes nothing. `publish_list_to` for a chosen counterparty and `withdraw_list_from` for a withdrawn one report `Refusal::ListDeliveryUnknown`; a call that changes the list sends the new version instead. |
 | `NoticeKind::BlockedMessagesLost` | Show the affected counterparty and acceptance-time range. Consult the payment method for payments that may have been among the lost messages. |
@@ -652,6 +710,7 @@ the new cursor to the service. Acknowledging the deletion notice leaves the cred
 | `NoticeKind::BlockFloorHeld` | Tell the user that the wallet saw the identity's block floor diverge after a provider loss and holds it for good: no one-time request is paid automatically, each can still be paid by hand, and an unblock or a widening that needs the floor raised waits, with the unblocked sender's one-time requests and, after a restore that isn't clean or a missed item, every re-send request, unless the shared post-loss hold stands too (`NoticeKind::AutomaticPaymentsHeld`), when they go without the raise. Billing Periods and payments without a request go on. Shown once, and again after each reopen while the hold stands; acknowledge it after showing it. |
 | `NoticeKind::FloorRaiseWaiting` | Tell the user that the wallet owes a block floor raise it can't write now, because the floor doesn't read or the Dispatch refuses the write for now: until it is written, an unblocked sender's one-time requests wait and it is asked nothing, and while the raise of a restore that isn't clean or of a missed item waits, no one is asked to re-send. Payments by hand, Billing Periods and payments without a request go on. The wallet tries again at the next receive, and from its second unwritten try in a row after a wait of one minute, doubling to ten; the wait ends early when the floor record changes, the floor becomes readable or a new raise is owed. Shown once per load while it stands, and again after a reopen while the raise stays unwritten; the notice goes when the raise is written, or when the divergence hold stands (`NoticeKind::BlockFloorHeld`). Acknowledge it after showing it. |
 | `NoticeKind::AutomaticPaymentsHeld` | Tell the user that, after a provider loss, no one-time request of the identity is paid automatically any more, on any of its wallets, and no payment of one is repeated at a resume, one the user started included; each can still be paid by hand. Billing Periods and payments without a request go on. Shown once, and again after each reopen; acknowledge it after showing it. |
+| `NoticeKind::PublicEndpointChangeNotPublished` | A change of the wallet's public endpoints saved while the Dispatch couldn't sign it wasn't published after a restart or a restore; each held change is a notice of its own. Withdraw again each endpoint in `endpoints_withdrawn` with `remove_public_endpoint`; show `endpoints_offered`, `endpoints_changed` and the current endpoints, and make those offers and payload changes again only when the user asks; with all three lists empty, show the current endpoints. Acknowledge it; acknowledging it again is no error. |
 | `PaykitError::Client` | Handle the enclosed Dispatch outcome. Preserve any kept batch and its ID. |
 | `PaykitError::Lib` | Use the rule error to distinguish invalid input from invalid network or shared data. |
 | `PaykitError::Rail` | Preserve any unresolved attempt unless the method established definitive refusal. |
@@ -670,6 +729,32 @@ the new cursor to the service. Acknowledging the deletion notice leaves the cred
 | `PublicAppFailureReason::Refused` | Exclude the unusable record. Its rule failure can help diagnose the lookup. |
 | `PublicAppFailureReason::Expired` | Wait for a current record from that app. A public record reaches its limit at any finite signed deadline or at the maximum age in the payee's signed identity document (90 days by default). |
 | `PublicAppFailureReason::OverBound` | This app's endpoints did not fit within the lookup bounds. Use the reason when explaining an incomplete lookup. |
+
+## Messages held at restore
+
+A restore holds the Paykit messages it can't tell are still wanted: those the backup's outbox carried, and, at a restore in place, those only the store it replaces still owed. The receive summary's `held_messages` counts, best effort, those released and withdrawn in that receive (`withdrawn` counts carried lists too), and those still held after it. `still_held` is null when the wallet couldn't list them; then the host does nothing, and the next receive reports. Paykit decides them only after a read of its own has read the whole feed, its records are listed with nothing left owed, and their scope keys are held, with nothing stopping the wallet. Until then they stay held. A held message ends at the earlier of the client's own deadline and 30 days after its signing, less the clock tolerance, judged on the service time the reads verified. It is then given up and told, at the first receive the client can act on: a stopped wallet does nothing, delivering nothing either, until it can. A withdrawal or give-up is told as `DeliveryUnknown`, or as `MessageUndelivered` for one never tried or a re-send of a message the counterparty already accepted, in the next receive's report. For `DeliveryUnknown`, show the original as possibly delivered and reconcile it with the counterparty or the current records (Paykit spec 7.2, 9).
+
+A stop or a proof is released with its original bytes while the record, read afresh and not paused as divergent, still holds it: a stop with no stop of the counterparty's, a proof with no receipt for its attempt. It still passes the normal delivery checks, and it adds no reply grant. While the record can't be read, waits for a key, is paused until the user confirms it, or has a counterparty's stop or receipt kept and not placed in it yet, the message stays held. An original that can't be read, or whose body doesn't parse, is withdrawn and told.
+
+After a restore, Paykit decides every held message of its own kinds, a hold of one message included: a host holds a counterparty (`hold_queued`), not a message. The bindings offer no hold of one message.
+
+| Held message | What happens and what the host shows |
+| --- | --- |
+| Payee or payer cancellation, or request rejection | Released while the record holds it. When the record shows the counterparty's own stop, it is withdrawn and nothing more is needed. When the record no longer shows it and the request is still open, it is withdrawn with `StopNotRecorded`, whose `stop` names the request, and the user may stop that request again. |
+| End of an accepted Allowance | Released while the Allowance record holds it, judged as an end the app made unless the user's origin is known. For a conflicted Allowance it is withdrawn with no notice: an end is never sent for one. When the record no longer shows it and the Allowance is still open, it is withdrawn with `StopNotRecorded`, whose `stop` names the Allowance's record, and the user may end that Allowance again. |
+| Payment proof | Released while the payer's record holds it and no receipt for its attempt. With a receipt recorded it is withdrawn and nothing is owed. When the record holds neither, it is withdrawn and told as `DeliveryUnknown`: reconcile the payment with the payee. |
+| One-time or recurring Payment Request | Withdrawn. Show the original first. If the payer never answered, the user may authorize a new request. |
+| Period details | Withdrawn. The payee may issue new details for an open period, within its limit of eight. The payer may ask for the originals by re-send request. |
+| Receipt | Withdrawn. The payer may ask for the receipt retained in the payee record by re-send request. |
+| Acceptance reporting a payment | Withdrawn and told as unknown, and never signed again: the payee gets the payment's proof, which carries what it needs, and credits by it (Paykit spec 7.2). The payment finishes on its proof. |
+| Subscription acceptance | Withdrawn. The user may accept again if the payer record still has no response. |
+| Private Payment List request or re-send request | Withdrawn. The payer asks for a list at its next need. Restore and ordinary re-send rules handle further re-send requests. |
+| Allowance proposal | Withdrawn. Show the possibly delivered original before the user authorizes a new proposal. |
+| Allowance acceptance or rejection | Withdrawn. The user may answer a still-pending proposal again. A rejected proposal can remain pending at the proposer until withdrawn or the retained rejection arrives. |
+| Proposer's withdrawal | Withdrawn. The late-withdrawal duty still applies, and the user may withdraw again (Paykit spec 8.3.1). |
+| Executor notice | Withdrawn. Executors read the Allowance record themselves. |
+| Empty or nonempty Private Payment List | Withdrawn and told, as every withdrawal is. A fresh empty withdrawal is owed and goes once the app holds plain `paykit_request`. Until that withdrawal is reserved, the list's `ListDeliveryUnknown` notice also stands, and the list calls report `Refusal::ListDeliveryUnknown`; the receive that reserves it removes the notice as superseded, so a host may not see it. Show the previous list, reapply the user's withdrawals, then let the user set the list and choose recipients again. |
+| Extension message | Withdrawn. The extension's owner may send again through its own call. |
 
 ## The payment method's proof
 
@@ -760,7 +845,7 @@ Every reason of `NotNow` is `RetryLater`, of `HeldForUser` `NeedsUser`, and of `
 
 Two rules override a code's case. A failure with a `keptBatch` comes as `OutcomeUnknown`, unless its case is `Recovery`: the wallet sends that batch again by itself, and the outcome shows once it is answered. The one exception is `settlement_warning_unsaved`, which comes as `NeedsUser` with its `keptBatch`: the user is shown the bucket's warning while the kept batch may still apply. A pay that may have been sent never comes as an error: it comes as a pending or uncertain outcome. The one exception is a wallet-wide stop met after the call, such as the store failing or an alarm. It comes as that stop, and the journal keeps the payment, which the resume after the recovery settles from the method's history.
 
-A failure that comes once the request may have left the device comes as `OutcomeUnknown`, also without a `keptBatch`: a timeout, an answer whose signature doesn't verify, an answer too large to take, one the service gave before reading the request, and one that doesn't read or verify. The failure doesn't say which request it was, and some requests the Dispatch client sends outside a kept batch are safe to repeat only while the first is outstanding: a message the service no longer holds is appended again, and a late connect request can reopen one that was declined. Only a failure that sent nothing comes as a case that calls again.
+A failure that comes once the request may have left the device comes as `OutcomeUnknown`, also without a `keptBatch`: a timeout, an answer whose signature doesn't verify, an answer too large to take, one the service gave before reading the request, and one that doesn't read or verify. The failure doesn't say which request it was, and some requests the Dispatch client sends outside a kept batch are safe to repeat only while the first is outstanding: a message the service no longer holds is appended again, and a late connect request can reopen one that was declined. Only a failure that sent nothing comes as a case that calls again. Otherwise a Dispatch client failure comes as `RetryLater` exactly when the same call may pass later with no one acting, by the SDK's table that `resumePayments` applies (`PaykitError::is_wait` in Rust); an error answer that needs another step first, such as a `receive`, a key bundle or a limit that frees, comes as `NotSent`, since it applied nothing.
 
 | Code | From | Case | What the host does |
 |---|---|---|---|
@@ -813,6 +898,7 @@ A failure that comes once the request may have left the device comes as `Outcome
 | `scope_keys_awaited` | `NotNowReason::ScopeKeysAwaited` | `RetryLater` | The signer stores the certificate's keys when it is next online; tell the user if it stays. |
 | `value_awaits_key` | `NotNowReason::ValueAwaitsKey` | `RetryLater` | The signer stores the record's keys when it is next online; call again then. |
 | `floor_unreadable` | `NotNowReason::FloorUnreadable` | `RetryLater` | The block floor can't be read now: the payer's records not listed yet, a key awaited, a kept floor write, or the Dispatch not answering. A later `receive` clears it with no one acting. |
+| `endpoint_change_untold` | `NotNowReason::EndpointChangeUntold` | `RetryLater` | A change of the public endpoints saved earlier and not signed couldn't be told yet, for a reason other than a store failure or an alarm, which come as themselves. Nothing of the app record is signed until it is; the next `receive`, or the next call that signs, tries again with no one acting. |
 | `floor_record_unreadable` | `HeldForUserReason::FloorRecordUnreadable` | `NeedsUser` | The block floor record doesn't read, and no later read clears it. This version has no call that repairs it: it reads again only once another of the user's wallets that holds a readable floor writes it. Until then an unblock is refused and the counterparty stays blocked, a block still takes effect, and one-time requests are paid by hand. Show that. |
 | `floor_raise_waiting` | `NotNowReason::FloorRaiseWaiting` | `RetryLater` | A block floor raise left unwritten waits before it is tried again: call again later. |
 | `no_service_time` | `NotNowReason::NoServiceTime` | `RetryLater` | `receive`, which verifies a service time, then call again. |
@@ -829,7 +915,7 @@ A failure that comes once the request may have left the device comes as `Outcome
 | `held_for_user` | a `HeldForUserReason` the bindings don't know | `NeedsUser` | Show `reason()` to the user. |
 | `attempt_check` | `HeldForUserReason::AttemptCheck` | `NeedsUser` | Inside `attempt_failed`: a check before money moved failed and nothing was paid. A new payment is the user's decision once the check can pass, for a certificate expiring soon after the signer renews it. |
 | `reload_required` | `HeldForUserReason::ReloadRequired` | `NeedsUser` | Load the wallet again, then edit its record. |
-| `dispatch_client_hold` | `HeldForUserReason::SwitchClient` | `NeedsUser` | The Dispatch client holds the attempt. The bindings carry no subtype: tell the user the wallet holds payments for now, finish a reconciliation or a display read the host started, and check the device clock; then make the call again. |
+| `dispatch_client_hold` | `HeldForUserReason::DispatchClient` | `NeedsUser` | The Dispatch client holds the attempt. The bindings carry no subtype: tell the user the wallet holds payments for now, finish a reconciliation or a display read the host started, and check the device clock; then make the call again. |
 | `held_unresolved` | `HeldForUserReason::Unresolved` | `NeedsUser` | A hold on one request, publication or delivery that no wait clears as far as the wallet can tell: show `reason()`. |
 | `payer_pass_owed` | `RecoveryReason::PayerPassOwed` | `Recovery` | `reconcile` with pay runs the payer pass owed since the restore. |
 | `activity_base_changed` | `HeldForUserReason::ActivityBaseChanged` | `NeedsUser` | After a provider loss another write sits at this record's version: show it for that request; it goes on once the loss steps run or a write the app takes replaces it. |
@@ -857,7 +943,7 @@ A failure that comes once the request may have left the device comes as `Outcome
 | `duties_too_large` | `AppRefusal::DutiesTooLarge` | `NotSent` | The backup wouldn't fit beside the duty events it carries: acknowledge the duty events acted on, then back up again. |
 | `deny_list_full` | `AppRefusal::DenyListFull` | `NeedsUser` | After a provider loss the new service's deny list has no room for `over` of the app's deny entries: ask the user which peers to unblock, then follow the recovery again. |
 | `wont_deliver` | `AppRefusal::WontDeliver` | `Permanent` | The message can no longer be delivered safely. |
-| `expired_unsent` | `AppError::ExpiredUnsent` | `NotSent` | The batch was retired before it was sent: make the call again. |
+| `expired_unsent` | `AppError::ExpiredUnsent` | `RetryLater` | The batch was retired before it was sent, and nothing of it applied: call again. |
 | `store_after_kept` | `AppError::Store` behind a kept batch | `OutcomeUnknown` | The commit failed after the call's batch was kept: it may have applied. Reconcile before trying again. |
 | `protocol_store` | `AppError::Protocol` behind a kept batch | `OutcomeUnknown` | Paykit's store failed after the call's batch was kept: it may have applied. Reconcile before trying again. |
 | `transport` | `TransportError::Connect` | `RetryLater` | No connection could be made, so nothing was sent: call again later. |
@@ -869,7 +955,7 @@ A failure that comes once the request may have left the device comes as `Outcome
 | `transport_invalid_request` | `TransportError::InvalidRequest` | `NotSent` | The host's transport couldn't build the request: fix the transport. |
 | `account_not_answering` | `AppError::NotAnsweringAsAccount` | `RetryLater` | The service doesn't answer for the account yet: call again later. |
 | `invalid_data` | `AppError::InvalidData`, `ClientError::Core` | `OutcomeUnknown` | Data from the store or from the call's answer doesn't verify or doesn't read. The request may have gone out and taken effect: reconcile before trying again. The same data gives the same answer until what serves it changes; show it and report it. |
-| `display_read_pending` | `ClientError::DisplayReadPending` | `RetryLater` | Wait for the signed display read in progress. |
+| `display_read_pending` | `ClientError::DisplayReadPending` | `NotSent` | A signed display read is owed first, and nothing was sent: `receive`, then call again. |
 | `bad_service_signature` | `ClientError::BadServiceSignature` or an unreadable signed header, at any status | `OutcomeUnknown` | An answer the pinned service key doesn't verify, from an intermediary such as a proxy, or after the service changed its key: nothing of it was used, its status included. The request went out, so it may have taken effect: reconcile before trying again. `receive` follows the newest `identity.json` and its key; if the answer stays, report it. |
 | `stale_answer` | `ClientError::StaleAnswer` | `RetryLater` | A public read outside its window: call again. |
 | `body_unread` | `ClientError::BodyUnread`: `too_large`, `rate_limited` or `not_found` before the service read the request | `OutcomeUnknown` | Such an answer binds the request without its body, so it counts as no answer (Dispatch wire 7.1): reconcile before trying again, after `retryAfterMs` when it is set. |
@@ -884,16 +970,16 @@ A failure that comes once the request may have left the device comes as `Outcome
 | `dispatch_not_current` | Dispatch answer `not_current` | `Recovery` | The app isn't current any more: recover. |
 | `dispatch_cert_expired` | Dispatch answer `cert_expired` | `Recovery` | The certificate expired: get a new one from the signer. |
 | `dispatch_not_found` | Dispatch answer `not_found` | `Permanent` | The service holds no such object. |
-| `dispatch_conflict` | Dispatch answer `conflict` | `NotSent` | The state changed: read again, decide again, then call again. |
-| `dispatch_stale_epoch` | Dispatch answer `stale_epoch` | `RetryLater` | Call again after `receive`. |
-| `dispatch_stale_generation` | Dispatch answer `stale_generation` | `RetryLater` | Call again after `receive`. |
-| `dispatch_stale_key` | Dispatch answer `stale_key` | `RetryLater` | Call again after `receive`. |
-| `dispatch_stale_identity` | Dispatch answer `stale_identity` | `RetryLater` | The `identity.json` delivered isn't the newest the service holds: call again after `receive`, which reads the current one. |
-| `dispatch_identity_needed` | Dispatch answer `identity_needed` | `RetryLater` | Call again after `receive`. |
-| `dispatch_moved` | Dispatch answer `moved` | `RetryLater` | The account moved: call again after `receive`. |
+| `dispatch_conflict` | Dispatch answer `conflict` | `RetryLater` | The state changed and nothing applied: a later call reads it again. |
+| `dispatch_stale_epoch` | Dispatch answer `stale_epoch` | `NotSent` | Nothing applied: call again after `receive`. |
+| `dispatch_stale_generation` | Dispatch answer `stale_generation` | `NotSent` | Nothing applied: call again after `receive`. |
+| `dispatch_stale_key` | Dispatch answer `stale_key` | `NotSent` | Nothing applied: call again after `receive`. |
+| `dispatch_stale_identity` | Dispatch answer `stale_identity` | `NotSent` | The `identity.json` delivered isn't the newest the service holds. Nothing applied: call again after `receive`, which reads the current one. |
+| `dispatch_identity_needed` | Dispatch answer `identity_needed` | `NotSent` | Nothing applied: call again after `receive`. |
+| `dispatch_moved` | Dispatch answer `moved` | `NotSent` | The account moved. Nothing applied: call again after `receive`. |
 | `dispatch_too_large` | Dispatch answer `too_large` | `NotSent` | The request is over a size cap of the service. Nothing applied; make a smaller one. |
 | `dispatch_rate_limited` | Dispatch answer `rate_limited` | `RetryLater` | Wait `retryAfterMs`, then call again. |
-| `dispatch_quota_wait` | Dispatch answer `quota_exceeded` naming `inbox`, `sender_share`, `claims` or `claim_share` | `RetryLater` | The limit frees with time: as the recipient's apps read their feed, or as the service deletes old claims, 30 days after their deadline or 400 days after their last entry. A claim with an open or unknown attempt is never deleted by age, so this app's doubtful attempts may need the user's answer first. Call again later. |
+| `dispatch_quota_wait` | Dispatch answer `quota_exceeded` naming `inbox`, `sender_share`, `claims` or `claim_share` | `NotSent` | Nothing applied. The limit frees as the recipient's apps read their feed, or as the service deletes old claims, 30 days after their deadline or 400 days after their last entry; no later call by itself frees it. A claim with an open or unknown attempt is never deleted by age, so this app's doubtful attempts may need the user's answer first. Call again once the limit has freed. |
 | `dispatch_quota_open_attempts` | Dispatch answer `quota_exceeded` naming `open_attempts` | `NeedsUser` | This app holds the most open attempts it may. The new attempt's batch stays kept at the front of the app's queue and is sent again before each later write, so the outcome writes that would free a slot, from `resumePayments` or the user resolving a doubtful attempt, wait behind it until the Dispatch takes that batch. Don't pay again: show that this app's payments wait, and call `resumePayments` later. |
 | `dispatch_quota_full` | Dispatch answer `quota_exceeded` naming `storage`, `record_keys`, `contacts`, `conversations`, `deny` or `invite_codes` | `NeedsUser` | The limit frees after the user removes something, such as contacts or records, through another app or the signer (these bindings have no call for it); invite codes also free as they expire or are used up. `quotaLimit()` names the limit. Then call again. |
 | `dispatch_quota_connect_requests` | Dispatch answer `quota_exceeded` naming `connect_requests` | `NotSent` | The recipient has its pending connect requests full. Nothing applied; ask again much later, as the recipient may never answer them. |

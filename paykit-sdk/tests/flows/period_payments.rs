@@ -233,7 +233,7 @@ fn proof_of(record: &ActivityRecord) -> (&StoredMessage, &PaymentProof) {
 /// The conditions of every `attempt` alice's Dispatch applied on the claim of `obligation`.
 fn attempt_conditions(w: &World, obligation: &[u8; 32]) -> Vec<Vec<Condition>> {
     w.alice
-        .switch()
+        .dispatch()
         .applied()
         .iter()
         .filter(|op| {
@@ -249,7 +249,7 @@ fn attempt_conditions(w: &World, obligation: &[u8; 32]) -> Vec<Vec<Condition>> {
 fn puts(w: &World, app: &Paykit, natural: &[u8]) -> Vec<Vec<Condition>> {
     let key = app.app().record_key(&natural_target(natural)).unwrap();
     w.alice
-        .switch()
+        .dispatch()
         .applied()
         .iter()
         .filter(|op| matches!(&op.body().kind, OpKind::RecordPut(put) if put.key == key))
@@ -1072,7 +1072,7 @@ async fn test_period_payments_hand_batch_kept_unanswered_is_no_payment() {
     let mut shop = w.shop().await;
     let mut wallet = w.wallet("wallet").await;
     let (request, _) = subscribed(&w, &mut shop, &mut wallet).await;
-    w.alice.switch().fail_next(Fault::Unreachable {
+    w.alice.dispatch().fail_next(Fault::Unreachable {
         path: "/ops".into(),
         after: 0,
     });
@@ -1420,7 +1420,7 @@ async fn restore_before_original_completion(answered: bool, priced: bool) {
     let writes = puts(&w, &wallet, &natural).len();
     let claim_entries = w
         .alice
-        .switch()
+        .dispatch()
         .applied()
         .iter()
         .filter(
@@ -1448,7 +1448,7 @@ async fn restore_before_original_completion(answered: bool, priced: bool) {
     let current = period_record(&w, &wallet, &request, period).await.unwrap();
     assert_eq!(current.to_json().unwrap(), paid);
     assert_eq!(puts(&w, &wallet, &natural).len(), writes);
-    assert_eq!(w.alice.switch().applied().iter()
+    assert_eq!(w.alice.dispatch().applied().iter()
         .filter(|op| matches!(&op.body().kind, OpKind::Claim(c) if c.claim_key == obligation.to_vec())).count(), claim_entries);
     assert_eq!(
         wallet
@@ -3689,7 +3689,7 @@ async fn required_app_period(priced: bool, matching: bool, explicit: bool) {
         assert_eq!(proof_of(&record).1.payment_app_id, required);
     } else {
         assert!(w.rail.all_executions().is_empty(), "{outcome:?}");
-        assert!(!w.alice.switch().applied().iter().any(|op| {
+        assert!(!w.alice.dispatch().applied().iter().any(|op| {
             matches!(&op.body().kind, OpKind::Claim(fields) if fields.kind == ClaimType::Attempt)
         }), "an attempt was applied: {outcome:?}");
         assert!(wallet.payments().await.unwrap().is_empty());
@@ -3895,7 +3895,7 @@ async fn pay_with_two_destination_senders(senders: PeriodSenders) {
         assert!(wallet.payments().await.unwrap().is_empty());
         assert!(w.rail.all_executions().is_empty());
 
-        w.router.add_switch(w.bob.origin(), w.bob.switch());
+        w.router.add_dispatch(w.bob.origin(), w.bob.dispatch());
         let removed = seller_wallet.app_id();
         w.bob
             .next_doc(|doc| {

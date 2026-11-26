@@ -86,6 +86,9 @@ pub enum NoticeKind {
     /// counterparty. Acknowledging it records that the host
     /// has seen it, without authorizing delivery or a replacement (Paykit spec 7.2).
     PossiblyDelivered,
+    /// The record no longer shows this stop, and the request or Allowance is still open
+    /// (Paykit spec 7.2). Show it open and let the user stop it again.
+    StopNotRecorded,
     /// The client gave up a counterparty's current Private Payment List, and its delivery
     /// is unknown. `counterparty` is the recipient, `msg_id` and `message_hash` the list.
     /// Nothing more is sent on its own, but an answer to the counterparty's list request
@@ -138,6 +141,17 @@ pub enum NoticeKind {
     /// Shared post-loss hold). Raised once, and again after each reopen, while the hold
     /// stands; it names no attempt, message or counterparty.
     AutomaticPaymentsHeld,
+    /// A change of the app's public endpoints that it saved and didn't sign wasn't published:
+    /// a later run of the app or a restore held it aside, and Paykit never signs such a
+    /// change, a withdrawal included (Paykit spec 4, "Changes saved and not yet signed").
+    /// [`Notice::endpoints_withdrawn`], [`Notice::endpoints_offered`] and
+    /// [`Notice::endpoints_changed`] name what it asked, by class. The host withdraws again the
+    /// endpoints it would have withdrawn, and asks the user before making the offers and
+    /// payload changes again; with no list, it shows the current endpoints. Raised at the
+    /// load or restore that held the change, one notice for each change; kept until
+    /// acknowledged, and through a restore; it can be told again for the same change, with
+    /// the same ID.
+    PublicEndpointChangeNotPublished,
 }
 
 impl NoticeKind {
@@ -156,6 +170,7 @@ impl NoticeKind {
             Self::AllowancePlacementExpired => "allowance_placement_expired",
             Self::AllowanceAcceptanceBeforeLoss => "allowance_acceptance_before_loss",
             Self::AllowanceWithdrawalConfirmed => "allowance_withdrawal_confirmed",
+            Self::StopNotRecorded => "stop_not_recorded",
             Self::PossiblyDelivered => "possibly_delivered",
             Self::ListDeliveryUnknown => "list_delivery_unknown",
             Self::BlockedMessagesLost => "blocked_lost",
@@ -167,6 +182,7 @@ impl NoticeKind {
             Self::BlockFloorHeld => "floor_held",
             Self::FloorRaiseWaiting => "raise_waiting",
             Self::AutomaticPaymentsHeld => "loss_hold",
+            Self::PublicEndpointChangeNotPublished => "endpoint_change_not_published",
         }
     }
 
@@ -317,6 +333,61 @@ impl SettlementSubject {
     }
 }
 
+/// What a [`NoticeKind::StopNotRecorded`] notice asks the user to stop again, as the call
+/// that stops it takes it (Paykit spec 7.2). One counterparty can have several requests or
+/// Allowances open at once, so the notice names the one its held stop was for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum StopSubject {
+    /// A request this identity was asked to pay, by its payee and request hash:
+    /// [`Paykit::cancel_request`] or [`Paykit::reject_request`] stops it again.
+    Request(crate::RequestRef),
+    /// A request this identity sent, by the record key of its payee activity record, which
+    /// its label's policy derives (Paykit spec 6): [`Paykit::cancel_sent_request`] stops it
+    /// again.
+    SentRequest {
+        /// The record key.
+        record: [u8; 32],
+    },
+    /// An Allowance, by the record key of its `allowances` record (Paykit spec 8.3):
+    /// [`Paykit::end_allowance`] ends it again.
+    Allowance {
+        /// The record key.
+        record: [u8; 32],
+    },
+}
+
+impl StopSubject {
+    pub(crate) fn path(self) -> String {
+        match self {
+            Self::Request(r) => format!("request/{}/{}", b64(&r.payee), b64(&r.request_hash)),
+            Self::SentRequest { record } => format!("sent/{}", b64(&record)),
+            Self::Allowance { record } => format!("allowance/{}", b64(&record)),
+        }
+    }
+
+    pub(crate) fn parse(path: &str) -> Option<Self> {
+        let (family, data) = path.split_once('/')?;
+        let subject = match family {
+            "request" => {
+                let (payee, hash) = data.split_once('/')?;
+                Self::Request(crate::RequestRef {
+                    payee: unb64_array(payee).ok()?,
+                    request_hash: unb64_array(hash).ok()?,
+                })
+            }
+            "sent" => Self::SentRequest {
+                record: unb64_array(data).ok()?,
+            },
+            "allowance" => Self::Allowance {
+                record: unb64_array(data).ok()?,
+            },
+            _ => return None,
+        };
+        (subject.path() == path).then_some(subject)
+    }
+}
+
 /// A notice for the host to show, until it acknowledges it ([`Paykit::acknowledge_notice`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -350,6 +421,18 @@ pub struct Notice {
     pub lost_from_ms: Option<u64>,
     /// For [`NoticeKind::BlockedMessagesLost`] or [`NoticeKind::DroppedMessagesLost`]: the latest such time.
     pub lost_until_ms: Option<u64>,
+    /// For [`NoticeKind::PublicEndpointChangeNotPublished`]: the public endpoints the change
+    /// would have withdrawn. Empty, with the other two lists, when the change isn't known.
+    pub endpoints_withdrawn: Vec<paykit_lib::PaymentEndpointIdentifier>,
+    /// For [`NoticeKind::PublicEndpointChangeNotPublished`]: the public endpoints the change
+    /// would have offered, not signed before.
+    pub endpoints_offered: Vec<paykit_lib::PaymentEndpointIdentifier>,
+    /// For [`NoticeKind::PublicEndpointChangeNotPublished`]: the public endpoints the change
+    /// would have given a new payload.
+    pub endpoints_changed: Vec<paykit_lib::PaymentEndpointIdentifier>,
+    /// For [`NoticeKind::StopNotRecorded`]: the request or Allowance to stop again, always
+    /// given for that kind and never for another.
+    pub stop: Option<StopSubject>,
 }
 
 /// A notice as kept (`p/nt/<attempt_id>/<kind>`, `p/nt/<sender>/<msg_id>` for a message
@@ -382,6 +465,17 @@ pub(crate) struct KeptNotice {
     /// of acceptance times, earliest and latest.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) lost: Option<(u64, u64)>,
+    /// For an endpoint change not published: the public endpoints the change asked to
+    /// withdraw and offer or change, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) endpoints: Option<crate::own_record::EndpointClasses>,
+    /// For an endpoint change not published: what its telling was told against and asked,
+    /// from which, with `endpoints`, its key is derived ([`crate::own_record::telling_id`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) telling: Option<crate::own_record::Telling>,
+    /// For a stop not recorded: what to stop again ([`StopSubject::path`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) stop: Option<String>,
 }
 
 /// Where a message given up with no entry stored came from: no entry, so no handle.
@@ -409,6 +503,11 @@ pub(crate) enum GivenUpOrigin {
     /// were held (`ha/`) or held in the outbox (`qs/`), passed its replay window unsent, or
     /// was lost with a write of its request record that holds neither it nor any stop.
     HeldAnswer,
+    /// A held stop absent from its current active record (Paykit spec 7.2).
+    UnrecordedStop,
+    /// The same, written before the stop's withdrawal and shown once the client no longer
+    /// holds the stop: a crash between leaves no notice for a stop still held.
+    UnrecordedStopPending,
     /// This app's own payment request, period details or subscription acceptance, held in
     /// the outbox while sends to its counterparty were held (`qs/`), passed its replay
     /// window unsent; its activity record still holds it.
@@ -424,9 +523,21 @@ pub(crate) enum GivenUpOrigin {
 impl GivenUpOrigin {
     fn notice_kind(origin: Option<Self>) -> NoticeKind {
         match origin {
+            Some(Self::UnrecordedStop | Self::UnrecordedStopPending) => NoticeKind::StopNotRecorded,
             Some(Self::AllowanceConflict) => NoticeKind::AllowancePlacementExpired,
             Some(Self::AllowanceBeforeLoss) => NoticeKind::AllowanceAcceptanceBeforeLoss,
-            _ => NoticeKind::MessageGivenUp,
+            // A message given up with no origin of its own is told as given up.
+            None
+            | Some(
+                Self::KeyWait
+                | Self::KeptReply
+                | Self::Divergent
+                | Self::ReceiveStep
+                | Self::HeldAnswer
+                | Self::HeldSend
+                | Self::HeldUnread
+                | Self::ClaimUnread,
+            ) => NoticeKind::MessageGivenUp,
         }
     }
 }
@@ -465,6 +576,9 @@ impl KeptNotice {
             stored: None,
             origin: None,
             lost: None,
+            endpoints: None,
+            telling: None,
+            stop: None,
         }
     }
 
@@ -482,6 +596,9 @@ impl KeptNotice {
             stored: None,
             origin: None,
             lost: None,
+            endpoints: None,
+            telling: None,
+            stop: None,
         }
     }
 
@@ -500,6 +617,9 @@ impl KeptNotice {
             stored: None,
             origin: None,
             lost: None,
+            endpoints: None,
+            telling: None,
+            stop: None,
         }
     }
 
@@ -524,6 +644,9 @@ impl KeptNotice {
             stored: None,
             origin: None,
             lost: None,
+            endpoints: None,
+            telling: None,
+            stop: None,
         }
     }
 
@@ -553,7 +676,32 @@ impl KeptNotice {
             stored,
             origin,
             lost: None,
+            endpoints: None,
+            telling: None,
+            stop: None,
         }
+    }
+
+    /// The notice of a held stop absent from its open record (Paykit spec 7.2), written
+    /// before the stop's withdrawal and shown once it is told
+    /// ([`GivenUpOrigin::UnrecordedStopPending`]): `request` is the request a request's stop
+    /// names, `None` for an Allowance's end.
+    pub(crate) fn unrecorded_stop(
+        to: [u8; 32],
+        msg_id: &str,
+        request: Option<[u8; 32]>,
+        subject: StopSubject,
+        at: u64,
+    ) -> Self {
+        let mut notice = Self::given_up(
+            to,
+            msg_id,
+            request,
+            at,
+            GivenUpFrom::Origin(GivenUpOrigin::UnrecordedStopPending),
+        );
+        notice.stop = Some(subject.path());
+        notice
     }
 
     pub(crate) fn withdrawal_confirmed(end: &paykit_lib::records::StoredMessage) -> Result<Self> {
@@ -570,6 +718,9 @@ impl KeptNotice {
             stored: None,
             origin: None,
             lost: None,
+            endpoints: None,
+            telling: None,
+            stop: None,
         })
     }
 
@@ -614,6 +765,9 @@ impl KeptNotice {
             stored: None,
             origin: None,
             lost: None,
+            endpoints: None,
+            telling: None,
+            stop: None,
         }
     }
 
@@ -634,6 +788,7 @@ impl KeptNotice {
                     | NoticeKind::AllowancePlacementExpired
                     | NoticeKind::AllowanceAcceptanceBeforeLoss
                     | NoticeKind::AllowanceWithdrawalConfirmed
+                    | NoticeKind::StopNotRecorded
                     | NoticeKind::PossiblyDelivered
                     | NoticeKind::ListDeliveryUnknown
                     | NoticeKind::BlockedMessagesLost
@@ -666,6 +821,9 @@ impl KeptNotice {
             stored: None,
             origin: None,
             lost: Some((from, until.max(from))),
+            endpoints: None,
+            telling: None,
+            stop: None,
         }
     }
 
@@ -704,7 +862,7 @@ impl KeptNotice {
     /// names: one that doesn't is a corrupt store.
     pub(crate) fn check_message(&self, sender: &[u8; 32], msg_id: &str) -> Result<()> {
         // A message notice is deleted at its acknowledgement, after its entry is forgotten,
-        // so a valid run keeps none acknowledged. It holds its entry's handle exactly when it
+        // so a valid run keeps none acknowledged but a stop's. It holds its entry's handle exactly when it
         // names no origin: one raised for a stored entry always has it, and one with no
         // entry stored (a key wait's, a kept reply's) names where it came from instead.
         if self.kind == NoticeKind::AllowanceWithdrawalConfirmed {
@@ -730,7 +888,8 @@ impl KeptNotice {
             || self.counterparty.as_deref() != Some(&b64(sender))
             || self.stored.is_some() == self.origin.is_some()
             || self.lost.is_some()
-            || self.acknowledged
+            // A stop's notice alone stays once acknowledged (`Paykit::acknowledge_notice`).
+            || (self.acknowledged && self.kind != NoticeKind::StopNotRecorded)
         {
             return Err(PaykitError::corrupt());
         }
@@ -784,8 +943,28 @@ impl KeptNotice {
             raised_at_ms: self.raised_at_ms,
             lost_from_ms: self.lost.map(|(from, _)| from),
             lost_until_ms: self.lost.map(|(_, until)| until),
+            endpoints_withdrawn: identifiers(self.endpoints.as_ref().map(|c| &c.withdrawn))?,
+            endpoints_offered: identifiers(self.endpoints.as_ref().map(|c| &c.offered))?,
+            endpoints_changed: identifiers(self.endpoints.as_ref().map(|c| &c.changed))?,
+            stop: self
+                .stop
+                .as_deref()
+                .map(|path| StopSubject::parse(path).ok_or_else(PaykitError::corrupt))
+                .transpose()?,
         })
     }
+}
+
+/// The Payment Endpoint Identifiers a kept notice names, each checked again (Paykit wire 1.4).
+fn identifiers(
+    ids: Option<&std::collections::BTreeSet<String>>,
+) -> Result<Vec<paykit_lib::PaymentEndpointIdentifier>> {
+    ids.into_iter()
+        .flatten()
+        .map(|id| {
+            paykit_lib::PaymentEndpointIdentifier::new(id).map_err(|_| PaykitError::corrupt())
+        })
+        .collect()
 }
 
 /// Bind `notice`, read at `key` (`nt/...`), to what the key names, as a restore checks it:
@@ -803,10 +982,21 @@ pub(crate) fn bind_notice(key: &str, notice: &KeptNotice) -> Result<()> {
             SettlementSubject::Changed { .. } | SettlementSubject::Conflicting { .. },
         )) => peer.is_none(),
         Some(StateKey::SettlementNotice(SettlementSubject::Bucket(_))) => true,
-        Some(StateKey::IdentityNotice(_)) => peer.is_none(),
+        Some(StateKey::IdentityNotice(_) | StateKey::EndpointChangeNotice(_)) => peer.is_none(),
         _ => peer.is_some(),
     };
     if !peer_allowed {
+        return Err(PaykitError::corrupt());
+    }
+    // Only the notice of an endpoint change not published names endpoints, each one that
+    // reads (Paykit wire 1.4), and it is kept with no lists rather than with empty ones.
+    let at_change_key = matches!(family, Some(StateKey::EndpointChangeNotice(_)));
+    if let Some(classes) = &notice.endpoints {
+        if !at_change_key || classes.is_empty() || !classes.reads() {
+            return Err(PaykitError::corrupt());
+        }
+    }
+    if notice.telling.is_some() != at_change_key {
         return Err(PaykitError::corrupt());
     }
     match family {
@@ -820,6 +1010,7 @@ pub(crate) fn bind_notice(key: &str, notice: &KeptNotice) -> Result<()> {
                 && notice.origin.is_none()
                 && notice.lost.is_none()
                 && notice.request_hash.is_none()
+                && notice.stop.is_none()
             {
                 Ok(())
             } else {
@@ -827,8 +1018,59 @@ pub(crate) fn bind_notice(key: &str, notice: &KeptNotice) -> Result<()> {
             }
         }
         _ if notice.settlement.is_some() => Err(PaykitError::corrupt()),
+        // A stop not recorded names what to stop again, and no other notice does: a request
+        // by the request hash it names too, an Allowance by its record alone.
+        Some(StateKey::UnrecordedStop { to, msg_id })
+            if notice.kind == NoticeKind::StopNotRecorded =>
+        {
+            let request = notice
+                .request_hash
+                .as_deref()
+                .map(unb64_array::<32>)
+                .transpose()
+                .map_err(|_| PaykitError::corrupt())?;
+            let bound = match notice.stop.as_deref().and_then(StopSubject::parse) {
+                Some(StopSubject::Request(r)) => r.payee == to && request == Some(r.request_hash),
+                Some(StopSubject::SentRequest { .. }) => request.is_some(),
+                Some(StopSubject::Allowance { .. }) => request.is_none(),
+                None => false,
+            };
+            if !bound {
+                return Err(PaykitError::corrupt());
+            }
+            notice.check_message(&to, &msg_id)
+        }
+        _ if notice.stop.is_some() => Err(PaykitError::corrupt()),
         Some(StateKey::IdentityNotice(kind)) => {
             if *notice == KeptNotice::identity(kind, notice.raised_at_ms) {
+                Ok(())
+            } else {
+                Err(PaykitError::corrupt())
+            }
+        }
+        // Kept acknowledged only while its change may still be held, so it isn't told again.
+        Some(StateKey::EndpointChangeNotice(id)) => {
+            // Its key is the ID of the telling it keeps: a value under another telling's key,
+            // moved or swapped, is refused.
+            let Some(telling) = &notice.telling else {
+                return Err(PaykitError::corrupt());
+            };
+            let told = crate::own_record::telling_id(
+                &telling.base,
+                &telling.target,
+                notice.endpoints.as_ref(),
+            );
+            if told != id {
+                return Err(PaykitError::corrupt());
+            }
+            let plain = KeptNotice {
+                endpoints: None,
+                telling: None,
+                acknowledged: false,
+                ..notice.clone()
+            };
+            let kind = NoticeKind::PublicEndpointChangeNotPublished;
+            if plain == KeptNotice::identity(kind, notice.raised_at_ms) {
                 Ok(())
             } else {
                 Err(PaykitError::corrupt())
@@ -851,7 +1093,11 @@ pub(crate) fn bind_notice(key: &str, notice: &KeptNotice) -> Result<()> {
         }
         _ if notice.message_hash.is_some() => Err(PaykitError::corrupt()),
         Some(StateKey::Notice { attempt, kind }) => notice.check(&attempt, kind),
-        Some(StateKey::MessageNotice { sender, msg_id }) => notice.check_message(&sender, &msg_id),
+        Some(StateKey::MessageNotice { sender, msg_id })
+            if notice.kind != NoticeKind::StopNotRecorded =>
+        {
+            notice.check_message(&sender, &msg_id)
+        }
         Some(StateKey::BlockedLost {
             counterparty,
             from_ms,
@@ -930,7 +1176,8 @@ impl Paykit {
         let mut out = Vec::new();
         // Each read whole and bound to its key ([`bind_notice`]).
         for (id, kept) in self.local_scan::<KeptNotice>(key::NOTICES).await? {
-            if !kept.acknowledged {
+            // A stop's notice waits for its withdrawal to be told (`show_pending_stop`).
+            if !kept.acknowledged && kept.origin != Some(GivenUpOrigin::UnrecordedStopPending) {
                 let mut notice = kept.view(id)?;
                 if let Some(SettlementSubject::Conflicting { bucket, settlement }) =
                     notice.settlement
@@ -973,16 +1220,28 @@ impl Paykit {
             Some(
                 StateKey::Notice { .. }
                     | StateKey::MessageNotice { .. }
+                    | StateKey::UnrecordedStop { .. }
                     | StateKey::RestoredDelivery { .. }
                     | StateKey::BlockedLost { .. }
                     | StateKey::SettlementNotice(_)
                     | StateKey::DroppedLost { .. }
                     | StateKey::IdentityNotice(_)
+                    | StateKey::EndpointChangeNotice(_)
             )
         ) {
             return Err(Refusal::NotFound.into());
         }
-        let mut kept = self.kept_notice(&key).await?.ok_or(Refusal::NotFound)?;
+        let Some(mut kept) = self.kept_notice(&key).await? else {
+            // This notice is deleted when acknowledged and may be told again: acknowledging
+            // it twice is no error.
+            if matches!(
+                StateKey::parse(key.as_bytes()),
+                Some(StateKey::EndpointChangeNotice(_))
+            ) {
+                return Ok(());
+            }
+            return Err(Refusal::NotFound.into());
+        };
         if kept.acknowledged {
             return Ok(());
         }
@@ -1010,7 +1269,21 @@ impl Paykit {
                 self.identity_told.push(kind);
             }
         }
-        if !held && kept.settlement.is_none() && !kept.kind.names_outgoing_message() {
+        // The notice of an endpoint change whose held change may not be cleared yet stays,
+        // acknowledged, until the clear: told again after it, it would be shown twice
+        // (`Paykit::settle_held_endpoint_change`).
+        let telling_kept = matches!(
+            StateKey::parse(key.as_bytes()),
+            Some(StateKey::EndpointChangeNotice(_))
+        ) && self.held_change_untold;
+        // A stop's notice stays, acknowledged, so a restore in place keeps that over an
+        // older backup's copy (`protocol.rs`, `installation_stop_notices`).
+        if !held
+            && !telling_kept
+            && kept.settlement.is_none()
+            && !kept.kind.names_outgoing_message()
+            && kept.kind != NoticeKind::StopNotRecorded
+        {
             return self.local_delete(&key).await;
         }
         kept.acknowledged = true;
@@ -1055,6 +1328,35 @@ impl Paykit {
                 .await?;
         }
         Ok(())
+    }
+
+    /// Tell the host that a change of public endpoints saved earlier wasn't published, with
+    /// the endpoints `classes` names, if known ([`NoticeKind::PublicEndpointChangeNotPublished`]).
+    /// Each telling is at a key of its own, the ID of what it keeps: told again,
+    /// as after a crash before its clear, it is the same notice, left as it is, acknowledged
+    /// or not, and acknowledging one telling never takes another's.
+    ///
+    /// # Errors
+    ///
+    /// A store failure, or a kept notice that doesn't read.
+    pub(crate) async fn endpoint_change_not_published(
+        &mut self,
+        telling: crate::own_record::Telling,
+        classes: Option<crate::own_record::EndpointClasses>,
+    ) -> Result<()> {
+        let classes = classes.filter(|classes| !classes.is_empty());
+        let id = crate::own_record::telling_id(&telling.base, &telling.target, classes.as_ref());
+        let key = key::endpoint_change_notice(&id);
+        if self.kept_notice(&key).await?.is_some() {
+            return Ok(());
+        }
+        let kind = NoticeKind::PublicEndpointChangeNotPublished;
+        let notice = KeptNotice {
+            endpoints: classes,
+            telling: Some(telling),
+            ..KeptNotice::identity(kind, self.service_time().unwrap_or(0))
+        };
+        self.local_put(&key, &notice).await
     }
 
     /// The notice kept at `key`, read whole and bound to it ([`bind_notice`]).
@@ -1125,6 +1427,7 @@ impl Paykit {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::own_record::{telling_id, EndpointClasses, Telling};
 
     fn kept(attempt: &AttemptId) -> KeptNotice {
         KeptNotice {
@@ -1140,6 +1443,9 @@ mod tests {
             stored: None,
             origin: None,
             lost: None,
+            endpoints: None,
+            telling: None,
+            stop: None,
         }
     }
 
@@ -1171,6 +1477,145 @@ mod tests {
         }
     }
 
+    fn classes(withdrawn: &[&str], offered: &[&str], changed: &[&str]) -> EndpointClasses {
+        let set = |ids: &[&str]| ids.iter().map(|id| id.to_string()).collect();
+        EndpointClasses {
+            withdrawn: set(withdrawn),
+            offered: set(offered),
+            changed: set(changed),
+        }
+    }
+
+    /// The notice of a telling against `base` of a change asking `target`, with `classes`,
+    /// at its own key.
+    fn telling_notice(
+        base: u8,
+        target: u8,
+        classes: Option<EndpointClasses>,
+    ) -> (String, KeptNotice) {
+        let telling = Telling {
+            base: [base; 32],
+            target: [target; 32],
+        };
+        let id = telling_id(&telling.base, &telling.target, classes.as_ref());
+        let notice = KeptNotice {
+            endpoints: classes,
+            telling: Some(telling),
+            ..KeptNotice::identity(NoticeKind::PublicEndpointChangeNotPublished, 5)
+        };
+        (key::endpoint_change_notice(&id), notice)
+    }
+
+    #[test]
+    fn test_endpoint_change_notice_names_each_class_in_its_own_list() {
+        let (key, notice) = telling_notice(
+            1,
+            2,
+            Some(classes(&["old"], &["new-a", "new-b"], &["moved"])),
+        );
+        assert!(bind_notice(&key, &notice).is_ok());
+        let view = notice.view("id".into()).unwrap();
+        let names = |ids: &[paykit_lib::PaymentEndpointIdentifier]| {
+            ids.iter()
+                .map(|id| id.as_str().to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names(&view.endpoints_withdrawn), ["old"]);
+        assert_eq!(names(&view.endpoints_offered), ["new-a", "new-b"]);
+        assert_eq!(names(&view.endpoints_changed), ["moved"]);
+        // With no lists, the host is told only that a change wasn't published.
+        let (key, plain) = telling_notice(1, 2, None);
+        assert!(bind_notice(&key, &plain).is_ok());
+        let plain = plain.view("id".into()).unwrap();
+        assert!(plain.endpoints_withdrawn.is_empty());
+        assert!(plain.endpoints_offered.is_empty());
+        assert!(plain.endpoints_changed.is_empty());
+    }
+
+    #[test]
+    fn test_endpoint_change_notice_binds_only_at_its_telling_key() {
+        let (key, notice) = telling_notice(1, 2, Some(classes(&["old"], &[], &[])));
+        assert!(bind_notice(&key, &notice).is_ok());
+        // Not at the kind's tag alone, nor without the telling it keeps.
+        let kind = NoticeKind::PublicEndpointChangeNotPublished;
+        assert!(bind_notice(&key::identity_notice(kind), &notice).is_err());
+        let mut untold = notice.clone();
+        untold.telling = None;
+        assert!(bind_notice(&key, &untold).is_err());
+        // Moved under another telling's key, or with another base, target or lists under
+        // its own, it is refused.
+        let (other_key, other) = telling_notice(3, 2, Some(classes(&["new"], &[], &[])));
+        assert!(bind_notice(&other_key, &other).is_ok());
+        assert!(bind_notice(&other_key, &notice).is_err());
+        assert!(bind_notice(&key, &other).is_err());
+        for changed in [
+            telling_notice(9, 2, Some(classes(&["old"], &[], &[]))).1,
+            telling_notice(1, 9, Some(classes(&["old"], &[], &[]))).1,
+            telling_notice(1, 2, Some(classes(&["other"], &[], &[]))).1,
+            telling_notice(1, 2, None).1,
+        ] {
+            assert!(bind_notice(&key, &changed).is_err());
+        }
+        assert_eq!(
+            StateKey::parse(key::endpoint_change_notice(&[1; 32]).as_bytes()),
+            Some(StateKey::EndpointChangeNotice([1; 32]))
+        );
+        assert!(StateKey::parse(b"nt/endpoint_change_not_published/short").is_none());
+        // Kept acknowledged while its change is held, naming no counterparty or other kind.
+        let mut acknowledged = notice.clone();
+        acknowledged.acknowledged = true;
+        assert!(bind_notice(&key, &acknowledged).is_ok());
+        assert!(bind_notice(&other_key, &acknowledged).is_err());
+        let mut named = notice.clone();
+        named.counterparty = Some(b64(&[1; 32]));
+        assert!(bind_notice(&key, &named).is_err());
+        let mut other_kind = notice.clone();
+        other_kind.kind = NoticeKind::BlockFloorHeld;
+        assert!(bind_notice(&key, &other_kind).is_err());
+    }
+
+    #[test]
+    fn test_endpoint_change_notice_refuses_lists_elsewhere_empty_or_unreadable() {
+        let (_, with_lists) = telling_notice(1, 2, Some(classes(&["old"], &[], &[])));
+        // Empty lists are kept as none, and their ID is the one without lists.
+        let (key, mut empty) = telling_notice(1, 2, None);
+        empty.endpoints = Some(EndpointClasses::default());
+        assert!(bind_notice(&key, &empty).is_err());
+        let change = classes(&["old"], &[], &[]);
+        // No other notice names endpoints or keeps a telling.
+        let mut other = KeptNotice::identity(NoticeKind::BlockFloorHeld, 5);
+        other.endpoints = Some(change.clone());
+        assert!(bind_notice(&key::identity_notice(NoticeKind::BlockFloorHeld), &other).is_err());
+        let mut told = KeptNotice::identity(NoticeKind::BlockFloorHeld, 5);
+        told.telling = with_lists.telling.clone();
+        assert!(bind_notice(&key::identity_notice(NoticeKind::BlockFloorHeld), &told).is_err());
+        let attempt = AttemptId::from_bytes([5; 16]);
+        let mut paid = kept(&attempt);
+        assert!(bind_notice(&key::notice(&attempt, paid.kind), &paid).is_ok());
+        paid.endpoints = Some(change.clone());
+        assert!(bind_notice(&key::notice(&attempt, paid.kind), &paid).is_err());
+        let to = [2; 32];
+        let hash = [3; 32];
+        let id = "123e4567-e89b-42d3-a456-426614174000";
+        let mut delivery = KeptNotice::list_delivery_unknown(&to, id, &hash, 3);
+        let delivery_key = key::restored_delivery(&to, id, &hash);
+        assert!(bind_notice(&delivery_key, &delivery).is_ok());
+        delivery.endpoints = Some(change);
+        assert!(bind_notice(&delivery_key, &delivery).is_err());
+        // An identifier the wire refuses is a corrupt store at the bind, in every list.
+        for bad in ["..", "private", "a/b", ""] {
+            for class in 0..3 {
+                let mut ids = [&[][..], &[][..], &[][..]];
+                ids[class] = std::slice::from_ref(&bad);
+                let (key, notice) = telling_notice(1, 2, Some(classes(ids[0], ids[1], ids[2])));
+                assert!(
+                    bind_notice(&key, &notice).is_err(),
+                    "{bad:?} in list {class}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn test_settlement_notices_bind_the_complete_subject() {
         let subjects = [
@@ -1198,6 +1643,9 @@ mod tests {
                 stored: None,
                 origin: None,
                 lost: None,
+                endpoints: None,
+                telling: None,
+                stop: None,
             };
             for acknowledged in [false, true] {
                 notice.acknowledged = acknowledged;
@@ -1272,6 +1720,9 @@ mod tests {
             stored: None,
             origin: None,
             lost: None,
+            endpoints: None,
+            telling: None,
+            stop: None,
         };
         let key = key::restored_delivery(&to, id, &hash);
         assert!(bind_notice(&key, &notice).is_ok());
@@ -1356,6 +1807,85 @@ mod tests {
             ..notice
         };
         assert!(bad.check(&attempt, NoticeKind::PaidAfterFailed).is_err());
+    }
+
+    #[test]
+    fn test_notices_unrecorded_stop_is_bound_to_outgoing_message() {
+        let id = "123e4567-e89b-42d3-a456-426614174000";
+        let to = [1; 32];
+        let notice = KeptNotice::unrecorded_stop(
+            to,
+            id,
+            None,
+            StopSubject::Allowance { record: [2; 32] },
+            3,
+        );
+        assert!(bind_notice(&key::unrecorded_stop(&to, id), &notice).is_ok());
+        assert!(bind_notice(&key::message_notice(&to, id), &notice).is_err());
+    }
+
+    #[test]
+    fn test_notices_unrecorded_stop_names_what_to_stop_again() {
+        let id = "123e4567-e89b-42d3-a456-426614174000";
+        let to = [1; 32];
+        let at = key::unrecorded_stop(&to, id);
+        let request = crate::RequestRef {
+            payee: to,
+            request_hash: [3; 32],
+        };
+        let sent = StopSubject::SentRequest { record: [4; 32] };
+        let allowance = StopSubject::Allowance { record: [5; 32] };
+        // Each subject binds with the request it names: a request's hash, an Allowance none.
+        for (request_hash, subject) in [
+            (Some([3; 32]), StopSubject::Request(request)),
+            (Some([3; 32]), sent),
+            (None, allowance),
+        ] {
+            let notice = KeptNotice::unrecorded_stop(to, id, request_hash, subject, 3);
+            assert!(bind_notice(&at, &notice).is_ok(), "{subject:?}");
+            assert_eq!(notice.view(id.into()).unwrap().stop, Some(subject));
+            assert_eq!(StopSubject::parse(&subject.path()), Some(subject));
+        }
+        let refused = [
+            // No subject at all, as an earlier build would have kept it.
+            KeptNotice::given_up(
+                to,
+                id,
+                None,
+                3,
+                GivenUpFrom::Origin(GivenUpOrigin::UnrecordedStop),
+            ),
+            // A request of another payee, or with another hash than the notice's.
+            KeptNotice::unrecorded_stop(
+                to,
+                id,
+                Some([3; 32]),
+                StopSubject::Request(crate::RequestRef {
+                    payee: [9; 32],
+                    ..request
+                }),
+                3,
+            ),
+            KeptNotice::unrecorded_stop(to, id, Some([8; 32]), StopSubject::Request(request), 3),
+            // A sent request with no request, an Allowance with one.
+            KeptNotice::unrecorded_stop(to, id, None, sent, 3),
+            KeptNotice::unrecorded_stop(to, id, Some([3; 32]), allowance, 3),
+            // A subject that doesn't parse.
+            KeptNotice {
+                stop: Some("allowance/not-a-key".into()),
+                ..KeptNotice::unrecorded_stop(to, id, None, allowance, 3)
+            },
+        ];
+        for notice in refused {
+            assert!(bind_notice(&at, &notice).is_err(), "{notice:?}");
+        }
+        // No other notice names one.
+        let given_up = KeptNotice {
+            stop: Some(allowance.path()),
+            ..KeptNotice::given_up(to, id, None, 3, GivenUpFrom::Origin(GivenUpOrigin::KeyWait))
+        };
+        assert!(bind_notice(&key::message_notice(&to, id), &given_up).is_err());
+        assert!(StopSubject::parse("request/AAAA").is_none());
     }
 
     #[test]

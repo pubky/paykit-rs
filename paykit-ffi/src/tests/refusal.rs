@@ -89,7 +89,7 @@ pub(super) fn categorized(
 }
 
 fn dispatch_answer(code: ErrorCode, retry_after: Option<u64>) -> AppError {
-    AppError::Switch(ClientError::Switch {
+    AppError::Dispatch(ClientError::Dispatch {
         status: code.status(),
         code,
         message: String::new(),
@@ -178,7 +178,7 @@ fn test_wallet_errors_categorize_each_failure_with_a_stable_code() {
         ),
         (
             PaykitError::Client(AppError::ExpiredUnsent),
-            "not_sent",
+            "retry_later",
             "expired_unsent",
         ),
         (
@@ -213,7 +213,7 @@ fn test_wallet_errors_categorize_each_failure_with_a_stable_code() {
         ),
         (
             PaykitError::Client(dispatch_answer(ErrorCode::StaleIdentity, None)),
-            "retry_later",
+            "not_sent",
             "dispatch_stale_identity",
         ),
         (
@@ -227,7 +227,7 @@ fn test_wallet_errors_categorize_each_failure_with_a_stable_code() {
             "dispatch_recovery_required",
         ),
         (
-            PaykitError::Client(AppError::Switch(ClientError::Usage(reason()))),
+            PaykitError::Client(AppError::Dispatch(ClientError::Usage(reason()))),
             "not_sent",
             "client_usage",
         ),
@@ -324,6 +324,31 @@ fn test_dispatch_events_carry_the_lists_and_backup_evidence() {
         BackupRefusal::from(app::BackupRefusal::DutiesTooLarge { duty_events: 5 }),
         BackupRefusal::DutiesTooLarge { duty_events: 5 }
     ));
+}
+
+/// Every member of a provider loss crosses, the count of unverified evidence included
+/// (Dispatch spec 12.6, Dispatch wire 7.4.14).
+#[test]
+fn test_dispatch_provider_loss_carries_every_member() {
+    let loss = crate::ProviderLoss::from(pubky_dispatch_client::app::ProviderLoss {
+        lost_generation: 1,
+        generation: 2,
+        declared_at_ms: 3,
+        accepted_from_ms: 4,
+        uncertain_until_ms: 5,
+        unverified: 6,
+    });
+    assert_eq!(
+        (
+            loss.lost_generation,
+            loss.generation,
+            loss.declared_at_ms,
+            loss.accepted_from_ms,
+            loss.uncertain_until_ms,
+            loss.unverified,
+        ),
+        (1, 2, 3, 4, 5, 6)
+    );
 }
 
 #[test]
@@ -534,7 +559,7 @@ fn every_refusal_kind() -> Vec<RefusalKind> {
             reason: HeldForUserKind::ReloadRequired,
         },
         RefusalKind::HeldForUser {
-            reason: HeldForUserKind::SwitchClient,
+            reason: HeldForUserKind::DispatchClient,
         },
         RefusalKind::HeldForUser {
             reason: HeldForUserKind::Unresolved,
@@ -626,7 +651,7 @@ fn every_refusal_kind() -> Vec<RefusalKind> {
 /// payment refusals.
 fn every_other_failure() -> Vec<WalletError> {
     let reason = || String::from("reason");
-    let client = |e: ClientError| AppError::Switch(e);
+    let client = |e: ClientError| AppError::Dispatch(e);
     let mut errors: Vec<PaykitError> = ErrorCode::ALL
         .into_iter()
         .map(|code| PaykitError::Client(dispatch_answer(code, None)))
@@ -640,7 +665,7 @@ fn every_other_failure() -> Vec<WalletError> {
         "attempts",
     ] {
         let mut answer = dispatch_answer(ErrorCode::QuotaExceeded, None);
-        if let AppError::Switch(ClientError::Switch { current, .. }) = &mut answer {
+        if let AppError::Dispatch(ClientError::Dispatch { current, .. }) = &mut answer {
             *current = serde_json::json!({ "limit": limit });
         }
         errors.push(PaykitError::Client(answer));
@@ -824,19 +849,25 @@ fn test_wallet_errors_match_the_host_guide_table() {
             "client_usage",                     // not sent: breaks a Dispatch rule
             "conflict",                         // nothing applied: the state changed first
             "destination",                      // refused before the attempt was written
-            "dispatch_conflict",                // refused by the Dispatch, nothing applied
+            "dispatch_identity_needed",         // refused by the Dispatch, nothing applied
+            "dispatch_moved",                   // refused by the Dispatch, nothing applied
             "dispatch_not_admitted", // refused by the recipient's Dispatch, nothing applied
             "dispatch_quota_connect_requests", // the recipient's pending list is full
+            "dispatch_quota_wait",   // refused by the Dispatch, nothing applied
+            "dispatch_stale_epoch",  // refused by the Dispatch, nothing applied
+            "dispatch_stale_generation", // refused by the Dispatch, nothing applied
+            "dispatch_stale_identity", // refused by the Dispatch, nothing applied
+            "dispatch_stale_key",    // refused by the Dispatch, nothing applied
             "dispatch_too_large",    // refused by the Dispatch as over a cap, nothing applied
+            "display_read_pending",  // not sent: a display read comes first
             "duties_too_large",      // nothing written by the backup
-            "expired_unsent",        // retired before its first send
             "invalid_input",         // the caller's value breaks a Paykit rule
             "label",                 // refused before the request was sent
             "method_not_submitted",  // the method submitted nothing
             "no_destination",        // refused before the attempt was written
             "recurring",             // refused before the attempt was written
             "transport_first_send_expired", // a first send never released
-            "transport_first_send_unavailable", // a first send the transport can't hand over
+            "transport_first_send_unavailable", // a first send that couldn't be timed
             "transport_invalid_request", // the transport couldn't build the request
             "transport_refused",     // the transport may not connect to the origin
             "unpinned",              // not sent without a pinned key
@@ -958,6 +989,7 @@ fn every_not_now_kind() -> Vec<NotNowKind> {
         R::ValueAwaitsKey,
         R::FloorUnreadable,
         R::FloorRaiseWaiting,
+        R::EndpointChangeUntold,
         R::NoServiceTime,
         R::ReadAgain,
         R::EarlierWriteUnresolved,
@@ -975,6 +1007,7 @@ fn every_not_now_kind() -> Vec<NotNowKind> {
             | R::ValueAwaitsKey
             | R::FloorUnreadable
             | R::FloorRaiseWaiting
+            | R::EndpointChangeUntold
             | R::NoServiceTime
             | R::ReadAgain
             | R::EarlierWriteUnresolved
@@ -1010,7 +1043,7 @@ fn every_recovery_kind() -> Vec<RecoveryNeededKind> {
             | HeldForUserKind::AllowanceExecutionHeld
             | HeldForUserKind::AttemptCheck
             | HeldForUserKind::ReloadRequired
-            | HeldForUserKind::SwitchClient
+            | HeldForUserKind::DispatchClient
             | HeldForUserKind::Unresolved
             | HeldForUserKind::PendingProposalsFull
             | HeldForUserKind::AllowanceLedgerFull
@@ -1044,9 +1077,9 @@ fn test_wallet_errors_each_refusal_variant_comes_as_one_case() {
 #[test]
 fn test_wallet_errors_full_quota_comes_as_what_frees_it() {
     for (limit, case, code) in [
-        (Some("inbox"), "retry_later", "dispatch_quota_wait"),
-        (Some("sender_share"), "retry_later", "dispatch_quota_wait"),
-        (Some("claim_share"), "retry_later", "dispatch_quota_wait"),
+        (Some("inbox"), "not_sent", "dispatch_quota_wait"),
+        (Some("sender_share"), "not_sent", "dispatch_quota_wait"),
+        (Some("claim_share"), "not_sent", "dispatch_quota_wait"),
         (
             Some("open_attempts"),
             "needs_user",
@@ -1058,7 +1091,7 @@ fn test_wallet_errors_full_quota_comes_as_what_frees_it() {
         (Some("invite_codes"), "needs_user", "dispatch_quota_full"),
         (Some("storage"), "needs_user", "dispatch_quota_full"),
         (Some("contacts"), "needs_user", "dispatch_quota_full"),
-        (Some("claims"), "retry_later", "dispatch_quota_wait"),
+        (Some("claims"), "not_sent", "dispatch_quota_wait"),
         (
             Some("connect_requests"),
             "not_sent",
@@ -1078,7 +1111,7 @@ fn test_wallet_errors_full_quota_comes_as_what_frees_it() {
         (None, "needs_user", "dispatch_quota_exceeded"),
     ] {
         let mut answer = dispatch_answer(ErrorCode::QuotaExceeded, None);
-        if let (AppError::Switch(ClientError::Switch { current, .. }), Some(limit)) =
+        if let (AppError::Dispatch(ClientError::Dispatch { current, .. }), Some(limit)) =
             (&mut answer, limit)
         {
             *current = serde_json::json!({ "limit": limit });
@@ -1117,7 +1150,7 @@ fn test_wallet_errors_context_carries_no_outside_text() {
     let sentinel = "SENTINEL-outside-text";
     let text = || String::from(sentinel);
     let mut service = dispatch_answer(ErrorCode::Unavailable, None);
-    if let AppError::Switch(ClientError::Switch { message, .. }) = &mut service {
+    if let AppError::Dispatch(ClientError::Dispatch { message, .. }) = &mut service {
         *message = text();
     }
     let errors = [
@@ -1137,14 +1170,14 @@ fn test_wallet_errors_context_carries_no_outside_text() {
         PaykitError::Refused(Refusal::IdentityUnavailable(text())),
         PaykitError::Refused(Refusal::CertificateRefused(text())),
         PaykitError::Refused(Refusal::AttemptFailed(Box::new(Refusal::HeldForUser(
-            paykit_sdk::HeldForUserReason::SwitchClient(text()),
+            paykit_sdk::HeldForUserReason::DispatchClient(text()),
         )))),
         PaykitError::Client(AppError::Alarm(
             pubky_dispatch_client::app::Alarm::Rollback { reason: text() },
         )),
-        PaykitError::Client(AppError::Switch(ClientError::InvalidResponse(text()))),
-        PaykitError::Client(AppError::Switch(ClientError::Usage(text()))),
-        PaykitError::Client(AppError::Switch(ClientError::Transport(
+        PaykitError::Client(AppError::Dispatch(ClientError::InvalidResponse(text()))),
+        PaykitError::Client(AppError::Dispatch(ClientError::Usage(text()))),
+        PaykitError::Client(AppError::Dispatch(ClientError::Transport(
             TransportError::Connect(text()),
         ))),
         PaykitError::Client(AppError::Refused(AppRefusal::Approval(text()))),
@@ -1258,6 +1291,11 @@ fn test_wallet_errors_sdk_refusals_take_the_table_code_through_the_conversion() 
             "retry_later",
             "floor_unreadable",
         ),
+        (
+            Refusal::NotNow(paykit_sdk::NotNowReason::EndpointChangeUntold),
+            "retry_later",
+            "endpoint_change_untold",
+        ),
     ] {
         let (found, failure) = categorized(PaykitError::Refused(refusal).into()).unwrap();
         assert_eq!((found, failure.code.as_str()), (case, code));
@@ -1268,7 +1306,7 @@ fn test_wallet_errors_sdk_refusals_take_the_table_code_through_the_conversion() 
 /// for `storage`.
 fn unsaved_settlement_warning(storage: PaykitError) -> PaykitError {
     let mut answer = dispatch_answer(ErrorCode::QuotaExceeded, None);
-    if let AppError::Switch(ClientError::Switch { current, .. }) = &mut answer {
+    if let AppError::Dispatch(ClientError::Dispatch { current, .. }) = &mut answer {
         *current = serde_json::json!({ "limit": "record_keys" });
     }
     PaykitError::SettlementNoticeUnavailable {
@@ -1324,7 +1362,7 @@ fn test_wallet_errors_failures_after_sending_are_outcome_unknown() {
     use pubky_dispatch_client::error::{ClientError as C, TransportError as T};
     let reason = || String::from("reason");
     let unread = |status, code| {
-        AppError::Switch(C::BodyUnread {
+        AppError::Dispatch(C::BodyUnread {
             status,
             code,
             retry_after: None,
@@ -1343,7 +1381,7 @@ fn test_wallet_errors_failures_after_sending_are_outcome_unknown() {
             "transport_first_send_unavailable",
         ),
         (
-            AppError::Switch(C::Transport(T::FirstSendExpired)),
+            AppError::Dispatch(C::Transport(T::FirstSendExpired)),
             "not_sent",
             "transport_first_send_expired",
         ),
@@ -1364,7 +1402,7 @@ fn test_wallet_errors_failures_after_sending_are_outcome_unknown() {
             "transport_no_answer",
         ),
         (
-            AppError::Switch(C::Transport(T::Timeout)),
+            AppError::Dispatch(C::Transport(T::Timeout)),
             "outcome_unknown",
             "transport_no_answer",
         ),
@@ -1384,12 +1422,12 @@ fn test_wallet_errors_failures_after_sending_are_outcome_unknown() {
             "bad_service_signature",
         ),
         (
-            AppError::Switch(C::BadServiceSignature { status: 502 }),
+            AppError::Dispatch(C::BadServiceSignature { status: 502 }),
             "outcome_unknown",
             "bad_service_signature",
         ),
         (
-            AppError::Switch(C::BadServiceSignature { status: 200 }),
+            AppError::Dispatch(C::BadServiceSignature { status: 200 }),
             "outcome_unknown",
             "bad_service_signature",
         ),
@@ -1414,12 +1452,12 @@ fn test_wallet_errors_failures_after_sending_are_outcome_unknown() {
             "client_unclassified",
         ),
         (
-            AppError::Switch(C::InvalidResponse(reason())),
+            AppError::Dispatch(C::InvalidResponse(reason())),
             "outcome_unknown",
             "invalid_response",
         ),
         (
-            AppError::Switch(C::Core(pubky_dispatch_core::Error::Invalid(reason()))),
+            AppError::Dispatch(C::Core(pubky_dispatch_core::Error::Invalid(reason()))),
             "outcome_unknown",
             "invalid_data",
         ),
@@ -1443,11 +1481,110 @@ fn test_wallet_errors_failures_after_sending_are_outcome_unknown() {
         assert_eq!(kept.kept_batch.as_deref(), Some([5; 16].as_slice()));
     }
     // A delay an unread answer gives comes with the failure, in milliseconds.
-    let delayed = AppError::Switch(C::BodyUnread {
+    let delayed = AppError::Dispatch(C::BodyUnread {
         status: 429,
         code: ErrorCode::RateLimited,
         retry_after: Some(7),
     });
     let (_, delayed) = categorized(PaykitError::Client(delayed).into()).expect("categorized");
     assert_eq!(delayed.retry_after_ms, Some(7_000));
+}
+
+/// Every Dispatch client failure, every answer of the Dispatch and every quota limit: the case
+/// is `RetryLater` exactly when the SDK's table, the one a resume applies, counts it a wait
+/// (`PaykitError::is_wait`, Paykit spec 7.2). A failure after the request may have left stays
+/// `OutcomeUnknown`, and a stop of the wallet stays `Recovery`, wait or not.
+#[test]
+fn test_wallet_errors_dispatch_client_failures_follow_the_sdk_wait_table() {
+    use pubky_dispatch_client::error::{ClientError as C, TransportError as T};
+    let reason = || String::from("reason");
+    let unread = |status, code| {
+        AppError::Dispatch(C::BodyUnread {
+            status,
+            code,
+            retry_after: None,
+        })
+    };
+    let mut errors = vec![
+        AppError::ExpiredUnsent,
+        AppError::NotAnsweringAsAccount { since_ms: 0 },
+        AppError::Transport(T::Connect(reason())),
+        AppError::Transport(T::Timeout),
+        AppError::Transport(T::Other(reason())),
+        AppError::Transport(T::UnreadableSignedHeader { status: 503 }),
+        AppError::Transport(T::UnreadableSignedHeader { status: 401 }),
+        AppError::Transport(T::FirstSendUnavailable),
+        AppError::Transport(T::FirstSendExpired),
+        AppError::Transport(T::Refused(reason())),
+        AppError::Transport(T::TooLarge(1)),
+        AppError::Transport(T::InvalidRequest(reason())),
+        AppError::Dispatch(C::Transport(T::Timeout)),
+        AppError::Dispatch(C::BadServiceSignature { status: 503 }),
+        AppError::Dispatch(C::BadServiceSignature { status: 401 }),
+        unread(429, ErrorCode::RateLimited),
+        unread(404, ErrorCode::NotFound),
+        unread(413, ErrorCode::TooLarge),
+        AppError::Dispatch(C::StaleAnswer { server_time_ms: 0 }),
+        AppError::Dispatch(C::DisplayReadPending),
+        AppError::Dispatch(C::InvalidResponse(reason())),
+        AppError::Dispatch(C::Core(pubky_dispatch_core::Error::Invalid(reason()))),
+        AppError::Dispatch(C::Usage(reason())),
+        AppError::Dispatch(C::BodyOverCap { cap: 1 }),
+        AppError::Dispatch(C::Unpinned),
+        AppError::Dispatch(C::OwnRecoveryRequired { generation: 1 }),
+        AppError::InvalidData(reason()),
+        AppError::Refused(AppRefusal::NotNow(reason())),
+        AppError::Refused(AppRefusal::Usage(reason())),
+    ];
+    errors.extend(ErrorCode::ALL.map(|code| dispatch_answer(code, None)));
+    for limit in [
+        "inbox",
+        "sender_share",
+        "claims",
+        "claim_share",
+        "open_attempts",
+        "storage",
+        "record_keys",
+        "contacts",
+        "conversations",
+        "deny",
+        "invite_codes",
+        "connect_requests",
+        "attempts",
+        "a limit these bindings don't know",
+    ] {
+        let mut answer = dispatch_answer(ErrorCode::QuotaExceeded, None);
+        if let AppError::Dispatch(C::Dispatch { current, .. }) = &mut answer {
+            *current = serde_json::json!({ "limit": limit });
+        }
+        errors.push(answer);
+    }
+    let mut checked = 0;
+    for error in errors {
+        let waits = PaykitError::Client(error.clone()).is_wait();
+        let (case, failure) =
+            categorized(PaykitError::Client(error.clone()).into()).expect("categorized");
+        if !matches!(case, "outcome_unknown" | "recovery") {
+            assert_eq!(case == "retry_later", waits, "{}: {case}", failure.code);
+            checked += 1;
+        }
+        // Behind a kept batch it may have applied; behind an earlier batch nothing of this
+        // call was sent. A stop of the wallet stays one either way.
+        let kept = AppError::Kept {
+            batch_id: [3; 16],
+            error: Box::new(error),
+        };
+        let (kept_case, kept) = categorized(PaykitError::Client(kept).into()).expect("kept");
+        let expected = if case == "recovery" {
+            "recovery"
+        } else {
+            "outcome_unknown"
+        };
+        assert_eq!(
+            (kept_case, kept.code.as_str()),
+            (expected, failure.code.as_str())
+        );
+    }
+    // The waits and the failures that aren't, each told apart by the table.
+    assert!(checked > 40, "{checked}");
 }

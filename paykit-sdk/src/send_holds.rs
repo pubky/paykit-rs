@@ -717,14 +717,12 @@ impl Paykit {
     ///
     /// # Errors
     ///
-    /// The client's errors.
+    /// The client's errors, and Paykit's own from recording what a carried list owes before
+    /// the flush.
     #[cfg(feature = "test-support")]
     pub async fn flush_outbox_in_delivery(
         &mut self,
-    ) -> std::result::Result<
-        pubky_dispatch_client::app::OutboxReport,
-        pubky_dispatch_client::app::AppError,
-    > {
+    ) -> crate::Result<pubky_dispatch_client::app::OutboxReport> {
         self.send_outbox().await
     }
 
@@ -954,7 +952,14 @@ impl Paykit {
                 gone.delete(&at);
                 continue;
             }
-            if past_replay_window(stop.created_at_ms, now) && !self.delivery_held(&stop.to).await? {
+            // A copy a restore holds is the restore's to end (`restore_held.rs`), on verified
+            // service time: this step judges on the device clock when none is verified, so
+            // it could end a held stop early, with none of the restore's notices.
+            let restore_held = queued.get(&stop.msg_id).is_some_and(|copy| copy.held);
+            if !restore_held
+                && past_replay_window(stop.created_at_ms, now)
+                && !self.delivery_held(&stop.to).await?
+            {
                 expired.push(stop);
             }
         }

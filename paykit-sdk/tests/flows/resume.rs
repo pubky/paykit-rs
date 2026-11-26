@@ -59,7 +59,7 @@ async fn stage(wallet: &Paykit, attempt: &AttemptId) -> Stage {
 /// The Dispatch answers nothing for the next `n` requests.
 fn dispatch_down(w: &World, n: usize) {
     for _ in 0..n {
-        w.alice.switch().fail_next(Fault::Unreachable {
+        w.alice.dispatch().fail_next(Fault::Unreachable {
             path: String::new(),
             after: 0,
         });
@@ -132,7 +132,7 @@ async fn test_resume_reports_a_refused_outcome_write_as_the_journal_holds_it() {
     w.rail.settle(&first, true);
     w.rail.settle(&second, true);
     // The first outcome's write is refused for now; the second's goes.
-    w.alice.switch().fail_next(Fault::Error {
+    w.alice.dispatch().fail_next(Fault::Error {
         path: "/ops".into(),
         code: pubky_dispatch_core::http::ErrorCode::Unavailable,
         current: serde_json::Value::Null,
@@ -250,7 +250,7 @@ async fn test_resume_on_a_failing_store_journals_nothing() {
     assert_eq!(stage(&wallet, &second).await, Stage::Paying);
 }
 
-/// The world's switches, where the next operation batch (`/ops`), once armed, fails at the
+/// The world's Dispatch services, where the next operation batch (`/ops`), once armed, fails at the
 /// host's transport with the error armed, nothing sent; later ones go through.
 struct RefusingOps {
     inner: Arc<pubky_dispatch_client::testing::Router>,
@@ -330,7 +330,7 @@ async fn test_resume_returns_a_host_transport_failure_behind_a_kept_outcome_writ
             settled_with_transport_error(&w, [true, true], error.clone()).await;
         // The first submit fails at the transport. The Dispatch refuses the same batch on
         // retry, leaving the first outcome unwritten (Paykit spec 7.2 step 3).
-        w.alice.switch().fail_next(Fault::Error {
+        w.alice.dispatch().fail_next(Fault::Error {
             path: "/ops".into(),
             code: pubky_dispatch_core::http::ErrorCode::Conflict,
             current: serde_json::Value::Null,
@@ -604,7 +604,7 @@ async fn test_resume_reports_a_method_refusal_whose_write_was_lost_as_failed() {
     wallet.receive(None).await.unwrap();
     w.rail.next(Behaviour::Refuse);
     // The attempt's write goes through; the outcome's is never answered.
-    w.alice.switch().fail_next(Fault::Unanswered {
+    w.alice.dispatch().fail_next(Fault::Unanswered {
         path: "/ops".into(),
         after: 1,
     });
@@ -789,7 +789,7 @@ async fn test_resume_reports_a_payment_whose_outcome_another_entrys_write_sent()
     }
     let unanswered = |n: usize| {
         for _ in 0..n {
-            w.alice.switch().fail_next(Fault::Unanswered {
+            w.alice.dispatch().fail_next(Fault::Unanswered {
                 path: "/ops".into(),
                 after: 0,
             });
@@ -847,7 +847,7 @@ async fn test_resume_reports_a_restored_failure_written_after_the_methods_histor
     w.rail.settle(&first, false);
     // The failure's write and its retry on the last flush.
     for _ in 0..2 {
-        w.alice.switch().fail_next(Fault::Unanswered {
+        w.alice.dispatch().fail_next(Fault::Unanswered {
             path: "/ops".into(),
             after: 0,
         });
@@ -941,7 +941,7 @@ async fn resumed_under(
     let mut told = Vec::new();
     let ops_time_out = |n: usize| {
         for _ in 0..n {
-            w.alice.switch().fail_next(Fault::Unanswered {
+            w.alice.dispatch().fail_next(Fault::Unanswered {
                 path: "/ops".into(),
                 after: 0,
             });
@@ -958,7 +958,7 @@ async fn resumed_under(
             .obligation;
         match sent {
             Sent::Unsent => ops_time_out(1),
-            Sent::AnswerLost => w.alice.switch().fail_next(Fault::LoseAnswer {
+            Sent::AnswerLost => w.alice.dispatch().fail_next(Fault::LoseAnswer {
                 path: "/ops".into(),
             }),
             Sent::Applied => {}
@@ -984,7 +984,7 @@ async fn resumed_under(
     }
     ops_time_out(timeouts);
     if claim_unavailable {
-        w.alice.switch().fail_next(Fault::Error {
+        w.alice.dispatch().fail_next(Fault::Error {
             path: "claims".into(),
             code: pubky_dispatch_core::http::ErrorCode::Unavailable,
             current: serde_json::Value::Null,
@@ -1368,7 +1368,7 @@ async fn test_resume_restore_admits_a_paid_attempt_owing_its_outcome_beside_its_
     let (mut wallet, _, first, retry) = failed_then_retried(&w, store()).await;
     w.rail.complete_after_failure(&first);
     for _ in 0..4 {
-        w.alice.switch().fail_next(Fault::Unanswered {
+        w.alice.dispatch().fail_next(Fault::Unanswered {
             path: "/ops".into(),
             after: 0,
         });
@@ -1437,7 +1437,7 @@ async fn test_resume_never_repeats_a_retry_beside_a_proof_whose_outcome_is_unwri
     w.rail.complete_after_failure(&first);
     let unanswered = || {
         for _ in 0..4 {
-            w.alice.switch().fail_next(Fault::Unanswered {
+            w.alice.dispatch().fail_next(Fault::Unanswered {
                 path: "/ops".into(),
                 after: 0,
             });

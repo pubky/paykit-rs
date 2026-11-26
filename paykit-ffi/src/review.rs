@@ -503,6 +503,9 @@ pub enum NotNowKind {
     /// The block floor can't be read now; a later receive clears this, though a floor deleted
     /// or lost keeps it: if it stays, show that blocks and unblocks wait.
     FloorUnreadable,
+    /// A change of the public endpoints saved earlier and not signed isn't told yet; nothing
+    /// of the app record is signed until it is. A receive tries again.
+    EndpointChangeUntold,
     /// A raise of the block floor left unwritten waits before it is tried again.
     FloorRaiseWaiting,
     /// No service time is verified yet; a read of the Dispatch clears this.
@@ -575,7 +578,7 @@ pub enum HeldForUserKind {
     ReloadRequired,
     /// The Dispatch client holds the attempt back, as the message names: reconcile mode, the
     /// clocks apart, or a display read owed.
-    SwitchClient,
+    DispatchClient,
     /// A hold on one request, publication or delivery that no wait clears, as the message
     /// names.
     Unresolved,
@@ -617,6 +620,7 @@ impl From<&paykit_sdk::NotNowReason> for NotNowKind {
             R::ScopeKeysAwaited => Self::ScopeKeysAwaited,
             R::ValueAwaitsKey => Self::ValueAwaitsKey,
             R::FloorUnreadable => Self::FloorUnreadable,
+            R::EndpointChangeUntold => Self::EndpointChangeUntold,
             R::FloorRaiseWaiting => Self::FloorRaiseWaiting,
             R::NoServiceTime(_) => Self::NoServiceTime,
             R::ReadAgain(_) => Self::ReadAgain,
@@ -646,7 +650,7 @@ impl From<&paykit_sdk::HeldForUserReason> for HeldForUserKind {
             R::AllowanceExecutionHeld(_) => Self::AllowanceExecutionHeld,
             R::AttemptCheck(_) => Self::AttemptCheck,
             R::ReloadRequired => Self::ReloadRequired,
-            R::SwitchClient(_) => Self::SwitchClient,
+            R::DispatchClient(_) => Self::DispatchClient,
             R::Unresolved(_) => Self::Unresolved,
             R::PendingProposalsFull => Self::PendingProposalsFull,
             R::AllowanceLedgerFull => Self::AllowanceLedgerFull,

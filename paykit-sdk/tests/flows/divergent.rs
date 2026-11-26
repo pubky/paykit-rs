@@ -1014,11 +1014,11 @@ async fn test_divergent_kept_write_waits_while_its_record_may_be_missing_from_th
     shop.receive(None).await.unwrap();
     w.clock.advance_ms(31 * 24 * HOUR_MS);
     let now = w.clock.now_ms();
-    w.bob.switch().push_missed(1, now - 1_000, now);
+    w.bob.dispatch().push_missed(1, now - 1_000, now);
     // The client lists the shop's collections right after the item; Paykit's own listing at
     // the end of the receive fails.
     w.bob
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
             path: "records?collection".into(),
             after: crate::certificate::client_listing_requests(shop.app().cert()),
@@ -2168,7 +2168,7 @@ async fn test_divergent_receipt_kept_before_its_record_read_moves_over_it_once_i
     assert_eq!(s.outcome().await, Outcome::Failed);
     s.phone_writes_back().await;
     w.alice
-        .switch()
+        .dispatch()
         .make_divergent(OTHER_UPLOADER, s.record, [1; 32])
         .unwrap();
     s.wallet.receive(None).await.unwrap();
@@ -2526,7 +2526,7 @@ async fn test_divergent_held_rejection_recorded_over_a_paused_record_and_sent_on
     let record = wallet.request(&request).await.unwrap().record;
     set_divergent(&base, &wallet, &record, true);
     wallet.block(&w.bob_id()).await.unwrap();
-    let entries = w.bob.switch().entries_from(&w.alice_id());
+    let entries = w.bob.dispatch().entries_from(&w.alice_id());
     wallet.reject_request(&request, None).await.unwrap();
     wallet.flush().await.unwrap();
     let view = wallet.request(&request).await.unwrap();
@@ -2542,7 +2542,7 @@ async fn test_divergent_held_rejection_recorded_over_a_paused_record_and_sent_on
         1
     );
     wallet.receive(None).await.unwrap();
-    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), entries);
+    assert_eq!(w.bob.dispatch().entries_from(&w.alice_id()), entries);
     let paused = |listed: &[paykit_sdk::DivergentRecord]| {
         listed.iter().any(|r| r.record == record && r.paused)
     };
@@ -2551,7 +2551,7 @@ async fn test_divergent_held_rejection_recorded_over_a_paused_record_and_sent_on
     wallet.receive(None).await.unwrap();
     wallet.receive(None).await.unwrap();
     wallet.flush().await.unwrap();
-    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), entries + 1);
+    assert_eq!(w.bob.dispatch().entries_from(&w.alice_id()), entries + 1);
     assert!(wallet
         .app()
         .protocol_scan("paykit", b"ha/")
@@ -2903,7 +2903,7 @@ async fn held_answer_lacking_in_its_record(divergent: bool) {
         .unwrap()
         .to_vec();
     wallet.block(&w.bob_id()).await.unwrap();
-    let entries = w.bob.switch().entries_from(&w.alice_id());
+    let entries = w.bob.dispatch().entries_from(&w.alice_id());
     let rejection = wallet.reject_request(&request, None).await.unwrap();
     assert_eq!(
         wallet
@@ -2919,7 +2919,7 @@ async fn held_answer_lacking_in_its_record(divergent: bool) {
     crate::outcome_record::phone_writes(&mut phone, &request, Some(&good)).await;
     if divergent {
         w.alice
-            .switch()
+            .dispatch()
             .make_divergent(OTHER_UPLOADER, record, [1; 32])
             .unwrap();
     }
@@ -2927,7 +2927,7 @@ async fn held_answer_lacking_in_its_record(divergent: bool) {
     let view = wallet.request(&request).await.unwrap();
     assert_eq!(view.divergent, divergent, "{view:?}");
     assert_ne!(view.status, RequestStatus::Rejected, "{view:?}");
-    let sent = |w: &World| w.bob.switch().entries_from(&w.alice_id()) - entries;
+    let sent = |w: &World| w.bob.dispatch().entries_from(&w.alice_id()) - entries;
     if divergent {
         let held = wallet
             .app()
@@ -3004,13 +3004,13 @@ async fn test_divergent_held_answer_kept_while_its_paused_record_is_deleted() {
     wallet.receive(None).await.unwrap();
     let record = wallet.request(&request).await.unwrap().record;
     wallet.block(&w.bob_id()).await.unwrap();
-    let entries = w.bob.switch().entries_from(&w.alice_id());
+    let entries = w.bob.dispatch().entries_from(&w.alice_id());
     wallet.reject_request(&request, None).await.unwrap();
     seen.armed.store(true, std::sync::atomic::Ordering::SeqCst);
     phone.receive(None).await.unwrap();
     crate::outcome_record::phone_writes(&mut phone, &request, None).await;
     w.alice
-        .switch()
+        .dispatch()
         .make_divergent(OTHER_UPLOADER, record, [1; 32])
         .unwrap();
     wallet.receive(None).await.unwrap();
@@ -3042,7 +3042,7 @@ async fn test_divergent_held_answer_kept_while_its_paused_record_is_deleted() {
             .len(),
         1
     );
-    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), entries);
+    assert_eq!(w.bob.dispatch().entries_from(&w.alice_id()), entries);
     confirm(&mut wallet, &record).await.unwrap();
     wallet.receive(None).await.unwrap();
     assert!(wallet
@@ -3051,7 +3051,7 @@ async fn test_divergent_held_answer_kept_while_its_paused_record_is_deleted() {
         .await
         .unwrap()
         .is_empty());
-    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), entries);
+    assert_eq!(w.bob.dispatch().entries_from(&w.alice_id()), entries);
 }
 
 #[tokio::test]
@@ -3066,7 +3066,7 @@ async fn test_divergent_held_answer_lacking_in_a_record_never_paused_given_up_wi
 
 /// The client's durable divergence report: `AppEvent::RecordDivergent { id, key }` is a duty
 /// event, delivered until acknowledged, kept through a restart and a cleared flag, and raised
-/// again under a new ID after a restore; `ScriptedSwitch::make_divergent` makes a record
+/// again under a new ID after a restore; `ScriptedDispatch::make_divergent` makes a record
 /// divergent at the Dispatch, as a conflicting upload does.
 mod durable_event {
     use super::*;
@@ -3088,7 +3088,7 @@ mod durable_event {
         wallet.receive(None).await.unwrap();
         let record = wallet.request(&request).await.unwrap().record;
         w.alice
-            .switch()
+            .dispatch()
             .make_divergent(UPLOADER, record, [1; 32])
             .unwrap();
         wallet.app_mut().receive(None).await.unwrap();
@@ -3142,7 +3142,7 @@ mod durable_event {
         wallet.receive(None).await.unwrap();
         let record = wallet.request(&request).await.unwrap().record;
         w.alice
-            .switch()
+            .dispatch()
             .make_divergent(UPLOADER, record, [1; 32])
             .unwrap();
         let summary = wallet.receive(None).await.unwrap();
@@ -3181,7 +3181,7 @@ mod durable_event {
         // The client's flag goes as a write clears it, so the next divergent view is a change.
         set_divergent(base, app, record, false);
         signer
-            .switch()
+            .dispatch()
             .make_divergent(UPLOADER, *record, [2; 32])
             .unwrap();
         app.app_mut().receive(None).await.unwrap();
@@ -3231,7 +3231,7 @@ mod durable_event {
         wallet.receive(None).await.unwrap();
         let record = wallet.request(&request).await.unwrap().record;
         w.alice
-            .switch()
+            .dispatch()
             .make_divergent(UPLOADER, record, [1; 32])
             .unwrap();
         wallet.receive(None).await.unwrap();
@@ -3281,7 +3281,7 @@ mod durable_event {
         wallet.receive(None).await.unwrap();
         let record = wallet.request(&request).await.unwrap().record;
         w.alice
-            .switch()
+            .dispatch()
             .make_divergent(UPLOADER, record, [1; 32])
             .unwrap();
         wallet.receive(None).await.unwrap();
@@ -3296,7 +3296,7 @@ mod durable_event {
         // The client's flag goes, so the next divergent view of the same write is a change.
         set_divergent(&base, &wallet, &record, false);
         w.alice
-            .switch()
+            .dispatch()
             .make_divergent(UPLOADER, record, [2; 32])
             .unwrap();
         wallet.receive(None).await.unwrap();
@@ -3341,7 +3341,7 @@ mod durable_event {
         w.rail.set_declaration(idempotent_without_history());
         let record = wallet.request(&request).await.unwrap().record;
         w.alice
-            .switch()
+            .dispatch()
             .make_divergent(UPLOADER, record, [1; 32])
             .unwrap();
         wallet.receive(None).await.unwrap();
@@ -3395,7 +3395,7 @@ mod durable_event {
         shop.receive(None).await.unwrap();
         let paid = sale(&shop, &request).await.record;
         w.bob
-            .switch()
+            .dispatch()
             .make_divergent(UPLOADER, paid, [1; 32])
             .unwrap();
         shop.receive(None).await.unwrap();
@@ -3531,7 +3531,7 @@ mod durable_event {
         wallet.receive(None).await.unwrap();
         let record = wallet.request(&request).await.unwrap().record;
         w.alice
-            .switch()
+            .dispatch()
             .make_divergent(UPLOADER, record, [1; 32])
             .unwrap();
         failing
@@ -3582,7 +3582,7 @@ mod durable_event {
         w.rail.set_declaration(idempotent_without_history());
         let record = wallet.request(&request).await.unwrap().record;
         w.alice
-            .switch()
+            .dispatch()
             .make_divergent(UPLOADER, record, [1; 32])
             .unwrap();
         assert!(
@@ -3760,7 +3760,7 @@ async fn test_divergent_later_write_waits_behind_a_kept_one_not_written_yet() {
     w.clock.advance_ms(1_000);
     let second = acceptance(&w);
     w.bob
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::Error {
             path: "/ops".into(),
             code: pubky_dispatch_core::http::ErrorCode::QuotaExceeded,
@@ -4426,11 +4426,11 @@ async fn test_divergent_stored_entry_neither_written_nor_given_up_while_its_reco
     set_divergent(&base, &shop, &record, true);
     w.clock.advance_ms(31 * 24 * HOUR_MS);
     let now = w.clock.now_ms();
-    w.bob.switch().push_missed(1, now - 1_000, now);
+    w.bob.dispatch().push_missed(1, now - 1_000, now);
     // The client lists the shop's collections right after the item; Paykit's own listing at
     // the end of the receive fails.
     w.bob
-        .switch()
+        .dispatch()
         .fail_next(pubky_dispatch_client::testing::Fault::Unreachable {
             path: "records?collection".into(),
             after: crate::certificate::client_listing_requests(shop.app().cert()),
@@ -4665,7 +4665,7 @@ async fn test_divergent_stored_request_never_reopens_a_divergent_delete() {
         .unwrap();
     // The delete reaches the wallet already divergent.
     w.alice
-        .switch()
+        .dispatch()
         .make_divergent(OTHER_UPLOADER, record, [1; 32])
         .unwrap();
     wallet.receive(None).await.unwrap();

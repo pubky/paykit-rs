@@ -64,6 +64,7 @@ mod error;
 mod executor;
 mod extensions;
 mod floor;
+mod heap;
 mod hold;
 mod journal;
 mod loss;
@@ -88,6 +89,7 @@ mod records;
 mod reply_asks;
 mod requests;
 mod resend;
+mod restore_held;
 mod send_holds;
 mod settlement_marks;
 mod settlements;
@@ -111,15 +113,15 @@ pub use hold::{AllowanceHold, HeldRequest};
 pub use journal::{PaymentView, Stage};
 pub use loss::{LossBoundary, RecoveryMembers, RecoveryReport};
 pub use marks::MAX_DROPPED_MARKS;
-pub use notices::{Notice, NoticeKind, SettlementSubject};
+pub use notices::{Notice, NoticeKind, SettlementSubject, StopSubject};
 pub use own_record::MAX_OWN_PUBLIC_ENDPOINTS;
 pub use pay::{
     BlockedPayment, PayOptions, PayOutcome, PayResult, PaymentDoubt, PaymentMode, TransferQuote,
     UnrequestedPayment, UNREQUESTED_DEADLINE_MS,
 };
 pub use paykit::{
-    orphan_floor_s, Paykit, PaykitBackup, PaykitConfig, ReceiveSummary, DEFAULT_RESEND_BUDGET,
-    PRE_HANDOFF_BUDGET_MS,
+    orphan_floor_s, HeldMessages, Paykit, PaykitBackup, PaykitConfig, ReceiveSummary,
+    DEFAULT_RESEND_BUDGET, PRE_HANDOFF_BUDGET_MS,
 };
 pub use paykit_lib::bodies::RequestDestination;
 pub use paykit_lib::{
