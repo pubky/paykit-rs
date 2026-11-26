@@ -29,3 +29,20 @@ updates:
       interval: weekly
     cooldown:
       default-days: 7
+    # The React Native CLI packages share one version and follow the React
+    # Native release line, so update them together in one pull request.
+    groups:
+      react-native-cli:
+        patterns:
+          - "@react-native-community/cli*"
+    ignore:
+      # A major CLI version belongs with a React Native upgrade.
+      - dependency-name: "@react-native-community/cli*"
+        update-types:
+          - version-update:semver-major
+      # @babel/runtime 8 drops the regenerator entry that the React Native
+      # Babel preset still imports, so development bundles fail to build.
+      # Lift this rule with the React Native release that moves to Babel 8.
+      - dependency-name: "@babel/runtime"
+        update-types:
+          - version-update:semver-major
