@@ -2176,13 +2176,14 @@ async fn test_restore_keeps_a_sighting_of_a_payment_this_installation_did_not_jo
         .unwrap();
     let orphan = |byte: u8, sighted: bool| {
         let mut value = entry.clone();
+        let attempt = paykit_lib::AttemptId::from_bytes([byte; 16]).to_text();
         value["d"] = serde_json::json!({
+            "attempt_id": attempt,
             "proof": null,
             "paid_at_ms": null,
+            "proof_msg_id": null,
             "method_failed": false,
             "ask_again": false,
-            "told": false,
-            "told_paid": false,
             "paid_seen": sighted.then(|| serde_json::json!({
                 "source": { "kind": "paid_history" },
                 "obligation": entry["d"]["obligation"],
@@ -2190,10 +2191,7 @@ async fn test_restore_keeps_a_sighting_of_a_payment_this_installation_did_not_jo
             })),
             "ledger_dropped": false,
         });
-        let key = format!(
-            "jf/{}",
-            paykit_lib::AttemptId::from_bytes([byte; 16]).to_text()
-        );
+        let key = format!("jf/{attempt}");
         (key.into_bytes(), value)
     };
     layer.push(orphan(8, true));
@@ -2237,6 +2235,43 @@ async fn test_restore_entry_paid_off_the_claim_and_resolved_otherwise_refused() 
             "{resolution}"
         );
     }
+}
+
+#[tokio::test]
+async fn test_restore_refuses_a_payments_facts_under_another_attempts_key() {
+    // What the method said of a payment names its attempt, and is read only at that
+    // attempt's key: a backup holding one payment's proof under another attempt's key would
+    // make that attempt paid, so it is refused, writing nothing.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    let paid = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .outcome
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    let app_id = wallet.app_id();
+    let bytes = wallet.backup().await.unwrap().to_bytes().unwrap();
+    let good: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let mut layer = layer_of(&good);
+    let (_, facts) = layer
+        .iter()
+        .find(|(k, _)| k.starts_with(b"jf/"))
+        .cloned()
+        .expect("the payment's facts are in the backup");
+    assert!(!facts["d"]["proof"].is_null(), "{facts}");
+    let other = paykit_lib::AttemptId::from_bytes([9; 16]).to_text();
+    layer.push((format!("jf/{other}").into_bytes(), facts));
+    refused_writing_nothing(
+        &w,
+        with_layer(&good, layer),
+        app_id,
+        "a payment's facts under another attempt's key",
+    )
+    .await;
 }
 
 /// A backup of alice's wallet with a payment priced by a rate in flight, confirmed at the

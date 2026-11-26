@@ -253,17 +253,12 @@ pending. Use `resume_payments` to progress outstanding work, then read
 `payments()` again to refresh the journal view.
 
 `resume_payments` returns one outcome for each payment that is still open
-and one for each payment that ended and whose outcome no call has returned
-yet, as the journal holds it when the call returns. A payment that ended
-without this wallet's own outcome, because the user or another app resolved
-it, comes as `PayOutcome::Resolved`: show nothing new to pay and read its
-state from `payments()`. An outcome a call returned, a pay call's, a
-resume's or the user's own `resolve_attempt`, is not listed again, unless a
-later resume finds the payment made after all. One that ended in a call that
-returned an error, or never returned, is listed by the next resume. The one
-gap is a crash in the instant after a call recorded that it returned an
-outcome and before the host received it: `payments()` still shows that
-payment's state.
+and one for each payment the call ended, as the journal holds it when the
+call returns. A payment that ended without this wallet's own outcome, because
+the user or another app resolved it, comes as `PayOutcome::Resolved`: show
+nothing new to pay and read its state from `payments()`. A payment that was
+already over before the call is not listed again, unless the call found it
+made after all.
 
 When another wallet marks a subscription manual-only, the wallet that started
 a payment by hand can still resume that attempt after a restart. The SDK
@@ -645,7 +640,7 @@ the new cursor to the service. Acknowledging the deletion notice leaves the cred
 |---|---|
 | `NoticeKind::PaidAfterFailed` | Show that a verified receipt arrived for an attempt previously shown as failed. |
 | `NoticeKind::HeldWithoutPay` | Show that the open attempt needs a wallet with `paykit_pay`. |
-| `NoticeKind::MessageGivenUp` | Show the message or request whose effect or delivery was given up. Acknowledgment can also retire the stored entry. |
+| `NoticeKind::MessageGivenUp` | Show the message or request whose effect or delivery was given up. Acknowledgment can also retire the stored entry. A kept message (a stored entry, a reply kept before its record, one kept over a divergent record) is given up 30 days after its acceptance when its record can't take it or the Dispatch has answered its write. One whose write the client keeps to send again (on a rate limit, a full account, a stale timestamp, or an answer before the first send) is never given up while the client keeps that batch, which may still land: it waits, with any cancellation kept beside it, and lands with the batch, or is decided once the client drops it, at most about 30 days after the batch's first send (`KEPT_BATCH_ANSWER_MS`). The client reports its kept batches (`AppEvent::KeptBatchesWaiting`). A stored entry is listed by `App::parked_entries` until it is written or given up (a reply kept before its record isn't), and a request shows `RequestStatus::Unrecorded`; Paykit raises no notice of its own for a message that waits. |
 | `NoticeKind::AllowancePlacementExpired` | Ordinary placement expired. The wallet still holds evidence of a possible Allowance conflict. Acknowledge the notice after showing it. The hold survives acknowledgment and restart. |
 | `NoticeKind::AllowanceAcceptanceBeforeLoss` | Show that the identified acceptance cannot open a budget after the payer’s declared provider loss. The proposing wallet withdraws only its verified original pending write. An uncertain read or a later lifetime keeps that record intact. The seller ends its matching accepted Allowance when the withdrawal arrives. |
 | `NoticeKind::AllowanceWithdrawalConfirmed` | The seller returned its signed end for the proposal and acceptance this wallet withdrew. The notice identifies that end. The original Allowance stays closed after acknowledgement and reopen. |

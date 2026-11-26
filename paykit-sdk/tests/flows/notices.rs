@@ -305,6 +305,127 @@ async fn test_notices_late_receipt_written_later_raised_by_an_own_app_from_its_k
     assert_eq!(other.notices().await.unwrap(), notices);
 }
 
+/// Alice's second wallet, joined after her first one paid bob, keeps no view of the payment's
+/// claim, so bob's receipt makes it read the claim at the dispatch. The read is answered `code`.
+/// Returns the second wallet and the payment's claim, the receipt not read yet.
+async fn receipt_read_answered(w: &World, code: ErrorCode) -> (Paykit, [u8; 32]) {
+    let (other, obligation, _) = receipt_read_answered_by(w, code).await;
+    (other, obligation)
+}
+
+/// [`receipt_read_answered`], with bob's shop.
+async fn receipt_read_answered_by(w: &World, code: ErrorCode) -> (Paykit, [u8; 32], Paykit) {
+    let (wallet, mut shop, _) = paid_after_failed(w).await;
+    let obligation = wallet.payments().await.unwrap()[0].obligation;
+    drop(wallet);
+    let mut other = w.wallet("second").await;
+    other.receive(None).await.unwrap();
+    receipt(&mut shop).await;
+    w.alice.switch().fail_next(Fault::Error {
+        path: "claims".into(),
+        code,
+        current: serde_json::Value::Null,
+    });
+    (other, obligation, shop)
+}
+
+#[tokio::test]
+async fn test_notices_receipt_claim_read_to_try_again_settles_it_once_read() {
+    // `409 conflict` says nothing of the claim: the receipt waits on the feed, and once the
+    // claim reads, it settles it. Settled as refused instead, the claim would stay unsettled.
+    let w = World::new();
+    let (mut other, obligation) = receipt_read_answered(&w, ErrorCode::Conflict).await;
+    other.receive(None).await.unwrap();
+    // Held: the receipt isn't in the record, and the claim, read through another wallet so
+    // this one keeps no view of it, isn't settled yet.
+    assert!(other.requests().await.unwrap()[0].receipt.is_none());
+    let mut inspector = w.wallet("inspector").await;
+    let held = inspector
+        .app_mut()
+        .read_claim(&obligation)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_ne!(held.view.status, ClaimStatus::Settled);
+    other.receive(None).await.unwrap();
+    assert!(other.requests().await.unwrap()[0].receipt.is_some());
+    let claim = other
+        .app_mut()
+        .read_claim(&obligation)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(claim.view.status, ClaimStatus::Settled);
+}
+
+#[tokio::test]
+async fn test_notices_receipt_claim_read_never_passing_given_up_at_its_window() {
+    // The claim read keeps answering `409 conflict`: the receipt is held, while a request bob
+    // sends after it is taken meanwhile. Past the receipt's 30 days it is given up, the host
+    // told, and is in no record (Paykit spec 8.1).
+    let w = World::new();
+    let (mut other, _, mut shop) = receipt_read_answered_by(&w, ErrorCode::Conflict).await;
+    other.receive(None).await.unwrap();
+    let later = crate::common::request_from(
+        &mut shop,
+        w.alice_id(),
+        crate::common::draft("2", w.clock.now_ms()),
+    )
+    .await;
+    for _ in 0..4 {
+        w.alice.switch().fail_next(Fault::Error {
+            path: "claims".into(),
+            code: ErrorCode::Conflict,
+            current: serde_json::Value::Null,
+        });
+    }
+    other.receive(None).await.unwrap();
+    assert_eq!(
+        other.request(&later).await.unwrap().status,
+        paykit_sdk::RequestStatus::Open
+    );
+    assert!(other.notices().await.unwrap().is_empty());
+    w.clock.advance_ms(paykit_sdk::KEPT_MESSAGE_MS);
+    let mut notices = Vec::new();
+    for _ in 0..3 {
+        w.alice.switch().fail_next(Fault::Error {
+            path: "claims".into(),
+            code: ErrorCode::Conflict,
+            current: serde_json::Value::Null,
+        });
+        other.receive(None).await.unwrap();
+        notices = other.notices().await.unwrap();
+        if !notices.is_empty() {
+            break;
+        }
+    }
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert_eq!(notices[0].kind, NoticeKind::MessageGivenUp);
+    assert!(other
+        .requests()
+        .await
+        .unwrap()
+        .iter()
+        .all(|request| request.receipt.is_none()));
+}
+
+#[tokio::test]
+async fn test_notices_receipt_claim_read_refused_for_good_settles_nothing() {
+    // `403 permission_missing` refuses the read for good: the receipt is recorded and settles
+    // nothing, as before.
+    let w = World::new();
+    let (mut other, obligation) = receipt_read_answered(&w, ErrorCode::PermissionMissing).await;
+    other.receive(None).await.unwrap();
+    assert!(other.requests().await.unwrap()[0].receipt.is_some());
+    let claim = other
+        .app_mut()
+        .read_claim(&obligation)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_ne!(claim.view.status, ClaimStatus::Settled);
+}
+
 #[tokio::test]
 async fn test_notices_receipt_within_the_claim_settles_it_and_raises_none() {
     let w = World::new();

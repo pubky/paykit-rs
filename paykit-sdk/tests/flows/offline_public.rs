@@ -20,6 +20,64 @@ async fn test_offline_public_same_selection_pays_once_while_connected() {
 }
 
 #[tokio::test]
+async fn test_offline_public_refused_call_is_no_payment_started() {
+    // The method refuses an offline payment's call: nothing was submitted. Like a refused
+    // online call it is kept as no payment started, never as the method's failure, whose
+    // history the recheck would ask about for nothing.
+    let world = World::new();
+    let mut wallet = world
+        .wallet_with("wallet", store(), PaykitConfig::default())
+        .await;
+    let _shop = shop_with_endpoint(&world).await;
+    wallet.receive(None).await.unwrap();
+    world.router.remove(world.alice.origin());
+    world.rail.next(paykit_sdk::rail::Behaviour::Refuse);
+    let outcome = wallet
+        .pay_without_request(payment(&world))
+        .await
+        .outcome
+        .unwrap();
+    let PayOutcome::Failed {
+        attempt_id, reason, ..
+    } = outcome
+    else {
+        panic!("{outcome:?}");
+    };
+    assert!(
+        reason.starts_with("the payment method refused the call"),
+        "{reason}"
+    );
+    let key = format!("j/{}", attempt_id.to_text());
+    let entry: serde_json::Value = serde_json::from_slice(
+        &wallet
+            .app()
+            .protocol_get("paykit", key.as_bytes())
+            .await
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        entry["d"]["failed_before_call"],
+        serde_json::json!(true),
+        "{entry}"
+    );
+    assert_eq!(
+        entry["d"]["failed_by_method"],
+        serde_json::json!(false),
+        "{entry}"
+    );
+    let facts = format!("jf/{}", attempt_id.to_text());
+    assert!(wallet
+        .app()
+        .protocol_get("paykit", facts.as_bytes())
+        .await
+        .unwrap()
+        .is_none());
+    assert!(world.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
 async fn test_offline_public_payment_rechecks_the_selected_transfer_before_handoff() {
     let world = World::new();
     let mut wallet = world

@@ -348,11 +348,11 @@ impl Paykit {
             if !self.fenced_own_proposal(pending.proposal()) {
                 return Ok(());
             }
-            let held_key = key::kept_reply(&reply.sender(), record, &reply.message().msg_id);
-            let stored_key = key::stored_note(&reply.sender(), &reply.message().msg_id);
-            let mut held = self.local_get::<KeptMessage>(&held_key).await?;
+            let kept_key = key::kept_reply(&reply.sender(), record, &reply.message().msg_id);
+            let note_key = key::stored_note(&reply.sender(), &reply.message().msg_id);
+            let mut held = self.local_get::<KeptMessage>(&kept_key).await?;
             let mut stored = self
-                .local_get::<crate::stored::StoredNote>(&stored_key)
+                .local_get::<crate::stored::StoredNote>(&note_key)
                 .await?;
             let active = stored.as_mut().filter(|note| !note.placed);
             if held.is_none() && active.is_none() {
@@ -367,10 +367,10 @@ impl Paykit {
                 q.loss_reported = true;
             }
             if let Some(q) = held {
-                tx.put(&held_key, &q)?;
+                tx.put(&kept_key, &q)?;
             }
             if let Some(note) = stored.filter(|note| !note.placed) {
-                tx.put(&stored_key, &note)?;
+                tx.put(&note_key, &note)?;
             }
             if reported {
                 return self.local_commit(tx).await;

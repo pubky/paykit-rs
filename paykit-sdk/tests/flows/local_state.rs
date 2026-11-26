@@ -595,9 +595,15 @@ async fn test_local_state_users_resolution_beside_a_proof_the_recheck_found_read
     assert_eq!(entry["d"]["user_resolved"], json!("failed"), "{entry}");
     // The method's failure, kept beside the entry, still asked about.
     let facts_key = format!("jf/{}", attempt_id.to_text());
-    let mut facts = held_json(&wallet, &facts_key).await;
-    facts["d"]["method_failed"] = json!(true);
-    facts["d"]["ask_again"] = json!(true);
+    let mut facts = entry.clone();
+    facts["d"] = json!({
+        "attempt_id": attempt_id.to_text(),
+        "proof": null,
+        "paid_at_ms": null,
+        "proof_msg_id": null,
+        "method_failed": true,
+        "ask_again": true,
+    });
     put(&mut wallet, &facts_key, &facts).await;
     w.rail.settle(&attempt_id, false);
     w.rail.complete_after_failure(&attempt_id);

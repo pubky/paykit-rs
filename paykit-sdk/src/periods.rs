@@ -1134,7 +1134,6 @@ impl Paykit {
             Ok(plan) => Box::pin(self.execute(plan)).await,
             Err(error) => Err(error),
         };
-        let outcome = self.tell(outcome).await;
         PayResult {
             outcome,
             public_failures,
