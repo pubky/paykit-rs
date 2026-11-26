@@ -454,7 +454,7 @@ fn validate_outbound_private_status(record: &OutboundPrivateMessageRecord) -> Re
     Ok(())
 }
 
-fn validate_prepared_private_send(
+pub(in crate::backup) fn validate_prepared_private_send(
     outbound_message_id: u64,
     prepared: &PreparedOutboundPrivateSend,
 ) -> Result<()> {

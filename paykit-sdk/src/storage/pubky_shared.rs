@@ -12,12 +12,12 @@ use zeroize::Zeroizing;
 
 use super::{
     decode_storage_state_blob, encode_storage_state_blob, run_storage_state_transaction,
-    StorageAdapter, StorageKeyRotationCallback, StorageOperation, StorageState,
-    StorageTransactionCallback,
+    PrivatePaymentListWithdrawalGrant, StorageAdapter, StorageKeyRotationCallback,
+    StorageOperation, StorageState, StorageTransactionCallback,
 };
 use crate::{
-    validate_storage_state, PaykitIdentitySecretKey, PaykitSdkError, PubkyPublicKey,
-    PubkySessionAccess, PubkySessionProvider, Result, PAYKIT_SESSION_CAPABILITIES,
+    validate_storage_state, PaykitIdentitySecretKey, PaykitSdkError, PubkyLocalSecretKey,
+    PubkyPublicKey, PubkySessionAccess, PubkySessionProvider, Result, PAYKIT_SESSION_CAPABILITIES,
 };
 
 const SHARED_STATE_ENVELOPE_VERSION: u32 = 1;
@@ -215,17 +215,7 @@ impl PubkySharedStateStorage {
         lock: &pubky::StorageLock,
     ) -> Result<RemoteStateSnapshot> {
         let Some(encrypted) = self.load_stable_encrypted_blob(access, lock).await? else {
-            let owner = access.public_key()?.to_public_key()?;
-            if paykit_lib::get_paykit_app_registry(&access.outbox_client.public_storage(), &owner)
-                .await?
-                .is_some_and(|registry| registry.noise_public_key().is_some())
-            {
-                return Err(PaykitSdkError::Storage {
-                    context: "Pubky shared state is missing for an initialized Paykit identity"
-                        .into(),
-                    source: None,
-                });
-            }
+            self.require_uninitialized_missing_state(access).await?;
             return Ok(RemoteStateSnapshot {
                 state: StorageState::default(),
                 revision: None,
@@ -234,6 +224,20 @@ impl PubkySharedStateStorage {
         let revision = Some(encrypted.revision);
         let state = decrypt_state(access, &encrypted.bytes)?;
         Ok(RemoteStateSnapshot { state, revision })
+    }
+
+    async fn require_uninitialized_missing_state(&self, access: &PubkySessionAccess) -> Result<()> {
+        let owner = access.public_key()?.to_public_key()?;
+        if paykit_lib::get_paykit_app_registry(&access.outbox_client.public_storage(), &owner)
+            .await?
+            .is_some_and(|registry| registry.noise_public_key().is_some())
+        {
+            return Err(PaykitSdkError::Storage {
+                context: "Pubky shared state is missing for an initialized Paykit identity".into(),
+                source: None,
+            });
+        }
+        Ok(())
     }
 
     async fn load_stable_encrypted_blob(
@@ -432,6 +436,91 @@ impl StorageAdapter for PubkySharedStateStorage {
         });
         self.record_backup_revision(observed);
         Ok(result)
+    }
+
+    async fn close_private_payment_list_withdrawal_admission(
+        &self,
+        original_grant: &PrivatePaymentListWithdrawalGrant,
+        original_secret: Option<&PubkyLocalSecretKey>,
+    ) -> Result<()> {
+        super::validate_withdrawal_admission_secret(original_grant, original_secret)?;
+        self.record_backup_revision(None);
+        if shared_state_operation_active() {
+            return Err(PaykitSdkError::Policy {
+                context: "withdrawal admission closure requires a separate storage operation"
+                    .into(),
+                source: None,
+            });
+        }
+        let _guard = self.transaction_lock.lock().await;
+        self.record_backup_revision(None);
+        let access = self.load_session_access().await?;
+        let storage_grant = access
+            .session
+            .as_grant()
+            .ok_or_else(|| PaykitSdkError::Identity {
+                context: "withdrawal admission closure requires grant-backed shared storage".into(),
+                source: None,
+            })?;
+        let info = storage_grant.session_info().await;
+        if access.public_key()? != original_grant.owner
+            || PubkyPublicKey::from_public_key(&info.homeserver) != original_grant.homeserver
+        {
+            return Err(PaykitSdkError::Identity {
+                context: "withdrawal admission closure does not match the original backing".into(),
+                source: None,
+            });
+        }
+        // A separate same-owner storage authorizer is allowed. Never replace
+        // the captured caller grant with the storage author's grant or client.
+        let session = access.session.clone();
+        with_shared_state_lock(&session, |lock| async move {
+            let encrypted = self.load_stable_encrypted_blob(&access, &lock).await?;
+            let revision = encrypted.as_ref().map(|blob| blob.revision.clone());
+            if self.last_revision()?.is_some() && revision.is_none() {
+                return Err(PaykitSdkError::Storage {
+                    context: "previously observed Pubky shared state is missing".into(),
+                    source: None,
+                });
+            }
+            let key = match encrypted.as_ref() {
+                Some(blob) => {
+                    let generation = encrypted_state_key_generation(&blob.bytes)?;
+                    // The header only selects a key. Full authenticated decryption
+                    // below is mandatory before observing or changing any journal.
+                    match original_secret.or(access.local_secret_key.as_ref()) {
+                        Some(root) => root.derive_paykit_identity_secret_key(generation)?,
+                        None => paykit_identity_secret_key(&access)?,
+                    }
+                }
+                None => {
+                    self.require_uninitialized_missing_state(&access).await?;
+                    paykit_identity_secret_key(&access)?
+                }
+            };
+            let mut state = match encrypted.as_ref() {
+                Some(blob) => decrypt_state_with_key(&key, &original_grant.owner, &blob.bytes)?,
+                None => StorageState::default(),
+            };
+            if state
+                .paykit_noise_public_key
+                .as_ref()
+                .is_some_and(|stored| stored != &super::paykit_noise_public_key(&key))
+            {
+                return Err(PaykitSdkError::Identity {
+                    context: "withdrawal admission state does not match its authenticated key"
+                        .into(),
+                    source: None,
+                });
+            }
+            self.record_revision(revision)?;
+            super::close_withdrawal_admission(&mut state, original_grant)?;
+            // Denial only: preserve every other field and the authenticated key
+            // generation. This must not upgrade ordinary provider key access.
+            let encrypted = encrypt_state_with_key(&key, &original_grant.owner, &state)?;
+            self.commit_encrypted_state(&access, &lock, encrypted).await
+        })
+        .await
     }
 
     async fn recover_shared_state_from_backup(

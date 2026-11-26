@@ -1,18 +1,138 @@
 use serde::{Deserialize, Serialize};
 
-use super::StorageState;
+use super::*;
+use crate::domain::contacts::ContactRecord;
+use crate::domain::receipts::{ReceiptAccessRecord, ReceiptIssuanceRecord, ReceiptRecord};
+use crate::identity::{IdentityState, PubkyPublicKey};
+use std::collections::{HashMap, HashSet};
+
 use crate::{PaykitSdkError, Result};
 
 /// Current encoded SDK state-blob version.
-pub const SDK_STATE_BLOB_VERSION: u32 = 4;
+pub const SDK_STATE_BLOB_VERSION: u32 = 6;
 const SDK_STATE_BLOB_VERSION_V1: u32 = 1;
 const SDK_STATE_BLOB_VERSION_V2: u32 = 2;
 const SDK_STATE_BLOB_VERSION_V3: u32 = 3;
+const SDK_STATE_BLOB_VERSION_V4: u32 = 4;
+const SDK_STATE_BLOB_VERSION_V5: u32 = 5;
 
 #[derive(Serialize, Deserialize)]
 struct StorageStateEnvelope<T> {
     version: u32,
     state: T,
+}
+
+// Frozen version 4 shape. Decode old bytes completely before adding new
+// authority-bearing fields; trailing bytes must never become a withdrawal.
+#[derive(Deserialize)]
+struct StorageStateV4 {
+    paykit_noise_public_key: Option<PubkyPublicKey>,
+    allowance_accounting: Option<crate::AllowanceAccountingState>,
+    identity_state: Option<IdentityState>,
+    linked_peers: HashMap<PubkyPublicKey, LinkedPeerRecord>,
+    contact_records: HashMap<PubkyPublicKey, ContactRecord>,
+    authorized_paykit_apps: HashMap<
+        PubkyPublicKey,
+        HashMap<paykit_lib::PaykitAppId, paykit_lib::PaykitAppCapabilities>,
+    >,
+    registered_paykit_apps: HashSet<paykit_lib::PaykitAppId>,
+    registered_paykit_app_capabilities:
+        HashMap<paykit_lib::PaykitAppId, paykit_lib::PaykitAppCapabilities>,
+    retired_paykit_apps: HashSet<paykit_lib::PaykitAppId>,
+    public_endpoint_records: HashMap<(paykit_lib::PaykitAppId, String), PublicEndpointRecord>,
+    payment_endpoint_reservations: HashMap<
+        (PubkyPublicKey, paykit_lib::PaykitAppId, String),
+        PaymentEndpointReservationRecord,
+    >,
+    encrypted_link_states: HashMap<PubkyPublicKey, EncryptedLinkStateRecord>,
+    peer_link_operation_leases: HashMap<PubkyPublicKey, PeerLinkOperationLease>,
+    next_peer_link_operation_lease_id: u64,
+    paykit_app_operation_leases: HashMap<paykit_lib::PaykitAppId, PaykitAppOperationLease>,
+    next_paykit_app_operation_lease_id: u64,
+    payment_request_execution_claims:
+        HashMap<(PubkyPublicKey, String), PaymentRequestExecutionClaim>,
+    outbound_private_messages: Vec<OutboundPrivateMessageRecord>,
+    next_outbound_private_message_id: u64,
+    private_stream_items: Vec<PrivateStreamItemRecord>,
+    next_receive_batch_id: u64,
+    next_private_stream_item_id: u64,
+    event_dedup_records: HashMap<(PubkyPublicKey, String), EventDedupRecord>,
+    receipt_access_records: HashMap<(PubkyPublicKey, String), ReceiptAccessRecord>,
+    receipt_records: HashMap<(PubkyPublicKey, String), ReceiptRecord>,
+    receipt_issuance_records: HashMap<(PubkyPublicKey, String), ReceiptIssuanceRecord>,
+    private_intake_cursors: HashMap<PubkyPublicKey, PrivateIntakeCursorRecord>,
+    private_intake_peers: HashMap<PubkyPublicKey, PrivateIntakePeerRecord>,
+    #[serde(default)]
+    private_intake_supervisor_lease: Option<PrivateIntakeSupervisorLease>,
+    #[serde(default)]
+    next_private_intake_supervisor_lease_id: u64,
+    #[serde(default)]
+    private_intake_stream_capacity: Option<usize>,
+    #[serde(default)]
+    private_intake_admitted_homeservers: HashMap<PubkyPublicKey, String>,
+    #[serde(skip)]
+    link_record_index: super::LinkRecordIndex,
+}
+
+impl From<StorageStateV4> for StorageState {
+    fn from(state: StorageStateV4) -> Self {
+        Self {
+            paykit_noise_public_key: state.paykit_noise_public_key,
+            allowance_accounting: state.allowance_accounting,
+            identity_state: state.identity_state,
+            linked_peers: state.linked_peers,
+            contact_records: state.contact_records,
+            authorized_paykit_apps: state.authorized_paykit_apps,
+            registered_paykit_apps: state.registered_paykit_apps,
+            registered_paykit_app_capabilities: state.registered_paykit_app_capabilities,
+            retired_paykit_apps: state.retired_paykit_apps,
+            public_endpoint_records: state.public_endpoint_records,
+            payment_endpoint_reservations: state.payment_endpoint_reservations,
+            encrypted_link_states: state.encrypted_link_states,
+            peer_link_operation_leases: state.peer_link_operation_leases,
+            next_peer_link_operation_lease_id: state.next_peer_link_operation_lease_id,
+            paykit_app_operation_leases: state.paykit_app_operation_leases,
+            next_paykit_app_operation_lease_id: state.next_paykit_app_operation_lease_id,
+            payment_request_execution_claims: state.payment_request_execution_claims,
+            outbound_private_messages: state.outbound_private_messages,
+            next_outbound_private_message_id: state.next_outbound_private_message_id,
+            private_stream_items: state.private_stream_items,
+            next_receive_batch_id: state.next_receive_batch_id,
+            next_private_stream_item_id: state.next_private_stream_item_id,
+            event_dedup_records: state.event_dedup_records,
+            receipt_access_records: state.receipt_access_records,
+            receipt_records: state.receipt_records,
+            receipt_issuance_records: state.receipt_issuance_records,
+            private_intake_cursors: state.private_intake_cursors,
+            private_intake_peers: state.private_intake_peers,
+            private_intake_supervisor_lease: state.private_intake_supervisor_lease,
+            next_private_intake_supervisor_lease_id: state.next_private_intake_supervisor_lease_id,
+            private_intake_stream_capacity: state.private_intake_stream_capacity,
+            private_intake_admitted_homeservers: state.private_intake_admitted_homeservers,
+            link_record_index: state.link_record_index,
+            private_payment_list_withdrawals: HashMap::new(),
+            closed_private_payment_list_withdrawal_grants: HashSet::new(),
+        }
+    }
+}
+
+// Postcard structs have no length prefix: the frozen v4 fields followed by
+// the withdrawal map are exactly the v5 positional wire layout. Do not add
+// live fields to either prefix; old bytes must be consumed in full first.
+#[derive(Deserialize)]
+struct StorageStateV5 {
+    previous: StorageStateV4,
+    #[serde(deserialize_with = "super::records::deserialize_withdrawals")]
+    private_payment_list_withdrawals: HashMap<PubkyPublicKey, PrivatePaymentListWithdrawalRecord>,
+}
+
+impl From<StorageStateV5> for StorageState {
+    fn from(state: StorageStateV5) -> Self {
+        Self {
+            private_payment_list_withdrawals: state.private_payment_list_withdrawals,
+            ..state.previous.into()
+        }
+    }
 }
 
 // Frozen top-level schema written by SDK state blob version 1. Postcard encodes
@@ -108,6 +228,8 @@ impl From<StorageStateV1> for StorageState {
             receipt_issuance_records: state.receipt_issuance_records,
             private_intake_cursors: std::collections::HashMap::new(),
             private_intake_peers: std::collections::HashMap::new(),
+            private_payment_list_withdrawals: Default::default(),
+            closed_private_payment_list_withdrawal_grants: HashSet::new(),
             link_record_index: Default::default(),
         }
     }
@@ -151,8 +273,8 @@ pub fn decode_storage_state_blob(bytes: &[u8]) -> Result<StorageState> {
             // their canonical empty encoding before decoding frozen v2.
             let mut upgraded = state_bytes.to_vec();
             upgraded.extend_from_slice(&[0, 0, 0, 0]);
-            let (state, remainder) =
-                postcard::take_from_bytes(&upgraded).map_err(|err| PaykitSdkError::Storage {
+            let (state, remainder): (StorageStateV4, _) = postcard::take_from_bytes(&upgraded)
+                .map_err(|err| PaykitSdkError::Storage {
                     context: "decode SDK state blob version 2".into(),
                     source: Some(err.into()),
                 })?;
@@ -162,13 +284,13 @@ pub fn decode_storage_state_blob(bytes: &[u8]) -> Result<StorageState> {
                     source: None,
                 });
             }
-            (state, &[][..])
+            (state.into(), &[][..])
         }
         SDK_STATE_BLOB_VERSION_V3 => {
             // Version 4 appends optional capacity and an empty admission map.
             let mut upgraded = state_bytes.to_vec();
             upgraded.extend_from_slice(&[0, 0]);
-            let (mut state, remainder): (StorageState, _) = postcard::take_from_bytes(&upgraded)
+            let (mut state, remainder): (StorageStateV4, _) = postcard::take_from_bytes(&upgraded)
                 .map_err(|err| PaykitSdkError::Storage {
                     context: "decode SDK state blob version 3".into(),
                     source: Some(err.into()),
@@ -181,11 +303,27 @@ pub fn decode_storage_state_blob(bytes: &[u8]) -> Result<StorageState> {
             }
             // Process-local supervisor cannot survive an SDK upgrade/restart.
             state.private_intake_supervisor_lease = None;
-            (state, &[][..])
+            (state.into(), &[][..])
+        }
+        SDK_STATE_BLOB_VERSION_V4 => {
+            let (state, remainder): (StorageStateV4, _) = postcard::take_from_bytes(state_bytes)
+                .map_err(|err| PaykitSdkError::Storage {
+                    context: "decode SDK state blob version 4".into(),
+                    source: Some(err.into()),
+                })?;
+            (state.into(), remainder)
+        }
+        SDK_STATE_BLOB_VERSION_V5 => {
+            let (state, remainder): (StorageStateV5, _) = postcard::take_from_bytes(state_bytes)
+                .map_err(|err| PaykitSdkError::Storage {
+                    context: "decode SDK state blob version 5".into(),
+                    source: Some(err.into()),
+                })?;
+            (state.into(), remainder)
         }
         SDK_STATE_BLOB_VERSION => {
             postcard::take_from_bytes(state_bytes).map_err(|err| PaykitSdkError::Storage {
-                context: "decode SDK state blob version 4".into(),
+                context: "decode SDK state blob version 6".into(),
                 source: Some(err.into()),
             })?
         }
@@ -316,41 +454,75 @@ mod tests {
         assert_eq!(decode_storage_state_blob(&encoded).unwrap(), state);
     }
 
+    // These populated blobs were written by the original encoders: v2 at
+    // 59b66f92, v3 at 57667af7 and v4 at 310a0d58. All three share this
+    // identity, cursor and set of nonzero counters.
+    fn historical_fixture_state() -> (PubkyPublicKey, StorageState) {
+        let owner =
+            PubkyPublicKey::new("7jfgaa9nutjyixzikb7tgmsf9gkwq7iqz498zr1nd5ig1fng4esy").unwrap();
+        let cursor = PrivateIntakeCursorRecord {
+            subscribed_user: owner.clone(),
+            homeserver: "https://fixture.invalid".into(),
+            event_id: 1025,
+        };
+        let state = StorageState {
+            identity_state: Some(IdentityState {
+                public_key: Some(owner.clone()),
+                initialized_at: chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap(),
+            }),
+            paykit_noise_public_key: Some(
+                PubkyPublicKey::new("9wm1eqn4wddis385xdgsym7b5ge9549zpcjhmdszymicopxj6acy")
+                    .unwrap(),
+            ),
+            private_intake_cursors: HashMap::from([(owner.clone(), cursor)]),
+            next_peer_link_operation_lease_id: 131,
+            next_outbound_private_message_id: 257,
+            next_private_stream_item_id: 513,
+            ..StorageState::default()
+        };
+        (owner, state)
+    }
+
     #[test]
     fn test_storage_state_blob_decodes_v2_before_supervisor_lease_fields() {
-        let mut encoded = encode_storage_state_blob(&StorageState::default()).unwrap();
-        encoded[0] = SDK_STATE_BLOB_VERSION_V2 as u8;
-        for _ in 0..4 {
-            assert_eq!(encoded.pop(), Some(0));
-        }
-
-        let decoded = decode_storage_state_blob(&encoded).unwrap();
-        assert!(decoded.private_intake_supervisor_lease.is_none());
-        assert_eq!(decoded.next_private_intake_supervisor_lease_id, 0);
+        let encoded = include_bytes!("tests/fixtures/sdk-state-v2.postcard");
+        let (_, expected) = historical_fixture_state();
+        let decoded = decode_storage_state_blob(encoded).unwrap();
+        assert_eq!(decoded, expected);
+        assert!(decoded.private_payment_list_withdrawals.is_empty());
     }
 
     #[test]
     fn test_storage_state_blob_decodes_v3_before_capacity_admission_fields() {
-        let now = chrono::Utc::now();
-        let state = StorageState {
-            private_intake_supervisor_lease: Some(crate::storage::PrivateIntakeSupervisorLease {
-                lease_id: 7,
-                claimed_at: now,
-                expires_at: now + chrono::Duration::minutes(1),
-            }),
-            next_private_intake_supervisor_lease_id: 8,
-            ..StorageState::default()
-        };
-        let mut encoded = encode_storage_state_blob(&state).unwrap();
-        encoded[0] = SDK_STATE_BLOB_VERSION_V3 as u8;
-        assert_eq!(encoded.pop(), Some(0));
-        assert_eq!(encoded.pop(), Some(0));
+        let encoded = include_bytes!("tests/fixtures/sdk-state-v3.postcard");
+        let (_, mut expected) = historical_fixture_state();
+        // Discard the process-local lease (id 9), preserving the next lease id.
+        expected.next_private_intake_supervisor_lease_id = 10;
+        let decoded = decode_storage_state_blob(encoded).unwrap();
+        assert_eq!(decoded, expected);
+        assert!(decoded.private_payment_list_withdrawals.is_empty());
+    }
 
-        let decoded = decode_storage_state_blob(&encoded).unwrap();
-        assert!(decoded.private_intake_supervisor_lease.is_none());
-        assert_eq!(decoded.next_private_intake_supervisor_lease_id, 8);
-        assert!(decoded.private_intake_stream_capacity.is_none());
-        assert!(decoded.private_intake_admitted_homeservers.is_empty());
+    #[test]
+    fn test_storage_state_blob_v4_cannot_create_withdrawal_authority() {
+        let encoded = include_bytes!("tests/fixtures/sdk-state-v4.postcard");
+        let (owner, mut expected) = historical_fixture_state();
+        expected.private_intake_supervisor_lease = Some(PrivateIntakeSupervisorLease {
+            lease_id: 9,
+            claimed_at: chrono::DateTime::from_timestamp(1_700_000_001, 0).unwrap(),
+            expires_at: chrono::DateTime::from_timestamp(1_700_000_061, 0).unwrap(),
+        });
+        expected.next_private_intake_supervisor_lease_id = 10;
+        expected.private_intake_stream_capacity = Some(2);
+        expected
+            .private_intake_admitted_homeservers
+            .insert(owner, "https://fixture.invalid".into());
+        let decoded = decode_storage_state_blob(encoded).unwrap();
+        assert_eq!(decoded, expected);
+        assert!(decoded.private_payment_list_withdrawals.is_empty());
+        let mut trailing = encoded.to_vec();
+        trailing.push(0);
+        assert!(decode_storage_state_blob(&trailing).is_err());
     }
 
     #[test]
@@ -358,7 +530,7 @@ mod tests {
         let encoded = include_bytes!("tests/fixtures/sdk-state-v1.postcard");
         let state = decode_storage_state_blob(encoded).unwrap();
 
-        assert_eq!(SDK_STATE_BLOB_VERSION, 4);
+        assert_eq!(SDK_STATE_BLOB_VERSION, 6);
         assert_eq!(
             state.identity_state.unwrap().public_key.unwrap().as_str(),
             "7jfgaa9nutjyixzikb7tgmsf9gkwq7iqz498zr1nd5ig1fng4esy"
@@ -370,7 +542,7 @@ mod tests {
 
         let current = encode_storage_state_blob(&StorageState::default()).unwrap();
         let (version, _): (u32, _) = postcard::take_from_bytes(&current).unwrap();
-        assert_eq!(version, 4);
+        assert_eq!(version, 6);
     }
 
     #[test]

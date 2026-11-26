@@ -100,6 +100,31 @@ impl StorageAdapter for FfiSdkStorageAdapter {
         }
     }
 
+    async fn close_private_payment_list_withdrawal_admission(
+        &self,
+        original_grant: &paykit_sdk::storage::PrivatePaymentListWithdrawalGrant,
+        original_secret: Option<&paykit_sdk::PubkyLocalSecretKey>,
+    ) -> paykit_sdk::Result<()> {
+        match self {
+            Self::Callback(storage) => {
+                storage
+                    .close_private_payment_list_withdrawal_admission(
+                        original_grant,
+                        original_secret,
+                    )
+                    .await
+            }
+            Self::PubkyShared(storage) => {
+                storage
+                    .close_private_payment_list_withdrawal_admission(
+                        original_grant,
+                        original_secret,
+                    )
+                    .await
+            }
+        }
+    }
+
     async fn recover_shared_state_from_backup(
         &self,
         current_key: paykit_sdk::PaykitIdentitySecretKey,

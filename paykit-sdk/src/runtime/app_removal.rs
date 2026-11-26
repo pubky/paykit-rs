@@ -15,6 +15,7 @@ where
             move |tx| {
                 crate::storage::require_paykit_app_operation_lease(tx, &lease)?;
                 let app_id = lease.app_id;
+                require_app_withdrawals_confirmed(&tx.export_storage_state(), &app_id)?;
                 let blockers = app_removal_blockers_in_transaction(tx, &app_id, now)?;
                 if blockers.is_empty() {
                     for mut message in tx.export_storage_state().outbound_private_messages {
@@ -60,6 +61,7 @@ pub(super) fn retire_app_outbound_private_messages(
     crate::storage::require_paykit_app_operation_lease(tx, lease)?;
     let app_id = &lease.app_id;
     let snapshot = tx.export_storage_state();
+    require_app_withdrawals_confirmed(&snapshot, app_id)?;
     if snapshot.outbound_private_messages.iter().any(|message| {
         message.app_id == *app_id
             && !message.is_delivery_confirmation()
@@ -162,6 +164,23 @@ pub(super) fn retire_app_outbound_private_messages(
     }
     debug_assert_eq!(counterparties.len(), leases.len());
     Ok(leases)
+}
+
+fn require_app_withdrawals_confirmed(
+    state: &crate::storage::StorageState,
+    app_id: &paykit_lib::PaykitAppId,
+) -> Result<()> {
+    if state
+        .private_payment_list_withdrawals
+        .values()
+        .any(|record| record.app_id == *app_id && record.confirmed_at.is_none())
+    {
+        return Err(PaykitSdkError::Policy {
+            context: "cannot remove Paykit app with an unconfirmed private list withdrawal".into(),
+            source: None,
+        });
+    }
+    Ok(())
 }
 
 pub(super) async fn require_app_capability_downgrade_safe<S>(

@@ -189,3 +189,43 @@ async fn test_restore_backup_state_refusal_names_public_endpoint_records() {
     );
     assert_no_identifiers(&context, &local);
 }
+
+#[tokio::test]
+async fn test_restore_preserves_closed_withdrawal_grants_without_blocking_backup() {
+    let local = public_key();
+    let closed = crate::storage::PrivatePaymentListWithdrawalGrant {
+        owner: public_key(),
+        homeserver: public_key(),
+        grant_id: "original-grant".into(),
+        client_id: "original-client".into(),
+    };
+    let state = StorageState {
+        closed_private_payment_list_withdrawal_grants: HashSet::from([closed.clone()]),
+        ..StorageState::default()
+    };
+    validate_storage_state(&state).unwrap();
+    assert!(restore_blockers(&state).is_empty());
+    let storage = InMemoryStorage::from_state(state.clone());
+    export_backup_state(&storage).await.unwrap();
+    restore_backup_state(&storage, empty_backup(identity(local.clone())))
+        .await
+        .unwrap();
+    let after = storage.snapshot().unwrap();
+    assert_eq!(after.identity_state.unwrap().public_key, Some(local));
+    assert_eq!(
+        after.closed_private_payment_list_withdrawal_grants,
+        state.closed_private_payment_list_withdrawal_grants
+    );
+    export_backup_state(&storage).await.unwrap();
+    let mut invalid = state;
+    invalid
+        .closed_private_payment_list_withdrawal_grants
+        .clear();
+    invalid
+        .closed_private_payment_list_withdrawal_grants
+        .insert(crate::storage::PrivatePaymentListWithdrawalGrant {
+            grant_id: String::new(),
+            ..closed
+        });
+    assert!(validate_storage_state(&invalid).is_err());
+}

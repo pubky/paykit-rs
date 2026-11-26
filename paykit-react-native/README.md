@@ -206,6 +206,8 @@ or report these types, or any object that contains them:
 `FfiPrivatePaymentEndpointSelectionRequest`,
 `FfiPrivatePaymentListDeliveryFailure`,
 `FfiPrivatePaymentListAcknowledgement`, `FfiPrivatePaymentListSyncChange`,
+`FfiPrivatePaymentListWithdrawal`,
+`FfiPrivatePaymentListWithdrawalAcknowledgement`,
 `FfiPrivateReceivingDetail`, `FfiPrivateReceivingDetailReservationResponse`,
 `FfiProfileResolution`, `FfiPubkyAuthCompanionClaim`,
 `FfiPublicContactPaymentResolution`, `FfiPublicPaymentEndpointCandidate`,
