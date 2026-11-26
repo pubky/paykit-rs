@@ -30,7 +30,7 @@ For canonical protocol vocabulary, see [THESAURUS.md](THESAURUS.md).
 | --- | --- |
 | `paykit-lib` | Paykit's formats and rules, on `pubky-dispatch-core`: scopes and their Dispatch permissions, message kinds and bodies, collections and policies, obligations, amounts and the payment rules. No I/O, no clock. |
 | `paykit-sdk` | The app SDK for wallets and seller apps, on `pubky-dispatch-client` and `pubky-dispatch-signer`: payment requests, proofs and receipts, recurring requests, Allowances, Private Payment Lists and receiving. |
-| `paykit-browser` | The `wasm32-unknown-unknown` build support (the browser random number backends) and the tests that run Paykit in browser engines. Not published, no public API; it depends on `paykit-lib` and `paykit-sdk`, never the reverse. The `Browser` workflow checks it. |
+| `paykit-browser` | The `wasm32-unknown-unknown` build support (the browser random number backends), the first browser host pieces for a host written in Rust (wasm32 only, not exported to JavaScript), and the tests that run Paykit in browser engines. Not published; it depends on `paykit-lib` and `paykit-sdk`, never the reverse. The `Browser` workflow checks it. |
 
 The Dispatch's own crates live in `pubky/pubky-dispatch`. The crates here are being
 built; none is published yet. Language bindings come later.
