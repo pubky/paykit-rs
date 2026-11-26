@@ -1947,8 +1947,12 @@ fn receipt_effect(
         |request, start| obligation(cx, &sender, request, start),
         |attempt| paykit_lib::derive::payment_obligation_blinded(&cx.blind(&attempt.to_bytes())),
     );
+    // And through what the method said of it, as every read of an entry lays it over
+    // ([`JournalEntry::with_facts`]).
+    let facts = state::cx_get::<state::StoredFacts>(cx, &key::attempt_facts(&attempt_id))?;
     let journaled = JournalEntry::on_claim(
-        state::cx_get::<JournalEntry>(cx, &key::journal(&attempt_id))?,
+        state::cx_get::<state::StoredEntry>(cx, &key::journal(&attempt_id))?
+            .map(|entry| entry.with_facts(facts.as_ref())),
         &claim,
     )
     .map_err(|_| Fail::corrupt())?;

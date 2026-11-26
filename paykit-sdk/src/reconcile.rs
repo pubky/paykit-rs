@@ -361,11 +361,9 @@ impl Paykit {
                             proof, paid_at_ms, ..
                         })) => {
                             if let Some(mut entry) = self.rebuilt_entry(&obligation, id).await? {
-                                entry.rail_proof = Some(proof);
-                                entry.paid_at_ms = paid_at_ms;
-                                // Journaled first: a report whose write fails leaves it for a
+                                // Kept first: a report whose write fails leaves it for a
                                 // resume, as [`PayOutcome::PaidOutcomeUnwritten`] says.
-                                self.set_stage(&mut entry, Stage::RailPaid).await?;
+                                self.learn_paid(&mut entry, proof, paid_at_ms).await?;
                                 report.resolved.push(self.report(&mut entry).await?);
                                 continue;
                             }
@@ -378,10 +376,9 @@ impl Paykit {
                             // payment while a late success could never be reported: the
                             // attempt stays doubtful, for a receipt or the user.
                             if let Some(mut entry) = self.rebuilt_entry(&obligation, id).await? {
-                                entry.failed_by_method = true;
-                                // Journaled first: a report whose write fails leaves it for a
+                                // Kept first: a report whose write fails leaves it for a
                                 // resume, as [`PayOutcome::PaidOutcomeUnwritten`] says.
-                                self.set_stage(&mut entry, Stage::RailFailed).await?;
+                                self.learn_failed(&mut entry, true).await?;
                                 report.resolved.push(self.report(&mut entry).await?);
                                 continue;
                             }
