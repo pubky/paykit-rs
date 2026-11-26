@@ -36,7 +36,10 @@ jobs:
           # implementation built on the GitHub Actions cache.
           cache-provider: basic
           # The android-bindgen job uses the same cache key and builds far
-          # more, so it writes the entry and this job only reads it.
+          # more, so it writes the entry and this job only reads it. After a
+          # change to a Gradle file outside android-bindgen's trigger paths,
+          # this job runs without a cache until android-bindgen next runs on
+          # master.
           cache-read-only: true
 
       - name: Set up JDK 17

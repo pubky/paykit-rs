@@ -14,7 +14,7 @@ inputs:
     required: false
     default: 'true'
   gradle-cache-read-only:
-    description: "'true' restores the Gradle cache but never saves it, for jobs that share a cache key with a job that builds more."
+    description: "'true' restores the Gradle cache but never saves it, for jobs that share a cache key with another job that writes it."
     required: false
     default: 'false'
 
