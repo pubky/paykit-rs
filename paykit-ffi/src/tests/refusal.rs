@@ -55,6 +55,7 @@ fn test_payment_refusals_keep_policy_evidence_and_the_original_attempt_failure()
     doubt.obligation = [9; 32];
     doubt.step = Some(4);
     doubt.next_possibly_duplicate = true;
+    doubt.pending_at_method = vec![paykit_lib::AttemptId::from_bytes([3; 16])];
     for prior in [None, Some(Box::new(doubt))] {
         let can_confirm = prior.is_some();
         let refusal = PaymentRefusal(Refusal::MayBePaid {
@@ -69,6 +70,10 @@ fn test_payment_refusals_keep_policy_evidence_and_the_original_attempt_failure()
             assert_eq!(doubt.obligation, [9; 32]);
             assert_eq!(doubt.step, Some(4));
             assert!(doubt.next_possibly_duplicate);
+            assert_eq!(
+                doubt.pending_at_method,
+                vec![paykit_lib::AttemptId::from_bytes([3; 16]).to_text()]
+            );
         }
     }
 }
@@ -416,6 +421,7 @@ fn every_refusal_kind() -> Vec<RefusalKind> {
                 unknown: Vec::new(),
                 orphaned: Vec::new(),
                 next_possibly_duplicate: false,
+                pending_at_method: Vec::new(),
                 divergent: false,
                 after_distrust: false,
                 early_pin: false,

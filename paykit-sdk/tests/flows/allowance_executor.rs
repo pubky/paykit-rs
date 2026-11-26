@@ -3012,6 +3012,48 @@ async fn compacted_failure_paid_by_receipt(retire_copy_key: bool) {
 }
 
 #[tokio::test]
+async fn test_allowance_executor_makes_no_attempt_while_a_failed_one_is_pending_at_the_method() {
+    // The executor's payment is left pending by the method, and the user confirms it
+    // failed: while the method still reports it pending, the executor doesn't pay the
+    // obligation again (Paykit spec 7.1; 8.3, Doubtful obligations).
+    let (world, mut payer, mut shop, key) = Box::pin(first_grant()).await;
+    world.rail.set_history_payer(payer.identity());
+    let request = Box::pin(request_from(
+        &mut shop,
+        payer.identity(),
+        draft("7", world.clock.now_ms()),
+    ))
+    .await;
+    Box::pin(payer.receive(None)).await.unwrap();
+    world.rail.next(paykit_sdk::rail::Behaviour::Hang);
+    let first = Box::pin(payer.pay_under_allowance(&request, &key))
+        .await
+        .outcome
+        .unwrap();
+    let attempt = first.attempt_id();
+    let (opened, _) = only_ledger(&payer).await;
+    Box::pin(payer.resolve_attempt(
+        &opened.entries[0].obligation,
+        attempt,
+        paykit_sdk::Resolution::Failed,
+        UserConfirmed::new(),
+    ))
+    .await
+    .unwrap();
+    let held = Box::pin(payer.pay_under_allowance(&request, &key))
+        .await
+        .outcome
+        .unwrap_err();
+    assert!(
+        matches!(held.refusal(), Some(paykit_sdk::Refusal::MayBePaid { doubt: Some(doubt), .. })
+            if doubt.pending_at_method == vec![attempt]),
+        "{held:?}"
+    );
+    assert_eq!(world.rail.executions(&attempt), 1);
+    assert_eq!(world.rail.all_pay_calls().len(), 1);
+}
+
+#[tokio::test]
 async fn test_allowance_release_holds_a_failure_its_method_reports_pending() {
     use pubky_dispatch_client::app::{ClaimOp, OpBatch};
 

@@ -2271,6 +2271,44 @@ async fn test_period_payments_selected_destination_outlasts_the_details_intake_w
 }
 
 #[tokio::test]
+async fn test_period_payments_by_policy_wait_while_a_failed_attempt_is_pending_at_the_method() {
+    // The policy's payment of the period is left pending by the method, and the user
+    // confirms it failed: while the method still reports it pending, the policy pays
+    // nothing (Paykit spec 7.1, No automatic payment of doubtful claims).
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let mut wallet = w.wallet("wallet").await;
+    let (request, _) = subscribed(&w, &mut shop, &mut wallet).await;
+    w.rail.next(Behaviour::Hang);
+    let first = by_policy(&mut wallet, &request, january()).await.unwrap();
+    assert!(matches!(first, PayOutcome::Pending { .. }), "{first:?}");
+    let attempt = first.attempt_id();
+    let obligation = wallet.payments().await.unwrap()[0].obligation;
+    wallet
+        .resolve_attempt(
+            &obligation,
+            attempt,
+            paykit_sdk::Resolution::Failed,
+            UserConfirmed::new(),
+        )
+        .await
+        .unwrap();
+    let held = by_policy(&mut wallet, &request, january())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(refusal(&held), Refusal::MayBePaid { doubt: Some(doubt), .. }
+            if doubt.pending_at_method == vec![attempt]),
+        "{held:?}"
+    );
+    assert_eq!(w.rail.all_pay_calls().len(), 1);
+    // Once the method says it failed, the policy pays the period.
+    w.rail.settle(&attempt, false);
+    let paid = by_policy(&mut wallet, &request, january()).await.unwrap();
+    assert_ne!(paid.attempt_id(), attempt);
+}
+
+#[tokio::test]
 async fn test_period_payments_priced_terms_allow_requested_asset_without_details() {
     let w = World::new();
     let mut shop = w.shop().await;

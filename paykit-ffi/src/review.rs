@@ -57,6 +57,9 @@ pub struct PriorPaymentDoubt {
     pub orphaned: Vec<String>,
     /// The next payment could duplicate the prior transfer.
     pub next_possibly_duplicate: bool,
+    /// Attempts recorded failed that the payment method still reports pending, so their
+    /// money may still move.
+    pub pending_at_method: Vec<String>,
     /// The activity record or its history diverges.
     pub divergent: bool,
     /// The evidence falls after a recorded distrust boundary.
@@ -309,6 +312,7 @@ impl PaymentRefusal {
                     unknown: d.unknown.iter().map(|i| i.to_text()).collect(),
                     orphaned: d.orphaned.iter().map(|i| i.to_text()).collect(),
                     next_possibly_duplicate: d.next_possibly_duplicate,
+                    pending_at_method: d.pending_at_method.iter().map(|i| i.to_text()).collect(),
                     divergent: d.divergent,
                     after_distrust: d.after_distrust,
                     early_pin: d.early_pin,

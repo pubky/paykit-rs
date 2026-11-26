@@ -309,6 +309,11 @@ pub struct PaymentDoubt {
     pub orphaned: Vec<AttemptId>,
     /// The next attempt would be flagged `possibly_duplicate`.
     pub next_possibly_duplicate: bool,
+    /// Attempts the claim shows `failed` that this app's payment method still reports
+    /// pending: handed off and neither paid nor failed, so their money may still move
+    /// (Paykit spec 7.1, No automatic payment of doubtful claims; 8.3, Pending holds a
+    /// failure).
+    pub pending_at_method: Vec<AttemptId>,
     /// Uploads after a provider loss conflict.
     pub divergent: bool,
     /// An entry by an app the own `identity.json` lists as removed, after its
@@ -334,6 +339,7 @@ impl PaymentDoubt {
             || !self.unknown.is_empty()
             || !self.orphaned.is_empty()
             || self.next_possibly_duplicate
+            || !self.pending_at_method.is_empty()
             || self.divergent
             || self.after_distrust
             || self.early_pin
@@ -2858,6 +2864,10 @@ impl Paykit {
                     .map(|a| a.attempt_id),
             );
         }
+        let pending_at_method = match &view {
+            Some(view) => self.pending_at_method(view).await?,
+            None => Vec::new(),
+        };
         // A SETTLED claim is refused above.
         let before_loss = self.loss_doubt(obligation, Some(request), period).await?;
         if period.is_some() && before_loss.is_some() {
@@ -2874,6 +2884,7 @@ impl Paykit {
             orphaned: ids(kept.orphaned),
             next_possibly_duplicate: kept.next_possibly_duplicate
                 || view.as_ref().is_some_and(|v| v.next_possibly_duplicate),
+            pending_at_method,
             divergent: kept.divergent,
             after_distrust: kept.after_distrust,
             early_pin: kept.early_pin,
@@ -2886,6 +2897,8 @@ impl Paykit {
                 "Dispatch spec 12.4: a restored attempt is unresolved"
             } else if before_loss.is_some() {
                 crate::loss::LOSS_DOUBT
+            } else if !doubt.pending_at_method.is_empty() {
+                "Paykit spec 7.1: a failed attempt's payment method still reports it pending"
             } else {
                 "Paykit spec 7.1: a doubtful claim"
             };
@@ -2896,6 +2909,34 @@ impl Paykit {
             .into());
         }
         Ok(view)
+    }
+
+    /// The attempts `view` shows `failed` that this app's payment method still reports
+    /// pending (Paykit spec 7.1, No automatic payment of doubtful claims; 8.3, Pending holds
+    /// a failure). The method may have taken the money though the attempt was recorded
+    /// failed, so a new attempt is made only by a user who has seen that, never
+    /// automatically. The history this app's method keeps answers for attempts it was
+    /// handed; one it doesn't list holds nothing here.
+    ///
+    /// # Errors
+    ///
+    /// A [`RailError`] when the method's history can't be read now: no attempt is made
+    /// while it may still report one pending.
+    async fn pending_at_method(&self, view: &ClaimView) -> Result<Vec<AttemptId>> {
+        let mut pending = Vec::new();
+        for shown in &view.attempts {
+            if shown.outcome != Outcome::Failed {
+                continue;
+            }
+            let attempt = AttemptId::from_bytes(shown.attempt_id);
+            match self.rail.payment(attempt).await? {
+                Some(RailOutcome::Pending) => pending.push(attempt),
+                Some(RailOutcome::Paid(_) | RailOutcome::Failed) | None => {}
+            }
+        }
+        pending.sort();
+        pending.dedup();
+        Ok(pending)
     }
 
     /// Refused when the app the destination of `request` must come from can't give one

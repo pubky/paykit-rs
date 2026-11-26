@@ -19,6 +19,7 @@ mod deletions;
 mod destinations;
 mod discovery_state;
 mod divergent;
+mod doubtful_retry;
 mod erasure;
 mod extensions;
 mod final_check;
