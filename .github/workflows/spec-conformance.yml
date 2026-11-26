@@ -118,7 +118,7 @@ jobs:
           diff -u --label "Specification $SPEC_COMMIT" --label "v0.2 $CODE_COMMIT" \
             "$RUNNER_TEMP/paykit-specification-tree" "$RUNNER_TEMP/paykit-implementation-tree"
 
-      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # v1
         with:
           toolchain: stable
 
