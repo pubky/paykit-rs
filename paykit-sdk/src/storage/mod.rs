@@ -36,6 +36,13 @@ pub use state_blob::{
 
 pub(crate) const PRIVATE_INTAKE_MAX_EVENT_STREAM_USERS: usize = 50;
 
+/// Error context when a buffered private intake packet's link generation is
+/// not the stored Encrypted Link generation. The storage adapter reports it
+/// from `buffer_private_intake_packet`, and private intake reports it for a
+/// generation that moved before the insert.
+pub(crate) const PRIVATE_INTAKE_PACKET_GENERATION_MISMATCH: &str =
+    "private intake packet generation does not match Encrypted Link";
+
 pub(crate) fn private_intake_stream_count(
     admitted_homeservers: &HashMap<PubkyPublicKey, String>,
 ) -> usize {
@@ -522,6 +529,9 @@ pub trait StorageTransaction {
     ) -> Result<PrivateIntakeBufferOutcome>;
 
     /// Advance one subscribed user's durable homeserver cursor monotonically.
+    ///
+    /// Rejects a cursor whose homeserver is empty or differs from the stored cursor's,
+    /// or whose event ID is lower than the stored one. An error never changes state.
     fn advance_private_intake_cursor(&mut self, cursor: PrivateIntakeCursorRecord) -> Result<()>;
 
     /// Drop one user's replay cursor when authoritative homeserver resolution moves it.
