@@ -222,18 +222,39 @@ where
         &self,
         counterparty: &PubkyPublicKey,
     ) -> Result<CounterpartyAppAuthorizationObservation> {
-        if let Some(public_storage) = self.pubky.load_public_storage().await? {
-            let registry = paykit_lib::get_paykit_app_registry(
-                &public_storage,
-                &counterparty.to_public_key()?,
-            )
+        self.fetch_counterparty_app_authorization_refusing_blocked(counterparty, false)
+            .await
+    }
+
+    /// Like [`Self::fetch_counterparty_app_authorization`]. When
+    /// `refuse_blocked_counterparty` is set, a `Blocked` counterparty returns
+    /// `Policy` before the App Registry read starts, and a block observed after
+    /// a failed provider call or read outranks its error.
+    pub(super) async fn fetch_counterparty_app_authorization_refusing_blocked(
+        &self,
+        counterparty: &PubkyPublicKey,
+        refuse_blocked_counterparty: bool,
+    ) -> Result<CounterpartyAppAuthorizationObservation> {
+        let public_storage = self.pubky.load_public_storage().await;
+        // A block can land while the provider call is in flight; it outranks
+        // the provider result. Nothing further starts once it is observed.
+        self.ensure_peer_not_blocked_if(refuse_blocked_counterparty, counterparty)
             .await?;
-            Ok(CounterpartyAppAuthorizationObservation::Public(
-                registry.map(Box::new),
-            ))
-        } else {
-            Ok(CounterpartyAppAuthorizationObservation::Cached)
+        let Some(public_storage) = public_storage? else {
+            return Ok(CounterpartyAppAuthorizationObservation::Cached);
+        };
+        let registry =
+            paykit_lib::get_paykit_app_registry(&public_storage, &counterparty.to_public_key()?)
+                .await;
+        if registry.is_err() {
+            // An in-flight read cannot be recalled without serializing against
+            // `block_peer`; a block that landed during it outranks its error.
+            self.ensure_peer_not_blocked_if(refuse_blocked_counterparty, counterparty)
+                .await?;
         }
+        Ok(CounterpartyAppAuthorizationObservation::Public(
+            registry?.map(Box::new),
+        ))
     }
 
     pub(super) async fn cached_counterparty_app_authorization_context(
@@ -299,73 +320,70 @@ where
         app: paykit_lib::PaykitApp,
     ) -> Result<paykit_lib::PaykitAppRegistry> {
         let _identity_guard = self.claim_identity_operation("publish Paykit app")?;
-        let (session, _, noop_sequence) = self
-            .load_session_access_and_refresh_identity_with(|tx| {
-                Ok(app_publication_noop_lease_sequence(
-                    tx,
-                    &self.config.app_id,
-                    app.capabilities(),
-                    self.clock.now(),
-                ))
-            })
-            .await?;
-        let session = session.ok_or_else(|| PaykitSdkError::Identity {
-            context: "publishing a Paykit app requires an active Pubky session".into(),
-            source: None,
-        })?;
-        // Publication has no wallet callbacks. Keep its durable transactions
+        // Publication has no wallet callbacks. Keep identity refresh and publication
         // under one storage lock; registry writes never acquire shared storage.
-        self.with_guarded_storage_operation(
-            Arc::clone(&session._guard),
-            Box::pin(async {
-                let (registry, revision) = self
-                    .load_paykit_app_registry_for_update(&session, true)
-                    .await?;
-                if let Some(sequence) = noop_sequence.flatten() {
-                    if self
-                        .unchanged_paykit_app(&app, &session, &registry, sequence)
-                        .await?
-                    {
-                        return Ok(registry);
-                    }
-                }
-                let remote_capabilities = registry
-                    .apps()
-                    .get(&self.config.app_id)
-                    .map(|previous| previous.capabilities());
-                let capabilities = app.capabilities();
-                // Persist restrictive capabilities with the lease before any public write.
-                let (app_lease, staged_update) = self
-                    .retry_storage_transaction(|| {
-                        move |tx| {
-                            let lease = self.claim_paykit_app_operation_in_transaction(tx, true)?;
-                            let staged = stage_app_capability_update_in_transaction(
-                                tx,
-                                &lease,
-                                remote_capabilities,
-                                capabilities,
-                            )?;
-                            Ok((lease, staged))
-                        }
-                    })
-                    .await?;
-                let result = async {
-                    validate_staged_app_capability_update(
-                        &self.storage,
-                        &app_lease,
-                        remote_capabilities,
-                        capabilities,
-                        staged_update,
+        self.with_storage_operation(Box::pin(async {
+            let (session, _, noop_sequence) = self
+                .load_session_access_and_refresh_identity_with(|tx| {
+                    Ok(app_publication_noop_lease_sequence(
+                        tx,
+                        &self.config.app_id,
+                        app.capabilities(),
                         self.clock.now(),
-                    )
-                    .await?;
-                    self.publish_paykit_app_inner(app, &app_lease, &session, (registry, revision))
-                        .await
+                    ))
+                })
+                .await?;
+            let session = session.ok_or_else(|| PaykitSdkError::Identity {
+                context: "publishing a Paykit app requires an active Pubky session".into(),
+                source: None,
+            })?;
+            let (registry, revision) = self
+                .load_paykit_app_registry_for_update(&session, true)
+                .await?;
+            if let Some(sequence) = noop_sequence.flatten() {
+                if self
+                    .unchanged_paykit_app(&app, &session, &registry, sequence)
+                    .await?
+                {
+                    return Ok(registry);
                 }
-                .await;
-                self.finish_paykit_app_operation(app_lease, result).await
-            }),
-        )
+            }
+            let remote_capabilities = registry
+                .apps()
+                .get(&self.config.app_id)
+                .map(|previous| previous.capabilities());
+            let capabilities = app.capabilities();
+            // Persist restrictive capabilities with the lease before any public write.
+            let (app_lease, staged_update) = self
+                .retry_storage_transaction(|| {
+                    move |tx| {
+                        let lease = self.claim_paykit_app_operation_in_transaction(tx, true)?;
+                        let staged = stage_app_capability_update_in_transaction(
+                            tx,
+                            &lease,
+                            remote_capabilities,
+                            capabilities,
+                        )?;
+                        Ok((lease, staged))
+                    }
+                })
+                .await?;
+            let result = async {
+                validate_staged_app_capability_update(
+                    &self.storage,
+                    &app_lease,
+                    remote_capabilities,
+                    capabilities,
+                    staged_update,
+                    self.clock.now(),
+                )
+                .await?;
+                self.publish_paykit_app_inner(app, &app_lease, &session, (registry, revision))
+                    .await
+            }
+            .await;
+            self.finish_paykit_app_operation(app_lease, result).await
+        }))
         .await
     }
 

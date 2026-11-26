@@ -15,6 +15,7 @@ mod private_intake;
 mod private_lists;
 mod profiles;
 mod public_endpoints;
+mod receipts;
 mod recovery;
 mod sessions;
 mod shared_identity;

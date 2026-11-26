@@ -4,10 +4,15 @@ use std::fmt;
 use super::{validate_optional_text, validate_text};
 use crate::{PaykitSdkError, PubkyPublicKey, Result};
 
-/// Pubky app profile path used by read-only fallback/helper APIs.
+/// Pubky app profile path, read by profile fallback and written by the Pubky app profile APIs.
 pub const PUBKY_PROFILE_PATH: &str = "/pub/pubky.app/profile.json";
 /// Pubky app follows path used by read-only helper APIs.
 pub const PUBKY_FOLLOWS_PATH_PREFIX: &str = "/pub/pubky.app/follows/";
+/// Pubky social v1 profile path, which replaces [`PUBKY_PROFILE_PATH`] once pubky.app migrated the identity.
+pub const SOCIAL_V1_PROFILE_PATH: &str = "/pub/social/v1/profile.json";
+/// Pubky social v1 follows path, which replaces [`PUBKY_FOLLOWS_PATH_PREFIX`] once pubky.app migrated the
+/// identity. Each follow is `<followed key>.json`.
+pub const SOCIAL_V1_FOLLOWS_PATH_PREFIX: &str = "/pub/social/v1/follows/";
 pub(crate) const PAYKIT_PROFILE_PATH: &str = "/pub/paykit/profile.json";
 
 const PROFILE_KIND: &str = "paykit.profile";
@@ -381,7 +386,10 @@ pub(crate) fn pubky_follow_keys_from_follow_entries(
 }
 
 fn direct_pubky_follow_key(path: &str) -> Option<&str> {
-    let value = path.strip_prefix(PUBKY_FOLLOWS_PATH_PREFIX)?;
+    let value = match path.strip_prefix(SOCIAL_V1_FOLLOWS_PATH_PREFIX) {
+        Some(value) => value.strip_suffix(".json")?,
+        None => path.strip_prefix(PUBKY_FOLLOWS_PATH_PREFIX)?,
+    };
     if value.is_empty() || value.contains('/') {
         return None;
     }

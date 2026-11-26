@@ -39,7 +39,7 @@ use crate::{
         pubky_follow_keys_from_follow_entries, public_contact_json, public_contact_path,
         ContactRecord, ContactUpdate, PaykitBlobRecord, PaykitProfile, PaykitProfileRecord,
         ProfileResolution, PubkyProfileRecord, PAYKIT_PROFILE_BLOB_PATH_PREFIX,
-        PAYKIT_PROFILE_PATH, PUBKY_FOLLOWS_PATH_PREFIX, PUBKY_PROFILE_PATH,
+        PAYKIT_PROFILE_PATH, PUBKY_PROFILE_PATH,
     },
     domain::endpoint_reservations::{
         expired_outbound_reservation_cancellations_in_transaction,
@@ -61,7 +61,7 @@ use crate::{
     },
     domain::outbound_private::{
         mark_outbound_failed, mark_outbound_invalid, mark_outbound_recovery_required,
-        mark_outbound_sent, validate_queued_outbound_private_message,
+        mark_outbound_sent, mark_outbound_slot_taken, validate_queued_outbound_private_message,
         OutboundPrivateCounterpartySendReport, OutboundPrivateMessageStatus,
         OutboundPrivateSendFailure, OutboundPrivateSendReport, RecoveryMarkerPublishFailure,
         ReservationCleanupFailure,
@@ -95,12 +95,11 @@ use crate::{
     },
     domain::publication::PublicationStatus,
     domain::receipts::{
-        decrypt_receipt_record_from_access, enqueue_receipt_access_for_issuance,
-        fetch_encrypted_receipt_json, merge_retrieval_error, missing_encrypted_receipt_error,
-        receipt_issuance_record as load_receipt_issuance_record,
+        decrypt_issued_receipt, decrypt_receipt_record_from_access,
+        enqueue_receipt_access_for_issuance, fetch_encrypted_receipt_json, merge_retrieval_error,
+        missing_encrypted_receipt_error, receipt_issuance_record as load_receipt_issuance_record,
         receipt_issuance_record_by_receipt_id as load_receipt_issuance_record_by_receipt_id,
-        receipt_issuance_record_matches_draft,
-        receipt_issuance_records as load_receipt_issuance_records, receipt_record_matches_access,
+        receipt_issuance_record_matches_draft, receipt_record_matches_access,
         store_encrypted_receipt_json, ReceiptAccessRecord, ReceiptAccessView,
         ReceiptIssuanceRecord, ReceiptIssuanceStatus, ReceiptIssuanceView, ReceiptRecord,
         ReceiptRetrievalStatus,
@@ -147,6 +146,7 @@ mod private_intake;
 mod private_lists;
 mod private_stream;
 mod profiles;
+mod pubky_app_profile;
 mod public_endpoints;
 mod receipts;
 mod recovery;
@@ -192,7 +192,8 @@ pub struct PaykitSdk<S, K, P, C = SystemClock> {
     // require access to session-protected storage.
     last_identity_state: Mutex<Option<IdentityState>>,
     // Runtime-local delivery witnesses are reusable only on the same Noise link
-    // and for the same App. Restarting conservatively republishes each list.
+    // and for the same App. After a restart, reuse falls back to durable link
+    // timestamps, which are coarser than these witnesses.
     private_payment_list_publications:
         Mutex<HashMap<(PubkyPublicKey, paykit_lib::PaykitAppId), PrivatePaymentListPublication>>,
     private_intake_topology_changed: Arc<tokio::sync::Notify>,

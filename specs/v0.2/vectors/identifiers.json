@@ -1,0 +1,328 @@
+{
+  "description": "Paykit's derived identifiers (wire 1.5): request hashes, obligation IDs with their blinded inputs, and the terms hash. Obligations are blinded with the naming key of the identity whose Dispatch holds them (this set's keys.json). Inputs refer to this set's keys.json and messages.json. The Dispatch's identifiers that Paykit's collections and natural keys give are this set's policies, with their policy hashes, and record_keys, with their blinded natural keys and record keys; the App IDs are keys.json's.",
+  "obligations": [
+    {
+      "blinded_payee": "v6gSKmjRzV-gUlqKaJFI79zUgNhPt0EaHAgLVx980WE",
+      "blinded_request_hash": "ZCe8B1QmPOwXLDncpSwYUEPB3FdutGomZbHfq0FSZR4",
+      "identity": "6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy",
+      "key_material_hex": "000000077265717565737400000020bfa8122a68d1cd5fa0525a8a689148efdcd480d84fb7411a1c080b571f7cd161000000206427bc0754263cec172c39dca52c185043c1dc576eb46a2665b1dfab4152651e000000080000000000000000",
+      "name": "one-time request",
+      "obligation": "yDIAP0oiyymoG2m_u5qGrhwss1w2abS1pj5eWiVgMEM",
+      "payee": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
+      "period_start_secs": 0,
+      "request_hash": "pukrdI5C7SfN7mlLheLGWRk2qzt8RTKXlXv4E1rRGKg"
+    },
+    {
+      "blinded_payee": "v6gSKmjRzV-gUlqKaJFI79zUgNhPt0EaHAgLVx980WE",
+      "blinded_request_hash": "tzn-mWkJdYLT6M2ATrsNkHG5IWSUt1pCZNZt_mK_3Lo",
+      "identity": "6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy",
+      "key_material_hex": "000000077265717565737400000020bfa8122a68d1cd5fa0525a8a689148efdcd480d84fb7411a1c080b571f7cd16100000020b739fe9969097582d3e8cd804ebb0d9071b9216494b75a4264d66dfe62bfdcba000000080000000069a23000",
+      "name": "recurring request, February period",
+      "obligation": "cn6gy5nb4Hk2lDlJ7adF2iAfJGqdNqfM4_TU9EClAHc",
+      "payee": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
+      "period_start_secs": 1772236800,
+      "request_hash": "c_ys4n4gUNKJa3D13sszDTpkj8rqdB206n-gIMVuzXY"
+    },
+    {
+      "attempt_id": "mAFdg5_0tVNjmrgiTUZW4g",
+      "blinded_attempt_id": "lTKd5xYq_MaVwtICWPRY2jMQqZykEA71gYUifTWa8lk",
+      "identity": "6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy",
+      "key_material_hex": "000000077061796d656e740000002095329de7162afcc695c2d20258f458da3310a99ca4100ef58185227d359af259",
+      "name": "payment without a request",
+      "obligation": "N2NpPjGpNzllStL56EkFof0xvGiYLo-v8IwYiKdqR3Q"
+    }
+  ],
+  "policies": {
+    "cases": [
+      {
+        "hashed_bytes_hex": "000000187075626b792d64697370617463682f76312f706f6c6963790000000a7061796b69745f7061790000000800000000000000010000000a7061796b69745f706179",
+        "name": "payer_activity",
+        "policy_hash": "LeOxUnjc744vmAmaoym3jLbpHLe1u8I0CvykY63Z4Nw",
+        "read_scope": "paykit_pay",
+        "write_scopes": [
+          "paykit_pay"
+        ]
+      },
+      {
+        "hashed_bytes_hex": "000000187075626b792d64697370617463682f76312f706f6c6963790000000e7061796b69745f726571756573740000000800000000000000010000000e7061796b69745f72657175657374",
+        "name": "payee_activity",
+        "policy_hash": "qKiNUeAuPF0MWUQFVypbSd-2ToqgAUXMN19Uat_ydsQ",
+        "read_scope": "paykit_request",
+        "write_scopes": [
+          "paykit_request"
+        ]
+      },
+      {
+        "hashed_bytes_hex": "000000187075626b792d64697370617463682f76312f706f6c6963790000000a7061796b69745f7061790000000800000000000000010000000a7061796b69745f706179",
+        "name": "payment_lists",
+        "policy_hash": "LeOxUnjc744vmAmaoym3jLbpHLe1u8I0CvykY63Z4Nw",
+        "read_scope": "paykit_pay",
+        "write_scopes": [
+          "paykit_pay"
+        ]
+      },
+      {
+        "hashed_bytes_hex": "000000187075626b792d64697370617463682f76312f706f6c696379000000107061796b69745f616c6c6f77616e6365000000080000000000000001000000107061796b69745f616c6c6f77616e6365",
+        "name": "allowance_proposals",
+        "policy_hash": "zHxKPbfe3sgT8z7eUcg2q7SluUw6IwWHUg3-M7gvt9U",
+        "read_scope": "paykit_allowance",
+        "write_scopes": [
+          "paykit_allowance"
+        ]
+      },
+      {
+        "hashed_bytes_hex": "000000187075626b792d64697370617463682f76312f706f6c696379000000107061796b69745f616c6c6f77616e6365000000080000000000000001000000107061796b69745f616c6c6f77616e6365000000097065726d616e656e74000000080000000000000000",
+        "name": "allowances",
+        "permanent": {
+          "generation": null
+        },
+        "policy_hash": "kdaIBW5YAfTBTvSwU43gSj9JpaXAdOogAIz-0k3WaHo",
+        "read_scope": "paykit_allowance",
+        "write_scopes": [
+          "paykit_allowance"
+        ]
+      },
+      {
+        "hashed_bytes_hex": "000000187075626b792d64697370617463682f76312f706f6c696379000000107061796b69745f616c6c6f77616e6365000000080000000000000001000000187061796b69745f616c6c6f77616e63655f65786563757465000000097065726d616e656e74000000080000000000000000",
+        "name": "allowance_ledgers",
+        "permanent": {
+          "generation": null
+        },
+        "policy_hash": "Z1VJkCSV66nJg9H8_XrGSc1ueA46CCYjyAJk6rRNOhI",
+        "read_scope": "paykit_allowance",
+        "write_scopes": [
+          "paykit_allowance_execute"
+        ]
+      },
+      {
+        "hashed_bytes_hex": "000000187075626b792d64697370617463682f76312f706f6c6963790000000a7061796b69745f7061790000000800000000000000010000000a7061796b69745f706179000000097065726d616e656e74000000080000000000000000",
+        "name": "block_floor",
+        "permanent": {
+          "generation": null
+        },
+        "policy_hash": "mrGGN_A5Va8fng43Sfu2BCly1r-YrmxtcErBFPkAWR4",
+        "read_scope": "paykit_pay",
+        "write_scopes": [
+          "paykit_pay"
+        ]
+      },
+      {
+        "hashed_bytes_hex": "000000187075626b792d64697370617463682f76312f706f6c696379000000127061796b69745f736574746c656d656e7473000000080000000000000001000000127061796b69745f736574746c656d656e7473000000097065726d616e656e74000000080000000000000000",
+        "name": "settlements",
+        "permanent": {
+          "generation": null
+        },
+        "policy_hash": "DENAn85Hn7rk9cz5VmtfEce5hjZClqO173N-YwUfKEo",
+        "read_scope": "paykit_settlements",
+        "write_scopes": [
+          "paykit_settlements"
+        ]
+      },
+      {
+        "hashed_bytes_hex": "000000187075626b792d64697370617463682f76312f706f6c6963790000000f7061796b69745f7265636f766572790000000800000000000000010000000f7061796b69745f7265636f76657279",
+        "name": "recovery_uploads",
+        "policy_hash": "AlL05mEMtVyVS4kLYHtr178NtlNGm4_PwL1VuM1zrBI",
+        "read_scope": "paykit_recovery",
+        "write_scopes": [
+          "paykit_recovery"
+        ]
+      },
+      {
+        "hashed_bytes_hex": "000000187075626b792d64697370617463682f76312f706f6c696379000000147061796b69745f726571756573743a73686f7031000000080000000000000001000000147061796b69745f726571756573743a73686f7031",
+        "name": "payee_activity of a request labelled shop1",
+        "policy_hash": "5PtOcjkBVRrjFYSYf0GLgMk1BGyGc08PZCWHQdTsg7Y",
+        "read_scope": "paykit_request:shop1",
+        "write_scopes": [
+          "paykit_request:shop1"
+        ]
+      }
+    ],
+    "description": "Wire 1.5, Dispatch wire 1.5: the policies of Paykit's collections, each with its read scope, its write scopes and its policy hash, hash(lp(\"pubky-dispatch/v1/policy\", read_scope, u64(n), write_scope_1, ..., write_scope_n)), hashed_bytes_hex being the bytes hashed: the fixed policy of each collection, by its name, a permanent policy appending two more parts, \"permanent\" and u64(generation), zero for a null generation, and, last, payee_activity's policy for a request labelled shop1."
+  },
+  "record_keys": {
+    "cases": [
+      {
+        "blinded_natural_key": "QdBXZosWC409d0rPllm3SJVkrWgZPt70Y5mU_nhM8xw",
+        "collection": "payer_activity",
+        "identity": "6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy",
+        "key_material_hex": "0000000e70617965725f61637469766974790000002041d057668b160b8d3d774acf9659b7489564ad68193edef4639994fe784cf31c000000202de3b15278dcef8e2f98099aa329b78cb6e91cb7b5bbc2340afca463add9e0dc",
+        "name": "payer request record",
+        "natural_key": "AAAAIOt0UWtOhbjKGKId9mJHpQAvJAGOAObxuQeGzwLIILwHAAAAIKbpK3SOQu0nze5pS4XixlkZNqs7fEUyl5V7-BNa0Rio",
+        "natural_key_hex": "00000020eb74516b4e85b8ca18a21df66247a5002f24018e00e6f1b90786cf02c820bc0700000020a6e92b748e42ed27cdee694b85e2c6591936ab3b7c453297957bf8135ad118a8",
+        "policy_hash": "LeOxUnjc744vmAmaoym3jLbpHLe1u8I0CvykY63Z4Nw",
+        "record_key": "3zuwLQtQELmSQ1-IaklpKO85T8MTnokobw6TfaY1hLY"
+      },
+      {
+        "blinded_natural_key": "30oNguvT4W7Y1tTihDlUwt-EfNIJPUySIDho3ErKjk0",
+        "collection": "payer_activity",
+        "identity": "6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy",
+        "key_material_hex": "0000000e70617965725f616374697669747900000020df4a0d82ebd3e16ed8d6d4e2843954c2df847cd2093d4c92203868dc4aca8e4d000000202de3b15278dcef8e2f98099aa329b78cb6e91cb7b5bbc2340afca463add9e0dc",
+        "name": "payer period record (February)",
+        "natural_key": "AAAAIOt0UWtOhbjKGKId9mJHpQAvJAGOAObxuQeGzwLIILwHAAAAIHP8rOJ-IFDSiWtw9d7LMw06ZI_K6nQdtOp_oCDFbs12AAAACAAAAABpojAA",
+        "natural_key_hex": "00000020eb74516b4e85b8ca18a21df66247a5002f24018e00e6f1b90786cf02c820bc070000002073fcace27e2050d2896b70f5decb330d3a648fcaea741db4ea7fa020c56ecd76000000080000000069a23000",
+        "policy_hash": "LeOxUnjc744vmAmaoym3jLbpHLe1u8I0CvykY63Z4Nw",
+        "record_key": "8NJufBWHjBzBLtRUExze98uHEfl6gmPQIgvq1S7cXio"
+      },
+      {
+        "blinded_natural_key": "6HqKHyViBYnfrloKVNwim2SNIwr5uMtrSrmqYZM7KzE",
+        "collection": "payer_activity",
+        "identity": "6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy",
+        "key_material_hex": "0000000e70617965725f616374697669747900000020e87a8a1f25620589dfae5a0a54dc229b648d230af9b8cb6b4ab9aa61933b2b31000000202de3b15278dcef8e2f98099aa329b78cb6e91cb7b5bbc2340afca463add9e0dc",
+        "name": "payer record of a payment without a request",
+        "natural_key": "AAAAIPFJiB6ftbbBb1pw_a4AVVECT_cIlbf9SZ1eNokhtS8MAAAAEJgBXYOf9LVTY5q4Ik1GVuI",
+        "natural_key_hex": "00000020f149881e9fb5b6c16f5a70fdae005551024ff70895b7fd499d5e368921b52f0c0000001098015d839ff4b553639ab8224d4656e2",
+        "policy_hash": "LeOxUnjc744vmAmaoym3jLbpHLe1u8I0CvykY63Z4Nw",
+        "record_key": "TIzrKC8qaIlCdY3CL-JHFmUurT3iSq9F0Mq1n6brOR4"
+      },
+      {
+        "blinded_natural_key": "aO53UsNZNpEa9P45uSNX_s1qCDymFGQ7pcDkB-m4i78",
+        "collection": "payee_activity",
+        "identity": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
+        "key_material_hex": "0000000e70617965655f61637469766974790000002068ee7752c35936911af4fe39b92357fecd6a083ca614643ba5c0e407e9b88bbf00000020a8a88d51e02e3c5d0c594405572a5b49dfb64e8aa00145cc375f546adff276c4",
+        "name": "payee request record",
+        "natural_key": "AAAAIOt0UWtOhbjKGKId9mJHpQAvJAGOAObxuQeGzwLIILwHAAAAIKbpK3SOQu0nze5pS4XixlkZNqs7fEUyl5V7-BNa0Rio",
+        "natural_key_hex": "00000020eb74516b4e85b8ca18a21df66247a5002f24018e00e6f1b90786cf02c820bc0700000020a6e92b748e42ed27cdee694b85e2c6591936ab3b7c453297957bf8135ad118a8",
+        "policy_hash": "qKiNUeAuPF0MWUQFVypbSd-2ToqgAUXMN19Uat_ydsQ",
+        "record_key": "Zzr5DDz4QkTOT8xv2CsCmDWNkCvvkeOaQ90dMj8EKLU"
+      },
+      {
+        "blinded_natural_key": "NpWn4XP7fYhx6hSSNv6pOQCBxKcs-N2x3dqIiMEJ234",
+        "collection": "payee_activity",
+        "identity": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
+        "key_material_hex": "0000000e70617965655f6163746976697479000000203695a7e173fb7d8871ea149236fea9390081c4a72cf8ddb1ddda8888c109db7e00000020a8a88d51e02e3c5d0c594405572a5b49dfb64e8aa00145cc375f546adff276c4",
+        "name": "payee record of a payment without a request",
+        "natural_key": "AAAAEmJ0Yy1iaXRjb2luLXAyd3BraAAAAEA0YTVlMWU0YmFhYjg5ZjNhMzI1MThhODhjMzFiYzg3ZjYxOGY3NjY3M2UyY2M3N2FiMjEyN2I3YWZkZWRhMzNi",
+        "natural_key_hex": "000000126274632d626974636f696e2d703277706b680000004034613565316534626161623839663361333235313861383863333162633837663631386637363637336532636337376162323132376237616664656461333362",
+        "policy_hash": "qKiNUeAuPF0MWUQFVypbSd-2ToqgAUXMN19Uat_ydsQ",
+        "record_key": "qSbwfTuooHJRcTAzWACUxjFqtXjOa5pjkSLKHb94IfY"
+      },
+      {
+        "blinded_natural_key": "G6aKPAkLKq6Sm5dkg1uLOlRnKWZ3JQph8Cx-GD5Lxw8",
+        "collection": "payment_lists",
+        "identity": "6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy",
+        "key_material_hex": "0000000d7061796d656e745f6c69737473000000201ba68a3c090b2aae929b9764835b8b3a5467296677250a61f02c7e183e4bc70f000000202de3b15278dcef8e2f98099aa329b78cb6e91cb7b5bbc2340afca463add9e0dc",
+        "name": "payment_lists record of the shop app",
+        "natural_key": "AAAAIOt0UWtOhbjKGKId9mJHpQAvJAGOAObxuQeGzwLIILwHAAAAEAkJfK_G2RlfVcK6ka07Q0s",
+        "natural_key_hex": "00000020eb74516b4e85b8ca18a21df66247a5002f24018e00e6f1b90786cf02c820bc070000001009097cafc6d9195f55c2ba91ad3b434b",
+        "policy_hash": "LeOxUnjc744vmAmaoym3jLbpHLe1u8I0CvykY63Z4Nw",
+        "record_key": "5fiRKr6m9kbL1tXEty223xfGNiBlDq68XWmND3_Az9w"
+      },
+      {
+        "blinded_natural_key": "Fql2amx7ItTm3GGfSktl0981j0HvYt7LsWCqTfdncxo",
+        "collection": "allowance_proposals",
+        "identity": "6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy",
+        "key_material_hex": "00000013616c6c6f77616e63655f70726f706f73616c730000002016a9766a6c7b22d4e6dc619f4a4b65d3df358f41ef62decbb160aa4df767731a00000020cc7c4a3db7dedec813f33ede51c836abb4a5b94c3a230587520dfe33b82fb7d5",
+        "name": "pending Allowance proposal",
+        "natural_key": "AAAAIOt0UWtOhbjKGKId9mJHpQAvJAGOAObxuQeGzwLIILwHAAAAJGQwZWZmZmI3LTE5MWItNDcwOS1iNmM3LWUzNDNhZjU1MDBiNA",
+        "natural_key_hex": "00000020eb74516b4e85b8ca18a21df66247a5002f24018e00e6f1b90786cf02c820bc070000002464306566666662372d313931622d343730392d623663372d653334336166353530306234",
+        "policy_hash": "zHxKPbfe3sgT8z7eUcg2q7SluUw6IwWHUg3-M7gvt9U",
+        "record_key": "7doGrMoOJO_oCObG-1crNf-y18ig72w6zsQv5Fb-yVc"
+      },
+      {
+        "blinded_natural_key": "Fql2amx7ItTm3GGfSktl0981j0HvYt7LsWCqTfdncxo",
+        "collection": "allowances",
+        "identity": "6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy",
+        "key_material_hex": "0000000a616c6c6f77616e6365730000002016a9766a6c7b22d4e6dc619f4a4b65d3df358f41ef62decbb160aa4df767731a0000002091d688056e5801f4c14ef4b0538de04a3f49a5a5c074ea20008cfed24dd6687a",
+        "name": "Allowance record",
+        "natural_key": "AAAAIOt0UWtOhbjKGKId9mJHpQAvJAGOAObxuQeGzwLIILwHAAAAJGQwZWZmZmI3LTE5MWItNDcwOS1iNmM3LWUzNDNhZjU1MDBiNA",
+        "natural_key_hex": "00000020eb74516b4e85b8ca18a21df66247a5002f24018e00e6f1b90786cf02c820bc070000002464306566666662372d313931622d343730392d623663372d653334336166353530306234",
+        "policy_hash": "kdaIBW5YAfTBTvSwU43gSj9JpaXAdOogAIz-0k3WaHo",
+        "record_key": "NVzuzRtwQjwMC1lVxORmQIb8Gk7nz_7hic-lhJD2aPs"
+      },
+      {
+        "blinded_natural_key": "Fql2amx7ItTm3GGfSktl0981j0HvYt7LsWCqTfdncxo",
+        "collection": "allowance_ledgers",
+        "identity": "6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy",
+        "key_material_hex": "00000011616c6c6f77616e63655f6c6564676572730000002016a9766a6c7b22d4e6dc619f4a4b65d3df358f41ef62decbb160aa4df767731a00000020675549902495eba9c983d1fcfd7ac649cd6e780e3a082623c80264eab44d3a12",
+        "name": "Allowance ledger",
+        "natural_key": "AAAAIOt0UWtOhbjKGKId9mJHpQAvJAGOAObxuQeGzwLIILwHAAAAJGQwZWZmZmI3LTE5MWItNDcwOS1iNmM3LWUzNDNhZjU1MDBiNA",
+        "natural_key_hex": "00000020eb74516b4e85b8ca18a21df66247a5002f24018e00e6f1b90786cf02c820bc070000002464306566666662372d313931622d343730392d623663372d653334336166353530306234",
+        "policy_hash": "Z1VJkCSV66nJg9H8_XrGSc1ueA46CCYjyAJk6rRNOhI",
+        "record_key": "YySJCJXUgutWuOf00xR9Afnw3Yr_4_ucALrmI7paoeU"
+      },
+      {
+        "blinded_natural_key": "vaf2ZZPSFCTGwLlMpzVtTS4vKhVzCD0jUtJD1xYHigw",
+        "collection": "allowance_ledgers",
+        "identity": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
+        "key_material_hex": "00000011616c6c6f77616e63655f6c65646765727300000020bda7f66593d21424c6c0b94ca7356d4d2e2f2a1573083d2352d243d716078a0c00000020675549902495eba9c983d1fcfd7ac649cd6e780e3a082623c80264eab44d3a12",
+        "name": "Allowance ledger when bob is the payer",
+        "natural_key": "AAAAIPFJiB6ftbbBb1pw_a4AVVECT_cIlbf9SZ1eNokhtS8MAAAAJGQwZWZmZmI3LTE5MWItNDcwOS1iNmM3LWUzNDNhZjU1MDBiNA",
+        "natural_key_hex": "00000020f149881e9fb5b6c16f5a70fdae005551024ff70895b7fd499d5e368921b52f0c0000002464306566666662372d313931622d343730392d623663372d653334336166353530306234",
+        "policy_hash": "Z1VJkCSV66nJg9H8_XrGSc1ueA46CCYjyAJk6rRNOhI",
+        "record_key": "s8yWTd97hKv1bZtHXP6CD0stZaz1YKzhsmiPxrpP4YA"
+      },
+      {
+        "blinded_natural_key": "JiKiDgoFqCREozBRIdAJ2JXNZLhvZP5OIuHzkBrgCdk",
+        "collection": "payee_activity",
+        "identity": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
+        "key_material_hex": "0000000e70617965655f6163746976697479000000202622a20e0a05a82444a3305121d009d895cd64b86f64fe4e22e1f3901ae009d900000020e4fb4e723901551ae31584987f418b80c935046c86734f0f64258741d4ec83b6",
+        "name": "payee request record of the request labelled shop1",
+        "natural_key": "AAAAIOt0UWtOhbjKGKId9mJHpQAvJAGOAObxuQeGzwLIILwHAAAAIHOyzq7X7Voyt1ZflNUPK5OdBKg9Z2YM0zFzHH_lhRLh",
+        "natural_key_hex": "00000020eb74516b4e85b8ca18a21df66247a5002f24018e00e6f1b90786cf02c820bc070000002073b2ceaed7ed5a32b7565f94d50f2b939d04a83d67660cd331731c7fe58512e1",
+        "policy_hash": "5PtOcjkBVRrjFYSYf0GLgMk1BGyGc08PZCWHQdTsg7Y",
+        "record_key": "vo5MeiVHVx3nrfrmBhEy1vQiJ9bZADUoxzH5sdM0s78"
+      },
+      {
+        "blinded_natural_key": "AkN_YyH_4lwWkb81n9Sw80JhDqdMYLtcB-IIu4i5oFk",
+        "blinded_settlement_tag_input": "2tupm7X1iDZMEbNoz2ow8UzQHcQ31b1hqnTvv6ZuyUc",
+        "bucket": 337,
+        "collection": "settlements",
+        "identity": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
+        "key_material_hex": "0000000b736574746c656d656e74730000002002437f6321ffe25c1691bf359fd4b0f342610ea74c60bb5c07e208bb88b9a059000000200c43409fce479fbae4f5ccf9566b5f11c7b986364296a3b5ef737e63051f284a",
+        "mark_settlement_tag_hex": "6cc2ee7c0373a89e87700093",
+        "name": "settlements bucket of the settlement of the payment without a request",
+        "natural_key": "AAAACAAAAAAAAAFR",
+        "natural_key_hex": "000000080000000000000151",
+        "occurrence": "payee record of a payment without a request",
+        "occurrence_blinded_natural_key": "NpWn4XP7fYhx6hSSNv6pOQCBxKcs-N2x3dqIiMEJ234",
+        "occurrence_tag_hex": "3c4b20d07e636568",
+        "policy_hash": "DENAn85Hn7rk9cz5VmtfEce5hjZClqO173N-YwUfKEo",
+        "record_key": "xmZMD3OmcbSs2sZKHD3tXiXbiu92v2yZUqLe8ZPt8lI",
+        "settlement_id": "4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b",
+        "settlement_tag_hex": "546c6cc2ee7c0373a89e87700093b34f0563d71e355509ea13667872ddeecfcb",
+        "settlement_tag_input_hex": "0000004034613565316534626161623839663361333235313861383863333162633837663631386637363637336532636337376162323132376237616664656461333362"
+      },
+      {
+        "blinded_natural_key": "YEEuohmu3KGN2bohG-oZdx2ySsyCsmb4AP8zVr38EQ0",
+        "collection": "private_list_publications",
+        "generation": 1,
+        "identity": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
+        "key_material_hex": "00000019707269766174655f6c6973745f7075626c69636174696f6e730000002060412ea219aedca18dd9ba211bea19771db24acc82b266f800ff3356bdfc110d00000020e9a7ff3b1feef94c8b6c267c4330539fc7fb550d14885e6cc9b22670bda308ab",
+        "name": "shop publication for Alice",
+        "natural_key": "AAAAEAkJfK_G2RlfVcK6ka07Q0sAAAAg8UmIHp-1tsFvWnD9rgBVUQJP9wiVt_1JnV42iSG1LwwAAAAIAAAAAAAAAAE",
+        "natural_key_hex": "0000001009097cafc6d9195f55c2ba91ad3b434b00000020f149881e9fb5b6c16f5a70fdae005551024ff70895b7fd499d5e368921b52f0c000000080000000000000001",
+        "policy": {
+          "permanent": {
+            "generation": 1
+          },
+          "read_scope": "paykit_request",
+          "write_scopes": [
+            "paykit_request"
+          ]
+        },
+        "policy_hash": "6af_Ox_u-UyLbCZ8QzBTn8f7VQ0UiF5sybImcL2jCKs",
+        "policy_material_hex": "000000187075626b792d64697370617463682f76312f706f6c6963790000000e7061796b69745f726571756573740000000800000000000000010000000e7061796b69745f72657175657374000000097065726d616e656e74000000080000000000000001",
+        "publisher": "brrz3m6g5rci6iqnzke44q4djc",
+        "recipient": "6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy",
+        "record_key": "VsPGx4tRhBvvZazNA7QPK-wE6wXXJkib-c3vpMWU0sw"
+      }
+    ],
+    "description": "Wire 1.5, Dispatch wire 1.5: the record keys of Paykit's natural keys, each in its collection under its policy, blinded with the naming key of the identity whose Dispatch holds it (identity, keys.json): natural_key (and natural_key_hex) is the natural key, blinded_natural_key its blind, derive(\"pubky-dispatch/v1/name\", naming_key, natural_key), key_material_hex the input of the record key, lp(collection, blinded_natural_key, policy_hash), and record_key derive(\"pubky-dispatch/v1/record\", collection, blinded_natural_key, policy_hash). The request hashes are those of messages.json's payment_request, payment_request_recurring (its February period, 1772236800) and payment_request_labelled, whose payee record is under the policy of its label shop1. The last is the settlements bucket of the settlement of the payment without a request, whose settlement ID is the UTF-8 bytes of settlement_id, given as such rather than read from a proof, held at bob's Dispatch: settlement_tag_input_hex is lp(settlement ID), blinded_settlement_tag_input its blind, settlement_tag_hex the settlement's tag, derive(\"paykit/v1/settlement\", \"tag\", blinded_settlement_tag_input), bucket u16_be(tag[0..2]) >> 6, mark_settlement_tag_hex bytes 2 to 13 of the tag, which its mark stores, and natural_key lp(u64(bucket)); occurrence_tag_hex is the first 8 bytes of derive(\"paykit/v1/settlement\", \"occurrence\", occurrence_blinded_natural_key), the blind of the natural key of the occurrence it was credited to, bob's payee record of that payment."
+  },
+  "request_hash": [
+    {
+      "hash": "pukrdI5C7SfN7mlLheLGWRk2qzt8RTKXlXv4E1rRGKg",
+      "message": "payment_request"
+    },
+    {
+      "hash": "c_ys4n4gUNKJa3D13sszDTpkj8rqdB206n-gIMVuzXY",
+      "message": "payment_request_recurring"
+    }
+  ],
+  "terms_hash": {
+    "acceptance": "allowance_acceptance",
+    "key_material_hex": "000003327b2276223a312c226b696e64223a227061796b69742e616c6c6f77616e63655f70726f706f73616c222c226d73675f6964223a2238623533313561332d363236392d346662302d383161352d643033366534643734663332222c22637265617465645f6174223a22323032362d30312d30315430303a31323a30302e3030305a222c2266726f6d223a7b226964656e74697479223a22377034666e3434716f7368637767666e647a35677274376679797a316579637179647578647165386f35386f663162797a6f646f222c226170705f6964223a226272727a336d3667357263693669716e7a6b6534347134646a63227d2c22746f223a22366672616f387739737335636e3534347164363468796e696b7262723937616531733539343163376d6135653165706966686779222c2272656673223a5b5d2c22626f6479223a7b22616c6c6f77616e63655f6964223a2264306566666662372d313931622d343730392d623663372d653334336166353530306234222c22616c6c6f7765725f67656e65726174696f6e223a372c2270726f706f7365725f726f6c65223a22616c6c6f776565222c227465726d73223a7b226163746976655f66726f6d223a22323032362d30312d30315430303a30303a30302e3030305a222c22616c6c6f7765645f7061796d656e745f656e64706f696e745f6964656e74696669657273223a5b226274632d6c696768746e696e672d626f6c743131225d2c226173736574223a22627463222c22657870697265735f6174223a6e756c6c2c226c69666574696d655f616d6f756e745f6c696d6974223a22302e3130222c227065725f7061796d656e745f616d6f756e74223a7b226d6178696d756d223a22302e3031222c226d696e696d756d223a22302e30303031227d2c22706572696f645f6c696d697473223a5b7b22616d6f756e745f6c696d6974223a22302e3033222c227061796d656e745f636f756e745f6c696d6974223a352c22706572696f64223a7b22616e63686f72223a22323032362d30312d33315430303a30303a30302e3030305a222c226576657279223a312c226b696e64223a22616e63686f726564222c22756e6974223a226d6f6e7468227d7d5d7d7d7d000001d67b2276223a312c226b696e64223a227061796b69742e616c6c6f77616e63655f616363657074616e6365222c226d73675f6964223a2232353062396566322d633335372d343835362d623863302d383633333638653632376235222c22637265617465645f6174223a22323032362d30312d30315430303a31333a30302e3030305a222c2266726f6d223a7b226964656e74697479223a22366672616f387739737335636e3534347164363468796e696b7262723937616531733539343163376d6135653165706966686779222c226170705f6964223a22637735616874646b69786361666e61397a6831793579356f3177227d2c22746f223a22377034666e3434716f7368637767666e647a35677274376679797a316579637179647578647165386f35386f663162797a6f646f222c2272656673223a5b2239486949456f57797848356e46715548522d78747776325867626264554f4969577951462d427063775155225d2c22626f6479223a7b22616c6c6f77616e63655f6964223a2264306566666662372d313931622d343730392d623663372d653334336166353530306234222c226578656375746f725f6170705f6964223a22637735616874646b69786361666e61397a6831793579356f3177227d7d",
+    "proposal": "allowance_proposal",
+    "terms_hash": "c6fSZwYRwRa_3yscaUapKYa_TKWdhfCEvJ5kzyMbauI"
+  }
+}

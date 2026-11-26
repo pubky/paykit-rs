@@ -319,6 +319,8 @@ pixel and cache limits, and request timeouts remain app responsibilities.
 - `PaykitSdk.resolvePrivatePaymentRequest`, `resolvePublicPaymentRequest`, and
   `prepareAndResolvePrivatePaymentRequest` — resolve using the request amount
   while enforcing its accepted endpoint identifiers and required payee App.
+  `resolvePublicPaymentRequest` fails with a policy error while the
+  counterparty is blocked, before any App Registry or Payment Endpoint read.
   Request preparation retains fresh private intake and final validation, but
   leaves an otherwise idle queue of unclaimed, unprepared Delivery Confirmations
   durably pending. Callers service them through later outbound processing;
@@ -627,6 +629,9 @@ See the [SDK accounting contract](../specs/paykit-sdk.md#durable-allowance-payme
   `receiptIssuanceRecords`, `receiptAccess`, `receiptAccessFrom`,
   `receiptAccessRecords`, `retrieveReceipt`, `receipts`, `receiptsFrom`, and
   `receiptRecords` — inspect issued, indexed, and decrypted receipts.
+  An issued receipt's `status` moves from `AccessQueued` to `AccessSent` once
+  any outbound drain publishes its Receipt Access, or to `AccessFailed` when
+  delivery stops without automatic retry (`lastError` says why).
 
 Receipt Decryption Keys and encrypted payloads stay inside SDK-managed state.
 Payment References are exposed through the redacted `PaymentReference`

@@ -1042,6 +1042,15 @@ pub fn parse_pubky_resource(uri: String) -> Result<FfiPubkyResourceRef, PaykitFf
 }
 
 pub(crate) fn pubky_from_config(config: &FfiPubkyClientConfig) -> Result<Pubky, PaykitFfiError> {
+    pubky_client_builder(config)?
+        .build()
+        .map(Pubky::with_client)
+        .map_err(|err| identity_error("pubky_client", format!("create Pubky client failed: {err}")))
+}
+
+pub(crate) fn pubky_client_builder(
+    config: &FfiPubkyClientConfig,
+) -> Result<pubky::PubkyHttpClientBuilder, PaykitFfiError> {
     if config.request_timeout_secs == 0 {
         return Err(validation_error(
             "pubky request timeout must be greater than zero",
@@ -1053,11 +1062,11 @@ pub(crate) fn pubky_from_config(config: &FfiPubkyClientConfig) -> Result<Pubky, 
         validate_local_testnet_host(host)?;
         builder.testnet_with_host(host);
     }
+    // Mobile networks may block UDP. Relays perform DHT access; waiting for a second,
+    // direct DHT operation would delay signup even after the relay succeeds.
+    builder.pkarr(|pkarr| pkarr.no_dht());
     builder.request_timeout(Duration::from_secs(config.request_timeout_secs));
-    builder
-        .build()
-        .map(Pubky::with_client)
-        .map_err(|err| identity_error("pubky_client", format!("create Pubky client failed: {err}")))
+    Ok(builder)
 }
 
 fn auth_relay_url(config: &FfiPubkyClientConfig) -> Option<String> {

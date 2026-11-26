@@ -338,6 +338,16 @@ extension PubkyProfileRecord: CustomStringConvertible, CustomDebugStringConverti
     public var debugDescription: String { description }
 }
 
+extension PubkyProfileSnapshot: CustomStringConvertible, CustomDebugStringConvertible {
+    public var description: String { "PubkyProfileSnapshot(<redacted>)" }
+    public var debugDescription: String { description }
+}
+
+extension PubkyProfileUpdate: CustomStringConvertible, CustomDebugStringConvertible {
+    public var description: String { "PubkyProfileUpdate(<redacted>)" }
+    public var debugDescription: String { description }
+}
+
 extension PaykitBlobRecord: CustomStringConvertible, CustomDebugStringConvertible {
     public var description: String { "PaykitBlobRecord(<redacted>)" }
     public var debugDescription: String { description }

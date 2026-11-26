@@ -1,5 +1,13 @@
 # Paykit SDK Architecture
 
+> **This is the Paykit v0.1 SDK document.** It doesn't describe Paykit v0.2. The v0.2 SDK
+> is the [`paykit-sdk`](https://github.com/pubky/paykit-rs/tree/v0.2/paykit-sdk) crate on the
+> `v0.2` branch: its documentation is the crate's own
+> ([`paykit-sdk/src/lib.rs`](https://github.com/pubky/paykit-rs/blob/v0.2/paykit-sdk/src/lib.rs),
+> built with `cargo doc -p paykit-sdk` on that branch), and the protocol it implements is the v0.2 spec set in
+> [`specs/v0.2`](v0.2/README.md) ([`spec.md`](v0.2/spec.md),
+> [`wire-format.md`](v0.2/wire-format.md)).
+
 ## Goal
 
 Describe the Paykit SDK layer that sits above Paykit Library.
@@ -832,8 +840,8 @@ adapter, the SDK marks the reservation as cancellation-started in storage before
 calling the adapter. Reservation IDs with cancellation-started records must not be
 reused for new Private Payment Lists until cleanup removes the record.
 App-removal cleanup checks its App lease when claiming cancellation, before
-adapter dispatch, and before deleting the reservation. If ownership changes
-after dispatch, cancellation may already have happened externally; the record
+adapter handoff, and before deleting the reservation. If ownership changes
+after handoff, cancellation may already have happened externally; the record
 remains for the current worker to reconcile through idempotent cancellation.
 
 Single-use Payment Request reservations are outside the SDK shape until the
@@ -1375,13 +1383,67 @@ The Rust SDK has two explicit receive modes per Linked Peer:
   explicit `receive_buffered_private_messages` calls.
 
 SSE-assisted intake treats each event as an untrusted hint. It validates the
-subscribed owner, derives the expected immutable Noise resource independently
-of the event path, fetches only that resource, and atomically stores ciphertext
-with the relevant per-user cursor. It does not decrypt application data or
-advance the Noise receive checkpoint in the background. Explicit buffered
-drain commits plaintext stream records, Event Message dedupe, the advanced
-Noise snapshot, queue removal, and retained packet generations together.
-Failure leaves the packet and checkpoint unchanged.
+subscribed owner. Each acquisition of a peer's expected slot, from a stream
+event or an audit, records the read folder of the Encrypted Link snapshot it
+used, which is the folder that holds that expected slot. While a peer has a
+recorded read folder, intake ignores DELETEs and every PUT that is neither
+under that folder nor at an Encrypted Link Handshake slot. An ignored event
+triggers no fetch and does not change health, so a `Stale` state set by a
+failed fetch for a relevant event clears only on the next relevant event or
+audit. A peer is unfiltered until an acquisition records its folder, and
+becomes unfiltered again once an acquisition sees a pending Encrypted Link
+Handshake. An acquisition that fails before it derives the expected slot, for
+example on a storage, authorization or marker error, or because the peer has
+no private intake checkpoint or no Encrypted Link snapshot, keeps the
+previously recorded folder, or none, so a flaky homeserver does not turn the
+filter off. A stale folder only delays a packet: Encrypted Link Handshake slots
+in any folder still pass, and audits still fetch the expected slot. Each
+acquisition that derives the expected slot refreshes the folder from the
+snapshot it used. A link that moves to a new folder, for example through a
+recovery or a relink finished outside intake, is followed from the next
+acquisition that starts after the move and derives the expected slot, at the
+latest the next successful audit. A link that moves while an acquisition runs
+is followed by that same acquisition when the move also changes the stored
+Encrypted Link generation before the running attempt's last generation-checked
+storage step (the counter read, the buffer insert or the absent-slot check):
+that step finds the generation moved, and the retried attempt reads the new
+snapshot and records its folder. Any other move, for example one committed
+after that step, or one whose acquisition ends in a failure that is not
+retried or runs out of retries, is followed from the next acquisition, because
+the running one records the folder of the snapshot it read before the move.
+Recorded folders live for the stream group's task: they survive reconnects of
+that group's stream, and a topology change, such as a homeserver move, or a
+restart after buffer capacity is released starts a new task with no recorded
+folders.
+
+The connected stream remembers the highest ignored event per peer in memory. A
+later relevant event from that peer whose acquisition succeeds drops it, which
+only means committing less. After an audit that finds the peer's next expected
+slot absent, it advances the stored per-user cursor to that event unless the
+cursor is already past it, so a reconnect does not replay it. Any audit outcome
+other than an absent expected slot, such as a pending Encrypted Link Handshake,
+an already buffered packet, capacity, the per-peer acquisition limit or a
+failure, keeps the ignored event for the next in-stream audit while the stream
+stays connected. Ignored events live only as long as the connected stream: an
+audit that stops at capacity ends the stream with backpressure, and that or any
+other disconnect drops them. After reconnect the homeserver replays those
+events from the stored cursor and intake filters them again. The stream handles
+no event while an audit runs, so every remembered event precedes the audit.
+This is safe because the stream delivers a homeserver's events in cursor order
+and the audit fetched the peer's expected slot after every remembered event and
+found it absent: an ignored event either cannot announce a packet the
+expected-slot fetch would find or, when the recorded folder was stale,
+announced one that the audit fetched. Audits remain the delivery guarantee, so
+a hint dropped through a stale read folder only adds latency, up to the audit
+interval.
+
+For a relevant event, the SDK still derives the expected immutable Noise
+resource independently of the event path, fetches only that resource, and
+atomically stores ciphertext with the relevant per-user cursor. Intake does not
+decrypt application data or advance the Noise receive checkpoint in the
+background. Explicit buffered drain commits plaintext stream records, Event
+Message dedupe, the advanced Noise snapshot, queue removal, and retained packet
+generations together. Failure leaves the packet and checkpoint unchanged.
 
 The supervisor groups public subscriptions by current homeserver and partitions
 each homeserver into at most 50 users per SSE request. Every partition consumes
@@ -1394,28 +1456,104 @@ origin when capacity permits. An over-capacity move marks the resolved topology
 stale and stops supervision; it does not retain old streams and use healthy
 audits as polling coverage for the moved peer.
 
+A Linked Peer whose Pubky homeserver cannot be resolved, because the lookup
+fails or finds no homeserver record, reserves no stream and is reported
+`Stale`. It is retried on each topology refresh, and its failed lookup does not
+stop intake for other peers, at startup or while the supervisor runs. When it
+later resolves, it is placed like any other topology change, so an
+over-capacity result marks the resolved topology stale and stops supervision.
+A topology refresh keeps the stored handshake admission of every peer that is
+still supervised but that the refresh did not place, such as a peer whose
+homeserver lookup failed or a handshake that became pending while the refresh
+was resolving, so reserved capacity stays reserved. A peer that already has a
+stream keeps its last resolved homeserver while a later lookup fails, because a
+missing record can be a temporary DHT miss.
+
 Durable intake is bounded to 64 packets per Linked Peer and 1,024 packets per
 identity, with equivalent exact ciphertext-byte bounds. A full peer is removed
 from its shared homeserver subscription while siblings continue. Its cursor is
 not advanced. After explicit drain releases capacity, it is subscribed again
 and catches up from durable state. No unbounded in-memory event queue is used.
 
-Startup, reconnect, replay, and healthy operation reconcile the next expected
-slot. Healthy streams audit at a validated 1-second to 1-hour cadence, with a
-60-second default plus bounded jitter. This repairs missing or parser-skipped
-events without turning an unavailable SSE endpoint into an always-on polling
-fallback. HTTP 404, 405, and 501 subscription failures are reported as
-`Unsupported`; other stream/fetch failures are `Stale` and retry. Neither state
-proves remote absence. Buffered work remains drainable during transport
-failure.
+Startup, reconnect, replay, healthy operation, and live inserts reconcile the
+next expected slot. Healthy streams audit at a validated 1-second to 1-hour
+cadence, with a 60-second default plus bounded jitter. This repairs missing or
+parser-skipped events without turning an unavailable SSE endpoint into an
+always-on polling fallback. After a live event buffers a packet, intake marks
+the Linked Peer `Replaying`, wakes consumers, and then probes the next expected
+slots by the healthy audit's rule, without a cursor, unless that packet fills
+the peer's capacity, in which case the Linked Peer is `Backpressured` and no
+probe runs. The probe reports
+`CaughtUp` when the next slot is absent and `Backpressured` when it fills
+capacity. A failed probe leaves the Linked Peer `Replaying` until the next
+event or healthy audit, and a probe never records the last successful audit.
+When the stream epoch stops before or during the probe, intake drops the
+probe's outcome without writing health, still wakes consumers for packets the
+probe buffered or a pending handshake it found, and leaves the next epoch's
+startup audit to settle the Linked Peer.
+HTTP 404, 405, and 501 subscription failures are reported as `Unsupported`;
+other stream/fetch failures, apart from that probe, and homeserver resolution
+failures are `Stale` and retry. Neither state proves remote absence. Buffered
+work remains drainable during transport failure.
+
+An expected-slot acquisition attempt keeps the Encrypted Link snapshot it
+reads after any handshake advance. Its generation-checked storage steps (the
+counter read, the buffer insert, and the absent-slot check, before any cursor
+advance or Absent report) first compare the stored Encrypted Link generation
+with that snapshot's in the same transaction. When any committed change moved
+it, whoever committed it (a consumer drain, an outbound private send, a
+handshake or observation transition, or the acquisition's own observation
+step that committed a replacement), the step neither buffers a packet,
+advances a cursor, nor reports the slot absent, and the acquisition is retried
+from fresh link state, up to 8 attempts. After the last attempt it fails like
+any other fetch failure. Other failures, including a failed observation,
+recovery, network, or handshake step, are not retried.
+
+A supervised peer (a Linked Peer or a peer with a pending Encrypted Link
+Handshake) with no stored intake cursor for its current homeserver, such as on
+first start, after Paykit identity key rotation, or after a homeserver move,
+is not replayed from the beginning of its private-directory history. Before
+subscribing, the supervisor makes one non-live, newest-first request limited to
+one event for those peers and subscribes them from that event. The startup
+audit runs after the subscription and reconciles every slot announced by an
+event the request could see. Homeserver event ids come from a sequence
+assigned at insert, so an event at or before the returned one can commit
+after the request. The stream skips it, and the next audit fetches its slot: the
+jittered in-stream audit, then each healthy audit. Every audit on that
+connection runs after the request, so the first one that finds a peer's
+expected slot absent stores that peer's cursor, and no later audit on the
+connection writes it again. If no audit does, reconnects of the same
+subscription group within one topology epoch, which lasts until the
+subscription topology restarts, reuse the event from its last successful
+request instead of repeating it while that request covered every peer still
+without a cursor; a peer it did not cover makes them request again. A new
+epoch makes the request again. This stays safe because each connection runs
+its startup audit after subscribing. If the request fails or returns no event,
+those peers subscribe from the beginning as before, and the next connect
+requests again. The newest-event request doubles as the event-stream support
+probe: when the homeserver rejects it with HTTP 404, 405, or 501, the live
+subscription is not attempted for that connect and the peers are reported
+`Unsupported` and retried exactly as after a rejected live subscription, so a
+homeserver without SSE costs one failing request per retry. Seeding deliberately
+covers only peers without a stored cursor for the current homeserver; a peer
+with a stored cursor resumes from it as before.
+Stopping the supervisor or restarting the subscription topology abandons a
+pending request. While the request is pending, the group keeps running
+expected-slot audits, the first one second after it starts and then at the
+healthy audit cadence; they start before the request finishes, so they never
+store a cursor. Audits, not events, guarantee delivery: a packet whose event
+the stream skips is fetched by the next audit.
 
 `PrivateIntakeSupervisor::health` reports per-peer transport state and last
 successful absent-slot audit. `subscribe_work` is a coalesced local hint, not a
 durable queue: consumers register first, inspect/drain durable state, wait, then
 inspect again. Buffered receive returns the canonical intake report, remaining
-packet count, and freshness. Explicit `stop` waits for stream tasks and marks
-peer state `Stopped`; dropping the handle requests cancellation but callers that
-need an observed shutdown use `stop`. Synchronous `is_finished` is true only
+packet count, and freshness. That freshness is the peer's state when the drain
+started; `health` reports the current state, and a later change, such as a
+live-insert probe settling the peer `CaughtUp`, sends no further wakeup.
+Explicit `stop` waits for stream tasks and marks peer state `Stopped`; dropping
+the handle requests cancellation but callers that need an observed shutdown use
+`stop`. Synchronous `is_finished` is true only
 when every task owned by the supervisor has terminated, including after
 autonomous lease, topology, or admission failure and after explicit `stop` has
 emptied the task set. Transport health does not determine this liveness signal.
@@ -1585,6 +1723,15 @@ Payment Request resolution restricted to a `required_app_id` loads only that
 app's public endpoints. Failure to load it returns `Unavailable`, regardless
 of other apps' endpoints.
 
+`resolve_public_payment_request` reads the received Payment Request, so it
+fails with `Policy` while the counterparty is blocked, before App Registry
+access. It rechecks the block after each public storage provider call, before
+each App Registry or Payment List read, after payment adapter selection, and
+after each payment target is built. A block that lands during any of those
+calls therefore returns `Policy`, even when that call failed. Requests inside a
+single App's Payment List read are not interrupted.
+`resolve_public_contact_payment` reads no Payment Request and is unaffected.
+
 ### Resolve Private Payment
 
 `resolve_private_contact_payment` checks only Linked Peer and cached Private
@@ -1749,6 +1896,19 @@ ID from the same shared SDK state. The
 one-call `issue_receipt` helper requires the draft to already contain a
 caller-provided Receipt ID so repeating the same call cannot create a second
 receipt after a partial failure.
+
+The App that observed the payment issues the Receipt. It need not be the App
+that proposed the Payment Request: Payment Requests and receipt issuance
+records are identity-wide shared state, so a wallet App can issue the Receipt
+for a request a merchant App proposed for the same identity, and the receipt
+carries that request's Payment Request ID. Only an App whose App Registry entry
+declares `receipts` may issue one. Other Apps on the identity read issued
+Receipts from shared state: `issued_receipts` lists the issuance records and
+`issued_receipt` returns the decrypted Receipt, Receipt Metadata included,
+without a network read. The record's App ID attributes the Receipt to the
+issuing App. That attribution assumes the identity's Apps write honestly: any
+App holding the Paykit secret and a Paykit session grant can write shared
+state.
 
 ### Retrieve Receipts
 

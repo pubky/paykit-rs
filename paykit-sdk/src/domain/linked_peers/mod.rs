@@ -681,7 +681,7 @@ pub(crate) fn requeue_recovery_required_outbound_messages(
             continue;
         }
         message.status = OutboundPrivateMessageStatus::Pending;
-        message.updated_at = now;
+        message.updated_at = message.updated_at.max(now);
         // Recovery cannot prove that a previous publication missed the peer.
         // Keep attempt evidence for both Event Messages and Private Payment Lists.
         if !message.is_unconfirmed_event() {

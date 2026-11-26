@@ -237,13 +237,15 @@ where
         .await
 }
 
+// Each transition below keeps `updated_at` from moving backwards: issued
+// receipts read it as their Receipt Access delivery time.
 pub(crate) fn mark_outbound_sent(
     mut record: OutboundPrivateMessageRecord,
     now: DateTime<Utc>,
 ) -> OutboundPrivateMessageRecord {
     record.status = OutboundPrivateMessageStatus::Sent;
     record.sent_at.get_or_insert(now);
-    record.updated_at = now;
+    record.updated_at = record.updated_at.max(now);
     record.last_error = None;
     record.prepared_send = None;
     record
@@ -255,8 +257,34 @@ pub(crate) fn mark_outbound_failed(
     now: DateTime<Utc>,
 ) -> OutboundPrivateMessageRecord {
     record.status = OutboundPrivateMessageStatus::Failed;
-    record.updated_at = now;
+    record.updated_at = record.updated_at.max(now);
     record.last_error = Some(error);
+    record
+}
+
+/// Drop a prepared send whose slot already holds another packet.
+///
+/// An event the peer already confirmed needs no new packet. Any other message
+/// is prepared again now, or after the failed-send backoff without `retry_now`.
+pub(crate) fn mark_outbound_slot_taken(
+    mut record: OutboundPrivateMessageRecord,
+    retry_now: bool,
+    now: DateTime<Utc>,
+) -> OutboundPrivateMessageRecord {
+    record.prepared_send = None;
+    if record.confirmed_at.is_some() {
+        return mark_outbound_sent(record, now);
+    }
+    if !retry_now {
+        return mark_outbound_failed(
+            record,
+            "Encrypted Link write slot already holds another packet".to_owned(),
+            now,
+        );
+    }
+    record.status = OutboundPrivateMessageStatus::Pending;
+    record.updated_at = record.updated_at.max(now);
+    record.last_error = None;
     record
 }
 
@@ -266,7 +294,7 @@ pub(crate) fn mark_outbound_invalid(
     now: DateTime<Utc>,
 ) -> OutboundPrivateMessageRecord {
     record.status = OutboundPrivateMessageStatus::Invalid;
-    record.updated_at = now;
+    record.updated_at = record.updated_at.max(now);
     record.last_error = Some(error);
     record.prepared_send = None;
     record
@@ -278,7 +306,7 @@ pub(crate) fn mark_outbound_recovery_required(
     now: DateTime<Utc>,
 ) -> OutboundPrivateMessageRecord {
     record.status = OutboundPrivateMessageStatus::RecoveryRequired;
-    record.updated_at = now;
+    record.updated_at = record.updated_at.max(now);
     record.last_error = Some(error);
     record.prepared_send = None;
     record

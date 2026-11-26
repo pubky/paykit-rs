@@ -54,7 +54,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # v1
         with:
           toolchain: stable
 
@@ -69,7 +69,7 @@ jobs:
 
       # After `npm ci`, which deletes node_modules, so the restored ubrn build
       # survives.
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           # The second workspace caches the ubrn CLI, which npm ships as Rust
           # source and builds on first use.
@@ -115,7 +115,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # v1
         with:
           toolchain: stable
           targets: aarch64-linux-android,x86_64-linux-android
@@ -133,7 +133,7 @@ jobs:
       # build survives. Like the bindgen workflows, the cross-compiled
       # ./target is not cached: only the cargo registry and the ubrn CLI,
       # which npm ships as Rust source and builds on first use.
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: paykit-react-native/node_modules/uniffi-bindgen-react-native -> target
           cache-all-crates: true
@@ -159,7 +159,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # v1
         with:
           toolchain: stable
           targets: aarch64-apple-ios,aarch64-apple-ios-sim
@@ -174,7 +174,7 @@ jobs:
         run: npm ci
 
       # As in the `android` job.
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: paykit-react-native/node_modules/uniffi-bindgen-react-native -> target
           cache-all-crates: true
@@ -205,7 +205,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # The emulator is x86_64, so only that ABI is built.
-      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # v1
         with:
           toolchain: stable
           targets: x86_64-linux-android
@@ -228,7 +228,7 @@ jobs:
         run: npm ci
 
       # As in the `android` job.
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: paykit-react-native/node_modules/uniffi-bindgen-react-native -> target
           cache-all-crates: true
@@ -296,7 +296,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # v1
         with:
           toolchain: stable
           targets: aarch64-apple-ios,aarch64-apple-ios-sim
@@ -330,7 +330,7 @@ jobs:
         run: npm ci
 
       # As in the `android` job.
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: paykit-react-native/node_modules/uniffi-bindgen-react-native -> target
           cache-all-crates: true

@@ -9,6 +9,10 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ### Added
 
+- Pubky app profile, follows and avatar reads and writes follow Pubky social v1 (`/pub/social/v1/`) once pubky.app migrated the identity, and `pubky_app_profile_session_capabilities` adds the social v1 scopes.
+- `issued_receipt` in Rust returns the decrypted Receipt of a local issuance record, Receipt Metadata included, so an App can read a Receipt another App on the identity issued, such as a wallet's Receipt for a request a merchant App proposed.
+- Issued receipts report Receipt Access delivery (`AccessSent`, `AccessFailed`) in Rust, Swift and Kotlin.
+- Pubky app profile writes: `fetch_pubky_profile_with_revision`, `publish_pubky_profile`, `upload_pubky_app_avatar`, `delete_pubky_profile` and `pubky_app_profile_session_capabilities` let an app edit the shared `/pub/pubky.app/profile.json` and its avatar.
 - React Native package `@synonymdev/react-native-paykit` in
   `paykit-react-native/`, generated from the `paykit-ffi` UniFFI metadata with
   uniffi-bindgen-react-native. It exposes the same SDK surface as Swift and
@@ -40,9 +44,31 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   `acceptPendingAllowanceProposals` in Swift and Kotlin accept up to a limit of
   one counterparty's pending Allowance proposals in one transaction, with work
   bounded by a per-link record cap instead of the link's whole history.
+- `EncryptedLink::prepared_private_send_slot` and `PreparedPrivateSendSlot`
+  report whether the destination slot of a prepared send is free, already holds
+  that exact ciphertext, or holds another packet.
+  `EncryptedLink::skip_published_write_slots` moves the next write slot and
+  sending nonce past packets already stored on the link's write stream, and
+  `EncryptedLink::next_write_slot_path` reports the slot the next packet uses.
 
 ### Changed
 
+- A first Pubky app profile for an identity with nothing under `/pub/pubky.app/` is created on Pubky social v1, without pubky.app's migration flag. The identity's own profile, follows and avatar also follow social v1 when it has a social v1 profile but no flag, and a profile delete removes the pubky.app (v0) copy before the social v1 profile, and `upload_pubky_app_avatar` returns a protocol error for an identity with no profile yet.
+- Before a send run first encrypts on an Encrypted Link, the SDK moves the
+  link past write slots that already hold packets and stores the advance, so
+  it never prepares a ciphertext for a used slot. That first send is published
+  on the slot found free. Other prepared sends, including ones restored from
+  storage, check their destination slot first. A slot that already holds the
+  same ciphertext counts as sent without a second write. A slot that holds
+  another packet is never overwritten: the SDK moves the link past the stored
+  packets and prepares the message again on the next free slot. A message that
+  meets a second taken slot in the same run waits for the normal retry backoff.
+  Each send costs one extra `HEAD` request to the sender's own homeserver when
+  the next slot is free.
+- `EncryptedLink::send_private_application_message_json` and the `paykit-lib`
+  send helpers built on the same path, such as `set_private_payment_list`,
+  move the link past write slots that already hold packets before they
+  encrypt. This also costs one `HEAD` request per send.
 - A payee no longer marks a Payment Request invalid when it stores an
   otherwise-valid Acceptance after its local proposal expiry, such as an
   in-time Acceptance fetched late. Later Payment Proofs are recorded and the
@@ -73,9 +99,28 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   `state_transaction_in_progress`. Previously they blocked until that call
   finished, which could deadlock React Native. Retry after the other call
   finishes.
+- In the Rust-only SSE-assisted private intake API,
+  `PrivateIntakeConfig::max_event_bytes` must now be in 2048..=65536 bytes.
+  `start_private_intake` rejects a smaller limit, because the homeserver event
+  stream can send events of about 1.1 KB and a smaller limit would end the
+  stream on such an event.
 
 ### Fixed
 
+- `delete_pubky_profile` checks a stale revision before deleting anything, so it no longer leaves a social v1 identity's pubky.app copy deleted.
+- FFI-created Pubky clients use their configured HTTP PKARR relays without
+  direct DHT waits, reducing mobile profile signup latency. Initial identity
+  refresh runs in the existing app-publication storage operation. Signup,
+  publication, capability checks and their failures remain awaited.
+- `sync_private_payment_lists_with_reservations_and_process_outbound` in Rust
+  and `syncPrivatePaymentListsWithReservationsAndProcessOutbound` in Swift and
+  Kotlin no longer republish every unchanged Private Payment List after an SDK
+  restart. A restarted runtime reuses a sent list when the peer is linked, the
+  stored link state still matches the peer record, and the list was sent more
+  than five minutes after the peer's last link change or private receive.
+  Otherwise it republishes the list once, as before. A list
+  reused this way is not reported in `acknowledged`, because the restarted
+  runtime did not witness its delivery. The storage format is unchanged.
 - `sign_up` in Rust and `signUp` in Swift and Kotlin no longer move an identity
   to another homeserver. They fail with a policy error, before anything is sent
   to the homeserver or published, when the identity's homeserver record names a
@@ -88,6 +133,72 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   reached the app as an internal panic error that included the platform error
   text, and a throw from `SdkStateBlobStore` left that SDK handle failing every
   later call with `state_transaction_lock_poisoned`.
+- `resolve_public_payment_request` in Rust and `resolvePublicPaymentRequest` in
+  Swift, Kotlin and React Native now fail with a policy error for a blocked
+  counterparty, before its App Registry is read, instead of resolving its
+  Payment Request.
+- In the Rust-only SSE-assisted private intake API (`start_private_intake` and
+  `PrivateIntakeSupervisor`), one Linked Peer or pending Encrypted Link
+  Handshake peer with no resolvable Pubky homeserver no longer makes
+  `start_private_intake` fail for every peer, and no longer freezes a running
+  supervisor's peer set while marking every stream `Stale`. That peer reserves
+  no stream, is reported `Stale` in health, and is retried on each topology
+  refresh.
+- In the Rust-only SSE-assisted private intake API (`start_private_intake` and
+  `PrivateIntakeSupervisor`), new Private Application Messages from a Linked
+  Peer now arrive through the homeserver event stream, and Encrypted Link
+  Handshake progress from a pending peer is picked up from the stream as well.
+  Intake subscribed with a path filter that the homeserver treats as one exact
+  file, so the stream matched no private message, and new messages waited for
+  the healthy audit (60 seconds by default).
+- In the Rust-only SSE-assisted private intake API (`start_private_intake` and
+  `PrivateIntakeSupervisor`), after a packet arrives through the homeserver
+  event stream, intake now checks the Linked Peer's next expected slot at once.
+  Health reports `Replaying` while that check runs, then `CaughtUp` when the
+  next slot is absent or `Backpressured` when the check fills capacity. If the
+  check fails, health stays `Replaying` until the next event or audit. If the
+  stream stops before or during the check, intake drops the check's result
+  without updating health, still wakes consumers for packets the check buffered
+  or a pending handshake, and the next stream's startup audit settles the Linked
+  Peer. A stop during the check ends it before its next slot fetch, so
+  `stop()` waits only for the fetch in flight. A packet that itself fills the
+  Linked Peer's capacity reports `Backpressured` at once, and no check runs.
+  Packets written back to back are buffered together.
+  Previously health reported the Linked Peer as `Replaying` until the next
+  healthy audit. A drain woken by the packet can still report the `Replaying`
+  freshness it started with, and no further wakeup follows when the check
+  settles the Linked Peer, so read `PrivateIntakeSupervisor::health()` for the
+  current state.
+- In the Rust-only SSE-assisted private intake API, when the stored Encrypted
+  Link generation changes while intake fetches a Linked Peer's next expected
+  slot (for a live event, a healthy audit or the check after a live packet) and
+  buffers its packet or finds it absent, for example because the app drains a
+  packet, sends a private message, or advances a handshake, intake now retries
+  with the new generation, up to 8 attempts, before failing as before. An absent
+  slot no longer advances the cursor or reports `CaughtUp` after such a change.
+  Other failures, such as network errors or a packet that fails the buffer's
+  integrity checks, are not retried.
+- In the Rust-only SSE-assisted private intake API (`start_private_intake` and
+  `PrivateIntakeSupervisor`), a supervised peer (a Linked Peer or a peer with
+  a pending Encrypted Link Handshake) with no stored intake cursor no longer
+  replays its whole private-directory event history, one expected-slot
+  fetch per event, before live events arrive, when a newest-event request
+  succeeds; otherwise it replays from the beginning as before. Intake starts
+  from the newest event found by a recent request (reused across reconnects
+  within one topology epoch), and the startup audit reconciles earlier slots.
+  While that request is pending, the group keeps running expected-slot audits
+  (first after one second, then at the healthy audit cadence), which never
+  store a cursor. The storage format is unchanged.
+- In the Rust-only SSE-assisted private intake API (`start_private_intake` and
+  `PrivateIntakeSupervisor`), files a Linked Peer writes under its private
+  directory for other Encrypted Links (except Encrypted Link Handshake slots),
+  its Receipts, and deletes no longer each trigger an expected-slot fetch
+  inline in the stream loop. Before, a burst of such events could delay other
+  peers' packets and `stop()`, and an unrelated fetch error could mark the peer
+  `Stale`. Each acquisition refreshes the peer's read folder, so a recovered
+  link's new folder is followed from its next acquisition. Ignored events
+  advance the replay cursor after an audit that finds the peer's next expected
+  slot absent.
 
 ### Integration
 
@@ -134,6 +245,31 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   documentation on `proposePaymentRequest`, `submitPaymentProof`,
   `PaymentRequestTerms` and `PaymentProofSubmission`. Protocol errors have a new
   code value, `message_too_large`; apps that branch on codes should handle it.
+- The Pubky HTTP client verifies HTTPS hosts only against the `webpki-roots`
+  list, not the operating system trust store. If you use your own HTTPS
+  homeserver or auth relay, confirm its certificate chain ends in a root that
+  `webpki-roots` 1.0.11 still includes. A chain that ends only in a removed root
+  now fails TLS verification.
+- Rust integrators must update their own `Cargo.lock`, because Cargo ignores the
+  lockfile of a dependency. Confirm `webpki-roots` and `webpki-root-certs` resolve
+  to 1.0.10 or later and `rustls-webpki` to 0.103.16 or later. Swift, Kotlin and
+  React Native apps get these versions by updating to a release built from this
+  repository's lockfile.
+
+### Security
+
+- Update `rustls` from 0.23.45 to 0.23.46 for upstream TLS security fixes.
+  Swift, Kotlin and React Native apps need a release rebuilt with this version;
+  Rust integrators must update `rustls` in their own `Cargo.lock`.
+- Update `webpki-roots`, `webpki-root-certs` and `rustls-webpki` so the Pubky HTTP
+  client no longer trusts the distrusted emSign G3 certificate paths
+  (RUSTSEC-2026-0381, RUSTSEC-2026-0382, RUSTSEC-2026-0383). Requests that use
+  the platform verifier, such as pkarr relay lookups and grant logout over ICANN
+  HTTPS, keep following the operating system trust store on iOS and Android. The
+  `webpki-roots` update also brings upstream root store changes. It removes 22
+  roots in total, including `DigiCert Global Root CA`,
+  `COMODO Certification Authority`, `GTS Root R2`, `QuoVadis Root CA 2` and
+  `QuoVadis Root CA 3`, and adds SECOM TLS 2024 and Telia TLS v3 roots.
 
 ## [0.1.1-rc1] - 2026-10-20
 

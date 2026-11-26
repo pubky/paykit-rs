@@ -1992,6 +1992,14 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     func deletePaykitProfile(expectedRevision: String) async throws
 
     /**
+     * Delete this identity's Pubky app profile at the revision it was read at.
+     *
+     * An absent profile is already deleted; a changed one returns a
+     * concurrent-update error.
+     */
+    func deletePubkyProfile(expectedRevision: String) async throws
+
+    /**
      * Return tracked Encrypted Link recovery marker state for a counterparty.
      */
     func encryptedLinkRecoveryMarkerStatus(counterparty: String) async throws  -> EncryptedLinkRecoveryMarkerReport?
@@ -2074,6 +2082,11 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
      * Fetch a public Pubky app profile.
      */
     func fetchPubkyProfile(publicKey: String) async throws  -> PubkyProfileRecord?
+
+    /**
+     * Fetch a Pubky app profile with the revision of the exact bytes read.
+     */
+    func fetchPubkyProfileWithRevision(publicKey: String) async throws  -> PubkyProfileSnapshot?
 
     /**
      * Fetch a public Pubky UTF-8 text file up to `max_bytes`.
@@ -2355,6 +2368,17 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
      * returned by the preceding fetch or publication.
      */
     func publishPaykitProfile(profile: PaykitProfile, expectedRevision: String?) async throws  -> PaykitProfileRecord
+
+    /**
+     * Apply `update` to this identity's Pubky app profile.
+     *
+     * Only the named fields change; other stored keys are kept. Pass `None`
+     * to create the first profile, or the revision from
+     * `fetch_pubky_profile_with_revision`. A changed profile returns a
+     * concurrent-update error. The session must hold
+     * `pubky_app_profile_session_capabilities()`.
+     */
+    func publishPubkyProfile(update: PubkyProfileUpdate, expectedRevision: String?) async throws  -> PubkyProfileSnapshot
 
     /**
      * Publish a public Contact Marker for a Contact Record.
@@ -2809,6 +2833,11 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
      * Upload profile avatar bytes and return the published blob record.
      */
     func uploadProfileAvatar(bytes: Data, contentType: String) async throws  -> PaykitBlobRecord
+
+    /**
+     * Upload avatar bytes as a Pubky app blob and file and return the file URI.
+     */
+    func uploadPubkyAppAvatar(bytes: Data, contentType: String) async throws  -> String
 
 }
 /**
@@ -3660,6 +3689,29 @@ open func deletePaykitProfile(expectedRevision: String)async throws   {
 }
 
     /**
+     * Delete this identity's Pubky app profile at the revision it was read at.
+     *
+     * An absent profile is already deleted; a changed one returns a
+     * concurrent-update error.
+     */
+open func deletePubkyProfile(expectedRevision: String)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_delete_pubky_profile(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(expectedRevision)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_void,
+            completeFunc: ffi_paykit_rust_future_complete_void,
+            freeFunc: ffi_paykit_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypePaykitError_lift
+        )
+}
+
+    /**
      * Return tracked Encrypted Link recovery marker state for a counterparty.
      */
 open func encryptedLinkRecoveryMarkerStatus(counterparty: String)async throws  -> EncryptedLinkRecoveryMarkerReport?  {
@@ -3934,6 +3986,26 @@ open func fetchPubkyProfile(publicKey: String)async throws  -> PubkyProfileRecor
             completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
             freeFunc: ffi_paykit_rust_future_free_rust_buffer,
             liftFunc: FfiConverterOptionTypePubkyProfileRecord.lift,
+            errorHandler: FfiConverterTypePaykitError_lift
+        )
+}
+
+    /**
+     * Fetch a Pubky app profile with the revision of the exact bytes read.
+     */
+open func fetchPubkyProfileWithRevision(publicKey: String)async throws  -> PubkyProfileSnapshot?  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_fetch_pubky_profile_with_revision(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(publicKey)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterOptionTypePubkyProfileSnapshot.lift,
             errorHandler: FfiConverterTypePaykitError_lift
         )
 }
@@ -4790,6 +4862,32 @@ open func publishPaykitProfile(profile: PaykitProfile, expectedRevision: String?
             completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
             freeFunc: ffi_paykit_rust_future_free_rust_buffer,
             liftFunc: FfiConverterTypePaykitProfileRecord_lift,
+            errorHandler: FfiConverterTypePaykitError_lift
+        )
+}
+
+    /**
+     * Apply `update` to this identity's Pubky app profile.
+     *
+     * Only the named fields change; other stored keys are kept. Pass `None`
+     * to create the first profile, or the revision from
+     * `fetch_pubky_profile_with_revision`. A changed profile returns a
+     * concurrent-update error. The session must hold
+     * `pubky_app_profile_session_capabilities()`.
+     */
+open func publishPubkyProfile(update: PubkyProfileUpdate, expectedRevision: String?)async throws  -> PubkyProfileSnapshot  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_publish_pubky_profile(
+                    self.uniffiClonePointer(),
+                    FfiConverterTypePubkyProfileUpdate_lower(update),FfiConverterOptionString.lower(expectedRevision)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypePubkyProfileSnapshot_lift,
             errorHandler: FfiConverterTypePaykitError_lift
         )
 }
@@ -6029,6 +6127,26 @@ open func uploadProfileAvatar(bytes: Data, contentType: String)async throws  -> 
             completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
             freeFunc: ffi_paykit_rust_future_free_rust_buffer,
             liftFunc: FfiConverterTypePaykitBlobRecord_lift,
+            errorHandler: FfiConverterTypePaykitError_lift
+        )
+}
+
+    /**
+     * Upload avatar bytes as a Pubky app blob and file and return the file URI.
+     */
+open func uploadPubkyAppAvatar(bytes: Data, contentType: String)async throws  -> String  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_upload_pubky_app_avatar(
+                    self.uniffiClonePointer(),
+                    FfiConverterData.lower(bytes),FfiConverterString.lower(contentType)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterString.lift,
             errorHandler: FfiConverterTypePaykitError_lift
         )
 }
@@ -18651,6 +18769,9 @@ public func FfiConverterTypePubkyAuthDetails_lower(_ value: PubkyAuthDetails) ->
 
 /**
  * Pubky client configuration owned by the binding layer.
+ *
+ * Identity records use HTTP PKARR relays, including on local testnets. Clients do
+ * not connect directly to the DHT; successful publication still awaits the relay.
  */
 public struct PubkyClientConfig {
     /**
@@ -19199,6 +19320,239 @@ public func FfiConverterTypePubkyProfileRecord_lift(_ buf: RustBuffer) throws ->
 #endif
 public func FfiConverterTypePubkyProfileRecord_lower(_ value: PubkyProfileRecord) -> RustBuffer {
     return FfiConverterTypePubkyProfileRecord.lower(value)
+}
+
+
+/**
+ * Pubky app profile with the revision of the exact bytes it was read from.
+ */
+public struct PubkyProfileSnapshot {
+    /**
+     * Profile owner.
+     */
+    public var publicKey: String
+    /**
+     * Public profile metadata.
+     */
+    public var profile: PubkyProfile
+    /**
+     * Content fingerprint to pass back when publishing an update.
+     */
+    public var revision: String
+    /**
+     * Local observation or publication time as RFC3339 text.
+     */
+    public var fetchedAt: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Profile owner.
+         */publicKey: String,
+        /**
+         * Public profile metadata.
+         */profile: PubkyProfile,
+        /**
+         * Content fingerprint to pass back when publishing an update.
+         */revision: String,
+        /**
+         * Local observation or publication time as RFC3339 text.
+         */fetchedAt: String) {
+        self.publicKey = publicKey
+        self.profile = profile
+        self.revision = revision
+        self.fetchedAt = fetchedAt
+    }
+}
+
+#if compiler(>=6)
+extension PubkyProfileSnapshot: Sendable {}
+#endif
+
+
+extension PubkyProfileSnapshot: Equatable, Hashable {
+    public static func ==(lhs: PubkyProfileSnapshot, rhs: PubkyProfileSnapshot) -> Bool {
+        if lhs.publicKey != rhs.publicKey {
+            return false
+        }
+        if lhs.profile != rhs.profile {
+            return false
+        }
+        if lhs.revision != rhs.revision {
+            return false
+        }
+        if lhs.fetchedAt != rhs.fetchedAt {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(publicKey)
+        hasher.combine(profile)
+        hasher.combine(revision)
+        hasher.combine(fetchedAt)
+    }
+}
+
+extension PubkyProfileSnapshot: Codable {}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePubkyProfileSnapshot: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PubkyProfileSnapshot {
+        return
+            try PubkyProfileSnapshot(
+                publicKey: FfiConverterString.read(from: &buf),
+                profile: FfiConverterTypePubkyProfile.read(from: &buf),
+                revision: FfiConverterString.read(from: &buf),
+                fetchedAt: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PubkyProfileSnapshot, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.publicKey, into: &buf)
+        FfiConverterTypePubkyProfile.write(value.profile, into: &buf)
+        FfiConverterString.write(value.revision, into: &buf)
+        FfiConverterString.write(value.fetchedAt, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePubkyProfileSnapshot_lift(_ buf: RustBuffer) throws -> PubkyProfileSnapshot {
+    return try FfiConverterTypePubkyProfileSnapshot.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePubkyProfileSnapshot_lower(_ value: PubkyProfileSnapshot) -> RustBuffer {
+    return FfiConverterTypePubkyProfileSnapshot.lower(value)
+}
+
+
+/**
+ * Changes to apply to the identity's Pubky app profile.
+ *
+ * `None` keeps the stored value. An empty `bio` or `image`, or empty `links`,
+ * removes that field. `status` and keys added by other apps are always kept.
+ */
+public struct PubkyProfileUpdate {
+    /**
+     * New display name.
+     */
+    public var name: String?
+    /**
+     * New bio.
+     */
+    public var bio: String?
+    /**
+     * New image URI, normally one returned by `upload_pubky_app_avatar`.
+     */
+    public var image: String?
+    /**
+     * New links, replacing the stored list.
+     */
+    public var links: [PubkyProfileLink]?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * New display name.
+         */name: String?,
+        /**
+         * New bio.
+         */bio: String?,
+        /**
+         * New image URI, normally one returned by `upload_pubky_app_avatar`.
+         */image: String?,
+        /**
+         * New links, replacing the stored list.
+         */links: [PubkyProfileLink]?) {
+        self.name = name
+        self.bio = bio
+        self.image = image
+        self.links = links
+    }
+}
+
+#if compiler(>=6)
+extension PubkyProfileUpdate: Sendable {}
+#endif
+
+
+extension PubkyProfileUpdate: Equatable, Hashable {
+    public static func ==(lhs: PubkyProfileUpdate, rhs: PubkyProfileUpdate) -> Bool {
+        if lhs.name != rhs.name {
+            return false
+        }
+        if lhs.bio != rhs.bio {
+            return false
+        }
+        if lhs.image != rhs.image {
+            return false
+        }
+        if lhs.links != rhs.links {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(name)
+        hasher.combine(bio)
+        hasher.combine(image)
+        hasher.combine(links)
+    }
+}
+
+extension PubkyProfileUpdate: Codable {}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePubkyProfileUpdate: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PubkyProfileUpdate {
+        return
+            try PubkyProfileUpdate(
+                name: FfiConverterOptionString.read(from: &buf),
+                bio: FfiConverterOptionString.read(from: &buf),
+                image: FfiConverterOptionString.read(from: &buf),
+                links: FfiConverterOptionSequenceTypeFfiPubkyProfileLink.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PubkyProfileUpdate, into buf: inout [UInt8]) {
+        FfiConverterOptionString.write(value.name, into: &buf)
+        FfiConverterOptionString.write(value.bio, into: &buf)
+        FfiConverterOptionString.write(value.image, into: &buf)
+        FfiConverterOptionSequenceTypeFfiPubkyProfileLink.write(value.links, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePubkyProfileUpdate_lift(_ buf: RustBuffer) throws -> PubkyProfileUpdate {
+    return try FfiConverterTypePubkyProfileUpdate.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePubkyProfileUpdate_lower(_ value: PubkyProfileUpdate) -> RustBuffer {
+    return FfiConverterTypePubkyProfileUpdate.lower(value)
 }
 
 
@@ -20370,7 +20724,9 @@ public struct ReceiptIssuanceView {
      */
     public var createdAt: String
     /**
-     * Last status update time as RFC3339 text.
+     * Last change to the issuance or its Receipt Access delivery as RFC3339
+     * text: each delivery attempt, failure, recovery requeue, publication or
+     * Delivery Confirmation moves it, and it never moves backwards.
      */
     public var updatedAt: String
     /**
@@ -20381,6 +20737,11 @@ public struct ReceiptIssuanceView {
      * Time Receipt Access was queued for private delivery as RFC3339 text.
      */
     public var accessQueuedAt: String?
+    /**
+     * Last storage, queueing or Receipt Access delivery error. While the
+     * status stays `AccessQueued`, the outbound queue retries delivery.
+     */
+    public var lastError: String?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -20422,14 +20783,20 @@ public struct ReceiptIssuanceView {
          * Creation time as RFC3339 text.
          */createdAt: String,
         /**
-         * Last status update time as RFC3339 text.
+         * Last change to the issuance or its Receipt Access delivery as RFC3339
+         * text: each delivery attempt, failure, recovery requeue, publication or
+         * Delivery Confirmation moves it, and it never moves backwards.
          */updatedAt: String,
         /**
          * Time the Encrypted Receipt was stored as RFC3339 text.
          */storedAt: String?,
         /**
          * Time Receipt Access was queued for private delivery as RFC3339 text.
-         */accessQueuedAt: String?) {
+         */accessQueuedAt: String?,
+        /**
+         * Last storage, queueing or Receipt Access delivery error. While the
+         * status stays `AccessQueued`, the outbound queue retries delivery.
+         */lastError: String?) {
         self.counterparty = counterparty
         self.appId = appId
         self.receiptId = receiptId
@@ -20445,6 +20812,7 @@ public struct ReceiptIssuanceView {
         self.updatedAt = updatedAt
         self.storedAt = storedAt
         self.accessQueuedAt = accessQueuedAt
+        self.lastError = lastError
     }
 }
 
@@ -20475,7 +20843,8 @@ public struct FfiConverterTypeReceiptIssuanceView: FfiConverterRustBuffer {
                 createdAt: FfiConverterString.read(from: &buf),
                 updatedAt: FfiConverterString.read(from: &buf),
                 storedAt: FfiConverterOptionString.read(from: &buf),
-                accessQueuedAt: FfiConverterOptionString.read(from: &buf)
+                accessQueuedAt: FfiConverterOptionString.read(from: &buf),
+                lastError: FfiConverterOptionString.read(from: &buf)
         )
     }
 
@@ -20495,6 +20864,7 @@ public struct FfiConverterTypeReceiptIssuanceView: FfiConverterRustBuffer {
         FfiConverterString.write(value.updatedAt, into: &buf)
         FfiConverterOptionString.write(value.storedAt, into: &buf)
         FfiConverterOptionString.write(value.accessQueuedAt, into: &buf)
+        FfiConverterOptionString.write(value.lastError, into: &buf)
     }
 }
 
@@ -24568,6 +24938,15 @@ public enum ReceiptIssuanceStatus {
      */
     case failed
     /**
+     * Receipt Access was published to the counterparty.
+     */
+    case accessSent
+    /**
+     * Receipt Access delivery stopped without automatic retry; `last_error`
+     * carries the failure. Recovering the Encrypted Link queues it again.
+     */
+    case accessFailed
+    /**
      * SDK returned a value this binding version does not understand.
      */
     case unknown
@@ -24596,7 +24975,11 @@ public struct FfiConverterTypeReceiptIssuanceStatus: FfiConverterRustBuffer {
 
         case 4: return .failed
 
-        case 5: return .unknown
+        case 5: return .accessSent
+
+        case 6: return .accessFailed
+
+        case 7: return .unknown
 
         default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -24622,8 +25005,16 @@ public struct FfiConverterTypeReceiptIssuanceStatus: FfiConverterRustBuffer {
             writeInt(&buf, Int32(4))
 
 
-        case .unknown:
+        case .accessSent:
             writeInt(&buf, Int32(5))
+
+
+        case .accessFailed:
+            writeInt(&buf, Int32(6))
+
+
+        case .unknown:
+            writeInt(&buf, Int32(7))
 
         }
     }
@@ -25893,6 +26284,30 @@ fileprivate struct FfiConverterOptionTypePubkyProfileRecord: FfiConverterRustBuf
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypePubkyProfileSnapshot: FfiConverterRustBuffer {
+    typealias SwiftType = PubkyProfileSnapshot?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypePubkyProfileSnapshot.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypePubkyProfileSnapshot.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeReceiptAmount: FfiConverterRustBuffer {
     typealias SwiftType = ReceiptAmount?
 
@@ -26125,6 +26540,30 @@ fileprivate struct FfiConverterOptionSequenceString: FfiConverterRustBuffer {
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterSequenceString.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionSequenceTypeFfiPubkyProfileLink: FfiConverterRustBuffer {
+    typealias SwiftType = [PubkyProfileLink]?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterSequenceTypePubkyProfileLink.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterSequenceTypePubkyProfileLink.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -27534,6 +27973,18 @@ public func paymentProofEventLen(localAppId: String, paymentReference: PaymentRe
 })
 }
 /**
+ * Session capabilities needed to write the Pubky app profile and its avatar.
+ *
+ * Apps that edit the shared Pubky app profile add these to their own session
+ * scope.
+ */
+public func pubkyAppProfileSessionCapabilities() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_paykit_fn_func_pubky_app_profile_session_capabilities($0
+    )
+})
+}
+/**
  * Return the Pubky public key for a local secret key.
  */
 public func pubkyPublicKeyFromSecret(localSecretKey: PubkyLocalSecretKey)throws  -> String  {
@@ -27649,6 +28100,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_func_payment_proof_event_len() != 55765) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_func_pubky_app_profile_session_capabilities() != 22590) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_func_pubky_public_key_from_secret() != 41462) {
@@ -27819,6 +28273,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_delete_paykit_profile() != 39915) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_delete_pubky_profile() != 47720) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_encrypted_link_recovery_marker_status() != 21009) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -27856,6 +28313,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_fetch_pubky_profile() != 60331) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_fetch_pubky_profile_with_revision() != 63813) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_fetch_pubky_text() != 46340) {
@@ -27973,6 +28433,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_publish_paykit_profile() != 23202) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_publish_pubky_profile() != 24640) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_publish_public_contact() != 11776) {
@@ -28132,6 +28595,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_upload_profile_avatar() != 49965) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_upload_pubky_app_avatar() != 9999) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaymentpayload_export_text() != 53824) {

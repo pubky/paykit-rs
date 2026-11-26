@@ -370,11 +370,20 @@ Snapshot bytes include sensitive key material and must be treated as secrets (st
 Durable runtimes should use
 `EncryptedLink::prepare_private_application_message_json`, persist the exact
 ciphertext and resulting snapshot together, acknowledge the prepared send, and
-then call `publish_prepared_private_application_message`. On receive, use
+then call `publish_prepared_private_application_message`. Before each publish,
+check the destination with `prepared_private_send_slot`. `Published` means the
+same ciphertext is already stored, so treat the send as complete. `Taken` means
+the slot holds another packet: drop the prepared ciphertext, call
+`skip_published_write_slots`, persist the resulting snapshot, and prepare the
+message again. Never publish into a `Taken` slot. A runtime that restores link
+state can instead call `skip_published_write_slots` before its first
+preparation and persist the resulting snapshot; a send prepared next, at
+`next_write_slot_path`, needs no second check. On receive, use
 `prepare_next_private_application_message`, persist the plaintext application
 result and resulting snapshot together, and only then call
 `acknowledge_persisted_private_receive`. The SDK runtime implements this staged
-flow; the direct stateless send helpers remain convenience APIs.
+flow; the direct stateless send helpers remain convenience APIs. Before they
+encrypt, they move the link past write slots that already hold packets.
 
 All Private Application Messages share one ordered encrypted stream and carry a
 source `app_id`. Use `EncryptedLink::receive_private_application_messages` when

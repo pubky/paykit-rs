@@ -54,8 +54,8 @@ pub use encrypted_link::{
     EncryptedLinkHandshake, EncryptedLinkHandshakeSnapshot, EncryptedLinkRecoveryContext,
     EncryptedLinkSnapshot, HandshakeAdvanceError, HandshakeProgress,
     PreparedEncryptedLinkHandshakeStep, PreparedPrivateApplicationMessageReceive,
-    PreparedPrivateApplicationMessageSend, PrivateApplicationMessage, PrivateMessageKind,
-    DEFAULT_MAX_RECOVERY_ATTEMPTS, DEFAULT_MAX_SEND_RETRIES,
+    PreparedPrivateApplicationMessageSend, PreparedPrivateSendSlot, PrivateApplicationMessage,
+    PrivateMessageKind, DEFAULT_MAX_RECOVERY_ATTEMPTS, DEFAULT_MAX_SEND_RETRIES,
     PRIVATE_APPLICATION_MESSAGE_RECEIVE_LIMIT,
 };
 #[doc(inline)]

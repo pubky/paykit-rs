@@ -2,7 +2,7 @@
 
 use std::{collections::HashMap, fmt};
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use sha2::{Digest, Sha256};
 
 use crate::{
@@ -18,7 +18,7 @@ use crate::{
         PaymentEndpointReservationRecord, PeerLinkOperationLease, StorageAdapter,
         StorageTransaction,
     },
-    PaykitSdkError, PubkyPublicKey, Result,
+    LinkedPeerState, PaykitSdkError, PubkyPublicKey, Result,
 };
 use paykit_lib::{
     parse_private_payment_list_json, serialize_private_payment_list_json, PaykitAppId,
@@ -30,6 +30,56 @@ const MAX_RESERVATION_ID_LEN: usize = 128;
 pub(crate) enum PrivatePaymentListQueuePolicy {
     Always,
     Sync { sent_message_id: Option<u64> },
+}
+
+/// Clock difference tolerated between Paykit Apps that share one identity's
+/// state. Their clocks stamp `sent_at` and `last_sync_at` independently.
+const PRIVATE_PAYMENT_LIST_REUSE_CLOCK_MARGIN: ChronoDuration = ChronoDuration::minutes(5);
+
+fn latest_private_payment_list(
+    tx: &dyn StorageTransaction,
+    counterparty: &PubkyPublicKey,
+    app_id: &PaykitAppId,
+) -> Option<OutboundPrivateMessageRecord> {
+    tx.outbound_private_messages(counterparty)
+        .into_iter()
+        .filter(|message| {
+            message.app_id == *app_id
+                && message.kind == PrivateMessageKind::PrivatePaymentList.as_str()
+        })
+        .max_by_key(|message| message.outbound_message_id)
+}
+
+/// Return the latest sent Private Payment List from `app_id` when durable state
+/// shows it was published after the last Encrypted Link change.
+///
+/// This lets a restarted runtime reuse an unchanged list without a stored
+/// delivery witness. `last_sync_at` advances whenever the peer's link state
+/// changes (establishment, recovery, block, unblock) and on private receives,
+/// so a list sent later than that, by more than the clock margin, went out on
+/// the current Encrypted Link. Receives make the check conservative: a list
+/// sent before one is republished once instead of reused. The caller must
+/// confirm that the current link snapshot still matches the stored peer
+/// record, because reuse skips the outbound restore that would check it.
+pub(crate) fn private_payment_list_sent_after_last_link_change(
+    tx: &dyn StorageTransaction,
+    counterparty: &PubkyPublicKey,
+    app_id: &PaykitAppId,
+) -> Option<u64> {
+    let peer = tx.linked_peer(counterparty)?;
+    if peer.state != LinkedPeerState::Linked {
+        return None;
+    }
+    let last_link_change = peer.last_sync_at?;
+    let latest = latest_private_payment_list(tx, counterparty, app_id)?;
+    if latest.status != OutboundPrivateMessageStatus::Sent {
+        return None;
+    }
+    // Recovery requeues clear `sent_at`, so it always names a publication made
+    // after the message last returned to the retry path.
+    let sent_at = latest.sent_at?;
+    (sent_at > last_link_change + PRIVATE_PAYMENT_LIST_REUSE_CLOCK_MARGIN)
+        .then_some(latest.outbound_message_id)
 }
 
 /// SDK cleanup record for a reserved endpoint tied to a queued private list.
@@ -288,17 +338,9 @@ pub(crate) fn queue_private_payment_list_with_reservations_in_transaction(
 
     if let PrivatePaymentListQueuePolicy::Sync { sent_message_id } = policy {
         // Pending, sending, and failed messages remain on the retry path, so
-        // they can be reused. A sent message is reusable only when this
-        // runtime witnessed its delivery on the current Encrypted Link.
-        let latest = tx
-            .outbound_private_messages(&counterparty)
-            .into_iter()
-            .filter(|message| {
-                message.app_id == message_app_id
-                    && message.kind == PrivateMessageKind::PrivatePaymentList.as_str()
-            })
-            .max_by_key(|message| message.outbound_message_id);
-        if let Some(message) = latest {
+        // they can be reused. A sent message is reusable only when the caller
+        // showed it was delivered on the current Encrypted Link.
+        if let Some(message) = latest_private_payment_list(tx, &counterparty, &message_app_id) {
             let reusable = match message.status {
                 OutboundPrivateMessageStatus::Pending
                 | OutboundPrivateMessageStatus::Sending

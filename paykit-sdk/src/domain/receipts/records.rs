@@ -2,7 +2,8 @@ use std::fmt;
 
 use chrono::{DateTime, Utc};
 use paykit_lib::{
-    serialize_receipt_access_json, PaykitAppId, PreparedReceipt, Receipt, ReceiptAccess,
+    serialize_receipt_access_json, PaykitAppId, PreparedReceipt, PrivateMessageKind, Receipt,
+    ReceiptAccess,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
@@ -10,7 +11,8 @@ use serde_json::{Map as JsonMap, Value as JsonValue};
 use super::access::receipt_access_key_hash;
 use crate::{
     domain::records::{AmountRecord, BillingPeriodRecord},
-    PubkyPublicKey, Result,
+    storage::OutboundPrivateMessageRecord,
+    OutboundPrivateMessageStatus, PubkyPublicKey, Result,
 };
 
 /// Receipt retrieval state for an indexed Receipt Access event.
@@ -42,6 +44,19 @@ pub enum ReceiptIssuanceStatus {
     AccessQueued,
     /// Last storage or queueing attempt failed.
     Failed,
+    /// Receipt Access was published to the counterparty.
+    ///
+    /// Read APIs derive this from the outbound private message that carries
+    /// Receipt Access; it is never stored on the issuance record, which stays
+    /// `AccessQueued`. Publication does not prove the peer read it yet.
+    AccessSent,
+    /// Receipt Access delivery stopped without automatic retry.
+    ///
+    /// The outbound message was found invalid, or its Encrypted Link needs
+    /// recovery. `last_error` carries the failure. Like `AccessSent`, it is
+    /// derived on read and never stored. Recovering the Encrypted Link queues
+    /// the message again, after which the status can move to `AccessSent`.
+    AccessFailed,
 }
 
 /// Durable local state for issuing one receipt.
@@ -233,12 +248,19 @@ pub struct ReceiptIssuanceView {
     pub outbound_message_id: Option<u64>,
     /// Creation time.
     pub created_at: DateTime<Utc>,
-    /// Last status update time.
+    /// Last change to the issuance or its Receipt Access delivery: each
+    /// delivery attempt, failure, recovery requeue, publication or Delivery
+    /// Confirmation moves it, and it never moves backwards.
     pub updated_at: DateTime<Utc>,
     /// Time the Encrypted Receipt was stored.
     pub stored_at: Option<DateTime<Utc>>,
     /// Time Receipt Access was queued for private delivery.
     pub access_queued_at: Option<DateTime<Utc>>,
+    /// Last storage, queueing or Receipt Access delivery error.
+    ///
+    /// While the status stays `AccessQueued`, this is the last failed delivery
+    /// attempt, which the outbound queue retries.
+    pub last_error: Option<String>,
 }
 
 impl fmt::Debug for ReceiptIssuanceView {
@@ -262,7 +284,59 @@ impl fmt::Debug for ReceiptIssuanceView {
             .field("updated_at", &self.updated_at)
             .field("stored_at", &self.stored_at)
             .field("access_queued_at", &self.access_queued_at)
+            .field(
+                "last_error",
+                &self
+                    .last_error
+                    .as_ref()
+                    .map(|error| format!("<redacted:{} bytes>", error.len())),
+            )
             .finish()
+    }
+}
+
+impl ReceiptIssuanceView {
+    /// Build the view with Receipt Access delivery read from the outbound
+    /// private message that carries it.
+    ///
+    /// `outbound` is the message stored under the record's
+    /// `outbound_message_id`, if any; it is used only when its counterparty
+    /// and Receipt Access kind match. A missing message leaves the stored
+    /// status.
+    pub(crate) fn with_access_delivery(
+        record: &ReceiptIssuanceRecord,
+        outbound: Option<&OutboundPrivateMessageRecord>,
+    ) -> Self {
+        let mut view = Self::from(record);
+        if record.status != ReceiptIssuanceStatus::AccessQueued {
+            return view;
+        }
+        let Some(message) = outbound.filter(|message| {
+            Some(message.outbound_message_id) == record.outbound_message_id
+                && message.counterparty == record.counterparty
+                && message.kind == PrivateMessageKind::ReceiptAccess.as_str()
+        }) else {
+            return view;
+        };
+        // Every outbound transition keeps `updated_at` from moving backwards,
+        // so it is the delivery time for every status shown here.
+        view.updated_at = view.updated_at.max(message.updated_at);
+        // `sent_at` survives a later failed retry of an unconfirmed event, so
+        // it, not `status`, tells whether Receipt Access was published. A
+        // Delivery Confirmation proves delivery even when an ambiguous
+        // publication left `sent_at` empty.
+        if message.sent_at.is_some() || message.confirmed_at.is_some() {
+            view.status = ReceiptIssuanceStatus::AccessSent;
+            return view;
+        }
+        view.last_error = message.last_error.clone();
+        if matches!(
+            message.status,
+            OutboundPrivateMessageStatus::Invalid | OutboundPrivateMessageStatus::RecoveryRequired
+        ) {
+            view.status = ReceiptIssuanceStatus::AccessFailed;
+        }
+        view
     }
 }
 
@@ -284,6 +358,7 @@ impl From<&ReceiptIssuanceRecord> for ReceiptIssuanceView {
             updated_at: record.updated_at,
             stored_at: record.stored_at,
             access_queued_at: record.access_queued_at,
+            last_error: record.last_error.clone(),
         }
     }
 }

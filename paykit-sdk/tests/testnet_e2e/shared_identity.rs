@@ -1,5 +1,6 @@
 use std::{
     any::Any,
+    collections::HashMap,
     future::pending,
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -12,8 +13,9 @@ use std::{
 use async_trait::async_trait;
 use chrono::{SecondsFormat, Utc};
 use paykit_lib::{
-    BillingPeriod, PaymentAmount, PaymentEndpointIdentifier, PaymentReference, PaymentRequestId,
-    PaymentRequestTerms, PaymentRequestTermsBuilder, Recurrence, RecurrenceConfig, RecurrenceUnit,
+    BillingPeriod, PaymentAmount, PaymentEndpointIdentifier, PaymentEndpointPayload,
+    PaymentReference, PaymentRequestId, PaymentRequestTerms, PaymentRequestTermsBuilder, ReceiptId,
+    Recurrence, RecurrenceConfig, RecurrenceUnit,
 };
 use paykit_sdk::{
     storage::{StorageOperation, StorageTransactionCallback},
@@ -330,9 +332,14 @@ async fn test_pubky_shared_state_is_visible_to_independent_apps_and_survives_sig
     assert_no_pending_shared_state_writes(&server_session).await;
 }
 
+tokio::task_local! {
+    static COUNTED_STORAGE_OPERATION: ();
+}
+
 struct CountedStorage {
     inner: PubkySharedStateStorage,
     operations: Arc<AtomicUsize>,
+    unbatched_transactions: Arc<AtomicUsize>,
     transactions: Arc<AtomicUsize>,
     commits: Arc<AtomicUsize>,
     reject_next_transaction: Arc<AtomicBool>,
@@ -345,7 +352,9 @@ impl StorageAdapter for CountedStorage {
         operation: StorageOperation<'a>,
     ) -> PaykitResult<Box<dyn Any + Send>> {
         self.operations.fetch_add(1, Ordering::SeqCst);
-        self.inner.run_operation_erased(operation).await
+        COUNTED_STORAGE_OPERATION
+            .scope((), self.inner.run_operation_erased(operation))
+            .await
     }
 
     async fn transaction_erased<'a>(
@@ -353,6 +362,9 @@ impl StorageAdapter for CountedStorage {
         f: StorageTransactionCallback<'a>,
     ) -> PaykitResult<Box<dyn Any + Send>> {
         self.transactions.fetch_add(1, Ordering::SeqCst);
+        if COUNTED_STORAGE_OPERATION.try_with(|_| ()).is_err() {
+            self.unbatched_transactions.fetch_add(1, Ordering::SeqCst);
+        }
         if self.reject_next_transaction.swap(false, Ordering::SeqCst) {
             return Err(PaykitSdkError::ConcurrentUpdate {
                 context: "shared-state transaction conflict".into(),
@@ -416,6 +428,7 @@ async fn test_private_message_scheduling_snapshot_reads_once_and_observes_shared
         CountedStorage {
             inner: pair.bitkit.storage.clone(),
             operations: operations.clone(),
+            unbatched_transactions: Arc::new(AtomicUsize::new(0)),
             transactions: transactions.clone(),
             commits: commits.clone(),
             reject_next_transaction: Arc::new(AtomicBool::new(false)),
@@ -514,6 +527,7 @@ async fn test_payment_execution_shared_operations() {
         CountedStorage {
             inner: pair.bitkit.storage.clone(),
             operations: operations.clone(),
+            unbatched_transactions: Arc::new(AtomicUsize::new(0)),
             transactions: transactions.clone(),
             commits: commits.clone(),
             reject_next_transaction: Arc::new(AtomicBool::new(false)),
@@ -793,6 +807,7 @@ async fn test_request_preparation_preserves_confirmation_for_restart() {
         CountedStorage {
             inner: pair.bitkit.storage.clone(),
             operations: Arc::new(AtomicUsize::new(0)),
+            unbatched_transactions: Arc::new(AtomicUsize::new(0)),
             transactions: transactions.clone(),
             commits: commits.clone(),
             reject_next_transaction: Arc::new(AtomicBool::new(false)),
@@ -1481,6 +1496,7 @@ async fn test_wallet_reservation_cleanup_does_not_hold_shared_state_lock() {
 async fn test_shared_operations_transaction_counts() {
     let pair = linked_homeserver_shared_pair().await;
     let operations = Arc::new(AtomicUsize::new(0));
+    let unbatched_transactions = Arc::new(AtomicUsize::new(0));
     let transactions = Arc::new(AtomicUsize::new(0));
     let commits = Arc::new(AtomicUsize::new(0));
     let reject_next_transaction = Arc::new(AtomicBool::new(false));
@@ -1488,6 +1504,7 @@ async fn test_shared_operations_transaction_counts() {
         CountedStorage {
             inner: pair.bitkit.storage.clone(),
             operations: operations.clone(),
+            unbatched_transactions: unbatched_transactions.clone(),
             transactions: transactions.clone(),
             commits: commits.clone(),
             reject_next_transaction: reject_next_transaction.clone(),
@@ -1641,9 +1658,11 @@ async fn test_shared_operations_transaction_counts() {
     let before_publication = pair.bitkit.storage_state().await;
     let revision = pair.bitkit.storage.last_revision().unwrap();
     commits.store(0, Ordering::SeqCst);
+    unbatched_transactions.store(0, Ordering::SeqCst);
     sdk.publish_paykit_app(test_app("Bitkit")).await.unwrap();
     let unchanged_transactions = transactions.swap(0, Ordering::SeqCst);
     assert_eq!(unchanged_transactions, 2);
+    assert_eq!(unbatched_transactions.swap(0, Ordering::SeqCst), 0);
     assert_eq!(commits.swap(0, Ordering::SeqCst), 0);
     assert_eq!(pair.bitkit.storage.last_revision().unwrap(), revision);
     assert_eq!(pair.bitkit.storage_state().await, before_publication);
@@ -1657,6 +1676,7 @@ async fn test_shared_operations_transaction_counts() {
     let downgrade_commits = commits.swap(0, Ordering::SeqCst);
     assert_eq!(downgrade_commits, 2);
     assert_eq!(downgrade_transactions, 6);
+    assert_eq!(unbatched_transactions.swap(0, Ordering::SeqCst), 0);
     assert_eq!(
         registry
             .apps()
@@ -2187,6 +2207,7 @@ async fn test_idle_polling_reads_shared_state_once_without_rewriting_it() {
             CountedStorage {
                 inner: user.storage.clone(),
                 operations: Arc::new(AtomicUsize::new(0)),
+                unbatched_transactions: Arc::new(AtomicUsize::new(0)),
                 transactions: transactions.clone(),
                 commits: Arc::new(AtomicUsize::new(0)),
                 reject_next_transaction: Arc::new(AtomicBool::new(false)),
@@ -4023,6 +4044,175 @@ async fn test_private_sends_survive_restart_at_checkpoint_and_publish_boundaries
 }
 
 #[tokio::test]
+async fn test_private_send_after_older_shared_state_copy_uses_next_free_slot() {
+    /// Records the destination of each prepared send a transaction stores.
+    struct PreparedSendRecorder {
+        inner: PubkySharedStateStorage,
+        destinations: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl StorageAdapter for PreparedSendRecorder {
+        async fn run_operation_erased<'a>(
+            &self,
+            operation: StorageOperation<'a>,
+        ) -> PaykitResult<Box<dyn Any + Send>> {
+            self.inner.run_operation_erased(operation).await
+        }
+
+        async fn transaction_erased<'a>(
+            &self,
+            transaction: StorageTransactionCallback<'a>,
+        ) -> PaykitResult<Box<dyn Any + Send>> {
+            let destinations = Arc::clone(&self.destinations);
+            self.inner
+                .transaction_erased(Box::new(move |tx| {
+                    let before = tx.export_storage_state();
+                    let result = transaction(tx)?;
+                    for message in tx.export_storage_state().outbound_private_messages {
+                        let Some(prepared) = message.prepared_send else {
+                            continue;
+                        };
+                        let stored_before = before.outbound_private_messages.iter().any(|old| {
+                            old.outbound_message_id == message.outbound_message_id
+                                && old.prepared_send.is_some()
+                        });
+                        if !stored_before {
+                            destinations.lock().unwrap().push(prepared.destination_path);
+                        }
+                    }
+                    Ok(result)
+                }))
+                .await
+        }
+    }
+
+    let pair = linked_homeserver_shared_pair().await;
+    let remote = pair.bitkit.access.session.storage();
+    let destinations = Arc::new(Mutex::new(Vec::new()));
+    let provider = TestnetSessionProvider::new(pair.bitkit.access.clone());
+    let sdk = PaykitSdk::new(
+        PreparedSendRecorder {
+            inner: PubkySharedStateStorage::new(provider.clone()),
+            destinations: Arc::clone(&destinations),
+        },
+        provider,
+        TestnetPaymentAdapter::default(),
+        PaykitSdkConfig::new(pair.bitkit.app_id.clone()).unwrap(),
+    );
+    let older = remote
+        .get(paykit_lib::PAYKIT_SHARED_STATE_PATH)
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+    let first = pair
+        .bitkit
+        .sdk
+        .propose_payment_request(pair.bob.public_key.clone(), recurring_request_terms())
+        .await
+        .unwrap();
+    let first_id = first.proposal_outbound_message_id.unwrap();
+    let report = sdk
+        .process_outbound_private_messages(pair.bob.public_key.clone())
+        .await
+        .unwrap();
+    assert_eq!(report.sent, vec![first_id]);
+    let used_slot = destinations.lock().unwrap().clone();
+    assert_eq!(used_slot.len(), 1);
+    let used_slot = used_slot[0].clone();
+    let used_packet = remote
+        .get(used_slot.as_str())
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+
+    // Write back the earlier copy of the whole state, so outbound records,
+    // receive positions and link state go back together.
+    remote
+        .put(paykit_lib::PAYKIT_SHARED_STATE_PATH, older)
+        .await
+        .unwrap();
+    let restored = pair.bitkit.storage_state().await;
+    assert!(!restored
+        .outbound_private_messages
+        .iter()
+        .any(|message| message.outbound_message_id == first_id));
+
+    let second = pair
+        .bitkit
+        .sdk
+        .propose_payment_request(pair.bob.public_key.clone(), recurring_request_terms())
+        .await
+        .unwrap();
+    let second_id = second.proposal_outbound_message_id.unwrap();
+    let report = sdk
+        .process_outbound_private_messages(pair.bob.public_key.clone())
+        .await
+        .unwrap();
+    assert_eq!(report.attempted, vec![second_id]);
+    assert_eq!(report.sent, vec![second_id]);
+    assert!(report.failed.is_empty());
+
+    // The run moved past the used slot before it encrypted, so the only
+    // ciphertext it stored targets the next free slot.
+    let (write_path, slot) = used_slot.rsplit_once('/').unwrap();
+    let next_slot = format!("{write_path}/{}", slot.parse::<u32>().unwrap() + 1);
+    assert_eq!(
+        *destinations.lock().unwrap(),
+        vec![used_slot.clone(), next_slot.clone()]
+    );
+    let sent = pair
+        .bitkit
+        .storage_state()
+        .await
+        .outbound_private_messages
+        .into_iter()
+        .find(|message| message.outbound_message_id == second_id)
+        .unwrap();
+    assert_eq!(sent.status, OutboundPrivateMessageStatus::Sent);
+    assert_eq!(sent.attempt_count, 1);
+    assert_eq!(
+        remote
+            .get(used_slot.as_str())
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap(),
+        used_packet
+    );
+    assert!(remote.exists(next_slot.as_str()).await.unwrap());
+
+    // The peer reads both packets in order and stays linked.
+    let received = pair
+        .bob
+        .sdk
+        .receive_private_messages(pair.bitkit.public_key.clone())
+        .await
+        .unwrap();
+    assert_eq!(received.stream_item_ids.len(), 2);
+    let requests = pair
+        .bob
+        .sdk
+        .received_payment_requests_from(&pair.bitkit.public_key)
+        .await
+        .unwrap();
+    for request in [&first, &second] {
+        assert!(requests
+            .iter()
+            .any(|record| record.payment_request_id == request.payment_request_id));
+    }
+    assert_eq!(
+        pair.bob.storage.snapshot().unwrap().linked_peers[&pair.bitkit.public_key].state,
+        LinkedPeerState::Linked
+    );
+}
+
+#[tokio::test]
 async fn test_private_send_retains_lease_for_pending_reservation_cleanup() {
     let pair = linked_homeserver_shared_pair().await;
     let obsolete = pair
@@ -4395,6 +4585,156 @@ async fn test_homeserver_backed_apps_complete_private_payment_flow() {
         Some(payment_request_id.as_str())
     );
     assert_eq!(retrieved.app_id, pair.server.app_id);
+}
+
+/// A merchant App proposes a request for the shared identity and the wallet
+/// App that received the money issues the Receipt for it.
+#[tokio::test]
+async fn test_wallet_app_issues_receipt_for_request_another_app_proposed() {
+    let pair = linked_homeserver_shared_pair().await;
+    pair.server
+        .sdk
+        .publish_paykit_app(
+            PaykitApp::new(
+                "Paykit Server",
+                PaykitAppCapabilities {
+                    private_payments: true,
+                    payment_requests: true,
+                    receipts: false,
+                    outgoing_payments: false,
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .expect("Paykit Server should publish its App without receipts");
+
+    let address = "bcrt1qmarketinvoiceaddress0000000000000000000";
+    let endpoint = PaymentEndpointIdentifier::new("btc-onchain").unwrap();
+    let terms = PaymentRequestTerms::builder(
+        PaymentAmount::new("0.0005", "btc").unwrap(),
+        PaymentReference::new("market-order-1").unwrap(),
+        vec![endpoint.clone()],
+    )
+    .required_app_id(Some(pair.server.app_id.clone()))
+    .payment_endpoints(Some(HashMap::from([(
+        endpoint.clone(),
+        PaymentEndpointPayload::new(address),
+    )])))
+    .build()
+    .unwrap();
+    let payment_request_id = PaymentRequestId::new_v4();
+    pair.server
+        .sdk
+        .propose_payment_request_with_id(
+            pair.bob.public_key.clone(),
+            payment_request_id.clone(),
+            terms,
+        )
+        .await
+        .expect("Paykit Server should propose the Market request");
+    pair.server
+        .sdk
+        .process_outbound_private_messages(pair.bob.public_key.clone())
+        .await
+        .expect("Paykit Server should deliver the Market request");
+    pair.bob
+        .sdk
+        .receive_private_messages(pair.bitkit.public_key.clone())
+        .await
+        .expect("the buyer should receive the Market request");
+
+    let seen_by_wallet = request_with_id(
+        pair.bitkit
+            .sdk
+            .payment_requests()
+            .await
+            .expect("Bitkit should list the shared Payment Requests"),
+        payment_request_id.as_str(),
+    );
+    assert_eq!(
+        seen_by_wallet.local_role,
+        Some(paykit_sdk::PaymentRequestLocalRole::Payee)
+    );
+    assert_eq!(
+        seen_by_wallet.proposal_app_id.as_ref(),
+        Some(&pair.server.app_id)
+    );
+
+    let draft = || {
+        ReceiptDraftBuilder::from_payment_reference(
+            PaymentReference::new("market-order-1").unwrap(),
+        )
+        .with_receipt_id(ReceiptId::new_v4())
+        .with_payment_request_id(payment_request_id.clone())
+        .with_payment_endpoint_identifier(endpoint.clone())
+        .with_amount(PaymentAmount::new("0.0005", "btc").unwrap())
+        .with_metadata(JsonMap::from_iter([(
+            "txid".into(),
+            serde_json::Value::String("ab".repeat(32)),
+        )]))
+        .build()
+        .unwrap()
+    };
+    let refused = pair
+        .server
+        .sdk
+        .issue_receipt(pair.bob.public_key.clone(), draft())
+        .await
+        .expect_err("an App registered without receipts must not issue one");
+    assert!(matches!(refused, PaykitSdkError::Policy { .. }));
+
+    let issuance = pair
+        .bitkit
+        .sdk
+        .issue_receipt(pair.bob.public_key.clone(), draft())
+        .await
+        .expect("Bitkit should issue the Receipt for the server-proposed request");
+    assert_eq!(issuance.status, ReceiptIssuanceStatus::AccessQueued);
+    pair.bitkit
+        .sdk
+        .process_outbound_private_messages(pair.bob.public_key.clone())
+        .await
+        .expect("Bitkit should deliver Receipt Access over the shared link");
+    pair.bob
+        .sdk
+        .receive_private_messages(pair.bitkit.public_key.clone())
+        .await
+        .expect("the buyer should receive Receipt Access");
+    let retrieved = pair
+        .bob
+        .sdk
+        .retrieve_receipt(pair.bitkit.public_key.clone(), &issuance.receipt_id)
+        .await
+        .expect("the buyer should fetch and decrypt the Receipt");
+    assert_eq!(retrieved.app_id, pair.bitkit.app_id);
+    assert_eq!(
+        retrieved.payment_request_id.as_deref(),
+        Some(payment_request_id.as_str())
+    );
+
+    let issued = pair
+        .server
+        .sdk
+        .issued_receipts()
+        .await
+        .expect("Paykit Server should read the identity's issued Receipts");
+    let issued = issued
+        .iter()
+        .find(|record| record.payment_request_id.as_deref() == Some(payment_request_id.as_str()))
+        .expect("Paykit Server should see the wallet's Receipt for its request");
+    assert_eq!(issued.app_id, pair.bitkit.app_id);
+    assert_eq!(issued.counterparty, pair.bob.public_key);
+    let receipt = pair
+        .server
+        .sdk
+        .issued_receipt(&pair.bob.public_key, &issued.receipt_id)
+        .await
+        .expect("Paykit Server should decrypt the wallet's Receipt");
+    assert_eq!(
+        receipt.metadata.get("txid"),
+        Some(&serde_json::Value::String("ab".repeat(32)))
+    );
 }
 
 type SharedStateSdk =
@@ -5116,6 +5456,7 @@ async fn test_claim_and_accept_commits_once_and_preserves_ownership_on_failure()
         CountedStorage {
             inner: pair.bitkit.storage.clone(),
             operations: Arc::new(AtomicUsize::new(0)),
+            unbatched_transactions: Arc::new(AtomicUsize::new(0)),
             transactions: transactions.clone(),
             commits: commits.clone(),
             reject_next_transaction: Arc::new(AtomicBool::new(false)),

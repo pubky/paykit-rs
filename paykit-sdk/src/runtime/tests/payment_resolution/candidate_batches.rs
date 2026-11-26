@@ -4,7 +4,7 @@ use crate::runtime::payment_resolution::{
     filter_private_views_by_authorized_apps, filter_public_candidates_for_request,
     load_public_payment_lists_with_budget, public_app_load_order,
     public_payment_endpoint_resource_limit_failure, public_payment_list_fits_resolution_budget,
-    unresolved_public_resolution,
+    unresolved_public_resolution, PublicPaymentListLoad,
 };
 
 fn public_app_ids(count: usize) -> Vec<paykit_lib::PaykitAppId> {
@@ -165,7 +165,7 @@ fn test_public_payment_list_budget_is_global_and_inclusive() {
 #[tokio::test]
 async fn test_public_payment_list_loader_passes_remaining_endpoint_budget_across_apps() {
     let calls = Arc::new(Mutex::new(Vec::new()));
-    let loaded = load_public_payment_lists_with_budget(public_app_ids(64), {
+    let loaded = load_public_payment_lists_with_budget(public_app_ids(64), || async { Ok(()) }, {
         let calls = calls.clone();
         move |app_id, max_endpoints, max_requests, max_payload_bytes| {
             calls
@@ -183,7 +183,8 @@ async fn test_public_payment_list_loader_passes_remaining_endpoint_budget_across
             }
         }
     })
-    .await;
+    .await
+    .unwrap();
 
     let calls = calls.lock().unwrap();
     assert_eq!(calls.len(), 2);
@@ -201,7 +202,7 @@ async fn test_public_payment_list_loader_passes_remaining_endpoint_budget_across
 #[tokio::test]
 async fn test_public_payment_list_loader_passes_remaining_payload_budget_across_apps() {
     let calls = Arc::new(Mutex::new(Vec::new()));
-    let loaded = load_public_payment_lists_with_budget(public_app_ids(64), {
+    let loaded = load_public_payment_lists_with_budget(public_app_ids(64), || async { Ok(()) }, {
         let calls = calls.clone();
         move |app_id, max_endpoints, max_requests, max_payload_bytes| {
             calls
@@ -219,7 +220,8 @@ async fn test_public_payment_list_loader_passes_remaining_payload_budget_across_
             }
         }
     })
-    .await;
+    .await
+    .unwrap();
 
     let calls = calls.lock().unwrap();
     assert_eq!(calls.len(), 2);
@@ -235,7 +237,7 @@ async fn test_public_payment_list_loader_passes_remaining_payload_budget_across_
 
 #[tokio::test]
 async fn test_public_payment_list_loader_distinguishes_invalid_data_from_resource_limits() {
-    let loaded = load_public_payment_lists_with_budget(public_app_ids(3), {
+    let loaded = load_public_payment_lists_with_budget(public_app_ids(3), || async { Ok(()) }, {
         move |app_id, max_endpoints, max_requests, max_payload_bytes| async move {
             if app_id.as_str() == "app-00" {
                 (
@@ -257,7 +259,8 @@ async fn test_public_payment_list_loader_distinguishes_invalid_data_from_resourc
             }
         }
     })
-    .await;
+    .await
+    .unwrap();
 
     assert_eq!(loaded.loaded_app_count, 1);
     assert_eq!(loaded.failures.len(), 2);
@@ -282,29 +285,31 @@ async fn test_public_payment_list_budget_counts_empty_and_failed_loads() {
         (false, 16, 17, 1024 * 1024),
     ] {
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let loaded = load_public_payment_lists_with_budget(public_app_ids(64), {
-            let calls = calls.clone();
-            move |_, endpoints, requests, bytes| {
-                calls.fetch_add(1, Ordering::SeqCst);
-                async move {
-                    let result = if succeeds {
-                        Ok(public_payment_list(0, 0))
-                    } else {
-                        Err(paykit_lib::PaykitError::InvalidData {
-                            context: "Payment List discarded after reading endpoints".into(),
-                            source: None,
-                        })
-                    };
-                    (
-                        result,
-                        endpoints - endpoint_attempts,
-                        requests - request_attempts,
-                        bytes - payload_bytes,
-                    )
+        let loaded =
+            load_public_payment_lists_with_budget(public_app_ids(64), || async { Ok(()) }, {
+                let calls = calls.clone();
+                move |_, endpoints, requests, bytes| {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    async move {
+                        let result = if succeeds {
+                            Ok(public_payment_list(0, 0))
+                        } else {
+                            Err(paykit_lib::PaykitError::InvalidData {
+                                context: "Payment List discarded after reading endpoints".into(),
+                                source: None,
+                            })
+                        };
+                        (
+                            result,
+                            endpoints - endpoint_attempts,
+                            requests - request_attempts,
+                            bytes - payload_bytes,
+                        )
+                    }
                 }
-            }
-        })
-        .await;
+            })
+            .await
+            .unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 4);
         assert_eq!(loaded.loaded_app_count, if succeeds { 4 } else { 0 });
         assert_eq!(
@@ -318,6 +323,92 @@ async fn test_public_payment_list_budget_counts_empty_and_failed_loads() {
             60
         );
     }
+}
+
+fn blocked_guard_error() -> PaykitSdkError {
+    PaykitSdkError::Policy {
+        context: "counterparty is blocked".into(),
+        source: None,
+    }
+}
+
+/// Runs the loader over `app_count` Apps with a guard that succeeds
+/// `guard_passes` times and then fails, returning the result and the number
+/// of Payment List reads that started.
+async fn load_with_failing_guard(
+    app_count: usize,
+    guard_passes: usize,
+) -> (Result<PublicPaymentListLoad>, usize) {
+    let guard_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let fetches = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let loaded = load_public_payment_lists_with_budget(
+        public_app_ids(app_count),
+        {
+            let guard_calls = guard_calls.clone();
+            move || {
+                let passes = guard_calls.fetch_add(1, Ordering::SeqCst) < guard_passes;
+                async move {
+                    if passes {
+                        Ok(())
+                    } else {
+                        Err(blocked_guard_error())
+                    }
+                }
+            }
+        },
+        {
+            let fetches = fetches.clone();
+            move |_, endpoints, requests, bytes| {
+                fetches.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    (
+                        Ok(public_payment_list(1, 1)),
+                        endpoints - 1,
+                        requests - 2,
+                        bytes - 1,
+                    )
+                }
+            }
+        },
+    )
+    .await;
+    (loaded, fetches.load(Ordering::SeqCst))
+}
+
+#[tokio::test]
+async fn test_public_payment_list_loader_guard_failure_starts_no_read() {
+    // The App Registry read succeeded and the block landed during it.
+    let (loaded, fetches) = load_with_failing_guard(3, 0).await;
+
+    assert_eq!(fetches, 0);
+    assert!(
+        matches!(loaded, Err(PaykitSdkError::Policy { ref context, .. }) if context == "counterparty is blocked"),
+        "unexpected result: {:?}",
+        loaded.map(|load| load.loaded_app_count)
+    );
+}
+
+#[tokio::test]
+async fn test_public_payment_list_loader_guard_failure_stops_later_reads() {
+    // The block landed during the first App's Payment List read.
+    let (loaded, fetches) = load_with_failing_guard(3, 1).await;
+
+    assert_eq!(fetches, 1);
+    assert!(
+        matches!(loaded, Err(PaykitSdkError::Policy { ref context, .. }) if context == "counterparty is blocked"),
+        "unexpected result: {:?}",
+        loaded.map(|load| load.loaded_app_count)
+    );
+}
+
+#[tokio::test]
+async fn test_public_payment_list_loader_passing_guard_loads_every_app() {
+    let (loaded, fetches) = load_with_failing_guard(3, usize::MAX).await;
+
+    let loaded = loaded.unwrap();
+    assert_eq!(fetches, 3);
+    assert_eq!(loaded.loaded_app_count, 3);
+    assert!(loaded.failures.is_empty());
 }
 
 #[test]

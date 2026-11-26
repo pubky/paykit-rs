@@ -1,0 +1,77 @@
+{
+  "amounts": {
+    "invalid": [
+      {
+        "text": "",
+        "why": "empty"
+      },
+      {
+        "text": ".",
+        "why": "no digit"
+      },
+      {
+        "text": "-1",
+        "why": "sign"
+      },
+      {
+        "text": "+1",
+        "why": "sign"
+      },
+      {
+        "text": "1e3",
+        "why": "exponent"
+      },
+      {
+        "text": "1,000",
+        "why": "grouping separator"
+      },
+      {
+        "text": " 1",
+        "why": "whitespace"
+      },
+      {
+        "text": "1.2.3",
+        "why": "two points"
+      },
+      {
+        "text": "0.0000000000000000001",
+        "why": "19 fractional digits"
+      },
+      {
+        "text": "340282366920938463463.374607431768211456",
+        "why": "value x 10^18 does not fit in 128 bits"
+      }
+    ],
+    "valid": [
+      {
+        "normalized": "0",
+        "text": "0"
+      },
+      {
+        "normalized": "25",
+        "text": "25.00"
+      },
+      {
+        "normalized": "0.5",
+        "text": ".5"
+      },
+      {
+        "normalized": "10",
+        "text": "10."
+      },
+      {
+        "normalized": "123.45",
+        "text": "000123.4500"
+      },
+      {
+        "normalized": "0.000000000000000001",
+        "text": "0.000000000000000001"
+      },
+      {
+        "normalized": "340282366920938463463.374607431768211455",
+        "text": "340282366920938463463.374607431768211455"
+      }
+    ]
+  },
+  "description": "Decimal amounts (wire 1.2): valid amounts with the normalized spelling of each, and invalid ones with the reason. The other primitive encodings are the Dispatch set's encoding.json."
+}

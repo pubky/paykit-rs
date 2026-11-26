@@ -143,8 +143,16 @@ Rust integrations that own a long-lived runtime can opt into SSE-assisted
 private intake. SSE is only a wake-up hint: the SDK derives and fetches the next
 expected immutable Noise slot, stores ciphertext and the per-user replay cursor
 atomically, and advances the Noise receive checkpoint only when the application
-explicitly drains buffered work. A healthy stream still audits expected slots
-about every 60 seconds by default, so a skipped or missed event does not become
+explicitly drains buffered work. For an established Encrypted Link, the SDK
+ignores deletes and files outside that link's read folder, such as Receipts or
+other links' messages, except Encrypted Link Handshake slots. Each acquisition
+refreshes the read folder from the stored link, so a link that moves to a new
+folder is followed from its next acquisition. Ignored events trigger no fetch
+and move the replay cursor only after an audit that finds the peer's next
+expected slot absent. Ignored events do not change health either, so a `Stale`
+state set by a failed fetch for a relevant event clears on the next relevant
+event or audit. A healthy stream still audits expected slots about every 60
+seconds by default, so a skipped, missed, or ignored event does not become
 permanent message loss.
 
 ```rust,no_run
@@ -193,9 +201,19 @@ supervisor.stop().await;
 subscriptions group at most 50 users from one homeserver per connection, so 51
 users on one homeserver require two reserved streams; peers on different
 homeservers require separate streams. Startup fails instead of silently leaving
-peers uncovered when capacity is insufficient. Active supervisor capacity is
-identity-wide: new handshakes are rejected before becoming pending when their
-resolved homeserver would need another stream. A later topology move that no
+peers uncovered when capacity is insufficient. A Linked Peer whose Pubky
+homeserver cannot be resolved does not stop intake for other peers while its
+lookup fails: it reserves no stream, stays visible in health as `Stale`, and is
+retried on each topology refresh. When it later resolves, it is placed like any
+other topology change, so a result that exceeds capacity stops supervision as
+described below. A topology refresh keeps the stored handshake admission of
+every peer that is still supervised but that the refresh did not place, such as
+a peer whose homeserver lookup failed or a handshake that became pending while
+the refresh was resolving, so reserved capacity stays reserved. A peer that
+already has a stream keeps its last resolved homeserver while a later
+lookup fails. Active supervisor capacity is identity-wide: new
+handshakes are rejected before becoming pending when their resolved homeserver
+would need another stream. A later topology move that no
 longer fits marks affected health stale and stops supervision instead of keeping
 old streams plus healthy-audit polling for an uncovered peer. Queue limits are 64 ciphertext
 packets per Linked Peer and 1,024 per identity. A full peer is detached without
@@ -203,11 +221,27 @@ advancing its cursor; draining durable work releases capacity and lets it
 resume.
 
 Inspect `PrivateIntakeSupervisor::health` and each buffered result's `freshness`.
+A buffered result's `freshness` is the state when that drain started; `health`
+shows the current state. After a live event buffers a packet, the Linked Peer
+is `Replaying` while intake checks its next expected slot, and stays
+`Replaying` until the next event or audit if that check fails. No further
+wakeup follows when the check settles the peer. The exception is a packet that
+fills the peer's capacity: the Linked Peer is then `Backpressured`, and no
+check runs.
 `Connecting`, `Replaying`, `Stale`, `Backpressured`, `Unsupported`, and `Stopped`
-must not be interpreted as remote queue emptiness. A homeserver that rejects or
+must not be interpreted as remote queue emptiness. `Stale` also covers a peer
+whose Pubky homeserver could not be resolved. A homeserver that rejects or
 does not implement SSE is `Unsupported`; SSE mode does not fall back to
 continuous slot polling. Already buffered packets remain drainable during an
 outage. Reconnects reuse durable per-user cursors and reconcile expected slots.
+A supervised peer (a Linked Peer or a peer with a pending Encrypted Link
+Handshake) without a stored cursor starts from the newest event found by a
+recent request (reused across reconnects within one topology epoch) instead of
+replaying its history, when such a request succeeds; otherwise it replays from
+the beginning as before. The startup audit reconciles its earlier slots.
+While that request is pending, the group keeps running expected-slot audits
+(first after one second, then at the healthy audit cadence), which never store
+a cursor.
 Use synchronous `PrivateIntakeSupervisor::is_finished` to detect authoritative
 supervisor task termination, including autonomous lease or topology failure.
 It remains false while any owned task is live and is true after `stop`; do not
@@ -376,7 +410,9 @@ Common workflows:
   `resolve_private_payment_request`, `resolve_public_payment_request`, or
   `prepare_and_resolve_private_payment_request`; these use the request amount
   and enforce its accepted endpoint identifiers and required payee App before
-  invoking the payment adapter. Request preparation still performs fresh private
+  invoking the payment adapter. `resolve_public_payment_request` returns
+  `Policy` while the counterparty is blocked, before any App Registry or
+  Payment Endpoint read. Request preparation still performs fresh private
   intake and final validation, but leaves an otherwise idle queue of unclaimed,
   unprepared Delivery Confirmations durable for later outbound processing.
   Callers must drive maintenance; preparation does not schedule a worker or
@@ -588,7 +624,13 @@ does not write those paths.
 Before publication, an outbound private send stores the exact prepared
 ciphertext and advanced Encrypted Link snapshot in one transaction. A retry
 publishes that same ciphertext, including after a crash or an uncertain write,
-before later messages can advance the link. Outbound status is local checkpoint
+before later messages can advance the link. Before a send run first encrypts,
+it moves the link past write slots that already hold packets and stores the
+advanced snapshot, so the first send is prepared and published on a free slot.
+Every other publication first checks the destination slot: a slot that
+already holds the same ciphertext counts as sent,
+and a slot that holds another packet is never overwritten. The message is then
+prepared again on the next free slot. Outbound status is local checkpoint
 state; `confirmed_at` separately records the counterparty's durable receipt of
 an Event Message, not business acceptance or payment execution. The SDK retries
 unconfirmed events with the same Event ID and payload, including after relinking,

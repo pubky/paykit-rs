@@ -1,0 +1,2133 @@
+{
+  "cases": [
+    {
+      "candidates": [
+        {
+          "allowed": true,
+          "amount": "0.0001"
+        },
+        {
+          "allowed": true,
+          "amount": "0.01"
+        },
+        {
+          "allowed": false,
+          "amount": "0.00009",
+          "refused_by": "per_payment"
+        },
+        {
+          "allowed": false,
+          "amount": "0.0101",
+          "refused_by": "per_payment"
+        }
+      ],
+      "claims": [],
+      "ledger": {
+        "acceptance": "tQTNgyJCrECEQwHkfbfTBJEITKB0b9jJYdT_bvgaXqo",
+        "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
+        "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
+        "entries": [],
+        "totals": {
+          "count": 0,
+          "spent": ""
+        },
+        "v": 1
+      },
+      "name": "per-payment range (inclusive)",
+      "t": "2026-02-10T00:00:00.000Z",
+      "terms": {
+        "active_from": null,
+        "allowed_payment_endpoint_identifiers": null,
+        "asset": "btc",
+        "expires_at": null,
+        "lifetime_amount_limit": "0.10",
+        "per_payment_amount": {
+          "maximum": "0.01",
+          "minimum": "0.0001"
+        },
+        "period_limits": [
+          {
+            "amount_limit": "0.03",
+            "payment_count_limit": 3,
+            "period": {
+              "anchor": "2026-01-31T00:00:00.000Z",
+              "every": 1,
+              "kind": "anchored",
+              "unit": "month"
+            }
+          }
+        ]
+      },
+      "usage": {
+        "lifetime": "0",
+        "periods": [
+          {
+            "amount": "0",
+            "count": 0
+          }
+        ],
+        "released": 0,
+        "reserved": 0,
+        "spent": 0
+      }
+    },
+    {
+      "candidates": [
+        {
+          "allowed": true,
+          "amount": "0.005"
+        },
+        {
+          "allowed": true,
+          "amount": "0.0051"
+        }
+      ],
+      "claims": [
+        {
+          "attempt_id": "uDFVmJKThwTKFJaHBTdMBQ",
+          "state": "open"
+        }
+      ],
+      "ledger": {
+        "acceptance": "tQTNgyJCrECEQwHkfbfTBJEITKB0b9jJYdT_bvgaXqo",
+        "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
+        "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
+        "entries": [
+          {
+            "asset": "btc",
+            "at": "2026-02-27T10:00:00.000Z",
+            "attempt_id": "PNlr0UBX86BxHOC2IEuJkw",
+            "obligation": "SmjItOaf7fhglhrXg89uZ1iSCSqcpPKAM4BiLhM20W4",
+            "outcome": "done",
+            "value": "0.01"
+          },
+          {
+            "asset": "btc",
+            "at": "2026-02-28T00:00:00.000Z",
+            "attempt_id": "Gxl2PpN8l3HlzSp-NaquQw",
+            "obligation": "SVfpRzZAsULb92yGXoc_V4N-X0qm9T9yurZGZgg1y7I",
+            "outcome": "done",
+            "value": "0.01"
+          },
+          {
+            "asset": "btc",
+            "at": "2026-03-05T09:00:00.000Z",
+            "attempt_id": "uDFVmJKThwTKFJaHBTdMBQ",
+            "obligation": "JPeL8QOy8ulS5e1ODDCZ1K7UwrvtbJjtuzonuvnmxfQ",
+            "outcome": null,
+            "value": "0.005"
+          }
+        ],
+        "totals": {
+          "count": 0,
+          "spent": ""
+        },
+        "v": 1
+      },
+      "name": "anchored monthly limit, anchor January 31: Feb 28 starts a new period",
+      "t": "2026-03-10T00:00:00.000Z",
+      "terms": {
+        "active_from": null,
+        "allowed_payment_endpoint_identifiers": null,
+        "asset": "btc",
+        "expires_at": null,
+        "lifetime_amount_limit": "0.10",
+        "per_payment_amount": {
+          "maximum": "0.01",
+          "minimum": "0.0001"
+        },
+        "period_limits": [
+          {
+            "amount_limit": "0.03",
+            "payment_count_limit": 3,
+            "period": {
+              "anchor": "2026-01-31T00:00:00.000Z",
+              "every": 1,
+              "kind": "anchored",
+              "unit": "month"
+            }
+          }
+        ]
+      },
+      "usage": {
+        "lifetime": "0.025",
+        "periods": [
+          {
+            "amount": "0.015",
+            "count": 2
+          }
+        ],
+        "released": 0,
+        "reserved": 1,
+        "spent": 2
+      }
+    },
+    {
+      "candidates": [
+        {
+          "allowed": false,
+          "amount": "0.001",
+          "refused_by": "period_count"
+        }
+      ],
+      "claims": [
+        {
+          "attempt_id": "y61PTWpow-POdkOoX47hig",
+          "state": "unknown"
+        },
+        {
+          "attempt_id": "wXani2L5jTkb1BFgKsq-4Q",
+          "resolved_by_owner": true,
+          "state": "failed"
+        },
+        {
+          "attempt_id": "67V5Hv1gWkOsuzvWo8kz1w",
+          "state": "done"
+        }
+      ],
+      "ledger": {
+        "acceptance": "tQTNgyJCrECEQwHkfbfTBJEITKB0b9jJYdT_bvgaXqo",
+        "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
+        "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
+        "entries": [
+          {
+            "asset": "btc",
+            "at": "2026-03-31T00:00:00.000Z",
+            "attempt_id": "nhzamKm2x2YyomD1WE-XJQ",
+            "obligation": "3C0DJLPv4dT-AvxRXYXQqldHaxEImLDUuNUkvU0TO4E",
+            "outcome": "done",
+            "value": "0.001"
+          },
+          {
+            "asset": "btc",
+            "at": "2026-04-01T00:00:00.000Z",
+            "attempt_id": "y61PTWpow-POdkOoX47hig",
+            "obligation": "sbZ7WuSUyx7C8veoT3s2G9DUPqPHMqgk3qzeehNpAdI",
+            "outcome": null,
+            "value": "0.001"
+          },
+          {
+            "asset": "btc",
+            "at": "2026-04-02T00:00:00.000Z",
+            "attempt_id": "wXani2L5jTkb1BFgKsq-4Q",
+            "obligation": "Ty1euinfoEwExVEFLGv8PChuYnj0bFsyvdkF1BSsJqw",
+            "outcome": null,
+            "value": "0.001"
+          },
+          {
+            "asset": "btc",
+            "at": "2026-04-03T00:00:00.000Z",
+            "attempt_id": "67V5Hv1gWkOsuzvWo8kz1w",
+            "obligation": "DBxTTVNYtaq9tCOnuEb-C2-BPc_aAtLNxTwivy5eOOk",
+            "outcome": null,
+            "value": "0.001"
+          }
+        ],
+        "totals": {
+          "count": 0,
+          "spent": ""
+        },
+        "v": 1
+      },
+      "name": "anchored monthly payment count",
+      "t": "2026-04-20T00:00:00.000Z",
+      "terms": {
+        "active_from": null,
+        "allowed_payment_endpoint_identifiers": null,
+        "asset": "btc",
+        "expires_at": null,
+        "lifetime_amount_limit": "0.10",
+        "per_payment_amount": {
+          "maximum": "0.01",
+          "minimum": "0.0001"
+        },
+        "period_limits": [
+          {
+            "amount_limit": "0.03",
+            "payment_count_limit": 3,
+            "period": {
+              "anchor": "2026-01-31T00:00:00.000Z",
+              "every": 1,
+              "kind": "anchored",
+              "unit": "month"
+            }
+          }
+        ]
+      },
+      "usage": {
+        "lifetime": "0.003",
+        "periods": [
+          {
+            "amount": "0.003",
+            "count": 3
+          }
+        ],
+        "released": 1,
+        "reserved": 1,
+        "spent": 2
+      }
+    },
+    {
+      "candidates": [
+        {
+          "allowed": true,
+          "amount": "0.06"
+        },
+        {
+          "allowed": false,
+          "amount": "0.0601",
+          "refused_by": "lifetime"
+        }
+      ],
+      "claims": [
+        {
+          "attempt_id": "1csmdhiTomzJxPwNK4iUiQ",
+          "state": "open"
+        },
+        {
+          "attempt_id": "IV3a-USNTlBKJKviTju36w",
+          "state": "unknown"
+        },
+        {
+          "attempt_id": "kgKyyUFzk6QDslF2mtH12A",
+          "state": "done"
+        },
+        {
+          "attempt_id": "PDznKpSB4sQGrHU8TTRojA",
+          "resolved_by_owner": true,
+          "state": "failed"
+        }
+      ],
+      "ledger": {
+        "acceptance": "tQTNgyJCrECEQwHkfbfTBJEITKB0b9jJYdT_bvgaXqo",
+        "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
+        "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
+        "entries": [
+          {
+            "asset": "btc",
+            "at": "2026-01-02T00:00:00.000Z",
+            "attempt_id": "1csmdhiTomzJxPwNK4iUiQ",
+            "obligation": "ONsOr1U2clGE6Cp9VqMJKmRx2jZbonIGJlqP63iPOnw",
+            "outcome": null,
+            "value": "0.01"
+          },
+          {
+            "asset": "btc",
+            "at": "2026-01-03T00:00:00.000Z",
+            "attempt_id": "IV3a-USNTlBKJKviTju36w",
+            "obligation": "25MSG-UvEnrZNdxRMquVlqhgTbhNLPZrF3pnAhBC400",
+            "outcome": null,
+            "value": "0.01"
+          },
+          {
+            "asset": "btc",
+            "at": "2026-01-04T00:00:00.000Z",
+            "attempt_id": "kgKyyUFzk6QDslF2mtH12A",
+            "obligation": "9c0XGBMyCDpCNK571kgikZgoO0AktVWaIDThSp-seAM",
+            "outcome": null,
+            "value": "0.01"
+          },
+          {
+            "asset": "btc",
+            "at": "2026-01-05T00:00:00.000Z",
+            "attempt_id": "PDznKpSB4sQGrHU8TTRojA",
+            "obligation": "W5WomdJ2AtTa_-ch-wIGOG4XWxAMdo7kkilve-MBhGA",
+            "outcome": null,
+            "value": "0.01"
+          },
+          {
+            "asset": "btc",
+            "at": "2026-01-06T00:00:00.000Z",
+            "attempt_id": "4KrTqgKTMtDAm0YN5afcPA",
+            "obligation": "A2UVl90rxGxN5kJo0bJH7xZEmuoJa99r1dc8Nu4swt4",
+            "outcome": "failed",
+            "value": "0.01"
+          },
+          {
+            "asset": "btc",
+            "at": "2026-01-07T00:00:00.000Z",
+            "attempt_id": "Lvgo4SQA0JZumhxvyNOyLg",
+            "obligation": "JUnqdBuHl1tYCHwpclzxdCo3s7MLmMl2bPn1r-_12zQ",
+            "outcome": null,
+            "value": "0.01"
+          }
+        ],
+        "totals": {
+          "count": 0,
+          "spent": ""
+        },
+        "v": 1
+      },
+      "name": "outcomes: open and unknown reserve; failed attempts are released; missing claims spend",
+      "t": "2026-01-08T00:00:00.000Z",
+      "terms": {
+        "active_from": null,
+        "allowed_payment_endpoint_identifiers": null,
+        "asset": "btc",
+        "expires_at": null,
+        "lifetime_amount_limit": "0.10",
+        "per_payment_amount": null,
+        "period_limits": []
+      },
+      "usage": {
+        "lifetime": "0.04",
+        "periods": [],
+        "released": 2,
+        "reserved": 2,
+        "spent": 2
+      }
+    },
+    {
+      "candidates": [
+        {
+          "allowed": true,
+          "amount": "0.005"
+        },
+        {
+          "allowed": false,
+          "amount": "0.0051",
+          "refused_by": "period_amount"
+        }
+      ],
+      "claims": [],
+      "ledger": {
+        "acceptance": "tQTNgyJCrECEQwHkfbfTBJEITKB0b9jJYdT_bvgaXqo",
+        "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
+        "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
+        "entries": [
+          {
+            "asset": "btc",
+            "at": "2026-01-01T00:00:00.000Z",
+            "attempt_id": "MSHbcbXMhZDzv0CkH0PqIw",
+            "obligation": "eWFYiRO6a4Lxw3hXHrs4FhaS2EqTcPR5UybOKAR5Bi0",
+            "outcome": "done",
+            "value": "0.015"
+          }
+        ],
+        "totals": {
+          "count": 0,
+          "spent": ""
+        },
+        "v": 1
+      },
+      "name": "rolling 7 days: an entry counts until at + 60 s + 7 days",
+      "t": "2026-01-08T00:00:59.999Z",
+      "terms": {
+        "active_from": null,
+        "allowed_payment_endpoint_identifiers": null,
+        "asset": "btc",
+        "expires_at": "2027-01-01T00:00:00.000Z",
+        "lifetime_amount_limit": null,
+        "per_payment_amount": null,
+        "period_limits": [
+          {
+            "amount_limit": "0.02",
+            "payment_count_limit": null,
+            "period": {
+              "every": 7,
+              "kind": "rolling",
+              "unit": "day"
+            }
+          }
+        ]
+      },
+      "usage": {
+        "lifetime": "0.015",
+        "periods": [
+          {
+            "amount": "0.015",
+            "count": 1
+          }
+        ],
+        "released": 0,
+        "reserved": 0,
+        "spent": 1
+      }
+    },
+    {
+      "candidates": [
+        {
+          "allowed": true,
+          "amount": "0.02"
+        }
+      ],
+      "claims": [],
+      "ledger": {
+        "acceptance": "tQTNgyJCrECEQwHkfbfTBJEITKB0b9jJYdT_bvgaXqo",
+        "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
+        "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
+        "entries": [
+          {
+            "asset": "btc",
+            "at": "2026-01-01T00:00:00.000Z",
+            "attempt_id": "MSHbcbXMhZDzv0CkH0PqIw",
+            "obligation": "eWFYiRO6a4Lxw3hXHrs4FhaS2EqTcPR5UybOKAR5Bi0",
+            "outcome": "done",
+            "value": "0.015"
+          }
+        ],
+        "totals": {
+          "count": 0,
+          "spent": ""
+        },
+        "v": 1
+      },
+      "name": "rolling 7 days: the entry has left the window",
+      "t": "2026-01-08T00:01:00.000Z",
+      "terms": {
+        "active_from": null,
+        "allowed_payment_endpoint_identifiers": null,
+        "asset": "btc",
+        "expires_at": "2027-01-01T00:00:00.000Z",
+        "lifetime_amount_limit": null,
+        "per_payment_amount": null,
+        "period_limits": [
+          {
+            "amount_limit": "0.02",
+            "payment_count_limit": null,
+            "period": {
+              "every": 7,
+              "kind": "rolling",
+              "unit": "day"
+            }
+          }
+        ]
+      },
+      "usage": {
+        "lifetime": "0.015",
+        "periods": [
+          {
+            "amount": "0",
+            "count": 0
+          }
+        ],
+        "released": 0,
+        "reserved": 0,
+        "spent": 1
+      }
+    },
+    {
+      "candidates": [
+        {
+          "allowed": true,
+          "amount": "0.08"
+        },
+        {
+          "allowed": true,
+          "amount": "0.0801"
+        }
+      ],
+      "claims": [
+        {
+          "attempt_id": "TuWE_GhGdr0IWPlqfybtvA",
+          "resolved_by_owner": false,
+          "state": "failed"
+        },
+        {
+          "attempt_id": "cplq2W95Xu8dfeA4ziGaLQ",
+          "state": "done"
+        },
+        {
+          "attempt_id": "dHkT0E1U9Xjuoci6VmnJ-Q",
+          "resolved_by_owner": true,
+          "state": "failed"
+        }
+      ],
+      "ledger": {
+        "acceptance": "tQTNgyJCrECEQwHkfbfTBJEITKB0b9jJYdT_bvgaXqo",
+        "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
+        "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
+        "entries": [
+          {
+            "asset": "btc",
+            "at": "2026-01-02T00:00:00.000Z",
+            "attempt_id": "TuWE_GhGdr0IWPlqfybtvA",
+            "obligation": "i7b-Ub_MRfMpYGmMjfkmdlygCM4ikyXXncScLzPavg8",
+            "outcome": null,
+            "value": "0.01"
+          },
+          {
+            "asset": "btc",
+            "at": "2026-01-03T00:00:00.000Z",
+            "attempt_id": "cplq2W95Xu8dfeA4ziGaLQ",
+            "obligation": "A4QREBpqQHlYUrDMv13tjcEsHTZUrHaesBXZ9s88h8I",
+            "outcome": "failed",
+            "value": "0.01"
+          },
+          {
+            "asset": "btc",
+            "at": "2026-01-04T00:00:00.000Z",
+            "attempt_id": "WgKUCLEG5QM2ledtUoCVEw",
+            "obligation": "4ns6mp_oVmmCjD2mTsGw3T5X1st8fQjuYCeDzCL6sMA",
+            "outcome": "failed",
+            "value": "0.01"
+          },
+          {
+            "asset": "btc",
+            "at": "2026-01-05T00:00:00.000Z",
+            "attempt_id": "dHkT0E1U9Xjuoci6VmnJ-Q",
+            "obligation": "vwnGBxBhdpI3w1fuOqd9MdlX2GbaV1HIX5fgO686IvE",
+            "outcome": null,
+            "value": "0.01"
+          }
+        ],
+        "totals": {
+          "count": 0,
+          "spent": ""
+        },
+        "v": 1
+      },
+      "name": "failures by either app are released; done overrides a failed ledger outcome",
+      "t": "2026-01-08T00:00:00.000Z",
+      "terms": {
+        "active_from": null,
+        "allowed_payment_endpoint_identifiers": null,
+        "asset": "btc",
+        "expires_at": null,
+        "lifetime_amount_limit": "0.10",
+        "per_payment_amount": null,
+        "period_limits": []
+      },
+      "usage": {
+        "lifetime": "0.01",
+        "periods": [],
+        "released": 3,
+        "reserved": 0,
+        "spent": 1
+      }
+    },
+    {
+      "candidates": [
+        {
+          "allowed": true,
+          "amount": "0.02"
+        },
+        {
+          "allowed": false,
+          "amount": "0.0200001",
+          "refused_by": "lifetime"
+        }
+      ],
+      "claims": [
+        {
+          "attempt_id": "V8iSNVUm--xaC5yF2VLX7Q",
+          "state": "open"
+        },
+        {
+          "attempt_id": "juOBNx66YMPauZSrqmN9PA",
+          "state": "done"
+        }
+      ],
+      "ledger": {
+        "acceptance": "tQTNgyJCrECEQwHkfbfTBJEITKB0b9jJYdT_bvgaXqo",
+        "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
+        "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
+        "entries": [
+          {
+            "asset": "btc",
+            "at": "2026-07-01T00:00:00.000Z",
+            "attempt_id": "V8iSNVUm--xaC5yF2VLX7Q",
+            "obligation": "i7j_RQxiEsugap85jU24JtO1XVK-XDMhi7t29ZDiA7Y",
+            "outcome": null,
+            "value": "0.01"
+          }
+        ],
+        "totals": {
+          "count": 5,
+          "failed": [
+            {
+              "attempt_id": "juOBNx66YMPauZSrqmN9PA",
+              "obligation": "OZOCm2BJdkDXGAiUWWdWSSi7NcP8dmGta4_CxPzy1oo",
+              "value": "0.02"
+            },
+            {
+              "attempt_id": "QDmnvpM0yDpLSNQvcqb4aA",
+              "obligation": "vJdU5DHYXjy6r3fhklzfxF5N0ml5Z-CGJgm8shTsnqI",
+              "value": "0.03"
+            }
+          ],
+          "spent": "0.05"
+        },
+        "v": 1
+      },
+      "name": "compacted failed attempts are released while claims remain and after they are gone",
+      "t": "2026-07-02T00:00:00.000Z",
+      "terms": {
+        "active_from": null,
+        "allowed_payment_endpoint_identifiers": null,
+        "asset": "btc",
+        "expires_at": null,
+        "lifetime_amount_limit": "0.10",
+        "per_payment_amount": null,
+        "period_limits": []
+      },
+      "usage": {
+        "lifetime": "0.08",
+        "periods": [],
+        "released": 0,
+        "reserved": 1,
+        "spent": 0
+      }
+    },
+    {
+      "candidates": [
+        {
+          "allowed": true,
+          "amount": "0.005"
+        },
+        {
+          "allowed": false,
+          "amount": "0.0050001",
+          "refused_by": "lifetime"
+        }
+      ],
+      "claims": [
+        {
+          "attempt_id": "rG-jkjkD5zt8ycDZw2ZQAw",
+          "state": "open"
+        }
+      ],
+      "ledger": {
+        "acceptance": "tQTNgyJCrECEQwHkfbfTBJEITKB0b9jJYdT_bvgaXqo",
+        "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
+        "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
+        "entries": [
+          {
+            "asset": "btc",
+            "at": "2026-06-01T00:00:00.000Z",
+            "attempt_id": "rG-jkjkD5zt8ycDZw2ZQAw",
+            "obligation": "bvYVEDd-W5wcFMRKj9iImo1qF509MhOZ_FA6yHdEiFE",
+            "outcome": null,
+            "value": "0.005"
+          }
+        ],
+        "totals": {
+          "count": 9,
+          "spent": "0.09"
+        },
+        "v": 1
+      },
+      "name": "lifetime limit with compacted totals",
+      "t": "2026-06-02T00:00:00.000Z",
+      "terms": {
+        "active_from": null,
+        "allowed_payment_endpoint_identifiers": null,
+        "asset": "btc",
+        "expires_at": null,
+        "lifetime_amount_limit": "0.10",
+        "per_payment_amount": null,
+        "period_limits": []
+      },
+      "usage": {
+        "lifetime": "0.095",
+        "periods": [],
+        "released": 0,
+        "reserved": 1,
+        "spent": 0
+      }
+    }
+  ],
+  "compaction": {
+    "after": {
+      "acceptance": "tQTNgyJCrECEQwHkfbfTBJEITKB0b9jJYdT_bvgaXqo",
+      "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
+      "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
+      "entries": [
+        {
+          "asset": "btc",
+          "at": "2026-01-07T00:00:00.000Z",
+          "attempt_id": "H8Q5RDJL3E2cxpYAdUzcqw",
+          "obligation": "9b2AE5e9dyuKEIfsrce1u-Rqr6mFh-iP20de6xwqVmM",
+          "outcome": null,
+          "value": "0.01"
+        },
+        {
+          "asset": "btc",
+          "at": "2026-03-01T00:00:00.000Z",
+          "attempt_id": "qhs-iTOKdAdnowjWjrPknQ",
+          "obligation": "lWkQCuAndbyOOuFaJ7t6ZqpY42NuSHzvcGnt1nkyow8",
+          "outcome": "done",
+          "value": "0.01"
+        }
+      ],
+      "totals": {
+        "count": 3,
+        "failed": [
+          {
+            "attempt_id": "B5_zS6aaKLnPdCZmW73a0A",
+            "obligation": "sKEZjN3SFS_B0HZcLg4dod88WI7AOnC_BfkH2zefbAU",
+            "value": "0.02"
+          }
+        ],
+        "spent": "0.03"
+      },
+      "v": 1
+    },
+    "before": {
+      "acceptance": "tQTNgyJCrECEQwHkfbfTBJEITKB0b9jJYdT_bvgaXqo",
+      "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
+      "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
+      "entries": [
+        {
+          "asset": "btc",
+          "at": "2026-01-05T00:00:00.000Z",
+          "attempt_id": "VnrZo7AZZB3mwR-gfg4t9w",
+          "obligation": "pMucwmH6LXML24Onv5CmiDyOn0b-nMzZnrD4iN3SLB0",
+          "outcome": "done",
+          "value": "0.01"
+        },
+        {
+          "asset": "btc",
+          "at": "2026-01-06T00:00:00.000Z",
+          "attempt_id": "B5_zS6aaKLnPdCZmW73a0A",
+          "obligation": "sKEZjN3SFS_B0HZcLg4dod88WI7AOnC_BfkH2zefbAU",
+          "outcome": "failed",
+          "value": "0.02"
+        },
+        {
+          "asset": "btc",
+          "at": "2026-01-07T00:00:00.000Z",
+          "attempt_id": "H8Q5RDJL3E2cxpYAdUzcqw",
+          "obligation": "9b2AE5e9dyuKEIfsrce1u-Rqr6mFh-iP20de6xwqVmM",
+          "outcome": null,
+          "value": "0.01"
+        },
+        {
+          "asset": "btc",
+          "at": "2026-03-01T00:00:00.000Z",
+          "attempt_id": "qhs-iTOKdAdnowjWjrPknQ",
+          "obligation": "lWkQCuAndbyOOuFaJ7t6ZqpY42NuSHzvcGnt1nkyow8",
+          "outcome": "done",
+          "value": "0.01"
+        }
+      ],
+      "totals": {
+        "count": 2,
+        "spent": "0.02"
+      },
+      "v": 1
+    },
+    "changed": true,
+    "claims": [
+      {
+        "attempt_id": "H8Q5RDJL3E2cxpYAdUzcqw",
+        "state": "open"
+      }
+    ],
+    "lifetime_after": "0.05",
+    "lifetime_before": "0.05",
+    "now": "2026-03-10T00:00:00.000Z",
+    "successors": {
+      "cases": [
+        {
+          "accepted": true,
+          "held": {
+            "acceptance": "tQTNgyJCrECEQwHkfbfTBJEITKB0b9jJYdT_bvgaXqo",
+            "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
+            "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
+            "entries": [
+              {
+                "asset": "btc",
+                "at": "2026-01-31T12:00:00.000Z",
+                "attempt_id": "VnrZo7AZZB3mwR-gfg4t9w",
+                "obligation": "pMucwmH6LXML24Onv5CmiDyOn0b-nMzZnrD4iN3SLB0",
+                "outcome": "done",
+                "value": "0.01"
+              }
+            ],
+            "totals": {
+              "count": 2,
+              "spent": "0.02"
+            },
+            "v": 1
+          },
+          "held_time": "2026-01-31T13:00:00.000Z",
+          "name": "monthly: compacted at February's end, written in March",
+          "newer": {
+            "acceptance": "tQTNgyJCrECEQwHkfbfTBJEITKB0b9jJYdT_bvgaXqo",
+            "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
+            "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
+            "entries": [],
+            "totals": {
+              "count": 3,
+              "spent": "0.03"
+            },
+            "v": 1
+          },
+          "newer_time": "2026-03-01T00:00:30.000Z",
+          "terms": {
+            "active_from": null,
+            "allowed_payment_endpoint_identifiers": null,
+            "asset": "btc",
+            "expires_at": null,
+            "lifetime_amount_limit": "0.10",
+            "per_payment_amount": {
+              "maximum": "0.01",
+              "minimum": "0.0001"
+            },
+            "period_limits": [
+              {
+                "amount_limit": "0.03",
+                "payment_count_limit": 3,
+                "period": {
+                  "anchor": "2026-01-01T00:00:00.000Z",
+                  "every": 1,
+                  "kind": "anchored",
+                  "unit": "month"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "accepted": false,
+          "held": {
+            "acceptance": "tQTNgyJCrECEQwHkfbfTBJEITKB0b9jJYdT_bvgaXqo",
+            "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
+            "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
+            "entries": [
+              {
+                "asset": "btc",
+                "at": "2026-01-31T12:00:00.000Z",
+                "attempt_id": "VnrZo7AZZB3mwR-gfg4t9w",
+                "obligation": "pMucwmH6LXML24Onv5CmiDyOn0b-nMzZnrD4iN3SLB0",
+                "outcome": "done",
+                "value": "0.01"
+              }
+            ],
+            "totals": {
+              "count": 2,
+              "spent": "0.02"
+            },
+            "v": 1
+          },
+          "held_time": "2026-03-01T00:00:30.000Z",
+          "name": "monthly: held from the newer write's time, judged in March alone",
+          "newer": {
+            "acceptance": "tQTNgyJCrECEQwHkfbfTBJEITKB0b9jJYdT_bvgaXqo",
+            "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
+            "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
+            "entries": [],
+            "totals": {
+              "count": 3,
+              "spent": "0.03"
+            },
+            "v": 1
+          },
+          "newer_time": "2026-03-01T00:00:30.000Z",
+          "terms": {
+            "active_from": null,
+            "allowed_payment_endpoint_identifiers": null,
+            "asset": "btc",
+            "expires_at": null,
+            "lifetime_amount_limit": "0.10",
+            "per_payment_amount": {
+              "maximum": "0.01",
+              "minimum": "0.0001"
+            },
+            "period_limits": [
+              {
+                "amount_limit": "0.03",
+                "payment_count_limit": 3,
+                "period": {
+                  "anchor": "2026-01-01T00:00:00.000Z",
+                  "every": 1,
+                  "kind": "anchored",
+                  "unit": "month"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "accepted": false,
+          "held": {
+            "acceptance": "tQTNgyJCrECEQwHkfbfTBJEITKB0b9jJYdT_bvgaXqo",
+            "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
+            "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
+            "entries": [
+              {
+                "asset": "btc",
+                "at": "2026-01-31T12:00:00.000Z",
+                "attempt_id": "VnrZo7AZZB3mwR-gfg4t9w",
+                "obligation": "pMucwmH6LXML24Onv5CmiDyOn0b-nMzZnrD4iN3SLB0",
+                "outcome": "done",
+                "value": "0.01"
+              }
+            ],
+            "totals": {
+              "count": 2,
+              "spent": "0.02"
+            },
+            "v": 1
+          },
+          "held_time": "2026-03-05T00:00:00.000Z",
+          "name": "monthly: held from after the newer write's time, judged at newer_time alone",
+          "newer": {
+            "acceptance": "tQTNgyJCrECEQwHkfbfTBJEITKB0b9jJYdT_bvgaXqo",
+            "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
+            "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
+            "entries": [],
+            "totals": {
+              "count": 3,
+              "spent": "0.03"
+            },
+            "v": 1
+          },
+          "newer_time": "2026-03-01T00:00:30.000Z",
+          "terms": {
+            "active_from": null,
+            "allowed_payment_endpoint_identifiers": null,
+            "asset": "btc",
+            "expires_at": null,
+            "lifetime_amount_limit": "0.10",
+            "per_payment_amount": {
+              "maximum": "0.01",
+              "minimum": "0.0001"
+            },
+            "period_limits": [
+              {
+                "amount_limit": "0.03",
+                "payment_count_limit": 3,
+                "period": {
+                  "anchor": "2026-01-01T00:00:00.000Z",
+                  "every": 1,
+                  "kind": "anchored",
+                  "unit": "month"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "accepted": false,
+          "held": {
+            "acceptance": "tQTNgyJCrECEQwHkfbfTBJEITKB0b9jJYdT_bvgaXqo",
+            "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
+            "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
+            "entries": [
+              {
+                "asset": "btc",
+                "at": "2026-02-01T00:30:00.000Z",
+                "attempt_id": "VnrZo7AZZB3mwR-gfg4t9w",
+                "obligation": "pMucwmH6LXML24Onv5CmiDyOn0b-nMzZnrD4iN3SLB0",
+                "outcome": "done",
+                "value": "0.01"
+              }
+            ],
+            "totals": {
+              "count": 2,
+              "spent": "0.02"
+            },
+            "v": 1
+          },
+          "held_time": "2026-02-02T00:00:00.000Z",
+          "name": "monthly: no time from held_time to newer_time could compact the entry",
+          "newer": {
+            "acceptance": "tQTNgyJCrECEQwHkfbfTBJEITKB0b9jJYdT_bvgaXqo",
+            "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
+            "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
+            "entries": [],
+            "totals": {
+              "count": 3,
+              "spent": "0.03"
+            },
+            "v": 1
+          },
+          "newer_time": "2026-03-01T01:00:00.000Z",
+          "terms": {
+            "active_from": null,
+            "allowed_payment_endpoint_identifiers": null,
+            "asset": "btc",
+            "expires_at": null,
+            "lifetime_amount_limit": "0.10",
+            "per_payment_amount": {
+              "maximum": "0.01",
+              "minimum": "0.0001"
+            },
+            "period_limits": [
+              {
+                "amount_limit": "0.03",
+                "payment_count_limit": 3,
+                "period": {
+                  "anchor": "2026-01-01T00:00:00.000Z",
+                  "every": 1,
+                  "kind": "anchored",
+                  "unit": "month"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "accepted": true,
+          "held": {
+            "acceptance": "tQTNgyJCrECEQwHkfbfTBJEITKB0b9jJYdT_bvgaXqo",
+            "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
+            "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
+            "entries": [
+              {
+                "asset": "btc",
+                "at": "2026-12-31T12:00:00.000Z",
+                "attempt_id": "VnrZo7AZZB3mwR-gfg4t9w",
+                "obligation": "pMucwmH6LXML24Onv5CmiDyOn0b-nMzZnrD4iN3SLB0",
+                "outcome": "done",
+                "value": "0.01"
+              }
+            ],
+            "totals": {
+              "count": 2,
+              "spent": "0.02"
+            },
+            "v": 1
+          },
+          "held_time": "2026-12-31T13:00:00.000Z",
+          "name": "yearly: compacted at 2027's end, written in leap year 2028",
+          "newer": {
+            "acceptance": "tQTNgyJCrECEQwHkfbfTBJEITKB0b9jJYdT_bvgaXqo",
+            "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
+            "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
+            "entries": [],
+            "totals": {
+              "count": 3,
+              "spent": "0.03"
+            },
+            "v": 1
+          },
+          "newer_time": "2028-01-01T00:00:30.000Z",
+          "terms": {
+            "active_from": null,
+            "allowed_payment_endpoint_identifiers": null,
+            "asset": "btc",
+            "expires_at": null,
+            "lifetime_amount_limit": "0.10",
+            "per_payment_amount": {
+              "maximum": "0.01",
+              "minimum": "0.0001"
+            },
+            "period_limits": [
+              {
+                "amount_limit": "0.03",
+                "payment_count_limit": 3,
+                "period": {
+                  "anchor": "2026-01-01T00:00:00.000Z",
+                  "every": 1,
+                  "kind": "anchored",
+                  "unit": "year"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "accepted": false,
+          "held": {
+            "acceptance": "tQTNgyJCrECEQwHkfbfTBJEITKB0b9jJYdT_bvgaXqo",
+            "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
+            "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
+            "entries": [
+              {
+                "asset": "btc",
+                "at": "2026-12-31T12:00:00.000Z",
+                "attempt_id": "VnrZo7AZZB3mwR-gfg4t9w",
+                "obligation": "pMucwmH6LXML24Onv5CmiDyOn0b-nMzZnrD4iN3SLB0",
+                "outcome": "done",
+                "value": "0.01"
+              }
+            ],
+            "totals": {
+              "count": 2,
+              "spent": "0.02"
+            },
+            "v": 1
+          },
+          "held_time": "2028-01-01T00:00:30.000Z",
+          "name": "yearly: held from the newer write's time, judged in 2028 alone",
+          "newer": {
+            "acceptance": "tQTNgyJCrECEQwHkfbfTBJEITKB0b9jJYdT_bvgaXqo",
+            "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
+            "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
+            "entries": [],
+            "totals": {
+              "count": 3,
+              "spent": "0.03"
+            },
+            "v": 1
+          },
+          "newer_time": "2028-01-01T00:00:30.000Z",
+          "terms": {
+            "active_from": null,
+            "allowed_payment_endpoint_identifiers": null,
+            "asset": "btc",
+            "expires_at": null,
+            "lifetime_amount_limit": "0.10",
+            "per_payment_amount": {
+              "maximum": "0.01",
+              "minimum": "0.0001"
+            },
+            "period_limits": [
+              {
+                "amount_limit": "0.03",
+                "payment_count_limit": 3,
+                "period": {
+                  "anchor": "2026-01-01T00:00:00.000Z",
+                  "every": 1,
+                  "kind": "anchored",
+                  "unit": "year"
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "description": "Wire 5.5 From one version to the next, spec 8.3: a reader holds held, written at service time held_time, and reads newer, written at newer_time, which no longer lists a held entry. newer counts that entry in its totals, as a compaction writes it. The reader accepts newer when the entry's at + longest period + 60 s was before some service time from held_time to newer_time, the longest period taken at that time, so an anchored month or year limit's entry compacted in a shorter period is accepted in a version written in a longer one. A held_time after newer_time judges at newer_time alone. accepted is the verdict."
+    },
+    "terms": {
+      "active_from": null,
+      "allowed_payment_endpoint_identifiers": null,
+      "asset": "btc",
+      "expires_at": null,
+      "lifetime_amount_limit": "0.10",
+      "per_payment_amount": {
+        "maximum": "0.01",
+        "minimum": "0.0001"
+      },
+      "period_limits": [
+        {
+          "amount_limit": "0.03",
+          "payment_count_limit": 3,
+          "period": {
+            "anchor": "2026-01-31T00:00:00.000Z",
+            "every": 1,
+            "kind": "anchored",
+            "unit": "month"
+          }
+        }
+      ]
+    }
+  },
+  "description": "Allowance usage (wire 5.5, spec 8.3 with specs/allowances.md): for every period limit the amount and count of counted entries in the period containing t (anchored) or with t < at + 60 s + L (rolling), the lifetime amount including compacted totals, and entry counts reserved, spent and released. A ledger or claim done, or a validated payer proof, spends. Open and unknown claims reserve entries without an outcome. The cases carry no payment-method history: each failure is one whose attempt a complete history omits (spec 8.3, Pending holds a failure), and every such failed attempt is released, whoever wrote the failure, while its claim remains and after it is gone: it counts in no amount and no count. Done or a paid proof overrides the release and spends. An entry without an outcome whose claim is gone spends. Compacted totals.failed items use the same rule for lifetime usage. Candidates are checked against every limit; refused_by names the first limit that refuses. failure_evidence holds pure counting inputs: evidence means already validated payer-proof evidence (paid), not a shared record member, and the failure itself comes from the claim, the entry or the compacted item; Callers must bind it to the attempt, obligation, Allowance, amount, asset and owner. Its compacted cases replace the entry with one totals.failed item. period_limit_spellings checks duplicate terms by wire spelling; period_limit_members checks required members. compaction/successors checks which newer ledger versions a reader holding an older one accepts after a compaction it didn't see.",
+  "failure_evidence": [
+    {
+      "attempt_id": "1csmdhiTomzJxPwNK4iUiQ",
+      "candidate": {
+        "allowed": true,
+        "amount": "0.01"
+      },
+      "claims": [
+        {
+          "attempt_id": "1csmdhiTomzJxPwNK4iUiQ",
+          "resolved_by_owner": true,
+          "state": "failed"
+        }
+      ],
+      "evidence": {
+        "paid": false
+      },
+      "ledger": {
+        "acceptance": "tQTNgyJCrECEQwHkfbfTBJEITKB0b9jJYdT_bvgaXqo",
+        "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
+        "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
+        "entries": [
+          {
+            "asset": "btc",
+            "at": "2026-01-02T00:00:00.000Z",
+            "attempt_id": "1csmdhiTomzJxPwNK4iUiQ",
+            "obligation": "ONsOr1U2clGE6Cp9VqMJKmRx2jZbonIGJlqP63iPOnw",
+            "outcome": null,
+            "value": "0.01"
+          }
+        ],
+        "totals": {
+          "count": 0,
+          "failed": [],
+          "spent": ""
+        },
+        "v": 1
+      },
+      "name": "owner failed",
+      "t": "2026-01-08T00:00:00.000Z",
+      "terms": {
+        "active_from": null,
+        "allowed_payment_endpoint_identifiers": null,
+        "asset": "btc",
+        "expires_at": null,
+        "lifetime_amount_limit": "0.01",
+        "per_payment_amount": {
+          "maximum": "0.01",
+          "minimum": "0.0001"
+        },
+        "period_limits": []
+      },
+      "usage": {
+        "lifetime": "0",
+        "periods": [],
+        "released": 1,
+        "reserved": 0,
+        "spent": 0
+      }
+    },
+    {
+      "attempt_id": "1csmdhiTomzJxPwNK4iUiQ",
+      "candidate": {
+        "allowed": true,
+        "amount": "0.01"
+      },
+      "claims": [
+        {
+          "attempt_id": "1csmdhiTomzJxPwNK4iUiQ",
+          "resolved_by_owner": false,
+          "state": "failed"
+        }
+      ],
+      "evidence": {
+        "paid": false
+      },
+      "ledger": {
+        "acceptance": "tQTNgyJCrECEQwHkfbfTBJEITKB0b9jJYdT_bvgaXqo",
+        "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
+        "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
+        "entries": [
+          {
+            "asset": "btc",
+            "at": "2026-01-02T00:00:00.000Z",
+            "attempt_id": "1csmdhiTomzJxPwNK4iUiQ",
+            "obligation": "ONsOr1U2clGE6Cp9VqMJKmRx2jZbonIGJlqP63iPOnw",
+            "outcome": null,
+            "value": "0.01"
+          }
+        ],
+        "totals": {
+          "count": 0,
+          "failed": [],
+          "spent": ""
+        },
+        "v": 1
+      },
+      "name": "another app failed",
+      "t": "2026-01-08T00:00:00.000Z",
+      "terms": {
+        "active_from": null,
+        "allowed_payment_endpoint_identifiers": null,
+        "asset": "btc",
+        "expires_at": null,
+        "lifetime_amount_limit": "0.01",
+        "per_payment_amount": {
+          "maximum": "0.01",
+          "minimum": "0.0001"
+        },
+        "period_limits": []
+      },
+      "usage": {
+        "lifetime": "0",
+        "periods": [],
+        "released": 1,
+        "reserved": 0,
+        "spent": 0
+      }
+    },
+    {
+      "attempt_id": "1csmdhiTomzJxPwNK4iUiQ",
+      "candidate": {
+        "allowed": true,
+        "amount": "0.01"
+      },
+      "claims": [],
+      "evidence": {
+        "paid": false
+      },
+      "ledger": {
+        "acceptance": "tQTNgyJCrECEQwHkfbfTBJEITKB0b9jJYdT_bvgaXqo",
+        "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
+        "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
+        "entries": [
+          {
+            "asset": "btc",
+            "at": "2026-01-02T00:00:00.000Z",
+            "attempt_id": "1csmdhiTomzJxPwNK4iUiQ",
+            "obligation": "ONsOr1U2clGE6Cp9VqMJKmRx2jZbonIGJlqP63iPOnw",
+            "outcome": "failed",
+            "value": "0.01"
+          }
+        ],
+        "totals": {
+          "count": 0,
+          "failed": [],
+          "spent": ""
+        },
+        "v": 1
+      },
+      "name": "failed ledger, claim gone",
+      "t": "2026-01-08T00:00:00.000Z",
+      "terms": {
+        "active_from": null,
+        "allowed_payment_endpoint_identifiers": null,
+        "asset": "btc",
+        "expires_at": null,
+        "lifetime_amount_limit": "0.01",
+        "per_payment_amount": {
+          "maximum": "0.01",
+          "minimum": "0.0001"
+        },
+        "period_limits": []
+      },
+      "usage": {
+        "lifetime": "0",
+        "periods": [],
+        "released": 1,
+        "reserved": 0,
+        "spent": 0
+      }
+    },
+    {
+      "attempt_id": "1csmdhiTomzJxPwNK4iUiQ",
+      "candidate": {
+        "allowed": false,
+        "amount": "0.01"
+      },
+      "claims": [
+        {
+          "attempt_id": "1csmdhiTomzJxPwNK4iUiQ",
+          "state": "unknown"
+        }
+      ],
+      "evidence": {
+        "paid": false
+      },
+      "ledger": {
+        "acceptance": "tQTNgyJCrECEQwHkfbfTBJEITKB0b9jJYdT_bvgaXqo",
+        "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
+        "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
+        "entries": [
+          {
+            "asset": "btc",
+            "at": "2026-01-02T00:00:00.000Z",
+            "attempt_id": "1csmdhiTomzJxPwNK4iUiQ",
+            "obligation": "ONsOr1U2clGE6Cp9VqMJKmRx2jZbonIGJlqP63iPOnw",
+            "outcome": null,
+            "value": "0.01"
+          }
+        ],
+        "totals": {
+          "count": 0,
+          "failed": [],
+          "spent": ""
+        },
+        "v": 1
+      },
+      "name": "unknown dispatch",
+      "t": "2026-01-08T00:00:00.000Z",
+      "terms": {
+        "active_from": null,
+        "allowed_payment_endpoint_identifiers": null,
+        "asset": "btc",
+        "expires_at": null,
+        "lifetime_amount_limit": "0.01",
+        "per_payment_amount": {
+          "maximum": "0.01",
+          "minimum": "0.0001"
+        },
+        "period_limits": []
+      },
+      "usage": {
+        "lifetime": "0.01",
+        "periods": [],
+        "released": 0,
+        "reserved": 1,
+        "spent": 0
+      }
+    },
+    {
+      "attempt_id": "1csmdhiTomzJxPwNK4iUiQ",
+      "candidate": {
+        "allowed": false,
+        "amount": "0.01"
+      },
+      "claims": [
+        {
+          "attempt_id": "1csmdhiTomzJxPwNK4iUiQ",
+          "state": "open"
+        }
+      ],
+      "evidence": {
+        "paid": false
+      },
+      "ledger": {
+        "acceptance": "tQTNgyJCrECEQwHkfbfTBJEITKB0b9jJYdT_bvgaXqo",
+        "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
+        "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
+        "entries": [
+          {
+            "asset": "btc",
+            "at": "2026-01-02T00:00:00.000Z",
+            "attempt_id": "1csmdhiTomzJxPwNK4iUiQ",
+            "obligation": "ONsOr1U2clGE6Cp9VqMJKmRx2jZbonIGJlqP63iPOnw",
+            "outcome": null,
+            "value": "0.01"
+          }
+        ],
+        "totals": {
+          "count": 0,
+          "failed": [],
+          "spent": ""
+        },
+        "v": 1
+      },
+      "name": "open attempt",
+      "t": "2026-01-08T00:00:00.000Z",
+      "terms": {
+        "active_from": null,
+        "allowed_payment_endpoint_identifiers": null,
+        "asset": "btc",
+        "expires_at": null,
+        "lifetime_amount_limit": "0.01",
+        "per_payment_amount": {
+          "maximum": "0.01",
+          "minimum": "0.0001"
+        },
+        "period_limits": []
+      },
+      "usage": {
+        "lifetime": "0.01",
+        "periods": [],
+        "released": 0,
+        "reserved": 1,
+        "spent": 0
+      }
+    },
+    {
+      "attempt_id": "1csmdhiTomzJxPwNK4iUiQ",
+      "candidate": {
+        "allowed": false,
+        "amount": "0.01"
+      },
+      "claims": [],
+      "evidence": {
+        "paid": false
+      },
+      "ledger": {
+        "acceptance": "tQTNgyJCrECEQwHkfbfTBJEITKB0b9jJYdT_bvgaXqo",
+        "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
+        "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
+        "entries": [
+          {
+            "asset": "btc",
+            "at": "2026-01-02T00:00:00.000Z",
+            "attempt_id": "1csmdhiTomzJxPwNK4iUiQ",
+            "obligation": "ONsOr1U2clGE6Cp9VqMJKmRx2jZbonIGJlqP63iPOnw",
+            "outcome": null,
+            "value": "0.01"
+          }
+        ],
+        "totals": {
+          "count": 0,
+          "failed": [],
+          "spent": ""
+        },
+        "v": 1
+      },
+      "name": "no outcome, claim gone",
+      "t": "2026-01-08T00:00:00.000Z",
+      "terms": {
+        "active_from": null,
+        "allowed_payment_endpoint_identifiers": null,
+        "asset": "btc",
+        "expires_at": null,
+        "lifetime_amount_limit": "0.01",
+        "per_payment_amount": {
+          "maximum": "0.01",
+          "minimum": "0.0001"
+        },
+        "period_limits": []
+      },
+      "usage": {
+        "lifetime": "0.01",
+        "periods": [],
+        "released": 0,
+        "reserved": 0,
+        "spent": 1
+      }
+    },
+    {
+      "attempt_id": "1csmdhiTomzJxPwNK4iUiQ",
+      "candidate": {
+        "allowed": false,
+        "amount": "0.01"
+      },
+      "claims": [],
+      "evidence": {
+        "paid": true
+      },
+      "ledger": {
+        "acceptance": "tQTNgyJCrECEQwHkfbfTBJEITKB0b9jJYdT_bvgaXqo",
+        "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
+        "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
+        "entries": [
+          {
+            "asset": "btc",
+            "at": "2026-01-02T00:00:00.000Z",
+            "attempt_id": "1csmdhiTomzJxPwNK4iUiQ",
+            "obligation": "ONsOr1U2clGE6Cp9VqMJKmRx2jZbonIGJlqP63iPOnw",
+            "outcome": "failed",
+            "value": "0.01"
+          }
+        ],
+        "totals": {
+          "count": 0,
+          "failed": [],
+          "spent": ""
+        },
+        "v": 1
+      },
+      "name": "paid proof overrides a failure",
+      "t": "2026-01-08T00:00:00.000Z",
+      "terms": {
+        "active_from": null,
+        "allowed_payment_endpoint_identifiers": null,
+        "asset": "btc",
+        "expires_at": null,
+        "lifetime_amount_limit": "0.01",
+        "per_payment_amount": {
+          "maximum": "0.01",
+          "minimum": "0.0001"
+        },
+        "period_limits": []
+      },
+      "usage": {
+        "lifetime": "0.01",
+        "periods": [],
+        "released": 0,
+        "reserved": 0,
+        "spent": 1
+      }
+    },
+    {
+      "attempt_id": "1csmdhiTomzJxPwNK4iUiQ",
+      "candidate": {
+        "allowed": false,
+        "amount": "0.01"
+      },
+      "claims": [
+        {
+          "attempt_id": "1csmdhiTomzJxPwNK4iUiQ",
+          "state": "done"
+        }
+      ],
+      "evidence": {
+        "paid": false
+      },
+      "ledger": {
+        "acceptance": "tQTNgyJCrECEQwHkfbfTBJEITKB0b9jJYdT_bvgaXqo",
+        "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
+        "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
+        "entries": [
+          {
+            "asset": "btc",
+            "at": "2026-01-02T00:00:00.000Z",
+            "attempt_id": "1csmdhiTomzJxPwNK4iUiQ",
+            "obligation": "ONsOr1U2clGE6Cp9VqMJKmRx2jZbonIGJlqP63iPOnw",
+            "outcome": "failed",
+            "value": "0.01"
+          }
+        ],
+        "totals": {
+          "count": 0,
+          "failed": [],
+          "spent": ""
+        },
+        "v": 1
+      },
+      "name": "done claim overrides a failure",
+      "t": "2026-01-08T00:00:00.000Z",
+      "terms": {
+        "active_from": null,
+        "allowed_payment_endpoint_identifiers": null,
+        "asset": "btc",
+        "expires_at": null,
+        "lifetime_amount_limit": "0.01",
+        "per_payment_amount": {
+          "maximum": "0.01",
+          "minimum": "0.0001"
+        },
+        "period_limits": []
+      },
+      "usage": {
+        "lifetime": "0.01",
+        "periods": [],
+        "released": 0,
+        "reserved": 0,
+        "spent": 1
+      }
+    },
+    {
+      "attempt_id": "1csmdhiTomzJxPwNK4iUiQ",
+      "candidate": {
+        "allowed": false,
+        "amount": "0.01"
+      },
+      "claims": [],
+      "evidence": {
+        "paid": false
+      },
+      "ledger": {
+        "acceptance": "tQTNgyJCrECEQwHkfbfTBJEITKB0b9jJYdT_bvgaXqo",
+        "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
+        "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
+        "entries": [
+          {
+            "asset": "btc",
+            "at": "2026-01-02T00:00:00.000Z",
+            "attempt_id": "1csmdhiTomzJxPwNK4iUiQ",
+            "obligation": "ONsOr1U2clGE6Cp9VqMJKmRx2jZbonIGJlqP63iPOnw",
+            "outcome": "done",
+            "value": "0.01"
+          }
+        ],
+        "totals": {
+          "count": 0,
+          "failed": [],
+          "spent": ""
+        },
+        "v": 1
+      },
+      "name": "done ledger spends",
+      "t": "2026-01-08T00:00:00.000Z",
+      "terms": {
+        "active_from": null,
+        "allowed_payment_endpoint_identifiers": null,
+        "asset": "btc",
+        "expires_at": null,
+        "lifetime_amount_limit": "0.01",
+        "per_payment_amount": {
+          "maximum": "0.01",
+          "minimum": "0.0001"
+        },
+        "period_limits": []
+      },
+      "usage": {
+        "lifetime": "0.01",
+        "periods": [],
+        "released": 0,
+        "reserved": 0,
+        "spent": 1
+      }
+    },
+    {
+      "attempt_id": "1csmdhiTomzJxPwNK4iUiQ",
+      "candidate": {
+        "allowed": true,
+        "amount": "0.01"
+      },
+      "claims": [
+        {
+          "attempt_id": "1csmdhiTomzJxPwNK4iUiQ",
+          "resolved_by_owner": true,
+          "state": "failed"
+        }
+      ],
+      "evidence": {
+        "paid": false
+      },
+      "ledger": {
+        "acceptance": "tQTNgyJCrECEQwHkfbfTBJEITKB0b9jJYdT_bvgaXqo",
+        "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
+        "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
+        "entries": [],
+        "totals": {
+          "count": 0,
+          "failed": [
+            {
+              "attempt_id": "1csmdhiTomzJxPwNK4iUiQ",
+              "obligation": "ONsOr1U2clGE6Cp9VqMJKmRx2jZbonIGJlqP63iPOnw",
+              "value": "0.01"
+            }
+          ],
+          "spent": ""
+        },
+        "v": 1
+      },
+      "name": "compacted owner failure",
+      "t": "2026-01-08T00:00:00.000Z",
+      "terms": {
+        "active_from": null,
+        "allowed_payment_endpoint_identifiers": null,
+        "asset": "btc",
+        "expires_at": null,
+        "lifetime_amount_limit": "0.01",
+        "per_payment_amount": {
+          "maximum": "0.01",
+          "minimum": "0.0001"
+        },
+        "period_limits": []
+      },
+      "usage": {
+        "lifetime": "0",
+        "periods": [],
+        "released": 0,
+        "reserved": 0,
+        "spent": 0
+      }
+    },
+    {
+      "attempt_id": "1csmdhiTomzJxPwNK4iUiQ",
+      "candidate": {
+        "allowed": true,
+        "amount": "0.01"
+      },
+      "claims": [],
+      "evidence": {
+        "paid": false
+      },
+      "ledger": {
+        "acceptance": "tQTNgyJCrECEQwHkfbfTBJEITKB0b9jJYdT_bvgaXqo",
+        "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
+        "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
+        "entries": [],
+        "totals": {
+          "count": 0,
+          "failed": [
+            {
+              "attempt_id": "1csmdhiTomzJxPwNK4iUiQ",
+              "obligation": "ONsOr1U2clGE6Cp9VqMJKmRx2jZbonIGJlqP63iPOnw",
+              "value": "0.01"
+            }
+          ],
+          "spent": ""
+        },
+        "v": 1
+      },
+      "name": "compacted failure, claim gone",
+      "t": "2026-01-08T00:00:00.000Z",
+      "terms": {
+        "active_from": null,
+        "allowed_payment_endpoint_identifiers": null,
+        "asset": "btc",
+        "expires_at": null,
+        "lifetime_amount_limit": "0.01",
+        "per_payment_amount": {
+          "maximum": "0.01",
+          "minimum": "0.0001"
+        },
+        "period_limits": []
+      },
+      "usage": {
+        "lifetime": "0",
+        "periods": [],
+        "released": 0,
+        "reserved": 0,
+        "spent": 0
+      }
+    },
+    {
+      "attempt_id": "1csmdhiTomzJxPwNK4iUiQ",
+      "candidate": {
+        "allowed": false,
+        "amount": "0.01"
+      },
+      "claims": [],
+      "evidence": {
+        "paid": true
+      },
+      "ledger": {
+        "acceptance": "tQTNgyJCrECEQwHkfbfTBJEITKB0b9jJYdT_bvgaXqo",
+        "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
+        "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
+        "entries": [],
+        "totals": {
+          "count": 0,
+          "failed": [
+            {
+              "attempt_id": "1csmdhiTomzJxPwNK4iUiQ",
+              "obligation": "ONsOr1U2clGE6Cp9VqMJKmRx2jZbonIGJlqP63iPOnw",
+              "value": "0.01"
+            }
+          ],
+          "spent": ""
+        },
+        "v": 1
+      },
+      "name": "compacted paid proof overrides a failure",
+      "t": "2026-01-08T00:00:00.000Z",
+      "terms": {
+        "active_from": null,
+        "allowed_payment_endpoint_identifiers": null,
+        "asset": "btc",
+        "expires_at": null,
+        "lifetime_amount_limit": "0.01",
+        "per_payment_amount": {
+          "maximum": "0.01",
+          "minimum": "0.0001"
+        },
+        "period_limits": []
+      },
+      "usage": {
+        "lifetime": "0.01",
+        "periods": [],
+        "released": 0,
+        "reserved": 0,
+        "spent": 0
+      }
+    },
+    {
+      "attempt_id": "1csmdhiTomzJxPwNK4iUiQ",
+      "candidate": {
+        "allowed": false,
+        "amount": "0.01"
+      },
+      "claims": [
+        {
+          "attempt_id": "1csmdhiTomzJxPwNK4iUiQ",
+          "state": "done"
+        }
+      ],
+      "evidence": {
+        "paid": false
+      },
+      "ledger": {
+        "acceptance": "tQTNgyJCrECEQwHkfbfTBJEITKB0b9jJYdT_bvgaXqo",
+        "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
+        "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
+        "entries": [],
+        "totals": {
+          "count": 0,
+          "failed": [
+            {
+              "attempt_id": "1csmdhiTomzJxPwNK4iUiQ",
+              "obligation": "ONsOr1U2clGE6Cp9VqMJKmRx2jZbonIGJlqP63iPOnw",
+              "value": "0.01"
+            }
+          ],
+          "spent": ""
+        },
+        "v": 1
+      },
+      "name": "compacted done claim overrides a failure",
+      "t": "2026-01-08T00:00:00.000Z",
+      "terms": {
+        "active_from": null,
+        "allowed_payment_endpoint_identifiers": null,
+        "asset": "btc",
+        "expires_at": null,
+        "lifetime_amount_limit": "0.01",
+        "per_payment_amount": {
+          "maximum": "0.01",
+          "minimum": "0.0001"
+        },
+        "period_limits": []
+      },
+      "usage": {
+        "lifetime": "0.01",
+        "periods": [],
+        "released": 0,
+        "reserved": 0,
+        "spent": 0
+      }
+    }
+  ],
+  "period_limit_members": {
+    "description": "Wire 4.15, specs/allowances.md: the terms of the first case with its period limit's amount_limit or payment_count_limit left out. A period limit carries both, each possibly null, not both null; a missing one isn't read as null, so every reader refuses these terms. reason is paykit-lib's wording.",
+    "refused": [
+      {
+        "name": "a period limit without amount_limit",
+        "reason": "invalid: terms: amount_limit: missing; a period limit carries both limits",
+        "terms": {
+          "active_from": null,
+          "allowed_payment_endpoint_identifiers": null,
+          "asset": "btc",
+          "expires_at": null,
+          "lifetime_amount_limit": "0.10",
+          "per_payment_amount": {
+            "maximum": "0.01",
+            "minimum": "0.0001"
+          },
+          "period_limits": [
+            {
+              "payment_count_limit": 3,
+              "period": {
+                "anchor": "2026-01-31T00:00:00.000Z",
+                "every": 1,
+                "kind": "anchored",
+                "unit": "month"
+              }
+            }
+          ]
+        }
+      },
+      {
+        "name": "a period limit without payment_count_limit",
+        "reason": "invalid: terms: payment_count_limit: missing; a period limit carries both limits",
+        "terms": {
+          "active_from": null,
+          "allowed_payment_endpoint_identifiers": null,
+          "asset": "btc",
+          "expires_at": null,
+          "lifetime_amount_limit": "0.10",
+          "per_payment_amount": {
+            "maximum": "0.01",
+            "minimum": "0.0001"
+          },
+          "period_limits": [
+            {
+              "amount_limit": "0.03",
+              "period": {
+                "anchor": "2026-01-31T00:00:00.000Z",
+                "every": 1,
+                "kind": "anchored",
+                "unit": "month"
+              }
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "period_limit_spellings": {
+    "accepted": [
+      {
+        "name": "amount limits 0.03 and 0.030, numerically equal",
+        "terms": {
+          "active_from": null,
+          "allowed_payment_endpoint_identifiers": null,
+          "asset": "btc",
+          "expires_at": null,
+          "lifetime_amount_limit": "0.10",
+          "per_payment_amount": {
+            "maximum": "0.01",
+            "minimum": "0.0001"
+          },
+          "period_limits": [
+            {
+              "amount_limit": "0.03",
+              "payment_count_limit": null,
+              "period": {
+                "every": 1,
+                "kind": "rolling",
+                "unit": "day"
+              }
+            },
+            {
+              "amount_limit": "0.030",
+              "payment_count_limit": null,
+              "period": {
+                "every": 1,
+                "kind": "rolling",
+                "unit": "day"
+              }
+            }
+          ]
+        }
+      },
+      {
+        "name": "anchors naming one instant, spelled with and without a fraction",
+        "terms": {
+          "active_from": null,
+          "allowed_payment_endpoint_identifiers": null,
+          "asset": "btc",
+          "expires_at": null,
+          "lifetime_amount_limit": "0.10",
+          "per_payment_amount": {
+            "maximum": "0.01",
+            "minimum": "0.0001"
+          },
+          "period_limits": [
+            {
+              "amount_limit": "0.03",
+              "payment_count_limit": 3,
+              "period": {
+                "anchor": "2026-01-31T00:00:00Z",
+                "every": 1,
+                "kind": "anchored",
+                "unit": "month"
+              }
+            },
+            {
+              "amount_limit": "0.03",
+              "payment_count_limit": 3,
+              "period": {
+                "anchor": "2026-01-31T00:00:00.000Z",
+                "every": 1,
+                "kind": "anchored",
+                "unit": "month"
+              }
+            }
+          ]
+        }
+      }
+    ],
+    "description": "Wire 4.15, specs/allowances.md: the terms of the first case with period_limits replaced. Two period limits are duplicates when every member is equal as spelled on the wire: amount_limit and anchor compare as strings, so numerically equal amounts (1, 1.0) or one instant spelled two ways are distinct entries; payment_count_limit and every compare as integers; kind and unit exactly. accepted are terms every reader takes, with each of their period limits; refused are terms with an entry twice, which every reader refuses. reason is paykit-lib's wording.",
+    "refused": [
+      {
+        "name": "an amount limit entry twice",
+        "reason": "invalid: terms: period_limits: an entry twice",
+        "terms": {
+          "active_from": null,
+          "allowed_payment_endpoint_identifiers": null,
+          "asset": "btc",
+          "expires_at": null,
+          "lifetime_amount_limit": "0.10",
+          "per_payment_amount": {
+            "maximum": "0.01",
+            "minimum": "0.0001"
+          },
+          "period_limits": [
+            {
+              "amount_limit": "0.030",
+              "payment_count_limit": null,
+              "period": {
+                "every": 1,
+                "kind": "rolling",
+                "unit": "day"
+              }
+            },
+            {
+              "amount_limit": "0.030",
+              "payment_count_limit": null,
+              "period": {
+                "every": 1,
+                "kind": "rolling",
+                "unit": "day"
+              }
+            }
+          ]
+        }
+      },
+      {
+        "name": "an anchored entry twice",
+        "reason": "invalid: terms: period_limits: an entry twice",
+        "terms": {
+          "active_from": null,
+          "allowed_payment_endpoint_identifiers": null,
+          "asset": "btc",
+          "expires_at": null,
+          "lifetime_amount_limit": "0.10",
+          "per_payment_amount": {
+            "maximum": "0.01",
+            "minimum": "0.0001"
+          },
+          "period_limits": [
+            {
+              "amount_limit": "0.03",
+              "payment_count_limit": 3,
+              "period": {
+                "anchor": "2026-01-31T00:00:00Z",
+                "every": 1,
+                "kind": "anchored",
+                "unit": "month"
+              }
+            },
+            {
+              "amount_limit": "0.03",
+              "payment_count_limit": 3,
+              "period": {
+                "anchor": "2026-01-31T00:00:00Z",
+                "every": 1,
+                "kind": "anchored",
+                "unit": "month"
+              }
+            }
+          ]
+        }
+      }
+    ]
+  }
+}

@@ -229,7 +229,8 @@ or report these types, or any object that contains them:
 `FfiAllowanceRecord`, `FfiLinkedPeerRecord`,
 `FfiPrivatePaymentListEndpoint`, `FfiPrivatePaymentListView`,
 `FfiQueuedPrivateMessage`, `FfiReceiptAccessView`, `FfiPaykitProfileRecord`,
-`FfiPubkyProfileRecord`, `FfiPaykitBlobRecord`, `FfiSdkStateBlobSnapshot`,
+`FfiPubkyProfileRecord`, `FfiPubkyProfileSnapshot`, `FfiPubkyProfileUpdate`,
+`FfiPaykitBlobRecord`, `FfiSdkStateBlobSnapshot`,
 `FfiPaykitStateObservation`, `FfiPrivateMessageSchedulingSnapshot`
 
 This list comes from

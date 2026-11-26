@@ -64,6 +64,8 @@ QueuedPrivateMessage
 ReceiptAccessView
 PaykitProfileRecord
 PubkyProfileRecord
+PubkyProfileSnapshot
+PubkyProfileUpdate
 PaykitBlobRecord
 SdkStateBlobSnapshot
 PaykitStateObservation

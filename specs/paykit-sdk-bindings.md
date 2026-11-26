@@ -1,5 +1,7 @@
 # Paykit SDK Bindings Plan
 
+This plan describes the v0.1 SDK. For the payment method contract of an installed v0.2 wallet, see [Installed wallet bindings](v0.2/spec.md#installed-wallet-bindings).
+
 ## Goal
 
 Define the platform binding surface for Paykit SDK.

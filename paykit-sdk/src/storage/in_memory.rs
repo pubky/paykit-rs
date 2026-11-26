@@ -375,7 +375,7 @@ impl StorageTransaction for StorageStateTransaction {
             })?;
         if link.generation != packet.link_generation {
             return Err(PaykitSdkError::Storage {
-                context: "private intake packet generation does not match Encrypted Link".into(),
+                context: PRIVATE_INTAKE_PACKET_GENERATION_MISMATCH.into(),
                 source: None,
             });
         }
@@ -992,7 +992,7 @@ impl StorageTransaction for StorageStateTransaction {
         message.status = OutboundPrivateMessageStatus::Sending;
         message.attempt_count = message.attempt_count.saturating_add(1);
         message.last_attempt_at = Some(now);
-        message.updated_at = now;
+        message.updated_at = message.updated_at.max(now);
         message.last_error = None;
         Some(message.clone())
     }
@@ -1189,5 +1189,61 @@ impl StorageTransaction for StorageStateTransaction {
             .values()
             .find(|record| record.receipt_id == receipt_id)
             .cloned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_storage_private_intake_cursor_rejected_advance_leaves_state_unchanged() {
+        let subscribed_user =
+            PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        let new_user = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        let storage = InMemoryStorage::new();
+        storage
+            .transaction({
+                let subscribed_user = subscribed_user.clone();
+                move |tx| {
+                    tx.advance_private_intake_cursor(PrivateIntakeCursorRecord {
+                        subscribed_user,
+                        homeserver: "homeserver-a".into(),
+                        event_id: 10,
+                    })
+                }
+            })
+            .await
+            .unwrap();
+        let before = storage.snapshot().unwrap();
+
+        let rejected = [
+            ("regression", subscribed_user.clone(), "homeserver-a", 9),
+            (
+                "homeserver mismatch",
+                subscribed_user.clone(),
+                "homeserver-b",
+                11,
+            ),
+            ("empty homeserver", subscribed_user.clone(), "", 11),
+            ("empty homeserver for a new user", new_user, "", 1),
+        ];
+        for (case, subscribed_user, homeserver, event_id) in rejected {
+            let cursor = PrivateIntakeCursorRecord {
+                subscribed_user,
+                homeserver: homeserver.into(),
+                event_id,
+            };
+            let was_rejected = storage
+                .transaction(move |tx| Ok(tx.advance_private_intake_cursor(cursor).is_err()))
+                .await
+                .unwrap();
+            assert!(was_rejected, "{case}: advance was not rejected");
+            assert_eq!(
+                storage.snapshot().unwrap(),
+                before,
+                "{case}: rejected advance changed state"
+            );
+        }
     }
 }

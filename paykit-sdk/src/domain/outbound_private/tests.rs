@@ -405,3 +405,63 @@ async fn test_claim_next_outbound_private_message_reclaims_stale_sending() {
     assert_eq!(stale_claim.status, OutboundPrivateMessageStatus::Sending);
     assert_eq!(stale_claim.attempt_count, 2);
 }
+
+#[tokio::test]
+async fn test_mark_outbound_slot_taken_drops_prepared_send() {
+    for (raw_json, confirmed, retry_now, expected) in [
+        (
+            raw_private_list(),
+            false,
+            true,
+            OutboundPrivateMessageStatus::Pending,
+        ),
+        (
+            raw_private_list(),
+            false,
+            false,
+            OutboundPrivateMessageStatus::Failed,
+        ),
+        (
+            raw_payment_request("bitkit"),
+            true,
+            false,
+            OutboundPrivateMessageStatus::Sent,
+        ),
+    ] {
+        let storage = registered_storage();
+        let counterparty = counterparty();
+        enqueue_private_message(&storage, counterparty.clone(), raw_json, timestamp())
+            .await
+            .unwrap();
+        let mut claimed = claim_next_outbound_private_message(
+            &storage,
+            &counterparty,
+            timestamp(),
+            timestamp(),
+            timestamp(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        claimed.prepared_send = Some(crate::storage::PreparedOutboundPrivateSend {
+            destination_path: "/pub/paykit/v0/private/outbox/0".into(),
+            ciphertext: vec![1; 32],
+        });
+        if confirmed {
+            claimed.confirmed_at = Some(timestamp());
+        }
+
+        let released = mark_outbound_slot_taken(claimed, retry_now, timestamp());
+
+        assert_eq!(released.status, expected);
+        assert!(released.prepared_send.is_none());
+        assert_eq!(
+            released.last_error.is_some(),
+            expected == OutboundPrivateMessageStatus::Failed
+        );
+        assert_eq!(
+            released.sent_at.is_some(),
+            expected == OutboundPrivateMessageStatus::Sent
+        );
+    }
+}

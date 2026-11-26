@@ -212,11 +212,17 @@ pub(in crate::runtime) fn public_payment_list_fits_resolution_budget(
             <= PUBLIC_PAYMENT_RESOLUTION_MAX_PAYLOAD_BYTES
 }
 
-pub(in crate::runtime) async fn load_public_payment_lists_with_budget<F, Fut>(
+/// Load each App's Payment List within the shared resolution budget.
+/// `ensure_read_may_start` runs before each read starts; its error stops
+/// loading, so no further read starts.
+pub(in crate::runtime) async fn load_public_payment_lists_with_budget<G, GFut, F, Fut>(
     app_ids: Vec<paykit_lib::PaykitAppId>,
+    mut ensure_read_may_start: G,
     mut fetch: F,
-) -> PublicPaymentListLoad
+) -> Result<PublicPaymentListLoad>
 where
+    G: FnMut() -> GFut,
+    GFut: Future<Output = Result<()>>,
     F: FnMut(paykit_lib::PaykitAppId, usize, usize, usize) -> Fut,
     Fut: Future<
         Output = (
@@ -240,6 +246,7 @@ where
                 .push(public_payment_endpoint_resource_limit_failure(app_id));
             continue;
         };
+        ensure_read_may_start().await?;
         let (result, remaining_endpoints, remaining_requests, remaining_payload_bytes) = fetch(
             app_id.clone(),
             max_endpoints,
@@ -277,7 +284,7 @@ where
         load.loaded_app_count += 1;
         load.payment_lists.push((app_id, payment_list));
     }
-    load
+    Ok(load)
 }
 
 impl<S, K, P, C> PaykitSdk<S, K, P, C>
@@ -708,6 +715,13 @@ where
     /// when present, its required payee App before adapter selection.
     /// Requests with bound Payment Endpoints have no public fallback; use
     /// [`Self::resolve_private_payment_request`] for their private destinations.
+    /// Returns `Policy` while the counterparty is `Blocked`, before any App
+    /// Registry or Payment Endpoint read. The block is rechecked after each
+    /// Pubky public storage provider call, before each App Registry or
+    /// Payment List read, after payment adapter selection, and after each
+    /// payment target is built. A block that lands during any of those calls
+    /// therefore returns `Policy`, even when that call failed. Requests inside
+    /// a single App's Payment List read are not interrupted.
     pub async fn resolve_public_payment_request(
         &self,
         counterparty: PubkyPublicKey,
@@ -736,9 +750,20 @@ where
         let required_app_id = payment_request_terms
             .as_ref()
             .and_then(|terms| terms.required_app_id.as_ref());
-        let mut batch = self
-            .public_payment_candidates(&counterparty, required_app_id)
+        // Only a received Payment Request refuses a blocked counterparty;
+        // plain contact resolution ignores Linked Peer state.
+        let refuse_blocked_counterparty = payment_request_terms.is_some();
+        let loaded = self
+            .public_payment_candidates(&counterparty, required_app_id, refuse_blocked_counterparty)
+            .await;
+        // A block can land while the Payment Endpoint reads are in flight.
+        // Those reads cannot be recalled without serializing against
+        // `block_peer`, so the guarantee is that no candidate reaches the
+        // payment adapter once a block is observed, and the call returns
+        // `Policy`, outranking a loading error or a `NoEndpoint` result.
+        self.ensure_peer_not_blocked_if(refuse_blocked_counterparty, &counterparty)
             .await?;
+        let mut batch = loaded?;
         filter_public_candidates_for_request(&mut batch.candidates, payment_request_terms.as_ref());
         if batch.candidates.is_empty() {
             return Ok(unresolved_public_resolution(
@@ -754,6 +779,7 @@ where
             batch.candidates,
             batch.failures,
             batch.loaded_app_count,
+            refuse_blocked_counterparty,
         )
         .await
     }
@@ -1098,17 +1124,51 @@ where
         counterparty: &PubkyPublicKey,
         payment_request_id: &PaymentRequestId,
     ) -> Result<PaymentRequestTermsRecord> {
+        // A blocked counterparty's received Payment Request is not resolved.
+        // The preflight keeps a blocked peer's App Registry from being
+        // contacted at all, and the fetch rechecks after the provider call and
+        // after a failed registry read. The recheck below runs atomically with
+        // the Payment Request read, so a block that lands during the registry
+        // fetch still refuses; its failing transaction also discards the
+        // authorized-apps cache write made by the registry observation.
+        self.ensure_peer_not_blocked(counterparty).await?;
+        let observation = self
+            .fetch_counterparty_app_authorization_refusing_blocked(counterparty, true)
+            .await?;
         let (context, record) = self
-            .counterparty_app_authorization_context_with(counterparty, |tx| {
-                self.payment_request_record_in_transaction(
+            .storage
+            .transaction(|tx| {
+                let context = observation.apply(tx, counterparty);
+                if tx.linked_peer(counterparty).map(|peer| peer.state)
+                    == Some(LinkedPeerState::Blocked)
+                {
+                    return Err(PaykitSdkError::Policy {
+                        context: format!("counterparty {counterparty} is blocked"),
+                        source: None,
+                    });
+                }
+                let record = self.payment_request_record_in_transaction(
                     tx,
                     counterparty,
                     payment_request_id,
                     true,
-                )
+                )?;
+                Ok((context, record))
             })
             .await?;
         payment_request_resolution_terms(record, context.payment_request_apps.as_deref())
+    }
+
+    /// Return `Policy` for a `Blocked` counterparty when `refuse_blocked_counterparty` is set.
+    pub(super) async fn ensure_peer_not_blocked_if(
+        &self,
+        refuse_blocked_counterparty: bool,
+        counterparty: &PubkyPublicKey,
+    ) -> Result<()> {
+        if refuse_blocked_counterparty {
+            self.ensure_peer_not_blocked(counterparty).await?;
+        }
+        Ok(())
     }
 
     async fn cached_private_resolution_allowed_for_peer(
@@ -1197,16 +1257,20 @@ where
         &self,
         counterparty: &PubkyPublicKey,
         required_app_id: Option<&paykit_lib::PaykitAppId>,
+        refuse_blocked_counterparty: bool,
     ) -> Result<PublicPaymentCandidateLoad> {
-        let public_storage =
-            self.pubky
-                .load_public_storage()
-                .await?
-                .ok_or_else(|| PaykitSdkError::Identity {
-                    context: "no Pubky public storage available for public Payment Endpoint lookup"
-                        .into(),
-                    source: None,
-                })?;
+        let public_storage = self.pubky.load_public_storage().await;
+        // Recheck after the provider call and before any App Registry or
+        // Payment Endpoint read. Reads already in flight cannot be recalled
+        // without serializing against `block_peer`, so the guarantee is that
+        // no read starts after a block has been observed, and the call returns
+        // `Policy`, outranking a provider error.
+        self.ensure_peer_not_blocked_if(refuse_blocked_counterparty, counterparty)
+            .await?;
+        let public_storage = public_storage?.ok_or_else(|| PaykitSdkError::Identity {
+            context: "no Pubky public storage available for public Payment Endpoint lookup".into(),
+            source: None,
+        })?;
         let public_key = counterparty.to_public_key()?;
         let Some(registry) =
             paykit_lib::get_paykit_app_registry(&public_storage, &public_key).await?
@@ -1215,6 +1279,9 @@ where
         };
         let loaded = load_public_payment_lists_with_budget(
             public_app_load_order(&registry, required_app_id),
+            // A block can land during the App Registry read or an earlier
+            // Payment List read. Nothing further starts once it is observed.
+            || self.ensure_peer_not_blocked_if(refuse_blocked_counterparty, counterparty),
             |app_id,
              mut remaining_endpoints,
              mut remaining_requests,
@@ -1240,7 +1307,7 @@ where
                 }
             },
         )
-        .await;
+        .await?;
         let mut endpoints = Vec::new();
         for (app_id, payment_list) in loaded.payment_lists {
             endpoints.extend(payment_list.payment_endpoints.into_iter().map(
@@ -1293,10 +1360,17 @@ where
     async fn build_public_payable_endpoints(
         &self,
         payable: Vec<PublicPaymentEndpointCandidate>,
+        refuse_blocked_counterparty: bool,
+        counterparty: &PubkyPublicKey,
     ) -> Result<Vec<ResolvedPublicPaymentEndpoint>> {
         let mut endpoints = Vec::with_capacity(payable.len());
         for endpoint in payable {
-            let target = self.payment.build_public_payment_target(&endpoint).await?;
+            let target = self.payment.build_public_payment_target(&endpoint).await;
+            // A block that lands during a target build outranks its error,
+            // and no further target build starts.
+            self.ensure_peer_not_blocked_if(refuse_blocked_counterparty, counterparty)
+                .await?;
+            let target = target?;
             endpoints.push(ResolvedPublicPaymentEndpoint { endpoint, target });
         }
         Ok(endpoints)
@@ -1320,6 +1394,7 @@ where
         counterparty: PubkyPublicKey,
         amount: Option<PaymentAmountContext>,
         candidates: Vec<PublicPaymentEndpointCandidate>,
+        refuse_blocked_counterparty: bool,
     ) -> Result<PublicContactPaymentResolution> {
         self.resolve_public_candidate_batch_with_failures(
             counterparty,
@@ -1327,6 +1402,7 @@ where
             candidates,
             Vec::new(),
             1,
+            refuse_blocked_counterparty,
         )
         .await
     }
@@ -1338,17 +1414,26 @@ where
         candidates: Vec<PublicPaymentEndpointCandidate>,
         failures: Vec<PublicPaymentEndpointLoadFailure>,
         loaded_app_count: usize,
+        refuse_blocked_counterparty: bool,
     ) -> Result<PublicContactPaymentResolution> {
-        let payable = self
+        let selected = self
             .payment
             .select_public_payment_endpoints(&PublicPaymentEndpointSelectionRequest {
-                counterparty,
+                counterparty: counterparty.clone(),
                 amount,
                 candidates: candidates.clone(),
             })
+            .await;
+        // Adapter work already in flight cannot be recalled without
+        // serializing against `block_peer`. Once a block is observed, no
+        // target is built and no result is returned, and the block outranks
+        // a selection error.
+        self.ensure_peer_not_blocked_if(refuse_blocked_counterparty, &counterparty)
             .await?;
-        let payable = public_payable_from_batch(&payable, &candidates)?;
-        let payable_endpoints = self.build_public_payable_endpoints(payable).await?;
+        let payable = public_payable_from_batch(&selected?, &candidates)?;
+        let payable_endpoints = self
+            .build_public_payable_endpoints(payable, refuse_blocked_counterparty, &counterparty)
+            .await?;
         if payable_endpoints.is_empty() {
             return Ok(unresolved_public_resolution(
                 true,
