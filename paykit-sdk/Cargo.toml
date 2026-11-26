@@ -25,6 +25,8 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio = { version = "1", features = ["rt"], optional = true }
+# The SDK's Instant: std's, or `performance.now()` on wasm32-unknown-unknown (std's panics).
+web-time = "1.1.0"
 
 # The workspace dependency turns the client's default features off, so the browser build drops
 # its native HTTP transport; every other target takes the defaults back here.

@@ -28,7 +28,14 @@ jobs:
           targets: wasm32-unknown-unknown
           components: clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - run: cargo clippy --locked --target wasm32-unknown-unknown -p paykit-browser --all-targets -- -D warnings
+      # The browser build's clippy settings (rig/wasm-clippy/clippy.toml) reject the std clocks,
+      # which panic on wasm32. Clippy reads no settings when the folder holds no clippy.toml, so
+      # the step checks the file is there first.
+      - run: |
+          test -f "$CLIPPY_CONF_DIR/clippy.toml"
+          cargo clippy --locked --target wasm32-unknown-unknown -p paykit-browser --all-targets -- -D warnings
+        env:
+          CLIPPY_CONF_DIR: ${{ github.workspace }}/paykit-browser/rig/wasm-clippy
       # The library alone: `--all-targets` above also turns on the test-only features of the
       # dev-dependencies, which the library must build without.
       - run: cargo check --locked --target wasm32-unknown-unknown -p paykit-browser --lib
