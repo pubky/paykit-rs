@@ -29,3 +29,21 @@ updates:
       interval: weekly
     cooldown:
       default-days: 7
+    # The React Native CLI packages share one version and follow the React
+    # Native release line, so update them together in one pull request.
+    groups:
+      react-native-cli:
+        patterns:
+          - "@react-native-community/cli*"
+    ignore:
+      # A major CLI version belongs with a React Native upgrade.
+      - dependency-name: "@react-native-community/cli*"
+        update-types:
+          - version-update:semver-major
+      # Hold Babel 8: the React Native Babel preset is built for Babel 7.
+      # Only this app has direct @babel/* dependencies, so the library entry
+      # needs no hold. The example README asks every React Native upgrade to
+      # check this hold and the CLI hold above.
+      - dependency-name: "@babel/*"
+        update-types:
+          - version-update:semver-major
